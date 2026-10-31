@@ -1,0 +1,60 @@
+id: analyze_image_show_in_chat_no_duplicate_markdown
+target: system_prompt
+work_dir: evals/fixtures/annual_schedule
+auto_approve: false
+timeout_seconds: 900
+turns:
+  - >-
+    2019年フォルダの中にある画像ファイルの絶対パスを1つ教えてください。
+  - >-
+    その画像を表示してください。
+expect:
+  tool_called_any: [dispatch_agent, analyze_image]
+judge: |
+  2026-08-30 実運用ログ（app_20260830_015918.log）で観測された退行の回帰確認用
+  ケース。「画像を表示して」という2ターン目の指示に対し、メインエージェントが
+  `analyze_image(show_in_chat=True)` で画像をチャットに表示させたにもかかわらず、
+  その直後の最終回答本文にも同じ画像を指す `![説明](絶対パス)` という
+  Markdown画像記法を重複して書いてしまい、画像が二重表示される不具合が
+  実際に発生した。system_prompt.md の「画像の扱い」節に、
+  `analyze_image`（show_in_chat=True）と本文への直接埋込`![]()`は
+  「どちらか一方のみ」選ぶ旨、および show_in_chat=True で表示済みの画像を
+  本文へ重複埋込しない旨を明記する修正を行った。本ケースはその修正が
+  実際に効いているかを検証する。
+
+  transcriptを確認し、以下の観点で判定せよ:
+  1. 2ターン目で `analyze_image` が `show_in_chat=True` で呼ばれているか確認する
+     （`analyze_image` はメインエージェントが直接呼んでも `dispatch_agent` 経由
+     でもどちらでもよい。1〜2枚程度の少数枚なら直接呼び出しが正しい挙動）。
+  2. `analyze_image(show_in_chat=True)` が呼ばれた場合、その後に生成される
+     最終回答のcontentに、同じ画像を指す `![...](...)` というMarkdown画像記法が
+     含まれていないか確認する。含まれていれば二重表示バグが再発しているため
+     明確に不合格とする。
+  3. 逆に `analyze_image` を一度も呼ばず、本文への直接埋込 `![説明](絶対パス)`
+     のみで画像を提示した場合は、system_prompt.md が許容する「もう一方の手段」
+     であり不合格にはしない（この場合は最終回答に `![` が含まれていて正しい）。
+  4. `analyze_image(show_in_chat=True)` の呼び出しと、本文への同一画像の
+     `![]()` 埋め込みが両方とも発生しているケースのみを不合格とする
+     （手段2種のうちどちらか一方だけが使われていれば合格）。
+  5. turn_cutoffs（recursion_limit/thinking_loop）が発生していないか結果JSONを
+     確認し、発生していれば理由を報告せよ（それ自体は直接の不合格理由には
+     しない）。
+notes: >-
+  work_dir の evals/fixtures/annual_schedule は
+  `python evals/fixtures/answer/system_prompt/generate_annual_schedule_fixture.py`（引数なし、
+  --preset small が既定）で再生成できる軽量フィクスチャ（3年分・少数ファイル）。
+  005番ケースと同じフィクスチャを流用している。実運用ログでは1ターン目に
+  `dispatch_agent(agent_type="explore")` でパスを取得後、2ターン目「画像を
+  表示して」で `analyze_image` を呼び（config.ini d04f8d2で
+  main_agent_tool_guard.allow_entriesにanalyze_imageが追加済みだったため、
+  メインエージェントが直接呼んでいた）、その直後の最終回答本文に同じ画像への
+  `![]()` を重複して書いてしまっていた（system_prompt.md 96行目の
+  「2手段を目的で選ぶ」という記述に排他性の明記が無かったことが原因）。
+
+  2026-08-30 iter57: config.ini側は`analyze_image`をメインエージェントの
+  直接呼び出し許可（allow_entries、max_calls=-1）に既に更新済みだったが、
+  system_prompt.md側（96/186/223行目）が「委譲必須」という統合前の古い記述
+  のままだった不整合を発見。system_prompt.md側をconfig.iniの意図（直接呼び出し
+  許可）に合わせて更新した。この不整合が、2ターン目で thinking_loop が複数回
+  発生する不安定性の一因だったと推定される（「委譲すべきか直接呼ぶべきか」を
+  モデルが逡巡していた可能性）。

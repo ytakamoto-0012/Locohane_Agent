@@ -1,0 +1,318 @@
+"""ReAct ループのグラフ構築（手書き実装／prebuilt 実装を config で切替）。
+
+config.graph_impl（config.ini の [graph].implementation）により
+2つの実装を出し分ける。
+
+- "handwritten": agent ノードと tools ノードを自分で明示配線する。ループの流れ
+  （モデル呼び出し → ツール実行 → 結果を戻す）がコードから直接追えることを
+  最優先する構成。
+  - agent ノード: システムプロンプト + 会話履歴を ChatOpenAI に渡してモデルを呼ぶ
+  - tools ノード: 直近 AI メッセージの tool_calls を実行する
+    （ImageAwareToolNode = ToolNode を継承し、view_image の画像artifactを
+    後続の HumanMessage として自動追加するラッパー）
+  - should_continue: tool_calls があれば tools へ、無ければ END
+- "prebuilt": LangGraph 標準の create_react_agent にそのまま委譲する。配線は
+  ライブラリ内部に隠蔽されるが実装量は最小になる。
+
+いずれの実装でも、LLM 接続は llama.cpp server（OpenAI 互換）を langchain-openai
+の ChatOpenAI で。Ollama 固有の API・ライブラリは一切使わない。
+会話状態は AsyncSqliteSaver で永続化する（保存先は config.checkpoint_db）。
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import create_react_agent
+
+from .config import Config
+from .context_trim import trim_old_tool_messages
+from .llm import ThinkingLoopDetected, build_model, pick_loop_nudge_message
+from .tools import ImageAwareToolNode, get_all_tools
+
+logger = logging.getLogger(__name__)
+
+# 空応答（無言終了）を検知した際に注入する、最終回答を促す短いリマインダー。
+EMPTY_RESPONSE_NUDGE = (
+    "（自動リマインダー: 直前の応答が空でした。これ以上ツールを呼ぶ必要が"
+    "無ければ、ここまでの作業内容を踏まえてユーザーへの最終回答を今すぐ"
+    "テキストで書いてください。まだ作業が終わっていなければ、続きのツール"
+    "呼び出しを行ってください。）"
+)
+
+
+def _build_handwritten_graph(config: Config, system_prompt: str, checkpointer):
+    """手書きの ReAct グラフをコンパイルして返す。
+
+    agent ノード（call_model）と tools ノード（ImageAwareToolNode(get_all_tools())）を
+    START → agent → (条件分岐) → tools → agent → ... → END という
+    ReAct ループとして明示配線する。
+
+    Args:
+        config: アプリ設定（LLM 接続情報）。build_model 経由でモデル構築に使う。
+        system_prompt: スキル一覧を注入済みのシステムプロンプト。
+            call_model が毎回メッセージ列の先頭に付与する。
+        checkpointer: AsyncSqliteSaver など LangGraph のチェックポインタ。
+            会話状態（MessagesState）の永続化に使う。
+
+    Returns:
+        コンパイル済みの LangGraph（CompiledStateGraph）。
+        astream_events / ainvoke などで実行できる。
+    """
+    model = build_model(config).bind_tools(get_all_tools())
+
+    def call_model(state: MessagesState) -> dict:
+        """agent ノード: システムプロンプトを先頭に付けてモデルを呼ぶ。
+
+        Args:
+            state: これまでの会話履歴を保持する MessagesState
+                （"messages" キーに HumanMessage/AIMessage/ToolMessage の列）。
+
+        Returns:
+            {"messages": [response]} の形の dict。LangGraph の
+            add_messages リデューサにより既存の履歴へ追記される。
+            response は tool_calls を含みうる AIMessage。
+        """
+        history = state["messages"]
+        if config.context_trim_enabled:
+            # 古い ToolMessage（サイズ上限のないツール実行結果）が会話履歴に
+            # 蓄積し続けるとプロンプトプリフィルが極端に遅くなるため、モデル
+            # への入力だけを間引く（state 自体・checkpointer上の永続履歴は
+            # 書き換えない。src/context_trim.py 参照）。
+            history = trim_old_tool_messages(
+                history,
+                keep_recent=config.context_trim_keep_recent_tool_messages,
+                max_chars=config.context_trim_truncated_max_chars,
+            )
+        messages = [SystemMessage(content=system_prompt), *history]
+        response = model.invoke(messages)
+        return {"messages": [response]}
+
+    def should_continue(state: MessagesState) -> str:
+        """直近 AI メッセージに tool_calls があれば tools、無ければ終了。
+
+        add_conditional_edges から呼ばれる分岐関数。
+
+        Args:
+            state: agent ノード実行後の MessagesState。
+
+        Returns:
+            次に遷移するノード名 "tools"、またはループを終了させる
+            LangGraph の終端マーカー END。
+        """
+        last = state["messages"][-1]
+        if getattr(last, "tool_calls", None):
+            return "tools"
+        return END
+
+    # --- 2 手書きノードを明示配線（ここがループ本体） ---
+    graph = StateGraph(MessagesState)
+    graph.add_node("agent", call_model)
+    graph.add_node("tools", ImageAwareToolNode(get_all_tools()))
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    graph.add_edge("tools", "agent")  # ツール結果を持って再びモデルへ（ReAct）
+
+    return graph.compile(checkpointer=checkpointer)
+
+
+def _build_prebuilt_graph(config: Config, system_prompt: str, checkpointer):
+    """LangGraph 標準の create_react_agent にそのまま委譲してグラフを作る。
+
+    ノード配線・tool_calls の分岐はすべて create_react_agent 内部に隠蔽される。
+    モデルは bind_tools せずに渡す（create_react_agent が内部で get_all_tools() の
+    戻り値を bind する）。
+
+    Args:
+        config: アプリ設定（LLM 接続情報）。build_model 経由でモデル構築に使う。
+        system_prompt: スキル一覧を注入済みのシステムプロンプト。
+            create_react_agent の prompt 引数にそのまま渡す。
+        checkpointer: AsyncSqliteSaver など LangGraph のチェックポインタ。
+
+    Returns:
+        コンパイル済みの LangGraph（CompiledStateGraph）。
+        astream_events / ainvoke などで実行できる。
+    """
+    model = build_model(config)
+
+    def pre_model_hook(state: MessagesState) -> dict:
+        """モデル呼び出し直前に、古い ToolMessage を切り詰めて入力を絞る。
+
+        create_react_agent 標準のフック。戻り値に "llm_input_messages" を
+        含めると、今回のモデル呼び出しの入力だけが差し替わり、state 自体・
+        checkpointer上の永続履歴はそのまま残る（src/context_trim.py 参照）。
+        """
+        trimmed = trim_old_tool_messages(
+            state["messages"],
+            keep_recent=config.context_trim_keep_recent_tool_messages,
+            max_chars=config.context_trim_truncated_max_chars,
+        )
+        return {"llm_input_messages": trimmed}
+
+    return create_react_agent(
+        model,
+        ImageAwareToolNode(get_all_tools()),
+        prompt=system_prompt,
+        pre_model_hook=pre_model_hook if config.context_trim_enabled else None,
+        checkpointer=checkpointer,
+    )
+
+
+def build_graph(config: Config, system_prompt: str, checkpointer):
+    """config.graph_impl に応じて手書き／prebuilt のグラフを構築する。
+
+    Args:
+        config: アプリ設定。graph_impl（"handwritten" または "prebuilt"）で
+            どちらの実装を使うか決める。
+        system_prompt: スキル一覧を注入済みのシステムプロンプト。
+        checkpointer: AsyncSqliteSaver など LangGraph のチェックポインタ。
+            会話状態（MessagesState）の永続化に使う。
+
+    Returns:
+        コンパイル済みの LangGraph（CompiledStateGraph）。
+        astream_events / ainvoke などで実行できる。
+
+    Raises:
+        ValueError: config.graph_impl が "handwritten" / "prebuilt" 以外の場合。
+    """
+    if config.graph_impl == "handwritten":
+        return _build_handwritten_graph(config, system_prompt, checkpointer)
+    if config.graph_impl == "prebuilt":
+        return _build_prebuilt_graph(config, system_prompt, checkpointer)
+    raise ValueError(f"unknown graph_impl: {config.graph_impl!r}")
+
+
+def is_empty_final_message(messages: list) -> bool:
+    """直近メッセージが「無言終了」（tool_calls も content も空の AIMessage）かを判定する。
+
+    小型ローカルモデルは、長い会話の末に thinking が長引いた・コンテキストが
+    逼迫した等の理由で、ツール呼び出しも最終回答テキストも無いまま応答を
+    終えることがある（tune-prompt調査で annual_schedule_xlsx_end_to_end 等の
+    ケースで実際に再現した）。system_prompt.md の文言強化だけでは解消しない
+    ため、コード側でも検知してリトライできるようにする。
+
+    Args:
+        messages: MessagesState の "messages" リスト。
+
+    Returns:
+        直近メッセージが AIMessage かつ tool_calls が無く、content が
+        空白のみ（または空）の場合に True。
+    """
+    if not messages:
+        return False
+    last = messages[-1]
+    if not isinstance(last, AIMessage):
+        return False
+    if getattr(last, "tool_calls", None):
+        return False
+    content = last.content if isinstance(last.content, str) else str(last.content)
+    return not content.strip()
+
+
+async def ainvoke_ensuring_final_text(
+    graph,
+    inputs: dict,
+    run_config: dict,
+    max_retries: int = 2,
+    nudge_messages: list[str] | None = None,
+    loop_max_retries: int = 2,
+) -> dict:
+    """graph.ainvoke() を呼び、無言終了（空応答）や反復ループだった場合は再試行する。
+
+    2種類の異常系を、単一のリトライループ内でどちらのフェーズでも検知して
+    自動リトライする（旧実装は「ループ検知の while ループ」と「無言終了の
+    for ループ」が分離しており、無言終了リトライ中に発生した
+    ThinkingLoopDetected が捕捉されずそのまま送出されてしまう欠陥があった。
+    020ケース（tune-prompt iter27）で実際に発生・確認済み。以降は統合する）:
+    - 無言終了（空応答）: is_empty_final_message() が True を返す限り、
+      EMPTY_RESPONSE_NUDGE を追加の HumanMessage としてグラフへ渡し、最大
+      max_retries 回まで再試行する（それでも空応答なら諦めて最後の結果を
+      そのまま返す＝呼び出し元は従来通り空の final_answer を受け取りうる）。
+    - 反復ループ: ChatLlamaCpp（src/llm.py）がストリーム中に検知して
+      ThinkingLoopDetected を送出した場合、pick_loop_nudge_message() で選んだ
+      注意メッセージを HumanMessage として注入し、最大 loop_max_retries 回まで
+      再試行する。注入した nudge は機械的なものであり、最終的に成功したら
+      graph.aupdate_state() の RemoveMessage で会話履歴から取り除く
+      （全て失敗した場合も、raise する前に同じ除去処理を必ず経由する。
+      旧実装は raise 経路でこの除去が漏れていた）。
+
+    両フェーズの再試行回数は `total_budget = max_retries + loop_max_retries`
+    として合算で共有し、全体の最大試行回数（初回 + リトライ）は
+    `total_budget + 1` に固定する（無限リトライを防ぐ。旧実装の
+    「ループ検知用予算＋無言終了用予算」を独立に持つ場合と同じ合計値）。
+
+    app.py（Chainlit UI）・evals/run_case.py の両方から共通で使うことを想定する。
+
+    Args:
+        graph: build_graph() が返すコンパイル済みグラフ。
+        inputs: 最初の ainvoke に渡す入力（例: {"messages": [HumanMessage(...)]})。
+        run_config: ainvoke に渡す config（thread_id・recursion_limit 等）。
+        max_retries: 空応答時に再試行する最大回数。
+        nudge_messages: ループ検知時に注入する注意メッセージの候補
+            （config.ini の [thinking_loop_guard].nudge_messages 由来）。
+            省略時は空リスト（pick_loop_nudge_message の既定文言を使う）。
+        loop_max_retries: ループ検知時に再試行する最大回数
+            （config.ini の [thinking_loop_guard].max_retries 由来）。
+
+    Returns:
+        graph.ainvoke() と同じ形式の結果 dict（{"messages": [...]})。
+
+    Raises:
+        ThinkingLoopDetected: ループ検知後、loop_max_retries 回再試行しても
+            なお反復ループが解消しなかった場合（無言終了リトライ中に発生した
+            場合も含む）。
+    """
+    nudge_messages = nudge_messages or []
+    remove_ids: list[str] = []
+    loop_attempt = 0
+    empty_attempt = 0
+    total_budget = max_retries + loop_max_retries
+    current_inputs = inputs
+    result: dict | None = None
+
+    for attempt in range(total_budget + 1):
+        try:
+            result = await graph.ainvoke(current_inputs, config=run_config)
+        except ThinkingLoopDetected as exc:
+            if loop_attempt >= loop_max_retries or attempt >= total_budget:
+                if remove_ids:
+                    await graph.aupdate_state(
+                        run_config, {"messages": [RemoveMessage(id=i) for i in remove_ids]}
+                    )
+                raise
+            logger.warning(
+                "LLM応答のループを検知（%d回目の再試行）: 直近テキスト=%r",
+                loop_attempt + 1,
+                exc.snippet,
+            )
+            nudge_id = str(uuid.uuid4())
+            remove_ids.append(nudge_id)
+            text = pick_loop_nudge_message(nudge_messages, loop_attempt)
+            current_inputs = {"messages": [HumanMessage(content=text, id=nudge_id)]}
+            loop_attempt += 1
+            continue
+
+        if not is_empty_final_message(result.get("messages") or []):
+            break
+        if empty_attempt >= max_retries or attempt >= total_budget:
+            break
+        nudge_id = str(uuid.uuid4())
+        remove_ids.append(nudge_id)
+        current_inputs = {"messages": [HumanMessage(content=EMPTY_RESPONSE_NUDGE, id=nudge_id)]}
+        empty_attempt += 1
+
+    if remove_ids:
+        # ループ検知・無言終了いずれの注意メッセージも機械的な注入であり、
+        # 会話履歴に残すとリトライのたびに全量再送されて長い会話ほど
+        # コンテキストを圧迫する（かつ「過去に失敗した」痕跡がモデル自身の
+        # 目に触れ続けることが、同種の失敗を誘発する自己参照的な悪循環に
+        # つながりうる）。thinking_loopのnudgeは元々ここで除去していたが、
+        # 無言終了のnudgeは対象外になっていた非対称性を解消する
+        # （tune-prompt iter22の長時間会話コンテキスト肥大化調査で発見）。
+        await graph.aupdate_state(
+            run_config, {"messages": [RemoveMessage(id=i) for i in remove_ids]}
+        )
+    return result

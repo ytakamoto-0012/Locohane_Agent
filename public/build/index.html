@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/public/settings/favicon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Locohane</title>
+    <!-- JS INJECTION PLACEHOLDER -->
+    <script>
+      // React マウント前に配色を確定させ、ライト→ダークのちらつき(FOUC)を防ぐ。
+      (function () {
+        var scheme = localStorage.getItem('la-color-scheme') || 'system';
+        var resolved =
+          scheme === 'system'
+            ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+            : scheme;
+        document.documentElement.dataset.theme = resolved;
+      })();
+    </script>
+    
+    <script type="module" crossorigin src="/assets/index-B05H-B5x.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-C2wpzc2_.css">
+      <!-- CSS INJECTION PLACEHOLDER -->
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

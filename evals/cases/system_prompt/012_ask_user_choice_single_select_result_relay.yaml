@@ -1,0 +1,40 @@
+id: ask_user_choice_single_select_result_relay
+target: system_prompt
+auto_approve: true
+turns:
+  - >-
+    レポートの結論を箇条書きと文章のどちらで書くか、先に確認してください。
+expect:
+  tool_called_any: [ask_user_choice]
+  tool_not_called: [AskUserQuestion]
+judge: |
+  ask_user_choice のdocstring削減（コンテキスト削減作業）に先立って追加した
+  回帰ケース。呼び出し精度を検証する既存ケースが無かったツールのため新設
+  した。「箇条書き」「文章」という2つの具体的な選択肢から1つを選ばせたい
+  場面であり、自由記述用の AskUserQuestion ではなく選択肢形式の
+  ask_user_choice を使うべき典型例。auto_approve: true のハーネス仕様上、
+  単一選択（multi_select=False）のask_user_choiceは常に先頭の選択肢が
+  機械的に選ばれる。
+
+  transcriptを確認し、以下の観点で判定せよ:
+  1. ask_user_choice が、2件以上の意味のある択一選択肢（例:「箇条書き」
+     「文章」に相当する内容）で呼ばれているか。multi_select は指定しない
+     （既定Falseのまま）であるべき（true にしていたら不合格）。
+  2. 選択肢がユーザー発話の趣旨（箇条書き/文章のどちらか）を正しく反映
+     しているか（無関係な選択肢で水増ししていないか、逆に択一の意味を
+     持たない選択肢1件だけになっていないか）。
+  3. ask_user_choice の戻り値（機械的に選ばれた先頭の選択肢）を、最終回答
+     または後続の処理が正しく踏まえているか（戻り値と矛盾する形式で
+     最終回答を書いていたら不合格。例えば先頭選択肢が「箇条書き」なのに
+     文章形式でレポート結論を書いている等）。
+  4. 同じ確認のために ask_user_choice を重複して呼んでいないか。
+  1・3のいずれかに明確に反する場合は不合格とせよ。
+notes: >-
+  work_dirは指定せず config.ini の [default_workdir].dir を使う。
+  ask_user_choiceのmulti_select=True経路は評価ハーネス（headless_chainlit.py）
+  がcl.AskElementMessage/cl.CustomElementをスタブ化していないため検証不可能
+  （既知の制約、本ケースの対象外）。single_select（既定）経路のみを対象と
+  する。check_script_job/check_dispatch_agent_job/update_task_progress/
+  ask_user_choice の4ツールはdocstring削減前まで呼び出し精度を検証する
+  evalケースが1件も無かったため、削減の安全網として本ケース含む4件を
+  新設した（009〜012）。

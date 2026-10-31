@@ -1,0 +1,20 @@
+id: config_timeouts_long_generation_response
+target: config_timeouts
+timeout_seconds: 600
+turns:
+  - >-
+    ファイル操作やツール呼び出しは一切不要です。あなたが知っているプログラミング
+    言語の設計思想・パラダイム・代表的なユースケースについて、20個以上できるだけ
+    多く挙げ、それぞれ数行ずつ詳しく説明してください。網羅性を優先し、省略せず
+    最後まで書き切ってください。
+expect:
+  response_not_contains: ["申し訳ありません", "できません"]
+auto_approve: true
+notes: >-
+  config.ini の [llm].stream_chunk_timeout_seconds の適正値算出用。ツール呼び出し
+  を挟まない単一LLM呼び出し内での持続的なストリーミング生成（長い出力）中の
+  チャンク間隔の安定性を計測する軽量ケース（001/002と異なりフィクスチャ・
+  work_dir不要、短時間で完走する）。`turn_timings` の
+  `max_stream_chunk_gap_seconds` を `python evals/analyze_timing.py
+  config_timeouts` で集計する。`python evals/run_all.py config_timeouts` で
+  実行する。

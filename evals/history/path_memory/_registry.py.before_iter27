@@ -1,0 +1,138 @@
+"""パスメモリー（ファイルパスの短縮参照）レジストリの読み書き。
+
+file-tools 等のスクリプトが返す長い絶対パスに、短い数値インデックス（@N）を
+自動で割り当てて記録し、以降のツール呼び出しでは @N を渡せば実パスに解決
+できるようにする。ローカルLLMが長いパス文字列を複数回のツール呼び出しに
+またがって正確に再生成できずタイプミスを頻発させる問題への対策。
+
+このモジュールは (a) file-tools 等のスクリプトから同一プロセス内で import
+される場合と、(b) src/tools.py から importlib で動的ロードされ view_image/
+run_script の @N 解決に使われる場合の両方で使われる。動作パラメータ
+（thread_id・レジストリ保存先・登録上限）は関数の引数として明示的に渡す方式
+に統一し、環境変数の読み取りは CLI 経由の呼び出し（env_params()、
+list_path_memory.py が使う）にのみ閉じる。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+
+_TOKEN_RE = re.compile(r"^@(\d+)$")
+
+
+def is_path_memory_token(token: str) -> bool:
+    """文字列が `@N`（N は1以上の整数）形式のパスメモリー参照かどうかを判定する。"""
+    return bool(_TOKEN_RE.match(token))
+
+
+def _registry_path(thread_id: str, path_memory_dir: Path) -> Path:
+    return path_memory_dir / f"{thread_id}.json"
+
+
+def _load(registry_path: Path) -> list[dict]:
+    if not registry_path.is_file():
+        return []
+    try:
+        data = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _save(registry_path: Path, entries: list[dict]) -> None:
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def register(thread_id: str, path: str, path_memory_dir: Path, max_entries: int) -> int | None:
+    """パスをレジストリへ登録し、1始まりのインデックスを返す。
+
+    Args:
+        thread_id: 登録先の会話を識別する文字列。
+        path: 登録する絶対パス文字列。
+        path_memory_dir: レジストリファイルの保存先ディレクトリ。
+        max_entries: 1会話あたりの登録上限件数。
+
+    Returns:
+        登録（または既存エントリの再利用）に成功すればそのインデックス
+        （1始まり）。上限に達していて新規登録できない場合は None。
+
+    Notes:
+        同一パスが既に登録済みの場合は新規追加せず、そのインデックスを
+        再利用しつつ `valid`（ファイルが実在するか）を最新の状態へ更新する。
+    """
+    registry_path = _registry_path(thread_id, path_memory_dir)
+    entries = _load(registry_path)
+    for i, entry in enumerate(entries):
+        if entry.get("path") == path:
+            entries[i]["valid"] = Path(path).exists()
+            _save(registry_path, entries)
+            return i + 1
+    if len(entries) >= max_entries:
+        return None
+    entries.append({"path": path, "valid": Path(path).exists()})
+    _save(registry_path, entries)
+    return len(entries)
+
+
+def resolve(thread_id: str, token: str, path_memory_dir: Path) -> str | None:
+    """`@N` 形式のトークンを実パスへ解決する。
+
+    Args:
+        thread_id: 会話を識別する文字列。
+        token: 解決したい文字列（`@N` 形式でなければ即 None）。
+        path_memory_dir: レジストリファイルの保存先ディレクトリ。
+
+    Returns:
+        該当インデックスのパス。トークンが `@N` 形式でない、または該当する
+        登録が無い場合は None。
+    """
+    m = _TOKEN_RE.match(token)
+    if not m:
+        return None
+    index = int(m.group(1))
+    entries = _load(_registry_path(thread_id, path_memory_dir))
+    if 1 <= index <= len(entries):
+        return entries[index - 1].get("path")
+    return None
+
+
+def list_entries(thread_id: str, path_memory_dir: Path) -> list[dict]:
+    """登録済み全件を返す。
+
+    Args:
+        thread_id: 会話を識別する文字列。
+        path_memory_dir: レジストリファイルの保存先ディレクトリ。
+
+    Returns:
+        `[{"index": int, "path": str, "valid": bool}, ...]`（登録順）。
+    """
+    entries = _load(_registry_path(thread_id, path_memory_dir))
+    return [
+        {"index": i + 1, "path": e.get("path"), "valid": bool(e.get("valid", False))}
+        for i, e in enumerate(entries)
+    ]
+
+
+def env_params() -> tuple[str, Path, int]:
+    """環境変数から (thread_id, path_memory_dir, max_entries) を読む。
+
+    run_script 経由でサブプロセスとして起動されるスクリプト
+    （file-tools の各スクリプトや list_path_memory.py）が使う。
+    src/tools.py からの動的ロード（同一プロセス内呼び出し）はこの関数を
+    使わず、パラメータを直接引数で渡す。
+
+    Returns:
+        (thread_id, path_memory_dir, max_entries) のタプル。環境変数が
+        未設定の場合はそれぞれ "_no_session" / "./data/path_memory" / 500
+        にフォールバックする。
+    """
+    thread_id = os.environ.get("AGENT_THREAD_ID") or "_no_session"
+    path_memory_dir = Path(os.environ.get("AGENT_PATH_MEMORY_DIR") or "./data/path_memory")
+    max_entries = int(os.environ.get("AGENT_PATH_MEMORY_MAX_ENTRIES") or "500")
+    return thread_id, path_memory_dir, max_entries

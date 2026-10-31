@@ -1,0 +1,48 @@
+id: check_dispatch_agent_job_background_poll_result_relay
+target: system_prompt
+work_dir: evals/fixtures/annual_schedule
+auto_approve: true
+env:
+  SUBAGENT_BACKGROUND_INLINE_WAIT_MAX_SECONDS: "1"
+  SUBAGENT_BACKGROUND_MIN_POLL_INTERVAL_SECONDS: "0"
+turns:
+  - >-
+    作業ディレクトリの画像を一通り確認して、それぞれ何が写っているか教えて
+    ください。時間がかかってもいいので終わったら報告してください。
+expect:
+  tool_called_any: [dispatch_agent]
+judge: |
+  check_dispatch_agent_job のdocstring削減（コンテキスト削減作業）に先立って
+  追加した回帰ケース。呼び出し精度を検証する既存ケースが無かったツールの
+  ため新設した。env で SUBAGENT_BACKGROUND_INLINE_WAIT_MAX_SECONDS を1秒に
+  短縮しているため、画像を複数枚確認するdispatch_agent呼び出しはほぼ確実に
+  安全上限へ到達し、job_idを含む案内文を返してターンが終わる経路を通る
+  はずである（dispatch_agentはメインエージェントへ直接bindされているため、
+  check_script_jobケース（009番）と異なりこの経路はメインagent側の可視
+  範囲でそのまま確認できる）。
+
+  transcriptを確認し、以下の観点で判定せよ:
+  1. dispatch_agent（agent_type="explore"が自然だが他の種別でもよい）が
+     呼ばれ、その結果（ToolMessage）に job_id を含む案内文が返っているか。
+  2. 後続ターンで check_dispatch_agent_job が呼ばれている場合、その
+     job_id 引数が直前の案内文中の job_id と一致しているか（一致しない
+     値・存在しない値を捏造して渡していたら不合格）。
+  3. check_dispatch_agent_job の結果が「実行中」だった場合、最終回答が
+     その旨を正直に反映しているか（完了していないのに完了したかのように
+     報告していたら不合格）。結果が完了していた場合、実際にサブエージェント
+     が調べた画像内容に基づく報告になっているか（transcript内の
+     dispatch_agentの最終回答と、ユーザーへの最終回答の整合性を見よ）。
+  4. dispatch_agent または check_dispatch_agent_job を極端に短い間隔・
+     無意味な繰り返しで連打していないか（3回を超えて連続で呼んでいたら、
+     その旨を報告し不合格の判断材料にせよ）。
+  1のjob_id案内文が返っていない場合（1ターン以内に完了してしまった場合）は
+  それ自体は不合格にせず、最終回答が画像内容を正しく報告できているかだけを
+  見て判定せよ。
+  2・3のいずれかに明確に反する場合は不合格とせよ。
+notes: >-
+  work_dirは005/007/008番と同じ evals/fixtures/annual_schedule
+  （`python evals/fixtures/answer/system_prompt/generate_annual_schedule_fixture.py` で再生成可能な
+  軽量フィクスチャ）を流用。check_script_job/check_dispatch_agent_job/
+  update_task_progress/ask_user_choice の4ツールはdocstring削減前まで
+  呼び出し精度を検証するevalケースが1件も無かったため、削減の安全網として
+  本ケース含む4件を新設した（009〜012）。

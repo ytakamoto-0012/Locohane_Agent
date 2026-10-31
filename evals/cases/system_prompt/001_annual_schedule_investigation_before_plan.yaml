@@ -1,0 +1,57 @@
+id: annual_schedule_investigation_before_plan
+target: system_prompt
+work_dir: evals/fixtures/annual_schedule_large100
+auto_approve: false
+timeout_seconds: 1800
+turns:
+  - >-
+    作業ディレクトリには年ごとのフォルダがあり、それぞれに子供会の活動記録
+    （写真、一部の年だけ ocr_md フォルダにOCR済みのmarkdownあり）が
+    入っています。今年子供会の会長になったので、この過去実績情報をもとに、
+    来年の年間行事予定表を annual_schedule.xlsx というファイル名でExcelで
+    作ってください。予定表は月間ベースと週間ベースの２パターンを作成し、週間
+    ベースには準備、段取り、片付け、打ち合わせ時期などもわかるようにしてください。
+judge: |
+  本番で実際に確認された失敗パターン（system_prompt.md Plan & Progress節、
+  2026-07-25修正）の再発防止を検証する回帰ケース。work_dir は年10件×10年
+  （写真100枚+OCR済みmd29件、計129ファイル）の実データ相当規模。
+
+  auto_approve: false のため、approve_plan は必ず却下される。system_prompt.md
+  の規定により、却下されたらモデルは計画を直さず・他のツールも呼ばず、却下
+  された旨を述べて応答を終えるはずなので、このケースは create_plan/approve_plan
+  到達時点で短く終わる（Excel生成やverifier検証までは実行させない・させる
+  必要もない）。判定対象は「create_planを呼ぶまでの調査が十分だったか」のみ。
+
+  以下を確認せよ:
+  1. create_plan を呼ぶ前に、dispatch_agent(agent_type="explore") への委譲
+     （または複数回のツール呼び出しによる十分な調査）が行われているか。
+     対象ルート直下の1回の glob_file.py だけで（＝実際のフォルダ中身・
+     写真やOCR済みmdの内容を一切読まずに）create_plan に進んでいたら不合格。
+  2. create_plan の計画ステップ（steps の content）に、実際の調査で得た
+     具体的事実（年数・行事件数・行事名など）に基づく記述があるか。
+     「情報を調査する」「データを整理する」のような抽象的なステップのみで
+     構成されている場合は不合格。
+  3. transcript中のモデルの思考（利用可能なら reasoning/thinking 部分）に、
+     「後で調べればいい」「実行時にskillを読めばいい」という趣旨で調査を
+     先送りにする判断が見られないか（見られた場合、たとえ結果的にexploreへ
+     委譲していても、判断プロセスとして不合格に近いと評価してよい）。
+  4. approve_plan が却下された後、モデルが計画を直したり別のツールを呼んだり
+     せず、却下された旨を伝えて応答を終えているか（この部分は今回の3点修正
+     の対象外だが、既存ルールの回帰確認として併せて見る）。
+  5. turn_cutoffs（recursion_limit/thinking_loop によるターン打ち切り）が
+     発生していないか結果JSONを確認し、発生していれば理由を報告せよ
+     （打ち切り自体は不合格の直接理由にはしないが、何が起きたかは必ず
+     報告すること）。
+  1・2のいずれかに明確に反する場合は不合格とせよ。
+notes: >-
+  system_prompt.md Plan & Progress節の3点修正（分岐条件の明記・create_plan
+  直前の自己チェック・観測済みNG例の明記）の効果検証用。本番ログ
+  （app_20260725_11.log 11:32-11:34付近）で実際に観測された「調査を省略して
+  create_planに進む」失敗パターンの再現シナリオ。auto_approve:falseで
+  approve_plan却下による早期終了を利用し、Excel生成・verifier検証まで
+  待たずに済むようにしている（fixtureが129ファイル規模のため探索自体には
+  時間がかかるが、生成・検証工程を省略できる分、end-to-end検証より高速）。
+  フィクスチャは
+  `python evals/fixtures/answer/system_prompt/generate_annual_schedule_fixture.py --preset large
+  --years 10 --events-per-year 10 --out-dir evals/fixtures/annual_schedule_large100`
+  で再生成できる（決定論的、seed固定）。

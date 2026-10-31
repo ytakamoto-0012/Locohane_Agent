@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "locohane-skills": {
+      "type": "stdio",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "C:\\path\\to\\Locohane_Agent\\mcp_server.bat"
+      ],
+      "env": {
+        "LOCOHANE_MCP_SKILLS_NAME": "locohane-skills",
+        "LOCOHANE_MCP_SKILLS_SRC": "",
+        "LOCOHANE_MCP_SKILLS_WORKDIR": "",
+        "LOCOHANE_MCP_SKILLS_SCRIPT_TIMEOUT_SECONDS": "",
+        "LOCOHANE_MCP_SKILLS_PYTHON": ""
+      }
+    }
+  }
+}

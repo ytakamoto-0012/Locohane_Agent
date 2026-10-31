@@ -1,0 +1,631 @@
+"""Chainlit UI（LangGraph 実行のストリーミング表示 + ステップ可視化）。
+
+役割:
+- 起動時にスキルを走査（第1段階 Discovery）→ システムプロンプトへ注入 → グラフを構築。
+- @cl.on_message で LangGraph を astream_events で回し、トークンをストリーミング表示。
+- スキル読み込み(read_skill)・ファイル読み込み(read_skill_file)・スクリプト実行(run_script)・
+  画像読み込み(view_image)・サブエージェント委譲(dispatch_agent)・ユーザーへの追加質問
+  (ask_user_text/ask_user_choice)の各ツールコールを cl.Step として可視化
+  （「今このスキルを読んでいます」が見える状態）。
+  dispatch_agent は内部で独立した ReAct ループを回すが、その内部の思考過程・
+  ツール呼び出しはグラフのトレースに乗らないため Step としては表示されない
+  （最終回答のみが1つの Step として見える。コンテキスト節約が目的）。
+- アップロードファイルは config.upload_dir に保存する。画像は data URL 化して
+  LLMへ視覚情報として渡し、それ以外はパスをメッセージへ明示。
+- ツール結果に生成ファイルの output_path（src/files.py 参照）が含まれる場合、
+  cl.File 付きメッセージとしてダウンロード可能な添付を自動送信する
+  （pdf-tools/pptx-tools 等、ファイルを生成する全スキルに共通で効く）。
+
+会話状態は AsyncSqliteSaver（config.checkpoint_db）で永続化。thread_id はセッション毎。
+グラフ／チェックポインタはアプリ全体で 1 つを共有し、会話は thread_id で分離する。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import shutil
+import uuid
+from dataclasses import replace
+from pathlib import Path
+
+# 完全オフライン運用を保証するための防御的な無効化（import より前に設定）。
+# 実態: このスタックの外部送信はすべて opt-in。
+#   - Chainlit(2.x) は LITERAL_API_KEY を設定した時のみ Literal AI へ送信する。
+#   - LangChain は LANGSMITH_API_KEY + トレーシング有効時のみ LangSmith へ送信する。
+# いずれのキーも設定しなければ外部通信は発生しないが、事故防止のため明示的に切る。
+# （setdefault なので、意図的に有効化したい場合は環境変数で上書きできる。）
+os.environ.setdefault("CHAINLIT_TELEMETRY_ENABLED", "false")  # 1.x 互換。2.x では no-op
+os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
+os.environ.setdefault("LANGSMITH_TRACING", "false")
+
+import uuid
+
+import aiosqlite
+import chainlit as cl
+from chainlit.input_widget import TextInput
+from langchain_core.messages import HumanMessage, RemoveMessage
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.errors import GraphRecursionError
+
+from src.agent_types import render_agent_types_block, scan_agent_types
+from src.config import load_config
+from src.files import extract_generated_file
+from src.graph import EMPTY_RESPONSE_NUDGE, build_graph, is_empty_final_message
+from src.images import is_image_file, to_data_url
+from src.cleanup import cleanup_old_files
+from src.cleanup import run_cleanup_loop as cleanup_run_cleanup_loop
+from src.llm import ThinkingLoopDetected, pick_loop_nudge_message
+from src.memory import render_memory_block
+from src.skills import build_system_prompt, render_skills_block, scan_skills
+from src.tools import init_tools
+from src.uploads import cleanup_old_uploads, run_cleanup_loop
+
+# ツール名 → UI 表示ラベル（ステップ名として表示）。
+_TOOL_LABELS = {
+    "read_skill": "スキル読み込み",
+    "read_skill_file": "ファイル読み込み",
+    "run_script": "スクリプト実行",
+    "view_image": "画像読み込み",
+    "dispatch_agent": "サブエージェント実行中",
+    "ask_user_text": "ユーザーへ質問中（自由記述）",
+    "ask_user_choice": "ユーザーへ質問中（選択式）",
+    "create_plan": "実行計画作成",
+    "approve_plan": "計画承認確認",
+    "update_task_progress": "進捗更新",
+    "create_memory": "メモリー保存",
+    "update_memory": "メモリー更新",
+    "delete_memory": "メモリー削除",
+    "read_memory": "メモリー読み込み",
+    "search_memory": "メモリー検索",
+    "list_memories": "メモリー一覧",
+    "help": "ヘルプ表示",
+}
+
+# アプリ全体で共有する状態（起動時に一度だけ構築）。
+_graph = None
+_config = None
+
+# usage_metadata（langchain-openai の UsageMetadata dict）のキー →
+# 累計辞書のキーの対応。on_chat_model_end のトークン集計で使う。
+_USAGE_KEYS = (("input", "input_tokens"), ("output", "output_tokens"), ("total", "total_tokens"))
+
+
+def _accumulate_usage(totals: dict, usage: dict) -> None:
+    """usage_metadata の値を totals（{"input","output","total"}）へ加算する。
+
+    Args:
+        totals: 加算先の集計辞書（in-placeで更新する）。
+        usage: AIMessage.usage_metadata（"input_tokens"/"output_tokens"/
+            "total_tokens" を持つ dict）。
+    """
+    for key, src_key in _USAGE_KEYS:
+        totals[key] += usage.get(src_key, 0) or 0
+
+
+def _format_token_usage(turn: dict, cumulative: dict) -> str:
+    """このターンと会話累計のトークン使用量を表示用の1行にまとめる。"""
+    return (
+        f"🔢 トークン使用量（このターン）: 入力 {turn['input']} / 出力 {turn['output']} / "
+        f"合計 {turn['total']}"
+        f"（会話累計: 入力 {cumulative['input']} / 出力 {cumulative['output']} / "
+        f"合計 {cumulative['total']}）"
+    )
+
+
+async def _setup() -> None:
+    """スキル走査・ツール初期化・グラフ構築を一度だけ行う（冪等）。
+
+    モジュール globals の _graph が None でなければ即座に return する
+    ため、複数回の @cl.on_chat_start 発火（複数セッション）でも
+    重い初期化（DB接続・グラフ構築）は1回しか実行されない。
+
+    実行内容:
+    1. load_config() で設定を読み込み、ログ出力先を設定する。
+    2. scan_skills() でスキルを走査し、build_system_prompt() で
+       システムプロンプトを組み立てる（第1段階 Discovery）。
+    3. init_tools() でツール（read_skill/read_skill_file/run_script/
+       execute_python_code/dispatch_agent/メモリー系ツール）に skills ルート・
+       サブエージェント設定・メモリールート等を注入する。
+    4. AsyncSqliteSaver を構築し、checkpoint_db への接続をアプリ
+       寿命で保持する。
+    5. build_graph() でグラフを構築し、モジュール globals に保持する。
+    6. アップロードフォルダの期限切れファイルを1回削除し、以降は
+       cleanup_interval_hours 間隔で削除を続けるバックグラウンドタスクを起動する
+       （upload_retention_days が0以下なら無効化）。
+
+    Args:
+        なし。
+
+    Returns:
+        None。副作用としてモジュール globals（_graph, _config）を設定する。
+    """
+    global _graph, _config
+    if _graph is not None:
+        return
+
+    _config = load_config()
+
+    # ログをファイルへ（何がどこに溜まるかを追えるように log_dir に出す）。
+    # 注意: chainlit run はモジュール読み込み前に自前で logging.basicConfig() を
+    # 呼び root logger にハンドラを付けてしまうため、basicConfig() は仕様上
+    # no-op になり FileHandler が root に付かない。そのため root logger へ
+    # 明示的に addHandler する。
+    #
+    # config.log_level（config.ini の [paths].log_level）で詳細度を切り替える:
+    #   "none"  - logging.disable() でプロセス全体のログ出力を無効化する
+    #             （ファイルハンドラ自体を作らない。data/logs/app.log は生成されない）。
+    #   "info"  - 従来通り root logger を INFO で FileHandler へ出す。
+    #   "debug" - root logger を DEBUG にする。DEBUG レベルのログ（ツール呼び出しの
+    #             全引数・全結果、LLM応答本文・thinkingを含む、tools.py/subagent.py/
+    #             llm.py 側で発行）も同じ FileHandler に記録されるようになる。
+    # config.log_clear_on_startup（[paths].log_clear_on_startup）が True なら、
+    # 起動のたびに app.log を空にしてから書き始める（FileHandler の mode="w"）。
+    # False（既定）なら従来通り追記（mode="a"）。
+    log_level = _config.log_level
+    if log_level not in ("info", "debug", "none"):
+        raise ValueError(
+            f"unknown log_level: {_config.log_level!r}（config.ini の "
+            "[paths].log_level は info/debug/none のいずれかで指定してください）"
+        )
+    if log_level == "none":
+        logging.disable(logging.CRITICAL)
+    else:
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.DEBUG if log_level == "debug" else logging.INFO)
+        formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        file_mode = "w" if _config.log_clear_on_startup else "a"
+        file_handler = logging.FileHandler(
+            _config.log_dir / "app.log", mode=file_mode, encoding="utf-8"
+        )
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+    # 第1段階 Discovery: スキルを走査して name+description をシステムプロンプトへ。
+    skills = scan_skills(_config.skills_dir)
+    system_prompt = build_system_prompt(skills, _config.system_prompt_path)
+    # エージェント種別（agents/*.md、ClaudeCode の .claude/agents/*.md 相当）を走査し、
+    # 各種別のシステムプロンプトにも {{skills}} を差し込む。
+    agent_type_defs = scan_agent_types(_config.agents_dir)
+    skills_block = render_skills_block(skills)
+    agent_type_defs = [
+        replace(a, system_prompt=a.system_prompt.replace("{{skills}}", skills_block))
+        for a in agent_type_defs
+    ]
+    # 永続メモリーの索引（MEMORY.md）を {{memory}} へ差し込む（常に読み込まれる仕様）。
+    # subagent 側にはメモリーツールを渡さないため差し込まない。
+    system_prompt = system_prompt.replace("{{memory}}", render_memory_block(_config.memory_dir))
+    # dispatch_agent が選べるエージェント種別一覧を {{agent_types}} へ差し込む。
+    system_prompt = system_prompt.replace(
+        "{{agent_types}}", render_agent_types_block(agent_type_defs)
+    )
+
+    # ツールに skills ルート等を注入（dispatch_agent 用にエージェント種別定義も渡す）。
+    init_tools(
+        _config.skills_dir,
+        _config.script_python,
+        _config.script_timeout,
+        _config,
+        agent_type_defs,
+        _config.subagent_max_iterations,
+        _config.default_workdir,
+        _config.memory_dir,
+        _config.help_path,
+        _config.path_memory_dir,
+        _config.path_memory_max_entries,
+        _config.script_require_approval,
+        _config.code_exec_enabled,
+        _config.code_exec_require_approval,
+        _config.approval_timeout_seconds,
+        _config.ask_user_text_timeout_seconds,
+        _config.ask_user_choice_timeout_seconds,
+    )
+
+    # チェックポインタ（会話状態の永続化）。接続はアプリ寿命で保持する。
+    conn = await aiosqlite.connect(str(_config.checkpoint_db))
+    saver = AsyncSqliteSaver(conn)
+    await saver.setup()
+
+    _graph = build_graph(_config, system_prompt, saver)
+    logging.getLogger(__name__).info("グラフ構築完了。スキル数=%d", len(skills))
+
+    # アップロードフォルダの期限切れファイルを起動時に1回削除し、以降は定期的に削除を続ける。
+    cleanup_old_uploads(_config.upload_dir, _config.upload_retention_days)
+    if _config.upload_retention_days > 0:
+        asyncio.create_task(
+            run_cleanup_loop(
+                _config.upload_dir,
+                _config.upload_retention_days,
+                _config.upload_cleanup_interval_hours,
+            )
+        )
+
+    # パスメモリー（skills/path-memory）のレジストリファイルも同様に日数ベースで
+    # 自動削除する（「会話終了」を検知する手段が無いための代替措置）。
+    cleanup_old_files(_config.path_memory_dir, _config.path_memory_retention_days)
+    if _config.path_memory_retention_days > 0:
+        asyncio.create_task(
+            cleanup_run_cleanup_loop(
+                _config.path_memory_dir,
+                _config.path_memory_retention_days,
+                _config.path_memory_cleanup_interval_hours,
+            )
+        )
+
+
+@cl.on_chat_start
+async def on_chat_start() -> None:
+    """Chainlit のチャットセッション開始時に呼ばれるフック。
+
+    アプリ全体の初期化（_setup）を（未実施なら）行った上で、
+    このセッション専用の thread_id を発行して LangGraph の
+    チェックポイント分離キーとして user_session に保存する。
+    最後に利用可能なスキル一覧を挨拶メッセージとして送信する。
+
+    Args:
+        なし（Chainlit のフック規約により引数なし）。
+
+    Returns:
+        None。副作用として cl.user_session への書き込みと
+        ウェルカムメッセージの送信を行う。
+    """
+    await _setup()
+    # 会話ごとに thread_id を発行（チェックポイントの分離キー）。
+    cl.user_session.set("thread_id", str(uuid.uuid4()))
+    cl.user_session.set("work_dir", None)
+    # Task Management ツール（create_plan/approve_plan/update_task_progress）の
+    # セッション状態。新しいセッションでは未作成・未承認から開始する。
+    cl.user_session.set("plan", None)
+    cl.user_session.set("plan_message", None)
+    cl.user_session.set("plan_approved", False)
+    # トークン使用量の会話全体累計（on_message の on_chat_model_end で加算）。
+    cl.user_session.set("token_usage_cumulative", {"input": 0, "output": 0, "total": 0})
+
+    # run_script の作業ディレクトリを歯車アイコンから指定できるようにする。
+    # 未入力（初期値）なら config.ini の [paths].default_workdir が使われる
+    # （tools.py の _resolve_workdir）。
+    await cl.ChatSettings(
+        [
+            TextInput(
+                id="work_dir",
+                label="作業ディレクトリ",
+                initial="",
+                placeholder=rf"例: C:\Users\me\project（未入力なら既定値 {_config.default_workdir} を使用）",
+            )
+        ]
+    ).send()
+
+    skills = scan_skills(_config.skills_dir)
+    names = "、".join(s.name for s in skills) or "（なし）"
+    await cl.Message(
+        content=(
+            f"ローカルエージェントを起動しました。利用可能なスキル: {names}\n\n"
+            "スクリプト実行時の作業ディレクトリは、右上の歯車アイコンから指定できます。"
+        )
+    ).send()
+
+
+@cl.on_settings_update
+async def on_settings_update(settings: dict) -> None:
+    """ChatSettings（歯車アイコン）で作業ディレクトリが変更されたときに呼ばれるフック。
+
+    入力値が空文字なら work_dir を None に戻し（既定動作＝config.ini の
+    default_workdir に復帰）、
+    値があれば実在するディレクトリかどうかを検証した上で cl.user_session に
+    絶対パス文字列として保存する。セキュリティ境界はかけない（ユーザー入力を
+    信頼する）が、run_script 実行時に subprocess.run が失敗するのを避けるため
+    「存在するディレクトリか」だけはここで確認する。
+
+    Args:
+        settings: ChatSettings の全入力値（{"work_dir": "..."}）。
+
+    Returns:
+        None。副作用として cl.user_session の更新と確認/エラーメッセージの送信を行う。
+    """
+    raw = (settings.get("work_dir") or "").strip()
+    if not raw:
+        cl.user_session.set("work_dir", None)
+        await cl.Message(
+            content=f"作業ディレクトリを未指定に戻しました（既定値 {_config.default_workdir} を使用します）。"
+        ).send()
+        return
+
+    path = Path(raw)
+    if not path.is_dir():
+        await cl.Message(content=f"作業ディレクトリの設定に失敗しました。存在するフォルダを指定してください: {raw}").send()
+        return
+
+    resolved = str(path.resolve())
+    cl.user_session.set("work_dir", resolved)
+    await cl.Message(content=f"作業ディレクトリを設定しました: {resolved}").send()
+
+
+def _save_uploads(message: cl.Message) -> list[str]:
+    """アップロードファイルを upload_dir に保存し、保存先パスの一覧を返す。
+
+    message.elements に含まれる各添付要素について、element.path
+    （Chainlit が保持する一時保存先）から config.upload_dir へコピーする。
+    path を持たない要素（テキストのみの要素など）はスキップする。
+
+    Args:
+        message: on_message で受け取った Chainlit のメッセージオブジェクト。
+            elements にアップロードファイルの情報が含まれる。
+
+    Returns:
+        保存先の絶対パス文字列のリスト（保存した順）。
+        アップロードが無ければ空リスト。
+    """
+    saved: list[str] = []
+    for element in message.elements or []:
+        src = getattr(element, "path", None)
+        if not src:
+            continue
+        dest = _config.upload_dir / (element.name or Path(src).name)
+        shutil.copyfile(src, dest)
+        saved.append(str(dest))
+        logging.getLogger(__name__).info("アップロード保存: %s", dest)
+    return saved
+
+
+def _build_human_message(user_text: str, saved_paths: list[str]) -> HumanMessage:
+    """アップロードファイルを踏まえて HumanMessage を組み立てる。
+
+    画像ファイルは data URL 化して content のマルチモーダル要素として積み、
+    Vision対応モデルへ実際の視覚情報として渡す。それ以外のファイルは従来通り
+    パスをテキストへ追記するのみ（run_script 等のツールにパスとして渡させるため）。
+
+    Args:
+        user_text: ユーザーが入力したメッセージ本文。
+        saved_paths: _save_uploads() が返した保存先パスの一覧。
+
+    Returns:
+        画像添付が無ければ文字列 content の HumanMessage、あれば
+        text + image_url のマルチモーダル content を持つ HumanMessage。
+    """
+    image_paths = [p for p in saved_paths if is_image_file(p)]
+    other_paths = [p for p in saved_paths if not is_image_file(p)]
+
+    text = user_text
+    if other_paths:
+        paths = "\n".join(f"- {p}" for p in other_paths)
+        text += f"\n\n[アップロードされたファイルの保存先]\n{paths}"
+
+    if not image_paths:
+        return HumanMessage(content=text)
+
+    content: list[dict] = [{"type": "text", "text": text}]
+    for p in image_paths:
+        content.append({"type": "image_url", "image_url": {"url": to_data_url(p)}})
+    return HumanMessage(content=content)
+
+
+@cl.on_message
+async def on_message(message: cl.Message) -> None:
+    """Chainlit がユーザーからのメッセージを受け取るたびに呼ばれるフック。
+
+    セッションの thread_id を使って LangGraph のグラフを astream_events
+    で実行し、以下をリアルタイムに UI へ反映する:
+    - on_chat_model_stream: モデルのトークンを最終回答へストリーム表示。
+    - on_tool_start / on_tool_end: ツール呼び出し（read_skill/read_skill_file/
+      run_script/view_image）を cl.Step として可視化し、入出力を表示する。
+
+    アップロードファイルがあれば _save_uploads() で保存し、_build_human_message()
+    で HumanMessage を組み立ててグラフへ渡す。画像は data URL 化してLLMへ
+    視覚情報として渡し、それ以外は保存先パスを本文に追記する（LLM が
+    run_script 等にパスを渡せるようにするため）。
+
+    Args:
+        message: ユーザーが送信した Chainlit のメッセージ
+            （本文 content と添付ファイル elements を含む）。
+
+    Returns:
+        None。副作用として cl.Message / cl.Step の送信・更新を行う。
+    """
+    thread_id = cl.user_session.get("thread_id")
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": _config.graph_recursion_limit,
+    }
+
+    # アップロードがあれば保存する。画像は data URL 化してLLMに見せ、それ以外は
+    # 保存先パスを本文に明示する（LLM が run_script に渡せるように）。
+    saved = _save_uploads(message)
+    human_message = _build_human_message(message.content, saved)
+
+    inputs = {"messages": [human_message]}
+    turn_totals = {"input": 0, "output": 0, "total": 0}  # このターンのトークン使用量
+    # 無言終了（tool_calls も回答テキストも無いまま終わる）を検知した場合、
+    # 最終回答を促して自動的に1回だけリトライする（下のループ末尾を参照）。
+    max_empty_retries = 2
+    # LLM応答の反復ループ（src/llm.py の ChatLlamaCpp が検知して
+    # ThinkingLoopDetected を送出する）を検知した場合の再試行回数と、
+    # 注入した注意メッセージ（機械的なもの）のid（成功後に履歴から取り除くため）。
+    loop_max_retries = _config.thinking_loop_guard_max_retries
+    loop_attempt = 0
+    loop_nudge_ids: list[str] = []
+    # 無言終了リマインダーのid（成功後に履歴から取り除くため。thinking_loopの
+    # nudgeと同様、機械的な注入を会話履歴に残さないようにする）。
+    empty_nudge_ids: list[str] = []
+    # 2つのリトライ要因（無言終了・反復ループ）で試行回数の予算を共有する。
+    total_retries = max_empty_retries + loop_max_retries
+
+    for attempt in range(total_retries + 1):
+        answer: cl.Message | None = None  # ツール呼び出しごとに区切って新規発行する
+        thinking: cl.Step | None = None  # <think> ブロック（reasoning_content）を表示するStep
+        steps: dict[str, cl.Step] = {}  # run_id -> Step（ツール開始/終了を対応付け）
+
+        try:
+            async for event in _graph.astream_events(inputs, config=config, version="v2"):
+                kind = event["event"]
+
+                if kind == "on_chat_model_stream":
+                    # モデルのトークンをストリーム表示。stream_token() は初回呼び出し時に
+                    # UI上の表示位置を確定させるため、ツール呼び出しをまたいで使い回すと
+                    # 後続のStepより上に固定表示されてしまう。ツール呼び出し区切りで
+                    # 新規 Message を発行し、時系列順に表示されるようにする。
+                    chunk = event["data"]["chunk"]
+
+                    # llama-server が reasoning_content（<think>ブロック）を返す場合、
+                    # ChatLlamaCpp（src/llm.py）が additional_kwargs へ拾い上げている。
+                    # 本回答とは別の折りたたみStepとして「思考中」を可視化する。
+                    reasoning = chunk.additional_kwargs.get("reasoning_content")
+                    if reasoning:
+                        if thinking is None:
+                            parent = cl.context.current_step
+                            thinking = cl.Step(
+                                name="思考中", type="llm", parent_id=parent.id if parent else None
+                            )
+                            await thinking.send()
+                        await thinking.stream_token(reasoning)
+
+                    if chunk.content:
+                        if thinking is not None:
+                            # 思考が終わり本回答が始まったのでStepを確定させる。
+                            await thinking.update()
+                            thinking = None
+                        if answer is None:
+                            answer = cl.Message(content="")
+                        await answer.stream_token(chunk.content)
+
+                elif kind == "on_tool_start":
+                    # ここまでの思考/回答があれば確定送信し、次のテキストは新しい Message に分ける。
+                    if thinking is not None:
+                        await thinking.update()
+                        thinking = None
+                    if answer is not None:
+                        await answer.send()
+                        answer = None
+                    # ツール実行を Step として可視化（どのスキル/ツールかが見える）。
+                    # cl.Step はコンストラクタでは local_steps（@cl.on_message が積む
+                    # 実行ラン）を自動継承しない（cl.Message は継承する）ため、明示的に
+                    # parent_id を揃えないと回答メッセージ群とは別系統（ルート直下）に
+                    # 置かれ、UI上でツールStepだけ末尾にまとめて表示されてしまう。
+                    label = _TOOL_LABELS.get(event["name"], event["name"])
+                    parent = cl.context.current_step
+                    step = cl.Step(name=label, type="tool", parent_id=parent.id if parent else None)
+                    step.input = event["data"].get("input")
+                    await step.send()
+                    steps[event["run_id"]] = step
+
+                elif kind == "on_tool_end":
+                    step = steps.pop(event["run_id"], None)
+                    if step is not None:
+                        output = event["data"].get("output")
+                        content = getattr(output, "content", output)
+                        step.output = content
+                        await step.update()
+                        if isinstance(content, str):
+                            generated = extract_generated_file(content)
+                            if generated is not None:
+                                await cl.Message(
+                                    content=f"生成ファイル: {generated.name}",
+                                    elements=[cl.File(name=generated.name, path=str(generated))],
+                                ).send()
+
+                elif kind == "on_chat_model_end":
+                    # config.ini [llm].track_token_usage=true の場合のみ usage_metadata が乗る
+                    # （src/llm.py の build_model が stream_usage を有効化している場合）。
+                    output = event["data"].get("output")
+                    usage = getattr(output, "usage_metadata", None)
+                    if usage:
+                        _accumulate_usage(turn_totals, usage)
+                        cumulative = cl.user_session.get("token_usage_cumulative")
+                        _accumulate_usage(cumulative, usage)
+                        cl.user_session.set("token_usage_cumulative", cumulative)
+        except ThinkingLoopDetected as exc:
+            # LLM応答（thinking/本文）が反復ループに陥り打ち切られた場合。
+            # ここまでの思考/回答があれば確定送信してから、注意メッセージを
+            # 注入して再試行する（id付きHumanMessageとして注入し、成功後に
+            # 履歴から取り除けるようidを記録しておく）。
+            logging.getLogger(__name__).warning(
+                "LLM応答のループを検知（%d回目の再試行）: 直近テキスト=%r",
+                loop_attempt + 1,
+                exc.snippet,
+            )
+            if thinking is not None:
+                await thinking.update()
+                thinking = None
+            if answer is not None:
+                await answer.send()
+                answer = None
+            if loop_attempt < loop_max_retries:
+                nudge_id = str(uuid.uuid4())
+                loop_nudge_ids.append(nudge_id)
+                text = pick_loop_nudge_message(
+                    _config.thinking_loop_guard_nudge_messages, loop_attempt
+                )
+                loop_attempt += 1
+                inputs = {"messages": [HumanMessage(content=text, id=nudge_id)]}
+                continue
+            await cl.Message(
+                content="応答が同じ内容を繰り返すループに陥ったため、処理を打ち切りました。"
+            ).send()
+            if loop_nudge_ids:
+                await _graph.aupdate_state(
+                    config, {"messages": [RemoveMessage(id=i) for i in loop_nudge_ids]}
+                )
+            if turn_totals["total"] > 0:
+                await cl.Message(
+                    content=_format_token_usage(turn_totals, cl.user_session.get("token_usage_cumulative"))
+                ).send()
+            return
+        except GraphRecursionError:
+            # メインの ReAct ループが recursion_limit（config.ini [graph]）に達した場合。
+            # ここまでの思考/回答があれば確定送信してから、打ち切りを明示する。
+            if thinking is not None:
+                await thinking.update()
+                thinking = None
+            if answer is not None:
+                await answer.send()
+                answer = None
+            await cl.Message(
+                content=(
+                    f"反復上限（recursion_limit={_config.graph_recursion_limit}）に達したため、"
+                    "処理を打ち切りました。タスクを分割するか、別のアプローチを試してください。"
+                )
+            ).send()
+            if loop_nudge_ids:
+                await _graph.aupdate_state(
+                    config, {"messages": [RemoveMessage(id=i) for i in loop_nudge_ids]}
+                )
+            if turn_totals["total"] > 0:
+                await cl.Message(
+                    content=_format_token_usage(turn_totals, cl.user_session.get("token_usage_cumulative"))
+                ).send()
+            return
+
+        if thinking is not None:
+            await thinking.update()
+        if answer is not None:
+            await answer.send()
+
+        # 無言終了（tool_calls も回答テキストも無いまま終わる）を検知した場合、
+        # 最終回答を促す短いメッセージを注入して自動的に1回だけリトライする
+        # （thinkingの長引き・コンテキスト逼迫等でこの状態に陥ることがある
+        # 小型ローカルモデル対策。evals/run_case.py の
+        # ainvoke_ensuring_final_text と同じ考え方）。
+        if attempt < total_retries:
+            state = await _graph.aget_state(config)
+            messages = state.values.get("messages", []) if state else []
+            if is_empty_final_message(messages):
+                nudge_id = str(uuid.uuid4())
+                empty_nudge_ids.append(nudge_id)
+                inputs = {"messages": [HumanMessage(content=EMPTY_RESPONSE_NUDGE, id=nudge_id)]}
+                continue
+        break
+
+    # ループ検知・無言終了いずれの注意メッセージ（機械的な注入）も、成功して
+    # 会話が完了した後は履歴に残さず取り除く（残すと長い会話ほど全量再送で
+    # コンテキストを圧迫し、過去の失敗の痕跡がモデル自身の目に触れ続けることに
+    # なる）。
+    remove_ids = loop_nudge_ids + empty_nudge_ids
+    if remove_ids:
+        await _graph.aupdate_state(
+            config, {"messages": [RemoveMessage(id=i) for i in remove_ids]}
+        )
+
+    if turn_totals["total"] > 0:
+        await cl.Message(
+            content=_format_token_usage(turn_totals, cl.user_session.get("token_usage_cumulative"))
+        ).send()

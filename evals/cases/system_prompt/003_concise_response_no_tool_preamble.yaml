@@ -1,0 +1,21 @@
+id: concise_response_no_tool_preamble
+target: system_prompt
+work_dir: evals/fixtures/annual_schedule_large
+auto_approve: true
+turns:
+  - "2025/photo_01.pngの内容を一言で教えて"
+expect:
+  tool_called_any: [analyze_image, Glob, dispatch_agent]
+  response_not_contains: ["これから","します","確認します","読み取ります"]
+judge: |
+  簡潔性ルール（Important Reminders 項目2）のツール呼び出し前後の説明文禁止効果測定。
+  ツール呼び出しの前後で「これから〜します」「〜しました」等の説明文を
+  挟んでいないか確認:
+  1. ツール呼び出し前に「画像を確認します」「読み取ります」等の前置きがないか。
+  2. ツール呼び出し後に「確認しました」「読み取りました」等の後置きがないか。
+  3. 結果を受け取った後は、必要な要約だけを簡潔に書いているか。
+  1,2のいずれかに反する場合は不合格。ただし「します」等の言葉自体が
+  タスク文に含まれる場合はその限りではない（文脈判断）。
+notes: >-
+  Important Reminders項目2「ツール呼び出しの前後に説明文を挟まない」の効果測定。
+  ツール呼び出し自体が行動を表すので結果に要約だけ書けばよい、という指示。

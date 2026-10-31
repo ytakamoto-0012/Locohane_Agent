@@ -1,0 +1,2903 @@
+"""LangGraph ツール（progressive disclosure 第2・第3段階）。
+
+仕様: https://agentskills.io/specification
+
+LangChain の @tool として定義する。read_skill/read_skill_file/run_script/analyze_image は
+すべて LangGraph のツールコールとして実行され、グラフのトレースに乗る
+（Chainlit 側で可視化するため）。dispatch_agent のみ内部で独立した ReAct
+ループ（subagent.py）を回す特殊なツールで、その内部の呼び出しはグラフの
+トレースに乗らない（意図的、コンテキスト節約のため）。
+
+- read_skill      … 第2段階(Read):    SKILL.md 本文全体を読む
+- read_skill_file       … 第3段階(Execute): references/assets 等を必要時に読む
+- run_script      … 第3段階(Execute): scripts/ 配下のスクリプトを実行する
+- execute_python_code … 第3段階(Execute): LLMが生成したPythonコードをその場で実行する
+- get_tool_source … 第3段階(Execute): run_script が失敗した際、原因調査用にスクリプトの絶対パスを返す
+- read_tool(Read)/glob_tool(Glob)/grep_tool(Grep) … ローカルファイルシステム上の
+  任意の絶対パスに対する読込・ファイル名検索・全文検索（src/file_tools.py に
+  ロジック本体、ClaudeCode の同名ツールに合わせた名前）
+- json_query      … JSON/dictへのJMESPathクエリ（src/file_tools.py にロジック本体）
+- list_path_memory … 現在の会話のパスメモリー（@N）登録内容を一覧表示する
+- analyze_image   … 第3段階(Execute): 画像ファイルをVision対応モデルへ見せ、LLM自身が内容を解析する
+- show_image      … 第3段階(Execute): 画像ファイルをチャットUIにプレビュー表示するだけ
+  （LLM自身は内容を見ない。provide_download の画像版。ユーザーへの「表示して」「見せて」はこちら）
+- dispatch_agent  … タスクをサブエージェントへ委譲し、最終回答のみを受け取る
+- ask_user_question(AskUserQuestion) … ユーザーへ自由記述で追加質問する。labels省略時は
+  単発質問（Chainlit AskUserMessage）、labels指定時は複数項目をまとめて提示する
+  フォーム（Chainlit AskElementMessage + CustomElement）
+- ask_user_choice … ユーザーへ選択肢形式で追加質問する。multi_select省略/False時は
+  単一選択（Chainlit AskActionMessage）、multi_select=True時は複数選択可能な
+  チェックボックスフォーム（Chainlit AskElementMessage + CustomElement）
+- create_memory / update_memory / delete_memory / read_memory / search_memory /
+  list_memories … スレッドをまたぐ永続メモリー（src/memory.py）の読み書き。
+  主エージェントのみに公開し、dispatch_agent のサブエージェントには渡さない。
+
+セキュリティ: read_skill_file / run_script / get_tool_source は必ず skills
+ディレクトリ配下に限定する（_safe_path でディレクトリトラバーサルを拒否）。保存・実行の
+パスがコードから追える事。analyze_image / read_tool(Read) / glob_tool(Glob) /
+grep_tool(Grep) は読み込み系ツールのため、パスの制限は行わない
+（_resolve_analyze_image_path / _resolve_file_tools_path）。
+メモリー系ツールも同様に memory.py 側の _safe_memory_path で memory ルート配下に限定する。
+
+設定（skills ルート・Python 実行ファイル・タイムアウト・サブエージェント設定・
+メモリールート）はモジュール globals に init_tools() で一度だけ注入する。動的 import
+やメタクラス等の仕掛けは使わない。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextvars
+import hashlib
+import json
+import logging
+import os
+import re
+import subprocess
+import tempfile
+import time
+import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+import chainlit as cl
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import BaseTool, tool
+from langgraph.prebuilt import ToolNode
+
+from . import file_tools, memory, path_memory
+from .agent_types import AgentType
+from .config import Config, expand_config_vars
+from .images import image_followup_message, is_image_file, to_data_url
+from .subagent import run_subagent
+
+logger = logging.getLogger(__name__)
+
+# 現在の実行がサブエージェント（dispatch_agent 経由）の内部かどうかを示す
+# コンテキスト変数。dispatch_agent がサブエージェント起動前に True を設定する。
+# contextvars は asyncio.gather() が生成する子タスクにも起動時点の値が
+# コピーされるため、run_subagent 内から並列実行される各ツール呼び出しからも
+# 参照できる（_check_file_tools_duplicate の重複ガードが、
+# [file_tools_duplicate_guard].carry_over_to_main=false のときに
+# メインエージェント/サブエージェントの呼び出し履歴を分けるために使う）。
+_IN_SUBAGENT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_in_subagent", default=False
+)
+
+# 現在の dispatch_agent 呼び出しを一意に識別するID（サブエージェント外では None）。
+# 重複ガードの集合をサブエージェント実行ごとに分けるために使う。サブエージェントの
+# 会話履歴は委譲元にも他のサブエージェントにも共有されず、返るのは最終回答テキスト
+# だけなので、あるサブエージェントが読んだ画像・ファイルを別のサブエージェントや
+# メインが読み直すのは重複ではなく正当な再取得である（同一集合で数えると、
+# 1件目のサブエージェントが読んで返しきれなかった画像を誰も読み直せなくなる）。
+_SUBAGENT_RUN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_subagent_run_id", default=None
+)
+
+
+def _duplicate_guard_session_key(base_key: str) -> str:
+    """重複ガードの記録先キーを、実行コンテキスト（メイン／各サブエージェント）ごとに分ける。
+
+    [file_tools_duplicate_guard].carry_over_to_main が false のとき、
+    サブエージェント内の呼び出しはメインエージェント側の判定に影響させない。
+    さらにサブエージェント同士も互いに影響しないよう、dispatch_agent の実行ID
+    ごとに別キーにする。
+
+    Args:
+        base_key: メインエージェント用の記録先キー
+            （例: "file_tools_call_signatures"）。
+
+    Returns:
+        実際に cl.user_session へ保存するキー。
+    """
+    cfg = _LLM_CONFIG
+    guard_carry_over = cfg.file_tools_duplicate_guard_carry_over_to_main if cfg else True
+    if guard_carry_over:
+        return base_key
+    run_id = _SUBAGENT_RUN_ID.get()
+    if run_id is None:
+        return base_key
+    return f"{base_key}_subagent_{run_id}"
+
+# dispatch_agent の実際のLLM呼び出しの同時実行数をガードするセマフォ。
+# ToolNode は同一AIMessage内の複数tool_callsを並列実行するため、モデルが
+# dispatch_agent を1ターンで複数回呼ぶと、単一インスタンスのllama-server
+# へ複数リクエストが同時に飛ぶ。system_prompt.md で「並列発行しない」と
+# 指示するだけでは低パラメータモデルの遵守が不確実な上、llama-serverの
+# --parallel スロット数を超えて並列実行するとチェックポイントの破損
+# （AIMessageのtool_callsに対応するToolMessageが欠落し、次のモデル呼び出し
+# でLangGraphがValueErrorを送出する）が本番で確認されたため、モデルの
+# 挙動に関係なく確実に効くコード側のガードとして同時実行数を制限する
+# （並列呼び出し自体は許可し、超過分は待ち順に処理される）。
+# init_tools() が config.ini の [subagent].max_parallel に応じて再設定する。
+# None はガード無効（無制限）を表す。既定値の Semaphore(1) は init_tools()
+# 未実行時（テスト等）の安全側フォールバック。
+_DISPATCH_AGENT_SEMAPHORE: "asyncio.Semaphore | None" = asyncio.Semaphore(1)
+
+# メインエージェントの全ツール呼び出し（ImageAwareToolNode 経由）の同時実行数を
+# ガードするセマフォ。init_tools() が config.ini の [graph].max_parallel に
+# 応じて再設定する。None はガード無効を表す。既定 Semaphore(1) は init_tools()
+# 未実行時（テスト等）の安全側フォールバック。
+_TOOL_CALL_SEMAPHORE: "asyncio.Semaphore | None" = asyncio.Semaphore(1)
+
+
+async def _tool_call_semaphore_wrap(request, execute):
+    """ToolNode(awrap_tool_call=...) 用インターセプタ。
+
+    全ツール呼び出し（同期/非同期問わず _execute_tool_async 経由で正しく
+    振り分けられた実行）を _TOOL_CALL_SEMAPHORE で待ち合わせる。dispatch_agent
+    は専用の _DISPATCH_AGENT_SEMAPHORE でも重ねてガードされる形になるが、
+    単に入れ子になるだけで問題ない。
+    """
+    sem = _TOOL_CALL_SEMAPHORE
+    if sem is None:
+        return await execute(request)
+    if sem.locked():
+        tool_name = request.tool_call.get("name")
+        logger.info("tool_call: 空きスロットが無いため待機します tool=%r", tool_name)
+    async with sem:
+        return await execute(request)
+
+
+@dataclass(frozen=True)
+class ResolvedAgentType:
+    """AgentType のツール名を実際の BaseTool へ解決した実行時表現。
+
+    init_tools() が agent_type_defs（frontmatterの生値）から組み立て、
+    _AGENT_TYPES に保持する。dispatch_agent はこれを引いて run_subagent()
+    に渡す。
+    """
+
+    description: str
+    system_prompt: str
+    tools: list[BaseTool]
+
+
+# init_tools() で注入されるモジュール設定（起動時に一度だけ設定）。
+# 複数ディレクトリ対応（scan_skills()/scan_agent_types() と同じマージ設計。
+# 例: [*locohane_skills_dirs, skills_dir]。前方のディレクトリが優先される）。
+_SKILLS_ROOTS: list[Path] | None = None
+_SCRIPT_PYTHON: str = "python"
+_SCRIPT_TIMEOUT: int = 60
+_CODE_EXEC_ENABLED: bool = False
+_SCRIPT_BACKGROUND_MAX_RUNTIME_SECONDS: int = 3600
+_SCRIPT_BACKGROUND_JOB_RETENTION_SECONDS: int = 1800
+_DEFAULT_WORKDIR: Path | None = None
+_LLM_CONFIG: Config | None = None
+_AGENT_TYPES: dict[str, ResolvedAgentType] = {}
+_SUBAGENT_MAX_ITERATIONS: int = 6
+_MEMORY_ROOT: Path | None = None
+_HELP_PATH: Path | None = None
+_PATH_MEMORY_DIR: Path | None = None
+_PATH_MEMORY_MAX_ENTRIES: int = 500
+_APPROVAL_TIMEOUT_SECONDS: int = 300
+_ASK_USER_QUESTION_TIMEOUT_SECONDS: int = 60
+_ASK_USER_CHOICE_TIMEOUT_SECONDS: int = 90
+_PLAN_BADGE_ALLOW_UNLOCK: bool = True
+
+# run_script は本来「書き込み系ツール」として一律に計画承認を要求するが、
+# 副作用のない純粋な読み取り専用スクリプトはここに (skill_name, script_filename)
+# を明示的に登録することで承認チェックを免除できる（read_vba.py は oletools で
+# ファイルのバイト列を読むだけ、read_excel.py も openpyxl/xlrd でファイルを
+# 読むだけで、いずれもExcel本体・COMを使わず書き込みも発生しないため対象外とした。
+# read_docx.py/read_pdf.py/read_pptx.py/inspect_pptx.py も同様に対象ファイルを
+# 読むだけで書き込みは発生しない。render_pdf_pages.py はユーザーの元PDFは変更
+# しないが、レンダリング結果のPNGをスキル内のrendered/へ新規保存する点で他とは
+# 異なるものの、対象自体は読み取り専用のため同様に対象外とした）。
+_PLAN_APPROVAL_EXEMPT_SCRIPTS: set[tuple[str, str]] = {
+    ("excel-tools", "read_vba.py"),
+    ("excel-tools", "read_excel.py"),
+    ("docx-tools", "read_docx.py"),
+    ("pdf-tools", "read_pdf.py"),
+    ("pdf-tools", "render_pdf_pages.py"),
+    ("pptx-tools", "read_pptx.py"),
+    ("pptx-tools", "inspect_pptx.py"),
+}
+
+
+# 「無期限待ち」の代替として使う実質無期限の秒数（2^31-1 ≈ 68年）。
+# chainlit.types.AskSpec は pydantic dataclass で timeout: int（Optional化されて
+# いない）を要求するため、timeout=None を渡すと ValidationError
+# 「timeout: Input should be a valid integer」がツール実行時の例外として
+# LLMに見えてしまう（本番ログ 2026-07-25 で確認）。None は使わず、この定数を渡す。
+_UNLIMITED_TIMEOUT_SECONDS = 2**31 - 1
+
+
+def _resolve_ask_timeout(seconds: int) -> int:
+    """config.ini のタイムアウト秒数を cl.Ask*Message(timeout=...) 用の値へ変換する。
+
+    0以下（無期限待ち指定）は _UNLIMITED_TIMEOUT_SECONDS（実質無期限）に変換する。
+    """
+    return seconds if seconds > 0 else _UNLIMITED_TIMEOUT_SECONDS
+
+
+def init_tools(
+    skills_root: Path | str | Sequence[Path | str],
+    script_python: str,
+    script_timeout: int,
+    llm_config: Config,
+    agent_type_defs: list[AgentType],
+    subagent_max_iterations: int,
+    default_workdir: Path,
+    memory_root: Path,
+    help_path: Path,
+    path_memory_dir: Path,
+    path_memory_max_entries: int,
+    code_exec_enabled: bool = False,
+    approval_timeout_seconds: int = 300,
+    ask_user_question_timeout_seconds: int = 60,
+    ask_user_choice_timeout_seconds: int = 90,
+    plan_badge_allow_unlock: bool = True,
+    dispatch_agent_max_parallel: int = 1,
+    graph_tool_max_parallel: int = 1,
+    script_background_max_runtime_seconds: int = 3600,
+    script_background_job_retention_seconds: int = 1800,
+) -> None:
+    """ツールが使う設定を注入する（app 起動時に一度だけ呼ぶ）。
+
+    read_skill / read_skill_file / run_script / dispatch_agent / メモリー系
+    ツールはいずれもモジュール globals を参照するため、グラフ構築より前に
+    必ずこの関数を呼んでおく必要がある。
+
+    Args:
+        skills_root: skills ディレクトリのルートパス、またはその並び。
+            複数渡した場合は渡した順に探索され、前方のディレクトリが優先
+            される（例: [*locohane_skills_dirs, skills_dir]）。各要素は
+            resolve() により絶対パスへ正規化した上でモジュール変数に保持する。
+        script_python: run_script が .py スクリプトを起動する際に使う
+            Python 実行ファイル（例: "python", "C:\\path\\to\\python.exe"）。
+        script_timeout: run_script のタイムアウト秒数。
+        llm_config: dispatch_agent がサブエージェント用モデルを構築する
+            際に使うアプリ設定（build_model に渡す）。
+        agent_type_defs: scan_agent_types() が返したエージェント種別定義
+            （system_prompt は {{skills}} 差し込み済みであること）。
+            dispatch_agent の agent_type 引数で選べる種別一覧として、
+            ツール名を実際の BaseTool に解決した上で _AGENT_TYPES に
+            保持する。
+        subagent_max_iterations: dispatch_agent の ReAct ループの
+            最大反復回数。
+        default_workdir: run_script の既定の作業ディレクトリ（cwd）。
+            Chainlit の ChatSettings でセッション単位の作業ディレクトリが
+            指定されなかった場合に使われる（config.ini の
+            [paths].default_workdir 由来）。
+        memory_root: 永続メモリーストアのルートディレクトリ（config.ini の
+            [paths].memory_dir 由来）。create_memory 等のメモリー系
+            ツールが参照する。
+        help_path: help ツールが読み込んで返すヘルプ本文ファイルの絶対パス
+            （config.ini の [paths].help_path 由来）。
+        path_memory_dir: パスメモリー（src/path_memory.py）のレジストリ
+            ファイル保存先ディレクトリ（config.ini の [path_memory].dir 由来）。
+            run_script/execute_python_code のサブプロセスへ環境変数
+            AGENT_PATH_MEMORY_DIR として渡すほか、Read/Glob/Grep/analyze_image/
+            run_script の @N 解決でも使う。
+        path_memory_max_entries: パスメモリー1会話あたりの登録上限件数
+            （config.ini の [path_memory].max_entries 由来）。
+        code_exec_enabled: execute_python_code ツール（LLMが生成した
+            Pythonコードをその場で実行する）の有効/無効。False の場合、
+            ツールは呼び出されてもエラー文字列を返すのみでコードは
+            実行されない（config.ini の [scripts].code_execution_enabled 由来）。
+        approval_timeout_seconds: create_plan/approve_plan の計画承認で
+            ユーザーの応答を待つ秒数（config.ini の
+            [timeouts].approval_seconds 由来）。0以下は無期限待ちを意味する。
+        ask_user_question_timeout_seconds: AskUserQuestion（自由記述の
+            質問。labels省略時は単発質問、labels指定時は複数項目フォーム）
+            がユーザーの応答を待つ秒数（config.ini の
+            [timeouts].ask_user_question_seconds 由来）。0以下は無期限待ちを意味する。
+        ask_user_choice_timeout_seconds: ask_user_choice がユーザーの
+            応答を待つ秒数（config.ini の
+            [timeouts].ask_user_choice_seconds 由来）。0以下は無期限待ちを意味する。
+        plan_badge_allow_unlock: 送信ボタン付近の Plan Mode / Edit Automatically
+            バッジをクリックした際、Plan Mode → Edit Automatically 方向
+            （ロック解除）も許可するか。False の場合はロック方向のクリックのみ
+            有効になる（config.ini の [plan].allow_badge_unlock 由来）。
+        dispatch_agent_max_parallel: dispatch_agent ツールの実LLM呼び出しを
+            _DISPATCH_AGENT_SEMAPHORE で同時に何件まで許可するか。1以上は
+            その値までにガードし（既定1＝完全直列化）、0以下はガードを
+            無効化して並列呼び出しをそのまま許可する
+            （config.ini の [subagent].max_parallel 由来）。
+        graph_tool_max_parallel: メインエージェントの全ツール呼び出し
+            （ImageAwareToolNode）を _TOOL_CALL_SEMAPHORE で同時に何件まで
+            許可するか。1以上はその値までにガードし（既定1＝完全直列化）、
+            0以下はガードを無効化して並列呼び出しをそのまま許可する
+            （config.ini の [graph].max_parallel 由来）。
+        script_background_max_runtime_seconds: run_script_background で
+            起動したプロセスを強制終了するまでの上限秒数（config.ini の
+            [scripts].background_max_runtime_seconds 由来）。
+        script_background_job_retention_seconds: run_script_background の
+            ジョブが終了後、check_script_job で一度も取得されないまま
+            registry に残ってよい秒数（config.ini の
+            [scripts].background_job_retention_seconds 由来）。
+
+    Returns:
+        None。副作用としてモジュール globals を更新するのみ。
+    """
+    global _SKILLS_ROOTS, _SCRIPT_PYTHON, _SCRIPT_TIMEOUT
+    global _CODE_EXEC_ENABLED
+    global _SCRIPT_BACKGROUND_MAX_RUNTIME_SECONDS, _SCRIPT_BACKGROUND_JOB_RETENTION_SECONDS
+    global _DEFAULT_WORKDIR, _LLM_CONFIG, _AGENT_TYPES, _SUBAGENT_MAX_ITERATIONS
+    global _MEMORY_ROOT
+    global _HELP_PATH
+    global _PATH_MEMORY_DIR, _PATH_MEMORY_MAX_ENTRIES
+    global _APPROVAL_TIMEOUT_SECONDS, _ASK_USER_QUESTION_TIMEOUT_SECONDS
+    global _ASK_USER_CHOICE_TIMEOUT_SECONDS
+    global _PLAN_BADGE_ALLOW_UNLOCK
+    global _DISPATCH_AGENT_SEMAPHORE
+    global _TOOL_CALL_SEMAPHORE
+    _skills_root_list = [skills_root] if isinstance(skills_root, (str, Path)) else list(skills_root)
+    _SKILLS_ROOTS = [Path(p).resolve() for p in _skills_root_list]
+    _SCRIPT_PYTHON = script_python
+    _SCRIPT_TIMEOUT = script_timeout
+    _CODE_EXEC_ENABLED = code_exec_enabled
+    _SCRIPT_BACKGROUND_MAX_RUNTIME_SECONDS = script_background_max_runtime_seconds
+    _SCRIPT_BACKGROUND_JOB_RETENTION_SECONDS = script_background_job_retention_seconds
+    _DEFAULT_WORKDIR = Path(default_workdir).resolve()
+    _LLM_CONFIG = llm_config
+    _AGENT_TYPES = _resolve_agent_types(agent_type_defs)
+    _SUBAGENT_MAX_ITERATIONS = subagent_max_iterations
+    _MEMORY_ROOT = Path(memory_root).resolve()
+    memory.ensure_dirs(_MEMORY_ROOT)
+    _HELP_PATH = Path(help_path).resolve()
+    _PATH_MEMORY_DIR = Path(path_memory_dir).resolve()
+    _PATH_MEMORY_MAX_ENTRIES = path_memory_max_entries
+    _APPROVAL_TIMEOUT_SECONDS = approval_timeout_seconds
+    _ASK_USER_QUESTION_TIMEOUT_SECONDS = ask_user_question_timeout_seconds
+    _ASK_USER_CHOICE_TIMEOUT_SECONDS = ask_user_choice_timeout_seconds
+    _PLAN_BADGE_ALLOW_UNLOCK = plan_badge_allow_unlock
+    _DISPATCH_AGENT_SEMAPHORE = (
+        asyncio.Semaphore(dispatch_agent_max_parallel) if dispatch_agent_max_parallel > 0 else None
+    )
+    _TOOL_CALL_SEMAPHORE = (
+        asyncio.Semaphore(graph_tool_max_parallel) if graph_tool_max_parallel > 0 else None
+    )
+    # 各ツールの description（LLMに見えるツールスキーマ説明）内の ${変数名} を
+    # config.ini の実値へ展開する。@tool デコレータが docstring から description を
+    # 設定するのは import 時の一度きりなので、ここで書き換えないと LLM には
+    # プレースホルダーがそのまま見えてしまう。BaseTool（pydanticモデル）は
+    # hashable とは限らないため、set化ではなく id() で重複を除いて回す。
+    # MCPサーバー由来のツール（_MCP_TOOLS）はここでは対象外にする。description が
+    # 外部サーバー由来のため、無関係な ${...} パターンを誤って展開しようとして
+    # ValueError を送出するリスクがあるため（register_mcp_tools/get_all_tools 参照）。
+    seen_tool_ids: set[int] = set()
+    for tool_obj in [*_BASE_TOOLS, *_SUBAGENT_TOOLS]:
+        if id(tool_obj) in seen_tool_ids:
+            continue
+        seen_tool_ids.add(id(tool_obj))
+        tool_obj.description = expand_config_vars(tool_obj.description, llm_config)
+
+
+def _resolve_agent_types(agent_type_defs: list[AgentType]) -> dict[str, ResolvedAgentType]:
+    """AgentType のツール名一覧を実際の BaseTool へ解決する。
+
+    tool_names が None（frontmatterで tools: 省略）の場合は、サブエージェント
+    に割当可能な既定ツール一式（_SUBAGENT_TOOLS）をそのまま継承させる
+    （Anthropic公式のサブエージェント仕様における「tools省略時は全ツール
+    継承」を、本プロジェクトのセキュリティ境界内で読み替えたもの）。
+    未知のツール名は例外を投げず警告してスキップする（scan_agent_types()
+    と同じフェイルオープンしない方針）。
+
+    Args:
+        agent_type_defs: scan_agent_types() が返した定義のリスト
+            （system_prompt は {{skills}} 差し込み済みであること）。
+
+    Returns:
+        エージェント種別名 -> ResolvedAgentType の辞書。
+    """
+    tool_lookup = {t.name: t for t in _SUBAGENT_TOOLS}
+    resolved: dict[str, ResolvedAgentType] = {}
+    for agent_def in agent_type_defs:
+        if agent_def.tool_names is None:
+            tools = list(_SUBAGENT_TOOLS)
+        else:
+            tools = []
+            for tool_name in agent_def.tool_names:
+                tool_obj = tool_lookup.get(tool_name)
+                if tool_obj is None:
+                    logger.warning(
+                        "エージェント種別 '%s': 未知のツール '%s' をスキップ",
+                        agent_def.name,
+                        tool_name,
+                    )
+                    continue
+                tools.append(tool_obj)
+        resolved[agent_def.name] = ResolvedAgentType(
+            description=agent_def.description,
+            system_prompt=agent_def.system_prompt,
+            tools=tools,
+        )
+    return resolved
+
+
+_PATH_MEMORY_TOKEN_RE = re.compile(r"^@(\d+)$")
+
+
+def _resolve_path_memory_token(value: str) -> tuple[str, str | None]:
+    """value が `@N` 形式のパスメモリー参照なら実パスへ解決する。
+
+    Args:
+        value: analyze_image の relative_path や run_script の args の
+            要素として渡された文字列。
+
+    Returns:
+        (解決後の値, エラーメッセージ) のタプル。
+        - `@N` 形式でなければ (value, None)（従来通りそのまま使う）。
+        - `@N` 形式で解決できれば (実パス, None)。
+        - `@N` 形式だがパスメモリーが利用できない・未登録の場合は
+          (value, "パスメモリー ... は登録されていません。..." というエラー文)。
+          呼び出し側はこのエラー文をそのまま「エラー: ...」として返すこと。
+    """
+    if not _PATH_MEMORY_TOKEN_RE.match(value):
+        return value, None
+    if _PATH_MEMORY_DIR is None:
+        return value, f"パスメモリー機能が利用できません: {value}"
+    thread_id = cl.user_session.get("thread_id") or "_no_session"
+    resolved = path_memory.resolve(thread_id, value, _PATH_MEMORY_DIR)
+    if resolved is None:
+        return value, (
+            f"パスメモリー {value} は登録されていません。"
+            "list_path_memory ツールで現在の登録内容を確認してください。"
+        )
+    return resolved, None
+
+
+_PATH_MEMORY_TEXT_TOKEN_RE = re.compile(r"(?<![\w@])@(\d+)\b")
+
+
+def _resolve_path_memory_tokens_in_text(text: str) -> str:
+    """自由記述テキスト中に埋め込まれた `@N` パスメモリー参照を実パスへ置換する。
+
+    dispatch_agent の task 引数のように、モデルが自然文の中でパスに触れる場面では
+    文字列全体が `@N` のみであることを前提とする _resolve_path_memory_token は使えない。
+    このヘルパーは文中に複数含まれうる `@N` を正規表現で検出し、解決できたものだけを
+    実パスへ置き換える。未登録・パスメモリー機能が使えない等で解決できないトークンは
+    エラーにせず元の `@N` 文字列のまま残す（自由文の一部が理由で呼び出し自体を
+    失敗させないため）。
+
+    Args:
+        text: `@N` を含みうる自由記述テキスト（dispatch_agent の task 等）。
+
+    Returns:
+        解決できた `@N` を実パスへ置換したテキスト。`@N` を含まない、または
+        どれも解決できなかった場合は text をそのまま返す。
+    """
+
+    def _replace(match: re.Match) -> str:
+        token = match.group(0)
+        resolved, error = _resolve_path_memory_token(token)
+        return token if error else resolved
+
+    return _PATH_MEMORY_TEXT_TOKEN_RE.sub(_replace, text)
+
+
+_RAW_UNC_PATH_RE = re.compile(r"\\\\[A-Za-z0-9_.\-]+(?:\\[A-Za-z0-9_.\-]+)+")
+
+
+def register_raw_unc_paths_in_text(text: str) -> str:
+    """ユーザー入力テキスト中の生UNCパスを path_memory へ事前登録し `@N` へ置換する。
+
+    低パラメータモデルはツール呼び出しのJSON argsにUNCパス（`\\\\server\\share\\...`）
+    を書き起こす際にバックスラッシュのエスケープを誤りやすい（ISSUE-002）。
+    ユーザーがチャット本文に生のUNCパスを直接書いた場合、そのままではLLMが
+    このパスを手で再構築する必要が生じるため、on_message でLLMに渡す前に
+    本文中のUNCパスを検出して path_memory へ登録し、本文中の当該箇所を
+    `@N` に置き換える。これによりLLMは以後そのターンから `@N` を使えばよく、
+    生のUNCパス文字列を手で書き起こす場面自体を無くす。
+
+    検出対象はUNCパスの正常形のみ（`\\\\server\\share` 以上の深さを要求し、
+    セグメントはASCII英数字・`_`・`.`・`-` に限定して地の文の巻き込みを防ぐ）。
+    ローカル絶対パス（`C:\\...`）や、既にLLMの誤変換で崩れた二重バックスラッシュ
+    形状の検出は今回のスコープ外（将来必要になれば別途拡張する）。
+
+    Args:
+        text: ユーザーのメッセージ本文（message.content）。
+
+    Returns:
+        検出したUNCパスを `@N` に置換したテキスト。path_memory機能が
+        利用できない場合やUNCパスを含まない場合は text をそのまま返す。
+    """
+    if _PATH_MEMORY_DIR is None:
+        return text
+    thread_id = cl.user_session.get("thread_id") or "_no_session"
+
+    def _replace(match: re.Match) -> str:
+        path = match.group(0)
+        index = path_memory.register(
+            thread_id,
+            path,
+            _PATH_MEMORY_DIR,
+            _PATH_MEMORY_MAX_ENTRIES,
+            description="ユーザー入力",
+        )
+        return f"@{index}" if index is not None else path
+
+    return _RAW_UNC_PATH_RE.sub(_replace, text)
+
+
+def _register_path_memory(paths: list[str], description: str | None = None) -> dict[str, str]:
+    """パスの一覧を path_memory レジストリへ登録し、{"@N": path, ...} を返す。
+
+    旧 skills/file-tools/scripts/_common.py の register_paths()（run_script
+    サブプロセス経由・環境変数依存）を、同一プロセス内の直接呼び出しに
+    置き換えたもの（Read/Glob/Grep/json_query が使う）。
+
+    Args:
+        paths: 登録したい絶対パス文字列のリスト。
+        description: 各パスに添える短い説明（省略可）。
+
+    Returns:
+        {"@N": path, ...} の辞書。path_memory が利用できない環境でも
+        例外を投げず空辞書を返す。
+    """
+    if _PATH_MEMORY_DIR is None:
+        return {}
+    thread_id = cl.user_session.get("thread_id") or "_no_session"
+    result: dict[str, str] = {}
+    for path in paths:
+        index = path_memory.register(
+            thread_id, path, _PATH_MEMORY_DIR, _PATH_MEMORY_MAX_ENTRIES, description=description
+        )
+        if index is not None:
+            result[f"@{index}"] = path
+    return result
+
+
+def _resolve_file_tools_path(raw: str) -> tuple[Path | None, str | None]:
+    """Read/Glob/Grep/json_query の path 系引数を解決する。
+
+    `@N` 形式のパスメモリー参照を解決したのち、絶対パスはそのまま、
+    相対パス（空文字含む）は作業ディレクトリ基準（_resolve_workdir()）で
+    解決する。旧 run_script はサブプロセスの cwd=workdir により暗黙に
+    作業ディレクトリ基準になっていたため、ネイティブツール化後もこの挙動を
+    明示的に再現する（Path.cwd() 等プロセス自身のcwdは使わない）。
+
+    Args:
+        raw: file_path/path 引数の生値（空文字・相対パス・絶対パス・`@N`）。
+
+    Returns:
+        (解決済み絶対パス, エラーメッセージ) のタプル。`@N` が未登録等で
+        解決できない場合は (None, エラー文字列)。
+    """
+    resolved, error = _resolve_path_memory_token(raw) if raw else (raw, None)
+    if error:
+        return None, error
+    p = Path(resolved) if resolved else _resolve_workdir()
+    if not p.is_absolute():
+        p = _resolve_workdir() / p
+    return p, None
+
+
+def _check_file_tools_duplicate(tool_label: str, signature: str) -> str | None:
+    """Read/Glob/Grep/json_query 共通の重複呼び出しガード。
+
+    旧 _run_script_impl の file-tools 分岐（読み取り専用スキルのため、
+    同一引数での再実行は結果が変わらないと保証できる）を汎用化したもの。
+    config.ini [file_tools_duplicate_guard] の enabled/max_calls/
+    carry_over_to_main をそのまま参照する。
+
+    Args:
+        tool_label: エラー文言に出すツール名（例: "Read"）。
+        signature: 呼び出し引数から組み立てた、その呼び出しを一意に表す文字列。
+
+    Returns:
+        重複と判定されればエラー文字列、そうでなければ None
+        （None の場合、呼び出し元は通常通り処理を続けてよい）。
+    """
+    cfg = _LLM_CONFIG
+    guard_enabled = cfg.file_tools_duplicate_guard_enabled if cfg else True
+    if not guard_enabled:
+        return None
+    guard_max_calls = cfg.file_tools_duplicate_guard_max_calls if cfg else 1
+    session_key = _duplicate_guard_session_key("file_tools_call_signatures")
+    if _record_and_check_duplicate(session_key, signature, guard_max_calls):
+        return (
+            f"エラー: {tool_label} を同じ引数で既に上限（{guard_max_calls}回）まで"
+            f"呼び出し済みです。{tool_label} は読み取り専用のため再実行しても"
+            "結果は変わりません。会話履歴にある前回の実行結果を参照するか、"
+            "別の引数・別の手段に切り替えてください。"
+        )
+    return None
+
+
+def _subprocess_env() -> dict[str, str]:
+    """run_script/execute_python_code の子プロセスへ渡す環境変数を組み立てる。
+
+    既存の PYTHONIOENCODING（日本語文字化け対策）に加え、パスメモリー
+    （src/path_memory.py）用の AGENT_THREAD_ID/AGENT_PATH_MEMORY_DIR/
+    AGENT_PATH_MEMORY_MAX_ENTRIES を注入する。run_script 経由で実行される
+    スキルのスクリプトは、これらを `path_memory.env_params()` で読み、
+    自分が出力するパスをレジストリへ登録できる。
+    """
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    env["AGENT_THREAD_ID"] = cl.user_session.get("thread_id") or "_no_session"
+    if _PATH_MEMORY_DIR is not None:
+        env["AGENT_PATH_MEMORY_DIR"] = str(_PATH_MEMORY_DIR)
+    env["AGENT_PATH_MEMORY_MAX_ENTRIES"] = str(_PATH_MEMORY_MAX_ENTRIES)
+    return env
+
+
+def _safe_path(relative: str) -> Path:
+    """skills ルート配下に限定した絶対パスを返す。境界外なら ValueError。
+
+    ディレクトリトラバーサル対策の中核。relative に ".." やシンボリック
+    リンク経由の脱出が含まれていても、resolve() で正規化した上で
+    is_relative_to() により境界を検証するため、skills ルート外への
+    アクセスは常に拒否される。
+
+    _SKILLS_ROOTS は複数ディレクトリを保持しうる（例: [*locohane_skills_dirs,
+    skills_dir]）。前方から順に候補を解決し、実在する最初の候補を返す。
+    どのルートにも実在しない場合は先頭ルート基準の候補を返す（呼び出し側の
+    「見つかりません」エラーへ自然に流すため）。
+
+    Args:
+        relative: skills ルートからの相対パス（例: "word-counter/SKILL.md"）。
+
+    Returns:
+        skills ルート配下に解決された絶対パス（Path）。
+
+    Raises:
+        RuntimeError: init_tools() が未実行で _SKILLS_ROOTS が空の場合。
+        ValueError: 解決後のパスがいずれかの skills ルート配下に収まらない
+            場合（ディレクトリトラバーサルの試行とみなす）。
+    """
+    if not _SKILLS_ROOTS:
+        raise RuntimeError("init_tools() が未実行です")
+    candidates: list[Path] = []
+    for root in _SKILLS_ROOTS:
+        # resolve() でシンボリックリンクや .. を正規化した上で境界を検証する。
+        candidate = (root / relative).resolve()
+        if not candidate.is_relative_to(root):
+            raise ValueError(f"skills ディレクトリ外へのアクセスは許可されません: {relative}")
+        candidates.append(candidate)
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _resolve_script_filename(skill_name: str, script_filename: str) -> Path:
+    """スキルの scripts/ 配下からファイル名でスクリプトを探し、絶対パスを返す。
+
+    get_tool_source / run_script が共有する解決ロジック。
+    呼び出し側にディレクトリ構成（scripts/ 配下という規約）を書かせず、
+    ファイル名のみで指定できるようにする。低パラメータモデルが「scripts/」
+    という文字列と引数名を混同して壊れた値（例: "scripts=read_file.py"）を
+    生成する誤動作を避けるための設計（ドキュメント側の引数名も script_filename
+    にリネーム済み）。
+
+    Args:
+        skill_name: スクリプトを持つスキルのフォルダ名。
+        script_filename: 探したいファイル名（例: "read_file.py"）。ディレクトリ
+            区切りを含む値（旧形式の "scripts/read_file.py" 等）が渡されても
+            os.path.basename() でファイル名部分のみを取り出すため動作する。
+
+    Returns:
+        解決済みの絶対パス（Path）。
+
+    Raises:
+        ValueError: skill_name に scripts/ ディレクトリが無い場合、
+            該当ファイルが見つからない場合。
+    """
+    basename = os.path.basename(script_filename)
+    if not basename:
+        raise ValueError(f"スクリプトのファイル名を指定してください: {script_filename!r}")
+    scripts_root = _safe_path(f"{skill_name}/scripts")
+    if not scripts_root.is_dir():
+        raise ValueError(f"スキル '{skill_name}' に scripts/ ディレクトリがありません")
+    matches = [p for p in scripts_root.rglob(basename) if p.is_file()]
+    if not matches:
+        raise ValueError(f"スクリプトが見つかりません: {basename}（skill={skill_name}）")
+    matches.sort(key=lambda p: (len(p.relative_to(scripts_root).parts), str(p)))
+    return matches[0]
+
+
+@tool
+def read_skill(skill_name: str) -> str:
+    """スキルの SKILL.md 本文全体を読み込んで返す。
+
+    ユーザーの要求に合致するスキルを選んだら、まずこのツールで本文（手順）を読むこと。
+    Agent Skills 標準の progressive disclosure における第2段階（Read）に相当する。
+
+    Args:
+        skill_name: 読み込むスキルのフォルダ名（= SKILL.md の name）。
+
+    Returns:
+        SKILL.md の本文全体（UTF-8 テキスト）。skill_name が skills ルート外を
+        指す場合や SKILL.md が存在しない場合は、例外を送出せず
+        「エラー: ...」形式の文字列を返す（LLM がそのまま読める形にするため）。
+    """
+    try:
+        skill_md = _safe_path(f"{skill_name}/SKILL.md")
+    except ValueError as e:
+        return f"エラー: {e}"
+    if not skill_md.is_file():
+        return f"エラー: スキル '{skill_name}' の SKILL.md が見つかりません。"
+    logger.info("read_skill: %s", skill_name)
+    return skill_md.read_text(encoding="utf-8")
+
+
+@tool
+def read_skill_file(relative_path: str) -> str:
+    """skills ディレクトリ配下のファイルを読み込んで返す。
+
+    SKILL.md 本文が references/assets を参照している場合など、必要時のみ使う。
+    Agent Skills 標準の progressive disclosure における第3段階（Execute）の一部。
+
+    Args:
+        relative_path: skills ルートからの相対パス（例: word-counter/references/notes.md）。
+
+    Returns:
+        ファイル内容（UTF-8、デコード不能なバイト列は errors="replace" で置換）。
+        skills ルート外を指す場合やファイルが存在しない場合は、例外を送出せず
+        「エラー: ...」形式の文字列を返す。
+    """
+    try:
+        path = _safe_path(relative_path)
+    except ValueError as e:
+        return f"エラー: {e}"
+    if not path.is_file():
+        return (
+            f"エラー: ファイルが見つかりません: {relative_path}"
+            "（read_skill_file は skills ディレクトリ配下限定です。作業ディレクトリ配下の"
+            "ファイルを読みたい場合は Read ツールを使ってください）"
+        )
+    logger.info("read_skill_file: %s", relative_path)
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+@tool
+def provide_download(file_path: str) -> str:
+    """既存のファイルをチャット画面にダウンロードボタンとして提示する。
+
+    アップロード済みファイルや、Read/Glob 等で見つけた既存ファイル、以前の
+    作業で生成済みのファイルなどを、あらためてユーザーがダウンロードできる
+    ようにしたいときに使う。Read 等と同様にパスの制限は行わない
+    （ローカルファイルシステム上の任意の絶対パスを指定できる）。
+
+    Args:
+        file_path: ダウンロードさせたいファイルの絶対パス（相対パスの場合は
+            セッションの作業ディレクトリ基準で解決する）。
+
+    Returns:
+        成功時: {"output_path": "..."} 形式のJSON文字列
+            （自動的にチャットへダウンロードボタンが表示される）。
+        失敗時: 「エラー: ...」形式の文字列。
+    """
+    path = Path(file_path)
+    if not path.is_absolute():
+        path = _resolve_workdir() / path
+    path = path.resolve()
+    if not path.is_file():
+        return f"エラー: ファイルが見つかりません: {file_path}"
+    logger.info("provide_download: %s", path)
+    return json.dumps({"output_path": str(path)}, ensure_ascii=False)
+
+
+@tool
+def show_image(file_path: str) -> str:
+    """既存の画像ファイルをチャット画面にプレビュー表示する（LLM自身は内容を見ない）。
+
+    ユーザーが「表示して」「見せて」「プレビューして」のように画像そのものを
+    見たいだけの依頼をしてきた場合は、まずこのツールを使う。画像の内容について
+    自分（LLM）が説明・分析・判断してから答える必要がある場合にのみ、代わりに
+    `analyze_image` を使うこと（`analyze_image` は画像をVision対応モデルへ実際に
+    見せてLLM自身に解析させるツール。`show_image` は画像データをLLMへは渡さず、
+    チャットUI上に表示するだけ）。迷ったら、ユーザーが求めているのが「画像そのものを
+    見ること」か「画像についての説明」かで判断する。
+
+    生成済みの画像（グラフ・スクリーンショット等）や、アップロード済み・
+    Glob で見つけた既存の画像をユーザーへ見せたいときに使う。
+    provide_download と同様にパスの制限は行わない（ローカルファイルシステム上の
+    任意の絶対パスを指定できる）。
+
+    Args:
+        file_path: 表示したい画像ファイルの絶対パス（相対パスの場合は
+            セッションの作業ディレクトリ基準で解決する）。
+
+    Returns:
+        成功時: {"output_path": "..."} 形式のJSON文字列
+            （自動的にチャットへ画像がプレビュー表示される）。
+        失敗時: 「エラー: ...」形式の文字列。
+    """
+    path = Path(file_path)
+    if not path.is_absolute():
+        path = _resolve_workdir() / path
+    path = path.resolve()
+    if not path.is_file():
+        return f"エラー: ファイルが見つかりません: {file_path}"
+    if not is_image_file(path):
+        return f"エラー: 画像ファイルではありません（対応形式: png/jpg/jpeg/gif/webp/bmp）: {file_path}"
+    logger.info("show_image: %s", path)
+    return json.dumps({"output_path": str(path)}, ensure_ascii=False)
+
+
+@tool
+def get_tool_source(skill_name: str, script_filename: str) -> str:
+    """run_script で実行したスクリプトの絶対パスを返す（中身は返さない）。
+
+    run_script がエラー（非0終了コード・スタックトレース）を返した場合の原因調査に使う。
+    このツールでソースファイルの絶対パスを取得し、必要なら read_skill_file で中身を
+    確認するか、execute_python_code 内で `sys.path.insert(0, "<このパスの親ディレクトリ>")`
+    のようにして _common.py 等の同スキル内ヘルパーモジュールを直接 import して調査・
+    代替コードの実行に使う。
+
+    Args:
+        skill_name: スクリプトを持つスキルのフォルダ名。
+        script_filename: 探したいファイル名（例: "read_file.py"）。パスや scripts/
+            プレフィックスは不要 — スキルフォルダの scripts/ 配下から自動検索される。
+
+    Returns:
+        スクリプトの絶対パス文字列。skill_name に scripts/ ディレクトリが無い場合、
+        スクリプトが見つからない場合は、例外を送出せず「エラー: ...」形式の
+        文字列を返す。
+    """
+    try:
+        script_path = _resolve_script_filename(skill_name, script_filename)
+    except ValueError as e:
+        return f"エラー: {e}"
+    logger.info("get_tool_source: %s/%s", skill_name, script_filename)
+    return str(script_path)
+
+
+@dataclass
+class WorkDirAccessStatus:
+    """作業ディレクトリへの実際のアクセス可否（probe_workdir_access の戻り値）。
+
+    サーバー駆動でローカルネットワーク上の別PCから利用される場合、ユーザーの
+    PCからは見える/書き込めるパスでも、サーバープロセス側からは見えない、
+    または見えても書き込み権限が無い（読み取り専用共有など）ことがある。
+    os.access() はWindowsのネットワーク共有・ACL構成では実態と食い違う
+    ことがあるため、実際のI/Oで判定する（probe_workdir_access 参照）。
+    """
+
+    path: str
+    exists: bool
+    readable: bool
+    writable: bool
+    error: str | None = None
+
+
+def probe_workdir_access(path: Path) -> WorkDirAccessStatus:
+    """作業ディレクトリの読み取り/書き込み可否を実際のI/Oで検証する。
+
+    Args:
+        path: 検証対象のディレクトリパス。
+
+    Returns:
+        存在確認・読み取り確認（os.listdir）・書き込み確認（一時ファイルの
+        作成/削除）の結果をまとめた WorkDirAccessStatus。
+    """
+    if not path.is_dir():
+        return WorkDirAccessStatus(str(path), exists=False, readable=False, writable=False)
+    try:
+        os.listdir(path)
+    except OSError as e:
+        return WorkDirAccessStatus(str(path), exists=True, readable=False, writable=False, error=str(e))
+    probe = path / f".agent_write_test_{uuid.uuid4().hex}.tmp"
+    try:
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+    except OSError as e:
+        return WorkDirAccessStatus(str(path), exists=True, readable=True, writable=False, error=str(e))
+    return WorkDirAccessStatus(str(path), exists=True, readable=True, writable=True)
+
+
+def _mark_workdir_not_writable() -> str:
+    """work_dir への実際の書き込み失敗を検知した際に呼ぶ（事後キャッチの保険）。
+
+    cl.user_session["work_dir_access"] を writable=False で更新し、以後の
+    _resolve_workdir(need_write=True) を自動的に default_workdir へ倒す
+    （work_dir 自体の表示用パスは変更しない）。_track_failure_streak と
+    同型で、LLMへの通知は戻り値の警告文字列を呼び出し元が戻り値に連結する
+    方式に揃える。
+
+    Returns:
+        戻り値に連結する警告文字列（先頭に改行を含む）。
+    """
+    work_dir = cl.user_session.get("work_dir")
+    status: WorkDirAccessStatus | None = cl.user_session.get("work_dir_access")
+    if status is None and work_dir:
+        status = probe_workdir_access(Path(work_dir))
+    if status is not None:
+        cl.user_session.set("work_dir_access", replace(status, writable=False))
+    return (
+        "\n\n【システム警告】指定された作業ディレクトリへの書き込みに失敗したため、"
+        "既定フォルダを使用しました。ユーザーへその旨を伝え、成果物が必要な場合は"
+        "provide_download で提供してください。"
+    )
+
+
+def _resolve_workdir(need_write: bool = False) -> Path:
+    """run_script が subprocess.run に渡す cwd を決定する。
+
+    Chainlit の ChatSettings（歯車アイコン）でユーザーがセッションに
+    作業ディレクトリを設定していればそれを使い（app.py の
+    on_settings_update が cl.user_session["work_dir"] に絶対パス文字列を
+    保存する）、未設定なら config.ini の [paths].default_workdir
+    （init_tools() で注入された _DEFAULT_WORKDIR）にフォールバックする。
+
+    サーバー/クライアントでファイルシステムが分離している環境（別PCから
+    利用する場合）では、ユーザー指定の work_dir がサーバー側から見て
+    アクセス不可・書き込み不可なことがある。app.py の _apply_work_dir が
+    設定時に cl.user_session["work_dir_access"]（WorkDirAccessStatus）へ
+    実測結果をキャッシュしており、ここではそれを参照して機械的に
+    default_workdir へフォールバックする（LLMが確認を怠っても安全側に
+    倒れる）。読み取り専用共有から既存ファイルを読ませたいだけのケースを
+    妨げないよう、need_write=False（既定）では読み取り可否のみを見る。
+
+    read_skill / read_skill_file / スクリプト本体の場所解決には影響しない
+    （それらは常に _safe_path 経由で skills ルート配下に固定される）。
+
+    Args:
+        need_write: True の場合、書き込み可否（status.writable）も見て
+            フォールバック判定する。既存ファイルの読み取りのみが目的の
+            呼び出し元は False のままでよい。
+
+    Returns:
+        呼び出し元が使う絶対パス。work_dir が未設定、またはアクセス不可・
+        （need_write時は）書き込み不可と判定されていれば default_workdir。
+
+    Raises:
+        RuntimeError: init_tools() が未実行で _DEFAULT_WORKDIR が None の場合。
+    """
+    if _DEFAULT_WORKDIR is None:
+        raise RuntimeError("init_tools() が未実行です")
+    work_dir = cl.user_session.get("work_dir")
+    if not work_dir:
+        return _DEFAULT_WORKDIR
+    status: WorkDirAccessStatus | None = cl.user_session.get("work_dir_access")
+    if status is not None:
+        if not status.exists or not status.readable:
+            return _DEFAULT_WORKDIR
+        if need_write and not status.writable:
+            return _DEFAULT_WORKDIR
+    return Path(work_dir)
+
+
+@tool
+def check_work_dir_status() -> str:
+    """現在の作業ディレクトリの実際のアクセス状況を確認する。
+
+    work_dir を ChatSettings（歯車アイコン）や作業フォルダアイコンで変更した
+    直後は自動的にこの確認が行われ、結果がサイドパネルに表示されるため、通常は
+    明示的に呼び出す必要はない。ただし run_script や execute_python_code が
+    ファイルの読み書きで原因不明のエラー（ファイルが見つからない、書き込め
+    ない等）を返した場合、それが「作業ディレクトリ自体へのアクセス問題
+    （サーバー側から見えない・読み取り専用共有である等）」なのか「スクリプト
+    側の問題」なのかを切り分けたいときに使う。
+
+    os.access() のような簡易判定ではなく、実際にディレクトリ一覧の取得と、
+    一時ファイルの作成・書き込み・削除を試みることで正確に判定する
+    （ローカルネットワーク越しの共有フォルダ等では簡易判定が実態と食い違う
+    ことがあるため）。
+
+    Returns:
+        作業ディレクトリのパス、状態（読み書き可能 / 読み取り専用（書き込み
+        不可）/ アクセス不可（読み取りも不可）/ 存在しない）、アクセス不可の
+        場合にどこへ自動フォールバックされるかをまとめた説明文字列。
+        init_tools() が未実行の場合は例外を送出せず「エラー: ...」形式の
+        文字列を返す。
+    """
+    if _DEFAULT_WORKDIR is None:
+        return "エラー: init_tools() が未実行です"
+    work_dir = cl.user_session.get("work_dir")
+    if not work_dir:
+        return (
+            f"作業ディレクトリ: 未設定（既定フォルダ {_DEFAULT_WORKDIR} を使用）\n"
+            "状態: 読み書き可能（既定フォルダはサーバー側の設定のため通常アクセス可能）"
+        )
+    status = probe_workdir_access(Path(work_dir))
+    cl.user_session.set("work_dir_access", status)
+    if not status.exists:
+        label = "存在しません（このPCから直接アクセスできません）"
+    elif not status.readable:
+        label = "アクセスできません（読み取り不可）"
+    elif not status.writable:
+        label = "読み取り専用（書き込み不可）"
+    else:
+        label = "読み書き可能"
+    lines = [f"作業ディレクトリ: {work_dir}", f"状態: {label}"]
+    if status.error:
+        lines.append(f"詳細: {status.error}")
+    if not status.exists or not status.readable:
+        lines.append(
+            f"影響: 読み取り・書き込みとも既定フォルダ（{_DEFAULT_WORKDIR}）を自動的に使用します。"
+        )
+    elif not status.writable:
+        lines.append(
+            f"影響: 書き込みが必要な処理（execute_python_code, run_script の出力生成）は"
+            f"既定フォルダ（{_DEFAULT_WORKDIR}）を自動的に使用します。既存ファイルの読み取りは"
+            "引き続きこの作業ディレクトリを使用します。"
+        )
+    return "\n".join(lines)
+
+
+def _resolve_exec_workdir() -> tuple[Path, bool]:
+    """execute_python_code / run_script が中間生成物を書く実行用ディレクトリ。
+
+    _resolve_workdir() が指す作業ディレクトリ直下に `_tmp_<thread_id>` を
+    自動的に作って返す（無ければ作成する）。LLMがコード内で相対パスで
+    書き出すファイル（ops.json 等の中間生成物）が作業ディレクトリ直下に
+    散らからないようにするため。`_tmp/<thread_id>` のような親子階層では
+    なく `_tmp_<thread_id>` という単一のディレクトリ名にしているのは、
+    セッション終了時に丸ごと rmtree した際、親ディレクトリ（`_tmp`）が
+    空のまま残り続ける問題を避けるため。
+
+    provide_download / show_image / _resolve_analyze_image_path は
+    ユーザーへの成果物提供に使う関数のため、意図的にこの関数を使わず
+    _resolve_workdir() のまま据え置く（最終成果物は _tmp_<thread_id> の
+    外、作業ディレクトリ直下に置かれる想定のため）。
+
+    _resolve_workdir(need_write=True) が事前に default_workdir へ振り分けて
+    いるのが通常経路だが、work_dir_access のキャッシュが古い場合（設定後に
+    共有が切断された等）に備え、実際の mkdir 失敗も捕捉して事後リトライする。
+
+    Returns:
+        `_tmp_<thread_id>` ディレクトリの絶対パスと、事後リトライで
+        default_workdir へフォールバックしたかどうかのタプル。
+    """
+    thread_id = cl.user_session.get("thread_id") or "_no_session"
+    workdir = _resolve_workdir(need_write=True)
+    d = workdir / f"_tmp_{thread_id}"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        return d, False
+    except OSError:
+        fallback_d = _DEFAULT_WORKDIR / f"_tmp_{thread_id}"
+        fallback_d.mkdir(parents=True, exist_ok=True)
+        return fallback_d, True
+
+
+def _resolve_analyze_image_path(raw: str) -> Path:
+    """analyze_image 専用のパス解決。読み込み系のためパスの制限は行わない。
+
+    相対パスは従来通り skills ルート基準で解決する（SKILL.md の
+    references/assets からの参照や既存の呼び出し規約との後方互換のため）。
+    絶対パスはそのまま解決する（Read/Glob/Grep と同じ方針で、ローカル
+    ファイルシステム上の任意パスを読めることを優先する）。_SKILLS_ROOTS が
+    複数ある場合は _safe_path() と同じく前方から順に実在確認し、最初に
+    見つかった候補を返す。
+
+    Args:
+        raw: analyze_image に渡された relative_path（相対パスまたは絶対パス）。
+
+    Returns:
+        解決済みの絶対パス（Path）。
+
+    Raises:
+        RuntimeError: init_tools() が未実行の場合。
+    """
+    if not _SKILLS_ROOTS:
+        raise RuntimeError("init_tools() が未実行です")
+    p = Path(raw)
+    if p.is_absolute():
+        return p.resolve()
+    for root in _SKILLS_ROOTS:
+        candidate = (root / p).resolve()
+        if candidate.exists():
+            return candidate
+    return (_SKILLS_ROOTS[0] / p).resolve()
+
+
+def _record_and_check_duplicate(session_key: str, signature: str, max_calls: int = 1) -> bool:
+    """同一シグネチャでの呼び出しが会話（セッション）中に上限回数まで既にあったかを判定し、記録する。
+
+    小型ローカルモデルは、進捗が無いまま同一引数のツール呼び出しを会話全体を
+    通じて散発的に繰り返すことがある（tune-prompt調査で glob_file.py の同一引数
+    2回連続呼び出し、analyze_image で同じ画像を14回重複して呼ぶ実例あり）。直前1回
+    との比較だけでは検知できないため、会話（thread）単位で見たシグネチャごとの
+    呼び出し回数を cl.user_session に保持し、上限に達しているかどうかで判定する。
+
+    Args:
+        session_key: cl.user_session に保存する呼び出し回数辞書のキー
+            （呼び出し元ごとに別集合にするため、対象を含める）。
+        signature: 呼び出し引数から組み立てた、その呼び出しを一意に表す文字列。
+        max_calls: 同一シグネチャを何回まで許可するか（既定1回。
+            [file_tools_duplicate_guard].max_calls 等、呼び出し元が設定値を
+            渡す場合がある）。
+
+    Returns:
+        True であれば、このシグネチャは今回のセッション内で既に上限回数まで
+        記録済み（＝今回は重複呼び出し、拒否すべき）。False であれば
+        まだ上限に達していない（呼び出し元はその旨をこの関数が記録済みなので、
+        通常通り処理を続けてよい）。
+    """
+    counts = cl.user_session.get(session_key)
+    if counts is None:
+        counts = {}
+    count = counts.get(signature, 0)
+    is_duplicate = count >= max_calls
+    counts[signature] = count + 1
+    cl.user_session.set(session_key, counts)
+    return is_duplicate
+
+
+_FAILURE_STREAK_THRESHOLD = 4
+
+
+def _track_failure_streak(session_key: str, failed: bool, tool_label: str) -> str:
+    """同一ツールの連続失敗回数を cl.user_session に記録し、閾値超過時は警告文を返す。
+
+    小型ローカルモデルは、同じコード・引数の微修正を繰り返すだけで根本的な
+    アプローチを変えないまま失敗を重ねることがある（tune-prompt調査で
+    execute_python_code が13回連続で構文エラーを繰り返した実例あり）。
+    system_prompt.md の「連続失敗3回で切り替える」という自己申告ルールだけ
+    では守られないことがあるため、ツール自体が連続失敗回数を数え、閾値を
+    超えたら結果メッセージに強制的な警告を追記する（会話（thread）単位で
+    独立させるため cl.user_session を使う）。
+
+    Args:
+        session_key: cl.user_session に保存するカウンタのキー
+            （ツールごとに別カウンタにするため、ツール名を含める）。
+        failed: 今回の実行が失敗（非0終了コード）だったか。
+        tool_label: 警告文に出すツール名（例: "execute_python_code"）。
+
+    Returns:
+        閾値に達していれば先頭に改行を含む警告文、そうでなければ空文字列
+        （空文字列は呼び出し側で無視してよい）。
+    """
+    if not failed:
+        cl.user_session.set(session_key, 0)
+        return ""
+    streak = cl.user_session.get(session_key, 0) + 1
+    cl.user_session.set(session_key, streak)
+    if streak < _FAILURE_STREAK_THRESHOLD:
+        return ""
+    return (
+        f"\n\n【システム警告】{tool_label} が直近{streak}回連続で失敗しています。"
+        "同じコード・引数を少しずつ書き直す対症療法をやめ、根本的に別の書き方・"
+        "別の手段に切り替えるか、この手段にこだわらず代替アプローチを検討してください。"
+    )
+
+
+@tool
+async def run_script(
+    skill_name: str, script_filename: str, script_args: list[str] | None = None
+) -> str:
+    """スキルの scripts/ 配下のスクリプトを実行し、標準出力/標準エラーを返す。
+
+    作業ディレクトリは、Chainlit の ChatSettings（歯車アイコン）でユーザーが
+    セッションに設定していればそのディレクトリ、未設定なら config.ini の
+    [paths].default_workdir を使う（_resolve_workdir 参照）。
+    タイムアウトは設定値（既定 60 秒）。完了までこのツール呼び出し自体が
+    ブロックされるため、タイムアウトに近い長時間の実行が見込まれるスクリプトは
+    このツールではなく run_script_background を使うこと。
+    .py スクリプトは設定された Python 実行ファイルで起動する。
+    Agent Skills 標準の progressive disclosure における第3段階（Execute）に相当する。
+    書き込み系ツールのため、create_plan/approve_plan で計画が承認済み
+    （cl.user_session["plan_approved"] が True）でない限り実行できない
+    （未承認の場合はエラーを返す）。ただし副作用のない読み取り専用スクリプト
+    （`_PLAN_APPROVAL_EXEMPT_SCRIPTS` に登録済みのもの。例: excel-tools の
+    read_vba.py）はこの承認チェックを免除される。
+
+    Args:
+        skill_name: スクリプトを持つスキルのフォルダ名。
+        script_filename: 実行したいスクリプトのファイル名（例: "count.py"）。
+            パスや scripts/ プレフィックスは不要 — スキルフォルダの scripts/
+            配下から自動検索される。同名ファイルが複数階層にある場合は
+            最も浅い階層のものが使われる。
+        script_args: スクリプトへ渡す追加引数のリスト（省略可）。
+
+    Returns:
+        「[終了コード] N」に続けて、標準出力・標準エラーがあれば
+        それぞれ「[標準出力]」「[標準エラー]」の見出し付きで連結した文字列。
+        スキルに scripts/ が無い場合、スクリプトが見つからない場合、
+        計画が未承認の場合、タイムアウトした場合、起動自体に失敗した場合は
+        いずれも例外を送出せず「エラー: ...」形式で返す。
+    """
+    return await _run_script_impl(skill_name, script_filename, script_args)
+
+
+@tool("Read")
+def read_tool(file_path: str, offset: int = 0, limit: int = 10) -> str:
+    """ローカルファイルシステム上の任意のテキストファイルを行番号付きで読み込む。
+
+    skills ディレクトリ配下限定の read_skill_file とは異なり、パスの制限は
+    行わない（ユーザーが指定した任意の絶対パスを読めることが目的）。
+    スキル本文・補助資料を読むなら read_skill_file、ユーザーが指定した
+    ファイルを読むならこちらを使う。読み取り専用のため、計画の有無に
+    関わらずいつでも呼んでよい。
+
+    Args:
+        file_path: 読み込む絶対パス（`@N` のパスメモリー参照も指定可）。
+            相対パスを指定した場合は作業ディレクトリ基準で解決する。
+        offset: 読み飛ばす先頭行数（0始まり、既定0）。
+        limit: 読み込む最大行数（既定10）。大きいファイルの続きを読みたい
+            場合は offset を前回の end_line に合わせて指定すること。
+
+    Returns:
+        `{"path", "total_lines", "start_line", "end_line", "content", "path_memory"}`
+        を持つJSON文字列。`content` は "行番号\\t内容" を改行結合した文字列。
+        ファイル不在・ディレクトリ指定・バイナリファイル・同一引数での
+        再呼び出し（読み取り専用のため上限回数まで）は例外を送出せず
+        「エラー: ...」形式の文字列を返す。
+    """
+    path, error = _resolve_file_tools_path(file_path)
+    if error:
+        return f"エラー: {error}"
+    dup_error = _check_file_tools_duplicate("Read", f"Read\x00{path}\x00{offset}\x00{limit}")
+    if dup_error:
+        return dup_error
+    try:
+        result = file_tools.read_file(path, offset=offset, limit=limit)
+    except ValueError as e:
+        return f"エラー: {e}"
+    path_memory = _register_path_memory([result["path"]])
+    if path_memory:
+        result["path_memory"] = path_memory
+    logger.info("Read: %s", path)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@tool("Glob")
+def glob_tool(pattern: str, path: str = "", head_limit: int = 200) -> str:
+    """指定ディレクトリ配下でglobパターンに一致するファイル・ディレクトリを検索する。
+
+    ファイル名検索だけでなく、ディレクトリ階層そのものの調査（対象直下に
+    ファイルが1件も無くサブディレクトリしか無いかもしれない場合等）にも
+    `"**/*"`/`"*"` 等で使う。読み取り専用のため、計画の有無に関わらず
+    いつでも呼んでよい。
+
+    Args:
+        pattern: globパターン（例: 配下の全Pythonファイルなら "**/*.py"）。
+        path: 検索起点ディレクトリの絶対パス（`@N` 可）。省略時は作業ディレクトリ。
+        head_limit: ファイル・ディレクトリそれぞれに独立に適用する上限件数（既定200）。
+
+    Returns:
+        `{"base", "base_contents", "total_matches", "returned", "truncated",
+        "files", "file_details", "total_directories", "returned_directories",
+        "directories_truncated", "directories", "path_memory"}` を持つJSON文字列。
+        `files`/`directories` は更新日時降順で `head_limit` 件までそれぞれ独立に
+        打ち切られる（`truncated`/`directories_truncated` で判別）。
+        `file_details` は `files` と同順・同数で、バイナリ判定と総行数
+        （`Read` の `limit` を決める前に確認すること）を持つ。
+        起点ディレクトリが存在しない・ディレクトリでない場合は例外を送出せず
+        「エラー: ...」形式の文字列を返す。
+    """
+    base, error = _resolve_file_tools_path(path)
+    if error:
+        return f"エラー: {error}"
+    dup_error = _check_file_tools_duplicate(
+        "Glob", f"Glob\x00{pattern}\x00{base}\x00{head_limit}"
+    )
+    if dup_error:
+        return dup_error
+    try:
+        result = file_tools.glob_search(base, pattern, head_limit=head_limit)
+    except ValueError as e:
+        return f"エラー: {e}"
+    path_memory = _register_path_memory([*result["files"], *[d["path"] for d in result["directories"]]])
+    if path_memory:
+        result["path_memory"] = path_memory
+    logger.info("Glob: pattern=%s base=%s", pattern, base)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@tool("Grep")
+def grep_tool(
+    pattern: str,
+    path: str = "",
+    glob: str = "",
+    output_mode: str = "files_with_matches",
+    case_insensitive: bool = False,
+    context: int = 0,
+    head_limit: int = 50,
+) -> str:
+    """指定ファイル・ディレクトリ配下のテキストから正規表現で検索する。
+
+    読み取り専用のため、計画の有無に関わらずいつでも呼んでよい。
+
+    Args:
+        pattern: 検索する正規表現。
+        path: 検索対象の絶対パス（ファイルまたはディレクトリ、`@N` 可）。
+            省略時は作業ディレクトリ配下を検索する。
+        glob: ディレクトリ検索時にファイル名を絞り込むglobパターン（省略可、例: "*.py"）。
+        output_mode: "files_with_matches"（既定、マッチしたファイル一覧）/
+            "content"（マッチ行の内容）/ "count"（ファイルごとのマッチ数）。
+        case_insensitive: True で大文字小文字を無視する。
+        context: "content" モード時、マッチ行の前後何行を含めるか（既定0）。
+        head_limit: 返却件数の上限（既定50）。
+
+    Returns:
+        output_mode に応じた形状のJSON文字列（`path_memory` 付き）。
+        マッチが1件も無い場合は `{"matched": false, ...}`。
+        正規表現が不正・対象パスが存在しない場合は例外を送出せず
+        「エラー: ...」形式の文字列を返す。
+    """
+    base, error = _resolve_file_tools_path(path)
+    if error:
+        return f"エラー: {error}"
+    signature = (
+        f"Grep\x00{pattern}\x00{base}\x00{glob}\x00{output_mode}\x00"
+        f"{case_insensitive}\x00{context}\x00{head_limit}"
+    )
+    dup_error = _check_file_tools_duplicate("Grep", signature)
+    if dup_error:
+        return dup_error
+    try:
+        result = file_tools.grep_search(
+            base,
+            pattern,
+            glob=glob,
+            output_mode=output_mode,
+            case_insensitive=case_insensitive,
+            context=context,
+            head_limit=head_limit,
+        )
+    except ValueError as e:
+        return f"エラー: {e}"
+    if result["matched"]:
+        if output_mode == "files_with_matches":
+            paths = result["files"]
+        elif output_mode == "count":
+            paths = [c["path"] for c in result["counts"]]
+        else:
+            paths = list(dict.fromkeys(m["path"] for m in result["matches"]))
+        path_memory = _register_path_memory(paths)
+        if path_memory:
+            result["path_memory"] = path_memory
+    logger.info("Grep: pattern=%s base=%s", pattern, base)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@tool
+def json_query(query: str, file_path: str = "", json_text: str = "") -> str:
+    """JSON/dictデータにJMESPathクエリを実行する。
+
+    JMESPath は jq とは構文が異なる点に注意（`.a.b` ではなく `a.b`、
+    `items[?age > \\`30\\`].name` のように書く）。読み取り専用のため、
+    計画の有無に関わらずいつでも呼んでよい。
+
+    Args:
+        query: JMESPathクエリ文字列。
+        file_path: クエリ対象のJSONファイルの絶対パス（`@N` 可）。
+            file_path/json_text のどちらか一方を必ず指定すること。
+        json_text: クエリ対象のJSON文字列を直接渡す場合に使う
+            （execute_python_code の出力等をその場でクエリしたい場合）。
+            file_path と同時指定・両方省略はエラー。
+
+    Returns:
+        `{"result": ...}` のJSON文字列（該当データが無ければ `{"result": null}`）。
+        file_path/json_text の指定不備・JSON解析失敗・クエリ不正の場合は
+        例外を送出せず「エラー: ...」形式の文字列を返す。
+    """
+    resolved_path: Path | None = None
+    if file_path:
+        resolved_path, error = _resolve_file_tools_path(file_path)
+        if error:
+            return f"エラー: {error}"
+    signature_source = json_text if not file_path else ""
+    signature = (
+        f"json_query\x00{query}\x00{resolved_path or ''}\x00"
+        f"{hashlib.sha256(signature_source.encode('utf-8')).hexdigest() if signature_source else ''}"
+    )
+    dup_error = _check_file_tools_duplicate("json_query", signature)
+    if dup_error:
+        return dup_error
+    try:
+        result = file_tools.query_json(
+            query, file_path=resolved_path, json_text=json_text or None
+        )
+    except ValueError as e:
+        return f"エラー: {e}"
+    logger.info("json_query: %s", query)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@tool
+def list_path_memory() -> str:
+    """現在の会話のパスメモリー（`@N`）登録内容を一覧表示する。
+
+    `@N` が何のファイルを指していたか思い出せなくなったとき、または
+    Read/Glob/Grep/analyze_image が「パスメモリー @N は登録されていません」と
+    返したときに使う。読み取り専用のため、計画の有無に関わらずいつでも呼んでよい。
+
+    Returns:
+        `{"entries": [{"index", "path", "valid", "description"}, ...]}` の
+        JSON文字列（登録順）。`valid` が false の場合、登録時点では存在したが
+        その後削除・移動された可能性がある。path_memory機能が利用できない
+        環境では `{"entries": []}` を返す。
+    """
+    if _PATH_MEMORY_DIR is None:
+        return json.dumps({"entries": []}, ensure_ascii=False)
+    thread_id = cl.user_session.get("thread_id") or "_no_session"
+    entries = path_memory.list_entries(thread_id, _PATH_MEMORY_DIR)
+    return json.dumps({"entries": entries}, ensure_ascii=False)
+
+
+def _prepare_script_execution(
+    skill_name: str, script_filename: str, script_args: list[str] | None = None
+) -> tuple[list[str], Path] | str:
+    """run_script / run_script_background 共通の前処理。
+
+    引数のパスメモリー解決 → スクリプトパス解決 → 作業ディレクトリ解決 →
+    計画承認チェック → 実行コマンド組み立て、までを行う。
+    (skill_name, script_filename) が _PLAN_APPROVAL_EXEMPT_SCRIPTS に
+    登録されている場合は計画未承認でも実行できる。
+
+    Returns:
+        検証に成功すれば (cmd, workdir) のタプル。失敗すれば
+        「エラー: ...」形式の文字列（呼び出し側はそのまま返せばよい）。
+    """
+    args = script_args or []
+    # args 内の各要素で `@N`（パスメモリー参照）を実パスへ解決する。
+    # 対象外の文字列（トークン形式でない）はそのまま通す。
+    resolved_args = []
+    for a in args:
+        resolved, error = _resolve_path_memory_token(a)
+        if error:
+            return f"エラー: {error}"
+        resolved_args.append(resolved)
+    args = resolved_args
+    try:
+        script_path = _resolve_script_filename(skill_name, script_filename)
+    except ValueError as e:
+        return f"エラー: {e}"
+    workdir = _resolve_workdir(need_write=True)
+
+    is_plan_exempt = (skill_name, script_filename) in _PLAN_APPROVAL_EXEMPT_SCRIPTS
+    if not is_plan_exempt and not cl.user_session.get("plan_approved"):
+        logger.info(
+            "run_script: 計画未承認のためブロック skill=%s script=%s", skill_name, script_filename
+        )
+        return (
+            "エラー: 計画が未承認のため実行できません"
+            f"（skill={skill_name}, script={script_filename}）。"
+            "create_plan で計画を作成し、approve_plan でユーザーの承認を得てから"
+            "実行してください。"
+        )
+
+    # .py は設定の Python で、それ以外はそのまま実行を試みる。
+    if script_path.suffix == ".py":
+        cmd = [_SCRIPT_PYTHON, str(script_path), *args]
+    else:
+        cmd = [str(script_path), *args]
+    return cmd, workdir
+
+
+async def _run_script_impl(
+    skill_name: str, script_filename: str, script_args: list[str] | None = None
+) -> str:
+    """run_script の実行本体。
+
+    公開ツールの引数名は "args" ではなく "script_args"（"args"/"kwargs" は
+    pydantic の ValidatedFunction が *args/**kwargs 用プレースホルダとして
+    予約している名前と衝突し、生成されるスキーマのフィールド名が
+    "v__args" に化けて run_script() 呼び出しが TypeError になるため使えない）。
+    """
+    prepared = _prepare_script_execution(skill_name, script_filename, script_args)
+    if isinstance(prepared, str):
+        return prepared
+    cmd, workdir = prepared
+
+    logger.info("run_script: %s %s cwd=%s", skill_name, script_filename, workdir)
+    try:
+        # 承認待ちの await 済みで別スレッドの必要はないが、subprocess.run 自体は
+        # ブロッキング呼び出しのため、to_thread でイベントループのブロックを避ける。
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+            timeout=_SCRIPT_TIMEOUT,
+            encoding="utf-8",
+            errors="replace",
+            env=_subprocess_env(),
+        )
+    except subprocess.TimeoutExpired:
+        return f"エラー: スクリプトが {_SCRIPT_TIMEOUT} 秒でタイムアウトしました。"
+    except OSError as e:
+        return f"エラー: スクリプトを実行できませんでした: {e}"
+
+    # stdout / stderr / 終了コードをまとめて返す（LLM が結果を解釈できるように）。
+    parts = [f"[終了コード] {proc.returncode}"]
+    if proc.stdout:
+        parts.append(f"[標準出力]\n{proc.stdout.rstrip()}")
+    if proc.stderr:
+        parts.append(f"[標準エラー]\n{proc.stderr.rstrip()}")
+    warning = _track_failure_streak("run_script_failure_streak", proc.returncode != 0, "run_script")
+    if warning:
+        parts.append(warning)
+    return "\n".join(parts)
+
+
+@dataclass
+class _BackgroundJob:
+    """run_script_background で起動したジョブの状態。
+
+    モジュールレベルの _BACKGROUND_JOBS に job_id をキーとして保持する。
+    """
+
+    process: asyncio.subprocess.Process
+    thread_id: str
+    skill_name: str
+    script_filename: str
+    started_at: float
+    stdout_chunks: list[str]
+    stderr_chunks: list[str]
+    status: str  # "running" | "completed" | "failed" | "timeout" | "killed" | "error"
+    returncode: int | None
+    error_message: str | None
+    runner_task: "asyncio.Task | None" = None
+
+
+# run_script_background のジョブレジストリ。プロセス内メモリのみで永続化は
+# しない（アプリ再起動でジョブは失われるが、そもそも実行中プロセスも
+# 再起動で失われるため実害はない）。
+_BACKGROUND_JOBS: dict[str, _BackgroundJob] = {}
+
+# check_script_job が「実行中」ステータスで返す標準出力/標準エラーの末尾の
+# 最大文字数（全量を返すとコンテキストを圧迫するため切り詰める）。
+_JOB_OUTPUT_TAIL_CHARS = 4000
+
+
+async def _read_stream_into(stream: "asyncio.StreamReader | None", chunks: list[str]) -> None:
+    """サブプロセスの stdout/stderr を EOF まで読み、行単位で chunks に追記する。"""
+    if stream is None:
+        return
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        chunks.append(line.decode("utf-8", errors="replace"))
+
+
+async def _run_background_job(job: "_BackgroundJob") -> None:
+    """バックグラウンドジョブのランナータスク本体。
+
+    stdout/stderr の読み取りと終了コード取得を並行して行い、
+    background_max_runtime_seconds を超えたら強制終了する。
+    stop_script_job が先に status を "killed" にしていた場合はそれを
+    上書きしない。
+    """
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                _read_stream_into(job.process.stdout, job.stdout_chunks),
+                _read_stream_into(job.process.stderr, job.stderr_chunks),
+                job.process.wait(),
+            ),
+            timeout=_SCRIPT_BACKGROUND_MAX_RUNTIME_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        job.process.kill()
+        await job.process.wait()
+        if job.status != "killed":
+            job.status = "timeout"
+        job.returncode = job.process.returncode
+        return
+    except Exception as e:  # noqa: BLE001 - ストリーム読み取り自体の異常はエラー扱いで返す
+        if job.status != "killed":
+            job.status = "error"
+            job.error_message = str(e)
+        return
+
+    job.returncode = job.process.returncode
+    if job.status == "killed":
+        return
+    job.status = "completed" if job.returncode == 0 else "failed"
+
+
+def _purge_stale_background_jobs() -> None:
+    """完了済みのまま check_script_job で回収されなかったジョブを掃除する。
+
+    専用のクリーンアップループは持たず、run_script_background の呼び出しの
+    度に opportunistic に走らせる。
+    """
+    now = time.monotonic()
+    stale = [
+        job_id
+        for job_id, job in _BACKGROUND_JOBS.items()
+        if job.status != "running" and now - job.started_at > _SCRIPT_BACKGROUND_JOB_RETENTION_SECONDS
+    ]
+    for job_id in stale:
+        _BACKGROUND_JOBS.pop(job_id, None)
+
+
+def _format_job_result(job: "_BackgroundJob") -> str:
+    """終了済みジョブの結果を run_script と同じ表示形式に整形する。"""
+    returncode_label = job.returncode if job.returncode is not None else "不明"
+    parts = [f"[終了コード] {returncode_label}"]
+    stdout = "".join(job.stdout_chunks).rstrip()
+    stderr = "".join(job.stderr_chunks).rstrip()
+    if stdout:
+        parts.append(f"[標準出力]\n{stdout}")
+    if stderr:
+        parts.append(f"[標準エラー]\n{stderr}")
+    return "\n".join(parts)
+
+
+def _resolve_job(job_id: str) -> "_BackgroundJob | str":
+    """job_id を現在のセッション所有のジョブへ解決する（他セッションは拒否）。"""
+    job = _BACKGROUND_JOBS.get(job_id)
+    if job is None:
+        return f"エラー: job_id '{job_id}' は見つかりません（既に取得済みか、無効なIDです）。"
+    thread_id = cl.user_session.get("thread_id") or ""
+    if job.thread_id != thread_id:
+        return f"エラー: job_id '{job_id}' は現在のセッションのものではありません。"
+    return job
+
+
+@tool
+async def run_script_background(
+    skill_name: str, script_filename: str, script_args: list[str] | None = None
+) -> str:
+    """スキルの scripts/ 配下のスクリプトをバックグラウンドで起動し、即座に job_id を返す。
+
+    処理時間が長くなることが見込まれるスクリプト向け。run_script と異なり
+    完了を待たずに制御を返すため、長時間スクリプトを実行してもエージェントの
+    ターンをブロックしない。完了確認・結果取得には check_script_job を、
+    途中で打ち切りたい場合は stop_script_job を使う。
+    引数解決・作業ディレクトリ解決・計画承認チェックは run_script と同じ
+    （_PLAN_APPROVAL_EXEMPT_SCRIPTS による免除も同様）。
+    バックグラウンドジョブを強制終了するまでの上限は config.ini の
+    [scripts].background_max_runtime_seconds（既定3600秒）。
+
+    Args:
+        skill_name: スクリプトを持つスキルのフォルダ名。
+        script_filename: 実行したいスクリプトのファイル名（例: "count.py"）。
+        script_args: スクリプトへ渡す追加引数のリスト（省略可）。
+
+    Returns:
+        起動に成功すれば job_id を含む案内文字列。引数不正・スクリプトが
+        見つからない・計画未承認・起動自体に失敗した場合は run_script 同様
+        「エラー: ...」形式の文字列を返す。
+    """
+    prepared = _prepare_script_execution(skill_name, script_filename, script_args)
+    if isinstance(prepared, str):
+        return prepared
+    cmd, workdir = prepared
+
+    _purge_stale_background_jobs()
+
+    logger.info("run_script_background: %s %s cwd=%s", skill_name, script_filename, workdir)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(workdir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=_subprocess_env(),
+        )
+    except OSError as e:
+        return f"エラー: スクリプトを起動できませんでした: {e}"
+
+    job_id = uuid.uuid4().hex[:12]
+    job = _BackgroundJob(
+        process=process,
+        thread_id=cl.user_session.get("thread_id") or "",
+        skill_name=skill_name,
+        script_filename=script_filename,
+        started_at=time.monotonic(),
+        stdout_chunks=[],
+        stderr_chunks=[],
+        status="running",
+        returncode=None,
+        error_message=None,
+    )
+    job.runner_task = asyncio.create_task(_run_background_job(job))
+    _BACKGROUND_JOBS[job_id] = job
+    return (
+        f"バックグラウンドで起動しました。job_id={job_id}\n"
+        "完了確認・結果取得には check_script_job（job_id指定）を、途中で打ち切る"
+        "場合は stop_script_job（job_id指定）を使ってください。"
+    )
+
+
+@tool
+async def check_script_job(job_id: str) -> str:
+    """run_script_background で起動したジョブの状況・結果を確認する。
+
+    実行中であれば経過秒数と、現時点までの標準出力・標準エラーの末尾
+    （最大4000文字）を返す。完了・失敗・タイムアウト・強制終了のいずれかで
+    終わっていれば、run_script と同じ形式
+    （"[終了コード] N" に続けて "[標準出力]"/"[標準エラー]"）で最終結果を返し、
+    以降は同じ job_id を指定できなくなる（登録から削除される）。
+    他セッションが起動した job_id は参照できない。
+
+    Args:
+        job_id: run_script_background の戻り値に含まれるID。
+
+    Returns:
+        状況または最終結果を表す文字列。job_id が不明・他セッションのもので
+        ある場合は「エラー: ...」形式の文字列。
+    """
+    resolved = _resolve_job(job_id)
+    if isinstance(resolved, str):
+        return resolved
+    job = resolved
+
+    if job.status == "running":
+        elapsed = int(time.monotonic() - job.started_at)
+        stdout_tail = "".join(job.stdout_chunks)[-_JOB_OUTPUT_TAIL_CHARS:].rstrip()
+        stderr_tail = "".join(job.stderr_chunks)[-_JOB_OUTPUT_TAIL_CHARS:].rstrip()
+        parts = [f"実行中です（経過 {elapsed} 秒）。"]
+        if stdout_tail:
+            parts.append(f"[標準出力（末尾）]\n{stdout_tail}")
+        if stderr_tail:
+            parts.append(f"[標準エラー（末尾）]\n{stderr_tail}")
+        return "\n".join(parts)
+
+    result = _format_job_result(job)
+    if job.status == "timeout":
+        result = (
+            f"エラー: バックグラウンド実行が {_SCRIPT_BACKGROUND_MAX_RUNTIME_SECONDS} "
+            f"秒の上限に達したため強制終了しました。\n{result}"
+        )
+    elif job.status == "killed":
+        result = f"stop_script_job により強制終了されました。\n{result}"
+    elif job.status == "error":
+        result = f"エラー: バックグラウンド実行中に問題が発生しました: {job.error_message}"
+    _BACKGROUND_JOBS.pop(job_id, None)
+    return result
+
+
+@tool
+async def stop_script_job(job_id: str) -> str:
+    """run_script_background で起動したジョブを強制終了する。
+
+    長時間実行を途中で打ち切りたい場合に使う。強制終了時点までの
+    標準出力・標準エラーを添えて結果を返し、登録から削除する。
+    他セッションが起動した job_id は操作できない。
+
+    Args:
+        job_id: run_script_background の戻り値に含まれるID。
+
+    Returns:
+        強制終了結果を表す文字列。job_id が不明・他セッションのものである、
+        または既に終了済みの場合は「エラー: ...」形式の文字列。
+    """
+    resolved = _resolve_job(job_id)
+    if isinstance(resolved, str):
+        return resolved
+    job = resolved
+
+    if job.status != "running":
+        return (
+            f"エラー: job_id '{job_id}' は既に終了しています（status={job.status}）。"
+            "check_script_job で結果を取得してください。"
+        )
+
+    job.status = "killed"
+    try:
+        job.process.kill()
+    except ProcessLookupError:
+        pass
+    if job.runner_task is not None:
+        await job.runner_task
+
+    result = _format_job_result(job)
+    _BACKGROUND_JOBS.pop(job_id, None)
+    return f"強制終了しました。\n{result}"
+
+
+def _register_exec_output_files(workdir: Path, before_snapshot: dict[Path, float]) -> str:
+    """execute_python_code の実行前後で workdir 直下のファイル差分を検知し、
+    新規作成/更新されたファイルを path_memory へ自動登録する。
+
+    LLMが execute_python_code のコード内で相対パス書き込みしたファイル
+    （中間生成物）を、後続の run_script 等へ渡す際にLLMが絶対パスを手で
+    組み立て直す必要が無いようにするため（cwdが `_tmp_<thread_id>` に
+    切り替わったことをLLMが意識しなくて済む）。
+
+    Args:
+        workdir: execute_python_code が使った実行用ディレクトリ
+            （_resolve_exec_workdir() の戻り値）。
+        before_snapshot: 実行前に取得した {ファイルパス: mtime} のスナップショット。
+
+    Returns:
+        新規作成/更新ファイルがあれば「[生成/更新ファイル]」見出し付きの
+        文字列（1行1ファイル、`@N ファイル名（新規作成|更新）` 形式）。
+        対象ファイルが無い場合は空文字列。パスメモリーへ登録できなかった
+        ファイルは絶対パスをそのまま表示する。
+    """
+    try:
+        after_files = [p for p in workdir.iterdir() if p.is_file()]
+    except OSError:
+        return ""
+
+    changed: list[tuple[Path, str]] = []
+    for p in after_files:
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        prev = before_snapshot.get(p)
+        if prev is None:
+            changed.append((p, "新規作成"))
+        elif mtime != prev:
+            changed.append((p, "更新"))
+    if not changed:
+        return ""
+
+    thread_id = cl.user_session.get("thread_id") or "_no_session"
+    lines = []
+    for p, kind in changed:
+        index = None
+        if _PATH_MEMORY_DIR is not None:
+            index = path_memory.register(
+                thread_id,
+                str(p),
+                _PATH_MEMORY_DIR,
+                _PATH_MEMORY_MAX_ENTRIES,
+                description=f"execute_python_codeが{kind}",
+            )
+        if index is not None:
+            lines.append(f"@{index} {p.name}（{kind}）")
+        else:
+            lines.append(f"{p}（{kind}、パスメモリー登録失敗のため絶対パスをそのまま使用）")
+    return "[生成/更新ファイル]\n" + "\n".join(lines)
+
+
+@tool
+async def execute_python_code(code: str) -> str:
+    """LLMが生成したPythonコードをその場で実行し、標準出力/標準エラーを返す。
+
+    run_script が skills/*/scripts/ 配下の既存ファイルしか実行できないのに対し、
+    このツールはコード文字列を一時ファイルへ書き出してその場で実行する。任意コード
+    実行はリスクが高いため、config.ini の [scripts].code_execution_enabled が
+    false の場合は実行せずエラーを返す。書き込み系ツールのため、create_plan/
+    approve_plan で計画が承認済み（cl.user_session["plan_approved"] が True）で
+    ない限り実行できない（未承認の場合はエラーを返す）。
+
+    作業ディレクトリは _resolve_exec_workdir() で決定する（run_script と
+    同じ作業ディレクトリ配下の `_tmp_<thread_id>` サブディレクトリ）。
+    このコードが相対パスで書き出すファイル（中間生成物）はここに溜まり、
+    LLMが作業ディレクトリのファイルを直接汚さないようにしている。
+    生成・更新されたファイルは実行後に自動検知して path_memory（`@N`）へ
+    登録し、戻り値に含める（後続の run_script 等へそのまま渡せる）。
+    タイムアウトや Python 実行ファイルは run_script と共通の設定
+    （[scripts].timeout / [scripts].python）を流用する。
+
+    Args:
+        code: 実行する Python コード全文。
+
+    Returns:
+        「[終了コード] N」に続けて、標準出力・標準エラー、生成/更新
+        ファイルの path_memory 参照（あれば）を、それぞれ見出し付きで
+        連結した文字列。code が空の場合、config.ini で無効化されている
+        場合、計画が未承認の場合、タイムアウトした場合、起動自体に
+        失敗した場合はいずれも例外を送出せず「エラー: ...」形式で返す。
+    """
+    if not code.strip():
+        return "エラー: code が空です。"
+    if not _CODE_EXEC_ENABLED:
+        return (
+            "エラー: LLMが生成したPythonコードの実行はconfig.iniで無効化されています"
+            "（[scripts] code_execution_enabled=false）。"
+        )
+    workdir, fell_back = _resolve_exec_workdir()
+
+    if not cl.user_session.get("plan_approved"):
+        logger.info("execute_python_code: 計画未承認のためブロック")
+        return (
+            "エラー: 計画が未承認のため実行できません。"
+            "create_plan で計画を作成し、approve_plan でユーザーの承認を得てから"
+            "実行してください。"
+        )
+
+    try:
+        before_snapshot = {p: p.stat().st_mtime for p in workdir.iterdir() if p.is_file()}
+    except OSError:
+        before_snapshot = {}
+
+    try:
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", dir=str(workdir), delete=False, encoding="utf-8"
+        )
+        tmp.write(code)
+        tmp.close()
+        tmp_path = Path(tmp.name)
+    except OSError:
+        # work_dir_access のキャッシュが古く、_resolve_exec_workdir の事前
+        # フォールバックが効かなかった場合の保険（例: mkdir後に権限が変わった等）。
+        thread_id = cl.user_session.get("thread_id") or "_no_session"
+        workdir = _DEFAULT_WORKDIR / f"_tmp_{thread_id}"
+        workdir.mkdir(parents=True, exist_ok=True)
+        fell_back = True
+        try:
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".py", dir=str(workdir), delete=False, encoding="utf-8"
+            )
+            tmp.write(code)
+            tmp.close()
+            tmp_path = Path(tmp.name)
+        except OSError as e2:
+            return f"エラー: 一時ファイルを作成できませんでした（既定フォルダでも失敗）: {e2}"
+
+    logger.info("execute_python_code: cwd=%s", workdir)
+    try:
+        try:
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                [_SCRIPT_PYTHON, str(tmp_path)],
+                cwd=str(workdir),
+                capture_output=True,
+                text=True,
+                timeout=_SCRIPT_TIMEOUT,
+                encoding="utf-8",
+                errors="replace",
+                env=_subprocess_env(),
+            )
+        except subprocess.TimeoutExpired:
+            return f"エラー: コードが {_SCRIPT_TIMEOUT} 秒でタイムアウトしました。"
+        except OSError as e:
+            return f"エラー: コードを実行できませんでした: {e}"
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    parts = [f"[終了コード] {proc.returncode}"]
+    if proc.stdout:
+        parts.append(f"[標準出力]\n{proc.stdout.rstrip()}")
+    if proc.stderr:
+        parts.append(f"[標準エラー]\n{proc.stderr.rstrip()}")
+
+    path_memory_note = _register_exec_output_files(workdir, before_snapshot)
+    if path_memory_note:
+        parts.append(path_memory_note)
+
+    warning = _track_failure_streak(
+        "execute_python_code_failure_streak", proc.returncode != 0, "execute_python_code"
+    )
+    if warning:
+        parts.append(warning)
+    if fell_back:
+        parts.append(_mark_workdir_not_writable())
+    return "\n".join(parts)
+
+
+@tool
+async def dispatch_agent(task: str, agent_type: str) -> str:
+    """タスクを独立したサブエージェントへ委譲し、最終回答のみを受け取る。
+
+    調査や複数ステップの下調べなど、詳細な思考過程やツール呼び出しの
+    経緯までは自分の会話履歴に残す必要が無い作業に使う。サブエージェントは
+    agent_type で選んだ種別のツールセットを使って自律的に作業するが、
+    その内部の思考過程・ツール呼び出しはあなたの会話履歴には一切残らず、最終回答の
+    テキストのみが返る（ログファイルには内部の記録が残る）。run_script が
+    呼ばれた場合、その承認確認はサブエージェントの実行中にそのまま
+    ユーザーへ表示される。数十〜数百件規模のファイル（画像等）を扱う調査は、
+    年・サブフォルダ等の単位でこのツールへ分割委任すると効率的。
+    サブエージェントはさらに別のサブエージェントへ委譲することはできない。
+
+    Args:
+        task: サブエージェントに依頼したいタスクの説明。必要な背景情報・
+            期待する出力形式を過不足なく書くこと（サブエージェントは
+            この会話の文脈を一切知らない）。対象パスは記憶から書き起こさず、
+            直前の glob_file.py 等で得た `@N`（パスメモリー参照）をそのまま
+            文中に埋め込んでよい（解決できるものは実パスへ自動置換される）。
+        agent_type: 使用するサブエージェントの種別名（必須、暗黙の既定値は
+            無い）。利用可能な種別とそれぞれの用途はシステムプロンプトの
+            一覧を参照し、タスクの内容に合った種別を毎回明示的に選ぶこと。
+
+    Returns:
+        サブエージェントの最終回答テキスト。init_tools() が未実行の場合、
+        agent_type が不明な場合、サブエージェントの実行に失敗した場合は、
+        例外を送出せず「エラー: ...」形式の文字列を返す。
+    """
+    if _LLM_CONFIG is None:
+        return "エラー: init_tools() が未実行です"
+    resolved = _AGENT_TYPES.get(agent_type)
+    if resolved is None:
+        available = ", ".join(sorted(_AGENT_TYPES)) or "（登録なし）"
+        return f"エラー: 不明な agent_type '{agent_type}' です。利用可能: {available}"
+    task = _resolve_path_memory_tokens_in_text(task)
+    logger.info("dispatch_agent: task=%r agent_type=%r", task, agent_type)
+    token = _IN_SUBAGENT.set(True)
+    # 重複ガードの集合をこの実行専用にするためのID（_duplicate_guard_session_key 参照）。
+    run_id_token = _SUBAGENT_RUN_ID.set(uuid.uuid4().hex)
+    try:
+        if _DISPATCH_AGENT_SEMAPHORE is not None:
+            if _DISPATCH_AGENT_SEMAPHORE.locked():
+                logger.info("dispatch_agent: 空きスロットが無いため待機します task=%r", task)
+            async with _DISPATCH_AGENT_SEMAPHORE:
+                return await run_subagent(
+                    task,
+                    resolved.tools,
+                    resolved.system_prompt,
+                    _LLM_CONFIG,
+                    _SUBAGENT_MAX_ITERATIONS,
+                )
+        return await run_subagent(
+            task,
+            resolved.tools,
+            resolved.system_prompt,
+            _LLM_CONFIG,
+            _SUBAGENT_MAX_ITERATIONS,
+        )
+    except Exception as e:  # noqa: BLE001 - 致命的エラーもエラー文字列化して返す
+        logger.exception("dispatch_agent 失敗")
+        return f"エラー: サブエージェントの実行に失敗しました: {e}"
+    finally:
+        _IN_SUBAGENT.reset(token)
+        _SUBAGENT_RUN_ID.reset(run_id_token)
+
+
+_VALID_TASK_STATUSES = ("pending", "in_progress", "completed")
+
+_STATUS_MARKERS = {
+    "pending": "[ ]",
+    "in_progress": "[~]",
+    "completed": "[x]",
+}
+
+
+def _render_plan(plan: list[dict], *, finished: bool = False) -> str:
+    """計画（ステップ一覧）をチェックリスト形式の Markdown へ整形する。
+
+    create_plan / update_task_progress の両方から呼ばれる表示専用の純関数。
+
+    Args:
+        plan: {"content": str, "activeForm": str,
+            "status": "pending"|"in_progress"|"completed"} の辞書のリスト。
+        finished: 全ステップ完了時に完了メッセージを付記するかどうか。
+
+    Returns:
+        「### 実行計画」見出しに続けて各ステップをチェックリストで並べた Markdown 文字列。
+        "in_progress" のステップは content の代わりに activeForm を表示する。
+    """
+    lines = ["### 実行計画"]
+    for step in plan:
+        marker = _STATUS_MARKERS[step["status"]]
+        text = step["activeForm"] if step["status"] == "in_progress" else step["content"]
+        lines.append(f"- {marker} {text}")
+    if finished:
+        lines.append("\n✅ 計画完了")
+    return "\n".join(lines)
+
+
+# frontend/src/utils/messageTree.ts の PLAN_PREFIX と一致させる
+# （サイドパネルの実行計画カード用マーカー。TOKEN_USAGE_PREFIX/WORK_DIR_PREFIX と同じ方式）。
+PLAN_PREFIX = "📋 実行計画\n"
+
+
+def _render_plan_payload(plan: list[dict], *, finished: bool = False, approved: bool = False) -> str:
+    """サイドパネル表示用に plan を JSON 化し、プレフィックス付き文字列として返す。
+
+    フロントエンドはこのプレフィックスでメインチャット窓への表示を除外し、
+    専用の PlanCard コンポーネント、および送信ボタン付近の PlanModeBadge が
+    JSON 部分をパースして描画する（approved は PlanModeBadge の Plan Mode /
+    Edit Automatically 表示に使う）。
+    """
+    payload = {"steps": plan, "finished": finished, "approved": approved}
+    return PLAN_PREFIX + json.dumps(payload, ensure_ascii=False)
+
+
+@tool
+async def create_plan(steps: list[dict[str, str]]) -> str:
+    """複数ステップの実行計画を作成し、ユーザーへチェックリストとして表示する。
+
+    書き込み系ツール（run_script、execute_python_code）を1回でも使うタスクに
+    着手する前に、まずこのツールで
+    ステップ一覧を提示する。作成しただけでは書き込み系ツールのブロックは
+    解除されない。承認を得るには続けて approve_plan を呼ぶこと。
+
+    Args:
+        steps: 実行計画の各ステップを表す辞書のリスト（1件以上、実行順）。
+            各辞書は次の2キーを持つこと。
+            - content: ステップの内容（例: "設定ファイルを読み込む"）。
+            - activeForm: 実行中（in_progress）の間だけチェックリストに
+              表示する現在進行形の説明（例: "設定ファイルを読み込み中"）。
+
+    Returns:
+        計画を作成した旨とステップ件数を伝えるテキスト。steps が空、または
+        いずれかの要素に content / activeForm が欠けている場合は、例外を
+        送出せず「エラー: ...」形式の文字列を返す。
+    """
+    if not steps:
+        return "エラー: steps が空です。1件以上のステップを指定してください。"
+    for i, s in enumerate(steps):
+        if not isinstance(s, dict) or not s.get("content") or not s.get("activeForm"):
+            return (
+                f"エラー: steps[{i}] には content と activeForm の両方を"
+                f"文字列で指定してください: {s!r}"
+            )
+    plan = [
+        {"content": s["content"], "activeForm": s["activeForm"], "status": "pending"}
+        for s in steps
+    ]
+    cl.user_session.set("plan", plan)
+    cl.user_session.set("plan_approved", False)
+    cl.user_session.set("awaiting_approve_plan_call", True)
+    message = cl.Message(content=_render_plan_payload(plan))
+    await message.send()
+    cl.user_session.set("plan_message", message)
+    logger.info("create_plan: %d steps", len(steps))
+    return f"計画を作成しました（全{len(steps)}件）。approve_plan でユーザーの承認を得てください。"
+
+
+@tool
+async def approve_plan() -> str:
+    """作成済みの実行計画についてユーザーの承認を得る。
+
+    cl.AskActionMessage パターンで計画内容を提示し、承認/拒否を選ばせる。
+    承認されると、以後 run_script/execute_python_code の
+    ハードブロックが解除され実行できるようになる
+    （cl.user_session["plan_approved"] を参照）。タイムアウト
+    （未応答）は安全側に倒して未承認扱いにするが、ユーザーが明示的に却下した
+    場合とは返り値のテキストで区別する（無応答は単に手が離せないだけの
+    可能性が高く、計画自体を作り直す必要はないため）。
+
+    Returns:
+        承認・明示的却下・タイムアウトのいずれかを伝えるテキスト。計画が未作成の
+        場合は例外を送出せず「エラー: ...」形式の文字列を返す。
+    """
+    plan = cl.user_session.get("plan")
+    if not plan:
+        return "エラー: 計画がありません。先に create_plan を呼んでください。"
+    content = (
+        _render_plan(plan)
+        + "\n\nこの計画を承認しますか？承認後は各ステップの書き込み系ツール"
+        "（run_script/execute_python_code）が実行できるようになります。"
+    )
+    actions = [
+        cl.Action(name="approve", payload={"value": "approve"}, label="✅ 計画を承認"),
+        cl.Action(name="deny", payload={"value": "deny"}, label="🚫 却下"),
+    ]
+    res = await cl.AskActionMessage(
+        content=content, actions=actions, timeout=_resolve_ask_timeout(_APPROVAL_TIMEOUT_SECONDS)
+    ).send()
+    approved = res is not None and res["payload"].get("value") == "approve"
+    cl.user_session.set("plan_approved", approved)
+    # 前回却下時に立てたフラグが誤って残らないよう、承認・タイムアウト時は
+    # 明示的にクリアする（このターンは却下ではないため）。
+    cl.user_session.set("plan_denied_just_now", False)
+    message: cl.Message | None = cl.user_session.get("plan_message")
+    if message is not None:
+        message.content = _render_plan_payload(plan, approved=approved)
+        await message.update()
+    if approved:
+        logger.info("approve_plan: 承認されました")
+        return "ユーザーが計画を承認しました。書き込み系ツール（run_script/execute_python_code）を実行できます。"
+    if res is None:
+        logger.info("approve_plan: 応答なし（タイムアウト）")
+        return (
+            f"ユーザーからの応答が{_APPROVAL_TIMEOUT_SECONDS}秒間ありませんでした"
+            "（離席中の可能性があります）。計画自体はそのまま保持されているので、"
+            "作り直す必要はありません。少し時間を置いてから改めて approve_plan を"
+            "呼び直してください。"
+        )
+    logger.info("approve_plan: 明示的に却下されました")
+    # app.py の on_tool_end がこのフラグを見て、ツール呼び出しを続けさせず
+    # このターンの処理を強制的に打ち切る（LLMが「計画を微修正して続行しよう」
+    # と自己判断してしまうのを、プロンプト指示だけに頼らずコード側で確実に防ぐため）。
+    cl.user_session.set("plan_denied_just_now", True)
+    return (
+        "ユーザーが計画を却下しました。これ以上ツールを呼ばず、"
+        "却下された旨を最終回答として述べて処理を終了してください。"
+    )
+
+
+@tool
+async def update_task_progress(step_index: int, status: str) -> str:
+    """実行計画中のステップの進捗状態を更新し、表示中のチェックリストへ反映する。
+
+    ステップの実行前に "in_progress"、完了後に "completed" を設定してユーザーに
+    進捗を見せること。"in_progress" の間はチェックリスト上に content の代わりに
+    create_plan で渡した activeForm が表示される。同時に "in_progress" にする
+    ステップは1つまでにすること。全ステップが completed になると計画は完了した
+    ものとみなし、plan_approved を False に戻す（承認は作成済み計画の実行に
+    限定したスコープのため、完了後の無関係な run_script/execute_python_code は
+    再びブロックされる）。
+
+    Args:
+        step_index: create_plan で渡した steps のインデックス（0始まり）。
+        status: "pending" | "in_progress" | "completed" のいずれか。
+
+    Returns:
+        更新内容を説明する短いテキスト。計画が未作成、step_index が範囲外、
+        status が不正な値の場合は、例外を送出せず「エラー: ...」形式の文字列を返す。
+    """
+    plan = cl.user_session.get("plan")
+    if not plan:
+        return "エラー: 計画がありません。先に create_plan を呼んでください。"
+    if status not in _VALID_TASK_STATUSES:
+        return f"エラー: status は {_VALID_TASK_STATUSES} のいずれかを指定してください: {status}"
+    if not (0 <= step_index < len(plan)):
+        return f"エラー: step_index が範囲外です（0〜{len(plan) - 1}）: {step_index}"
+
+    plan[step_index]["status"] = status
+    cl.user_session.set("plan", plan)
+    finished = all(s["status"] == "completed" for s in plan)
+    if finished:
+        cl.user_session.set("plan_approved", False)
+
+    message: cl.Message | None = cl.user_session.get("plan_message")
+    if message is not None:
+        message.content = _render_plan_payload(
+            plan, finished=finished, approved=cl.user_session.get("plan_approved", False)
+        )
+        await message.update()
+
+    logger.info("update_task_progress: step=%d status=%s finished=%s", step_index, status, finished)
+    label = plan[step_index]["content"]
+    suffix = "\n計画は全ステップ完了しました。" if finished else ""
+    return f"ステップ{step_index}「{label}」を {status} に更新しました。{suffix}"
+
+
+@tool
+async def get_plan_status() -> str:
+    """現在 Plan Mode（書き込み系ツールがロック中）か Edit Automatically（承認済み計画の
+    実行が許可された状態）かを確認する読み取り専用ツール。
+
+    書き込み系ツール（run_script、execute_python_code）を
+    呼ぶ前に自分の状態認識に確信が持てない場合、いつでも呼んでよい（計画の有無や承認
+    状態に関わらずブロックされない）。
+
+    Returns:
+        現在のモード（"Plan Mode" または "Edit Automatically"）と、計画が存在すれば
+        そのステップ一覧・各ステータスを含むテキスト。計画が未作成の場合はその旨を
+        伝えるテキストを返す。
+    """
+    plan = cl.user_session.get("plan")
+    approved = bool(cl.user_session.get("plan_approved"))
+    if not plan:
+        return "現在の状態: Plan Mode（計画は未作成）。書き込み系ツールはブロックされます。"
+    mode = "Edit Automatically" if approved else "Plan Mode"
+    return f"現在の状態: {mode}\n\n" + _render_plan(plan)
+
+
+@tool
+async def lock_plan_mode() -> str:
+    """Edit Automatically から Plan Mode へ手動で戻す（承認状態を取り消す）。
+
+    全ステップの完了を待たず、途中で自動実行を止めて書き込み系ツールを再びロックしたい
+    場合に、ユーザーの承認を介さず自分の判断で呼んでよい。計画（ステップ一覧）自体は
+    削除されない。再度書き込み系ツールを使うには、改めて approve_plan で承認を得ること。
+
+    Returns:
+        状態変更の結果を伝えるテキスト。
+    """
+    was_approved = bool(cl.user_session.get("plan_approved"))
+    cl.user_session.set("plan_approved", False)
+    plan = cl.user_session.get("plan")
+    message: cl.Message | None = cl.user_session.get("plan_message")
+    if message is not None and plan is not None:
+        finished = all(s["status"] == "completed" for s in plan)
+        message.content = _render_plan_payload(plan, finished=finished, approved=False)
+        await message.update()
+    logger.info(
+        "lock_plan_mode: 呼び出し（元の状態: %s）", "approved" if was_approved else "not approved"
+    )
+    if not was_approved:
+        return "既に Plan Mode です（変更なし）。"
+    return (
+        "Plan Mode へ戻しました。書き込み系ツールは再びブロックされます。"
+        "再開するには approve_plan で改めて承認を得てください。"
+    )
+
+
+async def toggle_plan_mode_from_ui() -> None:
+    """送信ボタン付近の Plan Mode / Edit Automatically バッジをユーザーが
+    クリックした際に呼ばれる（app.py の action_callback("toggle_plan_mode")
+    経由）。LLMツールではなく、ユーザーがUIから直接操作するための関数。
+
+    計画が存在しない場合は何もしない（切り替える対象が無いため）。また
+    config.ini の [plan].allow_badge_unlock が False の場合、Plan Mode →
+    Edit Automatically 方向（ロック解除）のクリックは無視する（Edit
+    Automatically → Plan Mode 方向のクリックは常に許可する）。
+    """
+    plan = cl.user_session.get("plan")
+    if not plan:
+        return
+    currently_approved = bool(cl.user_session.get("plan_approved"))
+    if not currently_approved and not _PLAN_BADGE_ALLOW_UNLOCK:
+        logger.info(
+            "toggle_plan_mode_from_ui: allow_badge_unlock=False のため"
+            "ロック解除方向のクリックを無視しました"
+        )
+        return
+    approved = not currently_approved
+    cl.user_session.set("plan_approved", approved)
+    message: cl.Message | None = cl.user_session.get("plan_message")
+    if message is not None:
+        finished = all(s["status"] == "completed" for s in plan)
+        message.content = _render_plan_payload(plan, finished=finished, approved=approved)
+        await message.update()
+    logger.info(
+        "toggle_plan_mode_from_ui: ユーザーがバッジをクリック（新状態: %s）",
+        "approved" if approved else "not approved",
+    )
+
+
+@tool("AskUserQuestion")
+async def ask_user_question(question: str, labels: list[str] | None = None) -> str:
+    """会話を続けるために必要な追加情報を、ユーザーに自由記述で質問する。
+
+    要求が曖昧・情報が不足している等、自由記述の回答（固有名詞・ファイルパス・
+    詳細な要望など）が必要な場合に使う。選択肢から選んでほしい場合は
+    ask_user_choice を使うこと。
+
+    単一の質問なら labels を省略する。複数項目（例:
+    ファイル名と出力形式）をまとめて一度に自由記述で答えてほしい場合のみ、
+    labels に入力欄ごとのラベルを列挙する。項目ごとに本ツールを繰り返す
+    必要はない。
+
+    Args:
+        question: ユーザーに表示する質問文（labels指定時はフォーム全体の
+            見出しとして表示）。
+        labels: 複数項目をまとめて聞きたい場合の、入力欄ごとのラベル文字列
+            リスト。省略時（None または空リスト）は単一の自由記述入力欄を
+            表示する。
+
+    Returns:
+        labels を省略した場合はユーザーが入力した回答テキストをそのまま返す。
+        labels を指定した場合は "ラベル: 入力値" を改行区切りで並べた文字列を
+        返す。設定値（config.ini の [timeouts].ask_user_question_seconds。
+        0以下は無期限待ち）の秒数以内に応答が無い場合は、例外を送出せず
+        「エラー: ユーザーからの応答がありませんでした（タイムアウト）。」を返す。
+    """
+    timeout = _resolve_ask_timeout(_ASK_USER_QUESTION_TIMEOUT_SECONDS)
+    if not labels:
+        logger.info("ask_user_question: %s", question)
+        res = await cl.AskUserMessage(content=question, timeout=timeout).send()
+        if res is None:
+            return "エラー: ユーザーからの応答がありませんでした（タイムアウト）。"
+        return res.get("output", "")
+    logger.info("ask_user_question: %s labels=%s", question, labels)
+    element = cl.CustomElement(
+        name="MultiTextForm", props={"question": question, "labels": labels}
+    )
+    res = await cl.AskElementMessage(content=question, element=element, timeout=timeout).send()
+    if res is None:
+        return "エラー: ユーザーからの応答がありませんでした（タイムアウト）。"
+    values = res.get("values") or []
+    return "\n".join(f"{label}: {value}" for label, value in zip(labels, values))
+
+
+@tool
+async def ask_user_choice(
+    question: str, choices: list[str], multi_select: bool = False
+) -> str:
+    """会話を続けるために必要な選択を、ユーザーに選択肢形式で質問する。
+
+    複数の進め方・方針からユーザーに1つ（または複数）選んでもらいたい場合に使う。
+    自由記述の回答が必要な場合は AskUserQuestion を使うこと。
+
+    Args:
+        question: ユーザーに表示する質問文。
+        choices: 選択肢の文字列リスト（1件以上）。
+        multi_select: True の場合、チェックボックス形式で複数選択できるように
+            表示し、選択された選択肢をまとめて返す（未選択のまま送信された
+            場合は "(選択なし)" を返す）。False（既定）の場合は従来通り、
+            選択肢ボタンをクリックした時点で即座にその1件を選んで返す
+            （択一で確定させたい場合はこちら）。
+
+    Returns:
+        multi_select=False（既定）: ユーザーが選んだ選択肢の文字列。
+        multi_select=True: ユーザーが選択した選択肢を「、」区切りで連結した
+        文字列（未選択なら "(選択なし)"）。
+        choices が空の場合や、設定値（config.ini の
+        [timeouts].ask_user_choice_seconds。0以下は無期限待ち）の秒数以内に
+        応答が無い場合は、例外を送出せず「エラー: ...」形式の文字列を返す。
+    """
+    if not choices:
+        return "エラー: choices が空です。1件以上の選択肢を指定してください。"
+    logger.info(
+        "ask_user_choice: %s choices=%s multi_select=%s", question, choices, multi_select
+    )
+    timeout = _resolve_ask_timeout(_ASK_USER_CHOICE_TIMEOUT_SECONDS)
+    if multi_select:
+        element = cl.CustomElement(
+            name="MultiChoiceForm", props={"question": question, "choices": choices}
+        )
+        res = await cl.AskElementMessage(content=question, element=element, timeout=timeout).send()
+        if res is None:
+            return "エラー: ユーザーからの応答がありませんでした（タイムアウト）。"
+        selected = res.get("values") or []
+        return "、".join(selected) if selected else "(選択なし)"
+    actions = [
+        cl.Action(name=f"choice_{i}", payload={"value": c}, label=c)
+        for i, c in enumerate(choices)
+    ]
+    res = await cl.AskActionMessage(content=question, actions=actions, timeout=timeout).send()
+    if res is None:
+        return "エラー: ユーザーからの応答がありませんでした（タイムアウト）。"
+    return res["payload"].get("value") or res.get("label", "")
+
+
+@tool(response_format="content_and_artifact")
+def analyze_image(relative_path: str) -> tuple[str, dict | None]:
+    """画像ファイルをLLMへ視覚情報として見せ、自分（LLM）がその内容を解析・説明・判断するために使う。
+
+    読み込み系ツールのため、ローカルファイルシステム上の任意の絶対パスを指定できる
+    （Read 等と同様、パスの制限は行わない）。
+
+    ユーザーが画像そのものを見たい（表示・プレビュー）だけなら、代わりに
+    `show_image` を使うこと。このツールはあくまで自分が画像の中身を理解する
+    必要がある場合専用（例: SKILL.md 本文が references/assets 配下の画像を
+    参照していて内容を踏まえて回答する必要がある場合、run_script が生成した
+    画像ファイルの内容を確認して次の判断に使う場合、ユーザーが指定した作業
+    ディレクトリ配下にある画像（写真・スキャン画像等）の内容を読み取って
+    説明・分析する必要がある場合）。
+    OpenAI互換APIの制約上、ツール呼び出し結果（ToolMessage）自体には
+    画像を積めないため、この関数はテキストの確認メッセージのみを返し、
+    実データは artifact 経由でグラフ側（ImageAwareToolNode）に渡す。
+    ImageAwareToolNode がそれを直後の HumanMessage として会話履歴へ追加し、
+    次のモデル呼び出しで実際にLLMへ見えるようになる。
+
+    Args:
+        relative_path: 相対パスを渡すと skills ルートからの相対パスとして
+            解決する（例: word-counter/references/example.png）。それ以外の
+            場所の画像を見る場合は絶対パス（例:
+            C:\\Users\\foo\\data\\2019\\img1.png）で指定すること。
+            Glob/Grep/Read の結果に付与されたパスメモリー参照（`@N` 形式）を
+            そのまま渡すこともできる。
+
+    Returns:
+        (確認テキスト, artifact) のタプル。artifact は画像を読み込めた場合のみ
+        {"image_url": "data:<mime>;base64,<...>"} を持つ dict、それ以外は None。
+        ファイルが存在しない場合・対応拡張子（png/jpg/jpeg/gif/webp/bmp）
+        でない場合、`@N` が未登録の場合は、例外を送出せず「エラー: ...」
+        形式のテキストと None を返す。
+    """
+    resolved_path, error = _resolve_path_memory_token(relative_path)
+    if error:
+        return f"エラー: {error}", None
+    path = _resolve_analyze_image_path(resolved_path)
+    if not path.is_file():
+        return f"エラー: ファイルが見つかりません: {relative_path}", None
+    if not is_image_file(path):
+        return (
+            f"エラー: 対応していない画像形式です（png/jpg/jpeg/gif/webp/bmpのみ）: {relative_path}",
+            None,
+        )
+    # 同一画像の重複表示を検知する（tune-prompt調査で同じ画像を14回重複して
+    # 呼ぶ実例あり。画像artifactはトークン消費が大きく、繰り返し会話へ積むと
+    # コンテキストを大きく圧迫するため、2回目以降はテキストのみ返し
+    # artifactを積まない）。解決済みの絶対パスをキーにするため、`@N`や相対/絶対
+    # パスなど表記が違っても同一ファイルなら重複として検知できる。
+    if _record_and_check_duplicate(
+        _duplicate_guard_session_key("analyze_image_call_signatures"), str(path)
+    ):
+        return (
+            f"エラー: この画像は既に一度確認済みです: {relative_path}。"
+            "同一画像の再表示は省略しました。会話履歴にある前回の説明を参照するか、"
+            "他の画像・他の手段に進んでください。",
+            None,
+        )
+    logger.info("analyze_image: %s", relative_path)
+    return f"画像を読み込みました: {relative_path}", {"image_url": to_data_url(path)}
+
+
+# init_tools() の _resolve_agent_types() がこのリストを実行時に参照するだけなので、
+# 定義順は init_tools()/dispatch_agent より後でもよい（analyze_image を含めるため
+# analyze_image の定義後に置く）。
+_SUBAGENT_TOOLS: list = [
+    read_skill,
+    read_skill_file,
+    provide_download,
+    show_image,
+    run_script,
+    run_script_background,
+    check_script_job,
+    stop_script_job,
+    execute_python_code,
+    get_tool_source,
+    check_work_dir_status,
+    analyze_image,
+    read_tool,
+    glob_tool,
+    grep_tool,
+    json_query,
+    list_path_memory,
+]
+
+
+def _with_image_followups(result: dict) -> dict:
+    """ToolMessage.artifact に画像があれば、直後に画像付き HumanMessage を追加する。
+
+    analyze_image が {"image_url": ...} という artifact 付きの ToolMessage を
+    返した場合にのみ発火する。それ以外のツール結果には触れない。
+
+    Args:
+        result: ToolNode.invoke/ainvoke の戻り値（{"messages": [ToolMessage, ...]}）。
+
+    Returns:
+        画像artifactがあれば末尾に HumanMessage を追加した新しい dict、
+        無ければ result をそのまま返す。
+    """
+    messages = result.get("messages", [])
+    extra = [
+        followup
+        for msg in messages
+        if (followup := image_followup_message(getattr(msg, "artifact", None))) is not None
+    ]
+    if not extra:
+        return result
+    return {**result, "messages": [*messages, *extra]}
+
+
+def _extract_tool_call_from_node_input(input) -> dict | None:  # noqa: A002
+    """ImageAwareToolNode.invoke/ainvoke が受け取る入力から、今回実行対象の
+    単一 tool_call を取り出す。
+
+    LangGraph は並列 tool_calls 実行のため、AIMessage の tool_calls を
+    まとめてバッチで渡すのではなく、個々の tool_call を1件ずつ
+    {"__type": "tool_call_with_context", "tool_call": {...}, "state": {...}}
+    という形で渡してくる（ToolNode の公開 docstring が説明する
+    dict/list/tool_calls-list の3形式には無い、実際に確認した挙動）。
+    この形でなければ None を返す。
+    """
+    if isinstance(input, dict) and input.get("__type") == "tool_call_with_context":
+        return input.get("tool_call")
+    return None
+
+
+def _log_tool_calls_debug(input) -> None:  # noqa: A002
+    """メイングラフのツール呼び出し（呼び出し前）を DEBUG レベルで記録する。
+
+    config.ini の [paths].log_level が "debug" のときのみ実際にログへ出る
+    （logger.isEnabledFor で早期リターンし、通常時はほぼゼロオーバーヘッド）。
+    """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    call = _extract_tool_call_from_node_input(input)
+    if not call:
+        return
+    logger.debug(
+        "tool_call: name=%s args=%r id=%s", call.get("name"), call.get("args"), call.get("id")
+    )
+
+
+def _log_tool_results_debug(result: dict) -> None:
+    """メイングラフのツール呼び出し結果を DEBUG レベルで記録する（全文、未省略）。"""
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    for msg in result.get("messages", []):
+        logger.debug("tool_result: name=%s content=%r", getattr(msg, "name", None), msg.content)
+
+
+_ALLOWED_WHILE_AWAITING_APPROVAL = {"approve_plan", "get_plan_status", "lock_plan_mode"}
+# このうち呼ばれたらガードのフラグ自体を解除するもの（それ以外
+# （get_plan_status）は読み取り専用の確認だけなので、フラグは維持したまま
+# 通過させる）。
+_CLEARS_AWAITING_APPROVAL = {"approve_plan", "lock_plan_mode"}
+
+
+def _guard_awaiting_approve_plan(input):  # noqa: A002
+    """create_plan 直後、approve_plan/get_plan_status/lock_plan_mode 以外の
+    tool_calls を実行させず、合成 ToolMessage に差し替える。
+
+    本番ログ・evalで、create_plan の直後に規定の approve_plan ではなく
+    ask_user_choice 等を自作して承認確認の代わりに使ってしまう事例が確認された
+    （システムプロンプトの指示のみでは確実性が無いため、コード側でも強制する）。
+    ただし、モデルが調査不足に自分で気づき lock_plan_mode で計画をやり直そうと
+    する自己修正（evalで実際に観測済み）は正当な経路として許可する。
+    ガード対象でなければ None を返す（呼び出し側はこの場合、通常通り
+    super().ainvoke()/invoke() を呼ぶこと）。
+
+    Args:
+        input: ImageAwareToolNode.invoke/ainvoke がそのまま受け取った入力
+            （_extract_tool_call_from_node_input 参照）。
+
+    Returns:
+        ブロックする場合は ToolNode.invoke/ainvoke と同じ形式の結果
+        （{"messages": [ToolMessage]}）。ガード対象外・許可リスト内の
+        呼び出しの場合は None。
+    """
+    if not cl.user_session.get("awaiting_approve_plan_call"):
+        return None
+    call = _extract_tool_call_from_node_input(input)
+    if not call:
+        return None
+    name = call.get("name")
+    if name in _ALLOWED_WHILE_AWAITING_APPROVAL:
+        if name in _CLEARS_AWAITING_APPROVAL:
+            cl.user_session.set("awaiting_approve_plan_call", False)
+        return None
+    # フラグはクリアしない（モデルが approve_plan/lock_plan_mode を呼ぶまで、
+    # 次の呼び出しも引き続きブロックする。plan_approved ガードと同様、
+    # 明示的に解除されるまでブロックし続ける設計）。
+    return {
+        "messages": [
+            ToolMessage(
+                content=(
+                    "エラー: create_planの直後はapprove_planを呼んでください"
+                    "（他のツールは実行されませんでした）。"
+                ),
+                name=name,
+                tool_call_id=call.get("id"),
+                status="error",
+            )
+        ]
+    }
+
+
+class ImageAwareToolNode(ToolNode):
+    """analyze_image の実行結果（画像）を、後続の HumanMessage として自動追加する ToolNode。
+
+    OpenAI互換API の tool role メッセージは文字列content しか持てないため、
+    画像を持つ ToolMessage.artifact をそのまま次のモデル呼び出しに含めることは
+    できない。そこで ToolNode 実行後に _with_image_followups() で後処理し、
+    画像を content に持つ HumanMessage を会話履歴へ追加する。
+    handwritten/prebuilt いずれのグラフ実装でも、素の ToolNode の代わりに
+    このクラスを使うだけで画像受け渡しに対応できる。
+
+    また ToolNode の公式拡張点 awrap_tool_call 経由で、全ツール呼び出しを
+    _TOOL_CALL_SEMAPHORE によりガードする（_tool_call_semaphore_wrap 参照。
+    ToolNode._afunc が同一AIMessage内の複数tool_callsを asyncio.gather() で
+    完全並列実行する挙動への対策。dispatch_agent 専用の
+    _DISPATCH_AGENT_SEMAPHORE と同じ理由づけのメインエージェント版）。
+    """
+
+    def __init__(self, tools, **kwargs):
+        kwargs.setdefault("awrap_tool_call", _tool_call_semaphore_wrap)
+        super().__init__(tools, **kwargs)
+
+    def invoke(self, input, config=None, **kwargs):  # noqa: A002
+        _log_tool_calls_debug(input)
+        blocked = _guard_awaiting_approve_plan(input)
+        if blocked is not None:
+            _log_tool_results_debug(blocked)
+            return _with_image_followups(blocked)
+        result = super().invoke(input, config, **kwargs)
+        _log_tool_results_debug(result)
+        return _with_image_followups(result)
+
+    async def ainvoke(self, input, config=None, **kwargs):  # noqa: A002
+        _log_tool_calls_debug(input)
+        blocked = _guard_awaiting_approve_plan(input)
+        if blocked is not None:
+            _log_tool_results_debug(blocked)
+            return _with_image_followups(blocked)
+        result = await super().ainvoke(input, config, **kwargs)
+        _log_tool_results_debug(result)
+        return _with_image_followups(result)
+
+
+def _require_memory_root() -> Path:
+    """_MEMORY_ROOT を返す。init_tools() が未実行なら RuntimeError。"""
+    if _MEMORY_ROOT is None:
+        raise RuntimeError("init_tools() が未実行です")
+    return _MEMORY_ROOT
+
+
+@tool
+def create_memory(name: str, description: str, memory_type: str, content: str) -> str:
+    """新しい永続メモリーを保存する。
+
+    スレッドをまたいで将来の会話へ引き継ぎたい価値ある事実を学んだときに使う。
+    memory_type ごとの保存タイミング・保存してはいけないものはシステムプロンプトの
+    Memory System セクションを参照すること。同名のメモリーが既にある場合はエラーに
+    なるので、既存メモリーの更新には update_memory を使うこと（迷ったら先に
+    search_memory / list_memories で重複が無いか確認する）。
+
+    Args:
+        name: 一意な名前（英数字・ハイフン・アンダースコアのみ、64文字以内）。
+        description: 一行の説明文（索引 MEMORY.md にそのまま載る）。
+        memory_type: "user" | "feedback" | "project" | "reference" のいずれか。
+        content: メモリー本文。feedback/project タイプはルール/事実の後に
+            「**Why:**」「**How to apply:**」の行を含めることが望ましい。
+
+    Returns:
+        保存したファイルパスを伝えるテキスト。name/memory_type が不正、
+        description/content が空、同名のメモリーが既に存在する場合は、
+        例外を送出せず「エラー: ...」形式の文字列を返す。
+    """
+    try:
+        path = memory.create_memory(_require_memory_root(), name, description, memory_type, content)
+    except (RuntimeError, ValueError) as e:
+        return f"エラー: {e}"
+    logger.info("create_memory: %s", name)
+    return f"メモリーを保存しました: {path}"
+
+
+@tool
+def update_memory(name: str, content: str) -> str:
+    """既存の永続メモリーの本文を更新する（name/description/memory_typeは変わらない）。
+
+    Args:
+        name: 更新対象メモリーの名前。
+        content: 新しい本文（既存の本文を丸ごと置き換える）。
+
+    Returns:
+        更新したファイルパスを伝えるテキスト。content が空、または name の
+        メモリーが存在しない場合は、例外を送出せず「エラー: ...」形式の文字列を返す。
+    """
+    try:
+        path = memory.update_memory(_require_memory_root(), name, content)
+    except (RuntimeError, ValueError) as e:
+        return f"エラー: {e}"
+    logger.info("update_memory: %s", name)
+    return f"メモリーを更新しました: {path}"
+
+
+@tool
+def delete_memory(name: str) -> str:
+    """永続メモリーを削除する。
+
+    Args:
+        name: 削除対象メモリーの名前。
+
+    Returns:
+        削除したファイルパスを伝えるテキスト。name のメモリーが存在しない場合は、
+        例外を送出せず「エラー: ...」形式の文字列を返す。
+    """
+    try:
+        path = memory.delete_memory(_require_memory_root(), name)
+    except (RuntimeError, ValueError) as e:
+        return f"エラー: {e}"
+    logger.info("delete_memory: %s", name)
+    return f"メモリーを削除しました: {path}"
+
+
+@tool
+def read_memory(name: str) -> str:
+    """永続メモリー1件を本文込みで全文読み込む。
+
+    search_memory / list_memories は一覧（name+description）しか返さないため、
+    メモリーの内容そのものを確認・引用する前には必ずこのツールで全文を読むこと。
+
+    Args:
+        name: 読み込むメモリーの名前。
+
+    Returns:
+        「[type] name\\ndescription\\n\\ncontent」形式の全文。name のメモリーが
+        存在しない場合は、例外を送出せず「エラー: ...」形式の文字列を返す。
+    """
+    try:
+        mem = memory.read_memory(_require_memory_root(), name)
+    except (RuntimeError, ValueError) as e:
+        return f"エラー: {e}"
+    logger.info("read_memory: %s", name)
+    return f"[{mem.memory_type}] {mem.name}\n{mem.description}\n\n{mem.content}"
+
+
+@tool
+def search_memory(query: str, memory_type: str | None = None) -> str:
+    """永続メモリーを name/description/本文に対するキーワード部分一致で検索する。
+
+    本文は返さず一覧（name+description）のみを返す（コンテキスト節約のため）。
+    内容そのものが必要な場合は、ヒットした name を read_memory へ渡すこと。
+
+    Args:
+        query: 検索キーワード（大文字小文字は区別しない）。
+        memory_type: 指定すれば "user"|"feedback"|"project"|"reference" の
+            いずれかに絞り込む（省略時は全type対象）。
+
+    Returns:
+        ヒットしたメモリーの「- [type] name: description」一覧と件数。
+        0件の場合は「一致するメモリーはありません」。query が空、または
+        memory_type が不正な値の場合は、例外を送出せず「エラー: ...」形式の
+        文字列を返す。
+    """
+    try:
+        hits = memory.search_memories(_require_memory_root(), query, memory_type)
+    except (RuntimeError, ValueError) as e:
+        return f"エラー: {e}"
+    logger.info("search_memory: query=%r type=%s hits=%d", query, memory_type, len(hits))
+    if not hits:
+        return "一致するメモリーはありません。"
+    lines = [f"- [{m.memory_type}] {m.name}: {m.description}" for m in hits]
+    return f"{len(hits)}件ヒットしました。\n" + "\n".join(lines)
+
+
+@tool
+def list_memories(memory_type: str | None = None) -> str:
+    """保存されている永続メモリーを一覧表示する。
+
+    Args:
+        memory_type: 指定すれば "user"|"feedback"|"project"|"reference" の
+            いずれかに絞り込む（省略時は全type対象）。
+
+    Returns:
+        「- [type] name: description」一覧。0件の場合は
+        「保存されているメモリーはありません」。memory_type が不正な値の
+        場合は、例外を送出せず「エラー: ...」形式の文字列を返す。
+    """
+    try:
+        mems = memory.list_memories(_require_memory_root(), memory_type)
+    except (RuntimeError, ValueError) as e:
+        return f"エラー: {e}"
+    logger.info("list_memories: type=%s count=%d", memory_type, len(mems))
+    if not mems:
+        return "保存されているメモリーはありません。"
+    return "\n".join(f"- [{m.memory_type}] {m.name}: {m.description}" for m in mems)
+
+
+@tool("help")
+def show_help() -> str:
+    """このシステムの使い方に関するヘルプ本文を返す。
+
+    ユーザーがヘルプや使い方、フィードバックの窓口について尋ねてきた場合に呼ぶ。
+    本文は config.ini の [paths].help_path が指すMarkdownファイル
+    （既定: system_prompt/help.md）に記述されており、このツールはその内容を
+    そのまま読み込んで返すだけの薄いラッパー（憶測でヘルプ内容を生成しない）。
+
+    Returns:
+        ヘルプ本文（UTF-8 テキスト、Markdown形式）。init_tools() が未実行、
+        または help_path のファイルが存在しない場合は、例外を送出せず
+        「エラー: ...」形式の文字列を返す。
+    """
+    if _HELP_PATH is None:
+        return "エラー: init_tools() が未実行です"
+    if not _HELP_PATH.is_file():
+        return f"エラー: ヘルプファイルが見つかりません: {_HELP_PATH}"
+    logger.info("show_help")
+    return _HELP_PATH.read_text(encoding="utf-8")
+
+
+# グラフに渡す組み込みツール一覧（3 段階の progressive disclosure + サブエージェント委譲 +
+# ユーザー質問 + 永続メモリー + ヘルプ）。MCPサーバー由来の動的ツール（_MCP_TOOLS）とは
+# 別管理にし、get_all_tools() で合流させる（詳細は _MCP_TOOLS 定義箇所参照）。
+_BASE_TOOLS: list[BaseTool] = [
+    read_skill,
+    read_skill_file,
+    provide_download,
+    show_image,
+    run_script,
+    run_script_background,
+    check_script_job,
+    stop_script_job,
+    execute_python_code,
+    get_tool_source,
+    check_work_dir_status,
+    analyze_image,
+    read_tool,
+    glob_tool,
+    grep_tool,
+    json_query,
+    list_path_memory,
+    dispatch_agent,
+    ask_user_question,
+    ask_user_choice,
+    create_plan,
+    approve_plan,
+    update_task_progress,
+    get_plan_status,
+    lock_plan_mode,
+    create_memory,
+    update_memory,
+    delete_memory,
+    read_memory,
+    search_memory,
+    list_memories,
+    show_help,
+]
+
+# MCPサーバーから取得した動的ツール（init_mcp_tools() が起動時に1回だけ設定する）。
+# src/mcp_client.py が register_mcp_tools() 経由で書き込む。
+_MCP_TOOLS: list[BaseTool] = []
+
+
+def register_mcp_tools(mcp_tools: list[BaseTool]) -> None:
+    """MCPサーバーから取得した動的ツール一覧を差し替える。
+
+    src.mcp_client.init_mcp_tools()（app.py の @cl.on_app_startup から
+    アプリ起動時に1回だけ呼ばれる）が呼ぶ。
+
+    Args:
+        mcp_tools: 接続に成功した全MCPサーバーのツールをフラットにまとめたリスト。
+    """
+    global _MCP_TOOLS
+    _MCP_TOOLS = list(mcp_tools)
+
+
+def get_all_tools() -> list[BaseTool]:
+    """メインエージェントに渡す全ツール（組み込み + MCP動的登録分）を返す。
+
+    src/graph.py の build_graph() がセッション構築の都度これを呼ぶため、
+    MCP接続が完了する前に呼ばれても（register_mcp_tools() 未実行なら）
+    組み込みツールのみで安全にグラフを構築できる。
+    """
+    return [*_BASE_TOOLS, *_MCP_TOOLS]

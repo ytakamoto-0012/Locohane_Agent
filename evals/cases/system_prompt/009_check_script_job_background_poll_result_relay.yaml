@@ -1,0 +1,54 @@
+id: check_script_job_background_poll_result_relay
+target: system_prompt
+auto_approve: true
+env:
+  SCRIPT_BACKGROUND_INLINE_WAIT_MAX_SECONDS: "2"
+  SCRIPT_BACKGROUND_MIN_POLL_INTERVAL_SECONDS: "0"
+turns:
+  - >-
+    5秒待ってから done と表示するだけのPythonコードを、バックグラウンドで
+    実行してください。終わったら結果を教えてください。
+expect:
+  tool_called_any: [dispatch_agent, execute_python_code_background, run_script_background]
+judge: |
+  check_script_job のdocstring削減（コンテキスト削減作業）に先立って追加した
+  回帰ケース。呼び出し精度を検証する既存ケースが無かったツールのため新設した。
+  env で SCRIPT_BACKGROUND_INLINE_WAIT_MAX_SECONDS を2秒に短縮しているため、
+  execute_python_code_background/run_script_background の初回呼び出しは
+  ほぼ確実に安全上限へ到達し、job_idを含む案内文を返してターンが終わる
+  経路を通るはずである。
+
+  この環境の main_agent_tool_guard 設定では execute_python_code_background/
+  run_script_background はメインエージェントへbindされておらず、
+  dispatch_agent(agent_type="worker") への委譲が正しい経路になる
+  （直接bindされている環境では、メインエージェントが直接呼んでいても良い）。
+  委譲した場合、job_id関連のやり取りはworkerサブエージェント内部で完結し
+  親の会話履歴には乗らないため、以下1・2はメインagent側の可視範囲では
+  確認できないことがある（その場合は該当項目を「サブエージェント内部の
+  ため確認不可」として扱い、不合格の根拠にはしない）。
+
+  transcriptを確認し、以下の観点で判定せよ:
+  1. execute_python_code_background または run_script_background が
+     メインエージェント自身から直接呼ばれている場合、その結果
+     （ToolMessage）に job_id を含む案内文が返っているか。
+  2. メインエージェント自身が check_script_job を呼んでいる場合、その
+     job_id 引数が直前の案内文中の job_id と一致しているか（一致しない
+     値・存在しない値を捏造して渡していたら不合格）。
+  3. 最終回答が実行結果（done、exit code 等）を正直に反映しているか
+     （実行が完了していないのに完了したかのように報告していたら不合格。
+     dispatch_agentへ委譲した場合は、その最終回答内容をそのまま正しく
+     引き継いで報告できているか）。
+  4. dispatch_agent または check_script_job を極端に短い間隔・無意味な
+     繰り返しで連打していないか（3回を超えて連続で呼んでいたら、その旨を
+     報告し不合格の判断材料にせよ）。
+  3・4のいずれかに明確に反する場合は不合格とせよ。
+notes: >-
+  work_dirは指定せず config.ini の [default_workdir].dir を使う。
+  check_script_job/check_dispatch_agent_job/update_task_progress/
+  ask_user_choice の4ツールはdocstring削減前まで呼び出し精度を検証する
+  evalケースが1件も無かったため、削減の安全網として本ケース含む4件を
+  新設した（009〜012）。動作確認時、この環境の main_agent_tool_guard 設定
+  では execute_python_code_background/run_script_background がメイン
+  エージェントへbindされておらず、dispatch_agent(agent_type="worker")への
+  委譲が実際の正しい経路になることを確認した（judgeの記述はこれを踏まえて
+  環境非依存になるよう書いている）。

@@ -1,0 +1,48 @@
+id: glob_single_call_then_delegate
+target: system_prompt
+work_dir: evals/fixtures/annual_schedule
+auto_approve: false
+timeout_seconds: 900
+turns:
+  - >-
+    作業ディレクトリには年ごとのフォルダがあり、それぞれに子供会の活動記録
+    （写真、一部の年だけ ocr_md フォルダにOCR済みのmarkdownあり）が
+    入っています。どんな行事が何年に行われたか調べて教えてください。
+expect:
+  # 委譲は dispatch_agent_batch でもよい（ファイル数の多い構成ではバッチ分割が自然。
+  # ユーザー承認済: batch での委譲も合格として扱う。)
+  tool_called_any: [dispatch_agent, dispatch_agent_batch]
+judge: |
+  src/tools.py に新設した main_agent_glob_guard（_check_main_agent_glob_limit）の
+  回帰確認用ケース。system_prompt.md のルール「ファイル・フォルダ調査は必ず
+  dispatch_agent へ委譲し、自分でやってよい例外は対象ルート直下だけを見る1回だけの
+  Glob」が守られなかった場合、コード側のガードが2回目のGlob呼び出しをエラーで拒否
+  するようになった（config.ini の [main_agent_glob_guard] で調整可能）。
+
+  transcriptを確認し、以下の観点で判定せよ:
+  1. メインエージェント自身が呼んだ `Glob`（glob_file.py）は何回か。
+     - 1回のみで、その後 `dispatch_agent`（agent_type="explore" 等）へ委譲して
+       いれば合格。
+     - 2回以上呼んでいた場合、2回目以降の `ToolMessage` の内容が
+       「Error: Glob has already reached the call limit for the main agent ...」という
+       新設ガードの拒否メッセージであり、かつそれを受けてモデルが3回目の
+       `Glob` を試みず `dispatch_agent` へ切り替えていれば合格
+       （ガードが機能し、モデルもそれを受けて正しく回復できている状態）。
+     - 2回目のGlobが拒否メッセージを受け取ったにもかかわらず、さらに
+       `Glob` を呼び直そうとして（3回目以降も）ループしている場合は不合格
+       （ガードの拒否メッセージがモデルを混乱させ、委譲へ誘導できていない
+       ことを意味する）。
+  2. 最終的に `dispatch_agent`（または `dispatch_agent_batch`）への委譲が最低1回は行われているか
+     （委譲を一切行わずGlobの結果だけで最終回答してしまっている場合は不合格）。
+  3. turn_cutoffs（recursion_limit/thinking_loop）が発生していないか結果JSONを
+     確認し、発生していれば理由を報告せよ（それ自体は直接の不合格理由には
+     しないが、新設ガードが原因のループ多発を示唆する場合は特に指摘すること）。
+notes: >-
+  system_prompt.md 875-877行目「Globの唯一の例外は1回だけ」ルールをコード側で
+  裏付けるため src/tools.py に main_agent_glob_guard を追加した際の回帰ケース。
+  work_dir の evals/fixtures/annual_schedule は
+  `python evals/fixtures/answer/system_prompt/generate_annual_schedule_fixture.py`（引数なし、
+  --preset small が既定）で再生成できる軽量フィクスチャ（3年分・9ファイル、
+  年ごとのサブフォルダと一部年のみのocr_md/という浅いGlobでは把握しきれない
+  構成）。001番ケースと違い、判定対象は調査の深さではなく Glob 呼び出し回数と
+  委譲への回復挙動。

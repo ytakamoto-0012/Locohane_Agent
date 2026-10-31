@@ -1,0 +1,61 @@
+"""指定ディレクトリ配下で glob パターンに一致するファイルを検索し JSON で出力する。
+
+file-tools スキルの実行スクリプト（progressive disclosure 第3段階）。
+run_script ツールから
+    python glob_file.py <pattern> [--path DIR] [--head-limit N]
+の形で呼ばれる。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from _common import register_paths, setup_utf8_stdio, suggest_similar_dir
+
+
+def main() -> int:
+    setup_utf8_stdio()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("pattern")
+    parser.add_argument("--path", default="")
+    parser.add_argument("--head-limit", type=int, default=200)
+    args = parser.parse_args()
+
+    base = Path(args.path) if args.path else Path.cwd()
+    if not base.exists():
+        hint = suggest_similar_dir(args.path) if args.path else ""
+        print(f"検索起点ディレクトリが見つかりません: {args.path}{hint}", file=sys.stderr)
+        return 1
+    if not base.is_dir():
+        print(f"検索起点パスがディレクトリではありません: {args.path}", file=sys.stderr)
+        return 1
+
+    try:
+        matches = [p for p in base.glob(args.pattern) if p.is_file()]
+    except ValueError as e:
+        print(f"パターンが不正です: {e}", file=sys.stderr)
+        return 1
+
+    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    truncated = matches[: args.head_limit]
+    files = [str(p.resolve()) for p in truncated]
+
+    result = {
+        "base": str(base.resolve()),
+        "total_matches": len(matches),
+        "returned": len(truncated),
+        "truncated": len(matches) > args.head_limit,
+        "files": files,
+    }
+    path_memory = register_paths(files)
+    if path_memory:
+        result["path_memory"] = path_memory
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

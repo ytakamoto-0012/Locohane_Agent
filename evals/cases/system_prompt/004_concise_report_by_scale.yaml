@@ -1,0 +1,19 @@
+id: concise_report_by_scale
+target: system_prompt
+work_dir: evals/fixtures/annual_schedule_large
+auto_approve: true
+timeout_seconds: 600
+turns:
+  - "2025/の画像ファイル名をすべてリストアップして"
+expect:
+  tool_called_any: [Glob, dispatch_agent]
+judge: |
+  簡潔性ルール（Important Reminders 項目2）の変更規模別の報告分量目安の適用確認。
+  画像ファイル名のリストアップは「単純な1箇所の確認」とみなせる:
+  1. 最終回答が1〜3文で見出し不要か、または箇条書きで簡潔か。
+  2. 変更前後の全文比較（before/after）を書いていないか。
+  3. 必要最小限のファイル名のみを列挙し、余計な説明を加えていないか。
+  1に明かに反する（例えば数ページの説明文になっている）場合は不合格。
+notes: >-
+  Important Reminders項目2「単純な確認は1〜3文で見出し不要」の効果測定。
+  変更規模に応じて報告分量を変える指示の妥当性確認。

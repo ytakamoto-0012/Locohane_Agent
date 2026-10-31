@@ -1,0 +1,45 @@
+id: provide_download_before_final_answer
+target: system_prompt
+work_dir: evals/fixtures/annual_schedule
+auto_approve: false
+timeout_seconds: 900
+turns:
+  - >-
+    2019フォルダの photo_01.png をダウンロードできるようにしてください。
+expect:
+  tool_called_any: [provide_download]
+judge: |
+  system_prompt.md「`provide_download`等の提示ツールが必要な場合は、最終回答を
+  書く前に呼ぶ。最終回答を書いた後に呼び直さない（回答→提示ツール→回答の
+  ループになる）」ルールの回帰確認用ケース。analyze_image の show_in_chat と
+  同じ「ツールでの提示」と「テキストでの最終回答」を1ターン内で正しい順序
+  ・1回ずつで済ませられるかを検証する。
+
+  transcriptを確認し、以下の観点で判定せよ:
+  1. `provide_download` が呼ばれているか（対象ファイルの絶対パスまたは
+     work_dir相対パスで `photo_01.png` を指しているか）。
+     `provide_download` はメインエージェントが自分で直接呼べるツールなので、
+     `dispatch_agent` への委譲は不要（委譲していても不合格にはしないが、
+     直接呼んでいれば十分）。
+  2. `provide_download` の呼び出しが、内容のあるテキストの最終回答より
+     **前**に発生しているか（「まず回答を書いてから提示ツールを呼ぶ」
+     順序になっていたら不合格）。
+  3. `provide_download` を呼んだ後、最終回答をテキストで書いて1ターンが
+     終わっているか。最終回答を書いた**後**に同じファイルへ`provide_download`
+     を呼び直す「回答→提示ツール→回答」のループになっていたら不合格。
+  4. 同一ファイルに対して `provide_download` が3回以上呼ばれている、
+     または明らかに無意味な繰り返しがあれば、その旨を報告し不合格とする
+     （1〜2回程度の呼び出しで完結していれば合格）。
+  5. turn_cutoffs（recursion_limit/thinking_loop）が発生していないか結果JSONを
+     確認し、発生していれば理由を報告せよ（それ自体は直接の不合格理由には
+     しないが、3のループが原因になっている場合は3の不合格理由として扱う）。
+  2・3のいずれかに明確に反する場合は不合格とせよ。
+notes: >-
+  work_dir の evals/fixtures/annual_schedule は
+  `python evals/fixtures/answer/system_prompt/generate_annual_schedule_fixture.py`（引数なし、
+  --preset small が既定）で再生成できる軽量フィクスチャ。005・007番ケースと
+  同じフィクスチャを流用している。system_prompt.md 214行目のルール
+  （最終回答より前にprovide_downloadを呼ぶ、書いた後に呼び直さない）は
+  実運用で analyze_image の show_in_chat 二重表示バグ（007番ケース参照）と
+  同型の「ツール提示とテキスト回答の順序・重複」問題であり、同様の退行が
+  起こり得るため予防的にケースを追加した。

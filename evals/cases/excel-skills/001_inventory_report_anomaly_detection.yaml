@@ -1,0 +1,54 @@
+id: inventory_report_anomaly_detection
+target: excel-skills
+work_dir: evals/fixtures/excel_columns_scale
+auto_approve: true
+timeout_seconds: 3600
+turns:
+  - >-
+    inventory_report.xlsx の内容を確認して、おかしいところがあれば
+    教えてください。
+expect:
+  tool_called_any: [run_script, dispatch_agent]
+  response_not_contains: ["申し訳ありません", "できません"]
+judge: |
+  300行×30列の表データ（在庫売上一覧シート、inventory_report.xlsx）に
+  意図的な異常を5箇所仕込んだフィクスチャ
+  （generate_excel_columns_scale_fixture.py参照）。既定の`--limit`が200行
+  のため、read_excel.pyを1回呼ぶだけでは全300行を読み切れず、複数回の
+  呼び出し（offset/limitでの分割、または--columnsでの列絞り込み）が
+  必要になる規模にしてある。仕込んだ異常は以下の5件（Excel行番号）:
+
+  1. 121行目: Q列（年間数量合計）の数式が`=SUM(E121:O121)`でP列（12月分）を
+     含んでいない（本来`=SUM(E121:P121)`のはず）。
+  2. 81行目: K列（7月数量）が-120というマイナス値。
+  3. 51行目と251行目: A列（ID）が両方とも"P-1050"で重複している。
+  4. 151行目: AD列（年間金額合計）の数式が`=SUM(R151:AD151)`で自身の
+     セルを範囲に含む循環参照になっている。read_excel.pyの`--style`付き
+     呼び出しでは`warnings`にこの循環参照が自動で含まれる。
+  5. 201行目: D列（単価）が0なのに、月別金額列（R〜AC）には非ゼロの
+     売上金額が入っている（単価0なら金額も0のはずという矛盾）。
+
+  以下を確認せよ:
+  1. transcript中のread_excel.py（run_script経由）の呼び出しが、300行を
+     一度に読もうとせず、`--offset`/`--limit`で複数回に分けている、
+     または`--columns`で列を絞り込んでいるか（既定`--limit`200のまま
+     一度も分割せず、201行目以降を一切確認していない場合は不十分と
+     評価してよい）。
+  2. 上記5件の異常のうち、具体的な行番号・列・内容に言及して指摘できて
+     いるものがいくつあるか数えよ。全5件を見つけることは要求しない
+     （2件以上を具体的に指摘できていれば合格ラインとして十分）。
+     曖昧に「異常がありそうです」とだけ述べて具体的な箇所を一つも
+     挙げていない場合は不合格に近いと評価せよ。
+  3. 実際には存在しない異常を捏造して報告していないか（存在しない行・
+     列・内容を挙げている場合は問題として報告せよ、ただし直接の
+     不合格理由にはしない）。
+  4. 最終回答が「確認しました」だけで終わらず、発見した異常の内容を
+     ユーザーに分かる形で報告しているか。
+  1・2のいずれかに明確に反する場合は不合格とせよ。
+notes: >-
+  excel-readスキルの--columns（2026-09-10追加、列絞り込み）と
+  --offset/--limit（既定200行）を組み合わせて、行数・列数どちらも多い
+  表を正しく分割して読めるか、また読んだ内容から異常を発見できるかを
+  評価する。fixtureは
+  `python evals/fixtures/answer/excel-skills/generate_excel_columns_scale_fixture.py`
+  で再生成できる（決定論的、seed固定）。

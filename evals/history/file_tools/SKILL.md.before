@@ -1,0 +1,133 @@
+---
+name: file-tools
+description: ローカルファイルシステム上の任意の絶対パスに対するファイル読み込み・ファイル名検索(glob)・全文検索(grep)、およびJSON/dictへのJMESPathクエリを行う。ユーザーが指定した絶対パスのファイル内容を確認したいとき、ファイル名やパターンでファイルを探したいとき、テキスト内容を正規表現で検索したいとき、JSON構造から特定の値だけを取り出したいときに使う。
+license: MIT
+metadata:
+  author: local-agent-system
+  version: "1.0"
+---
+
+# file-tools
+
+ローカルファイルシステムに対する Read/Glob/Grep 操作、および JSON/dict に対する
+JMESPath クエリを提供するスキルです。`scripts/` 配下の4つのスクリプトを
+`run_script` ツールで実行して結果を得ます。
+
+skills ディレクトリ配下限定の `read_skill_file` とは異なり、このスキルの
+`read_file.py` は**任意の絶対パス**（例: `C:\Users\foo\bar.txt`）を読めます。
+用途に応じて使い分けてください（スキル本文・補助資料を読むなら
+`read_skill_file`、ユーザーが指定した任意のファイルを読むならこのスキル）。
+**`glob_file.py`/`grep_file.py` が返すパスは常にこのスキル自身
+（`read_file.py` の `script_args` や他スクリプトの `--path`）に渡すこと。
+`read_skill_file` に渡すと「skills ディレクトリ外へのアクセスは許可されません」
+という無関係なエラーになるので混同しないこと。**
+
+各スクリプトは正常系なら終了コード0でJSON1行を標準出力へ、異常系なら
+終了コード非0でエラーメッセージを標準エラーへ出力します。
+
+**パスメモリー**: `read_file.py`/`glob_file.py`/`grep_file.py` が返す絶対パスには
+自動的に短い参照番号（`@1`, `@2`, ...）が付与され、出力の `path_memory` キー
+（`{"@1": "C:\\...", ...}`）に含まれます。長いパスを再入力する代わりに
+`view_image` や `run_script` の絶対パス引数へ `@N` をそのまま渡せます
+（詳細は `path-memory` スキルを参照）。
+
+## 1. read_file.py — 行番号付きファイル読み込み
+
+`run_script` の引数:
+- `skill_name`: `file-tools`
+- `script`: `scripts/read_file.py`
+- `script_args`: `["<絶対パス>", "--offset", "<省略可、既定0>", "--limit", "<省略可、既定2000>"]`
+
+出力例:
+```json
+{"path": "C:\\foo\\bar.txt", "total_lines": 120, "start_line": 1, "end_line": 120, "content": "1\t1行目\n2\t2行目", "path_memory": {"@1": "C:\\foo\\bar.txt"}}
+```
+`content` は `"行番号\t内容"` を改行結合した文字列です。それをそのまま
+ユーザーへ提示するか、必要な部分だけ要約して報告してください。
+
+エッジケース: ファイル不在・ディレクトリ指定・バイナリファイルはエラー終了します。
+大きいファイルの続きを読みたい場合は `--offset` を `end_line` に合わせて指定してください。
+
+## 2. glob_file.py — ファイル名検索
+
+`run_script` の引数:
+- `skill_name`: `file-tools`
+- `script`: `scripts/glob_file.py`
+- `script_args`: `["<globパターン>", "--path", "<検索起点、省略可>", "--head-limit", "<省略可、既定200>"]`
+
+例: 配下の全Pythonファイルを再帰検索するなら `"**/*.py"`。
+
+出力例:
+```json
+{"base": "C:\\project", "total_matches": 3, "returned": 3, "truncated": false, "files": ["C:\\project\\a.py", "..."], "path_memory": {"@1": "C:\\project\\a.py", "@2": "..."}}
+```
+`files` は更新日時降順です。`truncated` が true の場合は `total_matches` 件中
+`returned` 件のみ返している旨をユーザーに伝えてください。
+
+## 3. grep_file.py — 内容検索（正規表現）
+
+`run_script` の引数:
+- `skill_name`: `file-tools`
+- `script`: `scripts/grep_file.py`
+- `script_args`: `["<正規表現>", "--path", "<省略可>", "--glob", "<省略可>", "--output-mode", "<files_with_matches|content|count、既定files_with_matches>", "--case-insensitive", "--context", "<省略可>", "--head-limit", "<省略可>"]`
+  （`--case-insensitive` は値を取らないフラグ。大文字小文字を無視したいときだけ追加する）
+
+出力は `output-mode` により異なります（いずれのモードもマッチしたパスに
+`path_memory` キーが付与されます）:
+- `files_with_matches`（既定）: `{"matched": true, "total_files": N, "returned": N, "files": [...], "path_memory": {...}}`
+- `count`: `{"matched": true, "total_files": N, "returned": N, "counts": [{"path": ..., "count": ...}, ...], "path_memory": {...}}`
+- `content`: `{"matched": true, "total_matches": N, "returned": N, "truncated": bool, "matches": [{"path": ..., "line": ..., "text": ...}, ...], "path_memory": {...}}`
+
+マッチが1件もない場合は `{"matched": false, ...}` が返ります。その場合は
+「該当箇所が見つからなかった」旨をユーザーに伝えてください。
+
+## 4. json_query.py — JMESPathクエリ
+
+`run_script` の引数:
+- `skill_name`: `file-tools`
+- `script`: `scripts/json_query.py`
+- `script_args`: `["<JMESPathクエリ>", "--file", "<JSONファイルの絶対パス>"]`
+
+JSONを直接文字列で渡したい場合は `--file` を省略し、標準入力へJSON文字列を
+渡す運用も可能ですが、`run_script` は標準入力を扱えないため、通常は
+一時ファイルに保存してから `--file` で渡してください。
+
+**注意**: JMESPath は Unix の `jq` とは構文が異なります。`.a.b` ではなく `a.b`、
+配列フィルタは `items[?age > \`30\`].name` のように書きます。
+
+出力例:
+```json
+{"result": {"name": "太郎", "age": 30}}
+```
+該当データが無い場合は `{"result": null}` が返ります。
+
+## 大量ファイル・ディレクトリ構造の効率的な調査
+
+数十〜数百件規模のファイルを含むディレクトリを調査する場合、以下の手順を
+優先すること（`execute_python_code` で `os.walk` 等のディレクトリ走査コードを
+自前実装するより確実・簡潔）:
+
+1. まず `glob_file.py` を `"**/*"`（または絞ったパターン、例: `"**/*.png"`）で
+   実行し、対象ディレクトリ配下のファイル一覧を1回で取得する。ディレクトリ階層は
+   返されたパス文字列自体から読み取れるため、別途ツリー表示コードを書く必要はない。
+2. ファイル名や内容でさらに絞り込みたい場合は `grep_file.py` を使う（例: 特定の
+   年・キーワードを含むファイルだけに絞る）。
+3. `total_matches`（`glob_file.py`）や `total_files`（`grep_file.py`）が数十件を
+   超える場合、全件を1つずつ `read_file.py`/`view_image` で読むと非効率かつ
+   自分の会話が長くなりすぎる。年・サブフォルダ等の単位で `dispatch_agent` に
+   分割委任すること（詳細は system_prompt の Task Delegation 節を参照）。
+4. 画像ファイルは `read_file.py` では読めない（バイナリとしてエラーになる）。
+   内容を確認したい場合は `view_image` ツールを使う（skills 配下は相対パス、
+   作業ディレクトリ配下は絶対パスで指定する）。`glob_file.py` の結果に
+   付与された `path_memory` の `@N` をそのまま `view_image` に渡せば、
+   長い絶対パスを再入力する必要はない。`@N` が「登録されていません」と
+   言われた場合は `path-memory` スキルの `list_path_memory.py` で現在の
+   登録内容を確認すること。
+
+## エッジケース共通
+
+- 依存パッケージ `jmespath` が実行環境に入っていないと `json_query.py` は
+  `ModuleNotFoundError` で終了コード非0になります。その場合は導入者へ
+  `pip install jmespath` の実施を促してください。
+- いずれのスクリプトも例外を投げず、エラーはstderr+終了コード非0で返します。
+  `run_script` の戻り値テキストの `[標準エラー]` セクションを確認してください。

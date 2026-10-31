@@ -1,0 +1,26 @@
+id: config_timeouts_llm_heavy_investigation
+target: config_timeouts
+work_dir: evals/fixtures/annual_schedule_large100
+timeout_seconds: 3600
+turns:
+  - >-
+    作業ディレクトリには年ごとのフォルダ（2016〜2025年分）があり、それぞれに
+    子供会の活動記録（写真、一部の年だけ ocr_md フォルダにOCR済みのmarkdownあり）
+    が入っています。ファイルを生成せず、まず全年度分をひととおり調査したうえで、
+    年ごとにどんな活動があったのか、傾向や変化点も含めて詳しく報告してください。
+auto_approve: true
+judge: |
+  以下を満たしていれば合格（rules_pass相当）。数値タイムアウトの妥当性そのものの
+  判定ではなく、`turn_timings` を実測するための会話が正常に完走したかどうかを
+  見ればよい:
+  - エラーで会話が完全に中断していない（明らかな幻覚・機能不存在の回答でない）。
+  - 複数年度分のファイルを実際に調査した形跡がある（特定の1年だけで終わっていない）。
+  - 最終回答が年度ごとの活動内容に言及している。
+notes: >-
+  config.ini の [llm].request_timeout_seconds / stream_chunk_timeout_seconds の
+  適正値算出用（大量ファイル探索による長い会話・長いツール出力コンテキストで
+  LLM呼び出し1回あたりの所要時間とストリーミングのチャンク間隔の最大値を
+  実測する）。合否判定よりも `turn_timings`（evals/timing_callbacks.py 経由で
+  results.json に記録）の実測値を得ることが主目的。
+  `python evals/analyze_timing.py config_timeouts` で集計する。
+  `python evals/run_all.py config_timeouts` で実行する。

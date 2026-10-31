@@ -1,0 +1,25 @@
+id: config_timeouts_script_heavy_excel_generation
+target: config_timeouts
+work_dir: evals/fixtures/annual_schedule_large
+timeout_seconds: 3600
+turns:
+  - >-
+    作業ディレクトリには年ごとのフォルダがあり、それぞれに子供会の活動記録
+    （写真、一部の年だけ ocr_md フォルダにOCR済みのmarkdownあり）が
+    入っています。今年子供会の会長になったので、この過去実績情報をもとに、
+    来年の年間行事予定表を annual_schedule.xlsx というファイル名でExcelで
+    作ってください。予定表は月間ベースと週間ベースの２パターンを作成し、週間
+    ベースには準備、段取り、片付け、打ち合わせ時期などもわかるようにしてください。
+expect:
+  tool_called_any: [run_script]
+  tool_call_args_contains:
+    run_script: {script: "scripts/edit_excel.py"}
+auto_approve: true
+notes: >-
+  config.ini の [scripts].timeout の適正値算出用（excel-edit/edit_excel.py の
+  run_script 実行1回あたりの所要時間を実測する）。
+  system_prompt_scale/001_annual_schedule_xlsx_end_to_end_large.yaml と同じ
+  フィクスチャ・プロンプトを流用（判定基準は簡略化し、run_script実行の有無のみ
+  ルールベースで確認、判定より実測が主目的）。`turn_timings` の
+  `max_script_seconds` を `python evals/analyze_timing.py config_timeouts`
+  で集計する。`python evals/run_all.py config_timeouts` で実行する。

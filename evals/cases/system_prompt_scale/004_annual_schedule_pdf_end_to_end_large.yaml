@@ -1,0 +1,77 @@
+id: annual_schedule_pdf_end_to_end_large
+target: system_prompt_scale
+work_dir: evals/fixtures/annual_schedule_large
+timeout_seconds: 3600
+turns:
+  - >-
+    作業ディレクトリには年ごとのフォルダがあり、それぞれに子供会の活動記録
+    （写真、一部の年だけ ocr_md フォルダにOCR済みのmarkdownあり）が
+    入っています。今年子供会の会長になったので、この過去実績情報をもとに、
+    来年の年間行事予定表を annual_schedule.pdf というファイル名でA4印刷
+    可能なPDFとして作ってください。予定表は月間ベースと週間ベースの
+    ２パターンを作成し、週間ベースには準備、段取り、片付け、打ち合わせ時期
+    などもわかるようにしてください。
+
+expect:
+  tool_call_args_contains:
+    dispatch_agent:
+      agent_type: worker
+  response_not_contains: ["申し訳ありません", "できません", "機能がありません"]
+auto_approve: true
+judge: |
+  001_annual_schedule_xlsx_end_to_end_large と同じシナリオ（大量の画像+一部
+  OCR mdフォルダから過去実績を読み取り、年間行事予定表を作る）を、出力形式
+  だけxlsxからPDFに変えて再現するend-to-end検証。フィクスチャ
+  （evals/fixtures/annual_schedule_large）は001と共通。
+
+  pdf生成は pdf-tools の create_pdf.py（run_script経由、見出し・段落・表等の
+  セマンティックHTMLを渡してA4印刷可能なPDFを生成する方式）で行う
+  （system_prompt.md「【必須ルール】ファイルの新規作成・編集はスキルの
+  専用スクリプトを最優先する」節、pdf-tools SKILL.md参照）。read_pdf.py/
+  render_pdf_pages.py は既存PDFを読むための機能でありこのケースの本題では
+  ない（作業ディレクトリに入力PDFは存在しない）。
+
+  以下を確認せよ:
+  1. run_script で pdf-tools の実処理（create_pdf.py）を呼ぶ前に、
+     create_plan → approve_plan を経由しているか（計画未承認のままだと
+     ツール側でブロックされ「Error: cannot run because the plan is not approved」が
+     返るため、これが返っている場合は不合格）。
+  2. `read_skill(pdf-tools)` を読み、`run_script` で `create_pdf.py` を
+     呼び出してannual_schedule.pdf（またはそれに類するファイル名）を
+     作成しているか。`execute_python_code` で reportlab等を使い自作して
+     いる場合は不合格（system_prompt.md の「スキルの専用スクリプトを
+     最優先する」ルール違反）。
+  3. 実行結果（ToolMessage）が正常終了（エラーでない）になっているか。
+  4. 生成した予定表の中身が、過去実績（ランダム生成のため具体的な行事名は
+     ケースごとに変わる）を一切参照せず一般的な行事名を当て推量しているだけ
+     ではなく、実際にフォルダ内の複数年・複数行事の情報を読み取った形跡が
+     transcript（read_skill_file/run_script/dispatch_agent 等の呼び出し内容）
+     から確認できるか。
+  5. 大量ファイルの探索中に、同じ失敗を繰り返す・タイプミスを繰り返す等の
+     明らかなループに陥っていないか。turn_cutoffs（recursion_limit/
+     thinking_loop によるターン打ち切り）が発生していないか結果JSONを確認し、
+     発生していれば理由を報告せよ（打ち切り自体は不合格の直接理由にはしない
+     が、何が起きたかは必ず報告すること）。
+  6. 最終回答がユーザーに生成ファイルの場所を伝えているか。
+  7. `dispatch_agent(agent_type="verifier")` による検証で差異・不備が
+     報告された場合、その直後に「修正します」等と述べたにもかかわらず
+     実際には修正のツール呼び出し（run_script/dispatch_agent等）を行わずに
+     検証ステップ・計画を`completed`にしていないか、また最終回答が
+     その不備を解消済みであるかのように（実際には未修正のまま）
+     報告していないか。verifierの指摘内容と、その後に実際に修正が
+     行われたか（該当箇所を書き換えるツール呼び出しがtranscriptに
+     存在するか）を突き合わせて確認し、指摘だけ受けて未修正のまま
+     完了扱い・完了報告している場合は不合格とせよ。
+     （verifierが差異なしと報告した場合はこの項目は該当なしとする）
+  1・2・6・7のいずれかに明確に反する場合は不合格とせよ。
+notes: >-
+  001_annual_schedule_xlsx_end_to_end_large のpdf版として追加した派生
+  ケース。シナリオ・フィクスチャ（evals/fixtures/annual_schedule_large、
+  generate_annual_schedule_fixture.py --preset large で生成）は001と共通、
+  出力形式のみExcel（excel-edit）からPDF（pdf-tools/create_pdf.py）に
+  変更した。/tune-prompt system_prompt の自動ループには含めない（毎
+  イテレーション実行するには重すぎるため、001と同じ理由）。
+  `python evals/fixtures/answer/system_prompt/generate_annual_schedule_fixture.py --preset large`
+  でフィクスチャを再生成できる（001と共有、決定論的、seed固定）。
+  `python evals/run_all.py system_prompt_scale` で手動実行する。
+  2026-08-13: 新規作成。

@@ -1,0 +1,211 @@
+"""サブエージェント（タスク委譲）用の独立した ReAct ループ。
+
+tools.py の dispatch_agent ツールから呼ばれる。LangGraph の StateGraph は
+使わず、graph.py の _build_handwritten_graph（call_model → should_continue
+→ ToolNode → call_model … のループ）と同じ流れを async 関数の中で再現する。
+
+意図的に tools.py / graph.py を import しない（呼び出し側から tools /
+system_prompt / config を引数で受け取る汎用エンジンにすることで、
+tools.py → subagent.py → tools.py という循環 import を避けている）。
+
+model.ainvoke() / tool.ainvoke() はいずれも RunnableConfig を明示的に渡さない
+ため、親グラフの astream_events には内部の呼び出しが一切伝播しない。
+これにより、サブエージェント内部の思考過程・ツール呼び出しは Chainlit の
+UI には表示されず、ログファイルにのみ記録される（コンテキスト節約が目的）。
+
+async 化している理由: run_script が実行前にユーザー承認を求める async ツール
+になったため（tools.py 参照）。dispatch_agent 自身も async ツールであり、
+ImageAwareToolNode.ainvoke から同一イベントループ上で直接 await されるので、
+ここで ainvoke に統一しても新規スレッド/イベントループのブリッジは不要。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import BaseTool
+
+from .config import Config
+from .images import image_followup_message
+from .llm import ThinkingLoopDetected, build_model, pick_loop_nudge_message
+
+logger = logging.getLogger(__name__)
+
+
+async def _run_one_tool_call(
+    call: dict, tools_by_name: dict[str, BaseTool]
+) -> tuple[ToolMessage, HumanMessage | None]:
+    """1件の tool_call を実行し、(ToolMessage, followup) を返す。例外は送出しない。"""
+    tool_obj = tools_by_name.get(call["name"])
+    if tool_obj is None:
+        tool_message = ToolMessage(
+            content=f"エラー: 未知のツールです: {call['name']}",
+            tool_call_id=call["id"],
+        )
+    else:
+        try:
+            # ToolCall dict（"name"/"args"/"id"/"type" を持つ）をそのまま
+            # ainvoke に渡す。call["args"] のみを渡すと BaseTool 側で
+            # tool_call_id が None のまま扱われ、response_format=
+            # "content_and_artifact" のツール（view_image 等）の artifact
+            # が握りつぶされてしまうため、ToolCall 形式を維持する。
+            tool_message = await tool_obj.ainvoke(call)
+        except Exception as e:  # noqa: BLE001 - ツール異常はエラー文字列化してループ継続
+            logger.exception("subagent tool error: %s", call["name"])
+            tool_message = ToolMessage(
+                content=f"エラー: ツール実行に失敗しました: {e}",
+                tool_call_id=call["id"],
+            )
+    logger.info(
+        "subagent tool=%s args=%s -> %s",
+        call["name"],
+        call["args"],
+        str(tool_message.content)[:500],
+    )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "subagent tool=%s args=%r -> %r", call["name"], call["args"], tool_message.content
+        )
+    followup = image_followup_message(getattr(tool_message, "artifact", None))
+    return tool_message, followup
+
+
+async def _invoke_with_loop_retry(model, messages: list, config: Config):
+    """model.ainvoke() を呼び、反復ループを検知したら注意メッセージを注入して再試行する。
+
+    ThinkingLoopDetected（src/llm.py の ChatLlamaCpp がストリーム中に検知して
+    送出する）を捕捉し、config.thinking_loop_guard_nudge_messages から選んだ
+    メッセージを一時的に追加した**ローカルコピー**で再試行する。サブエージェントの
+    会話履歴（呼び出し元の messages）はローカルなPythonリストでLangGraphの
+    チェックポイントを一切使わないため、成功しても失敗しても nudge が
+    messages 本体に残ることはない（後始末が不要）。
+
+    Args:
+        model: build_model() が構築した（bind_tools 済みの）モデル。
+        messages: これまでの会話履歴（変更しない）。
+        config: thinking_loop_guard_nudge_messages/_max_retries を含むアプリ設定。
+
+    Returns:
+        model.ainvoke() が返す AIMessage。
+
+    Raises:
+        ThinkingLoopDetected: max_retries 回再試行してもなお反復ループが
+            解消しなかった場合。
+    """
+    max_retries = config.thinking_loop_guard_max_retries
+    local_messages = messages
+    for attempt in range(max_retries + 1):
+        try:
+            return await model.ainvoke(local_messages)
+        except ThinkingLoopDetected as exc:
+            if attempt >= max_retries:
+                raise
+            logger.warning(
+                "subagent: LLM応答のループを検知（%d回目の再試行）: 直近テキスト=%r",
+                attempt + 1,
+                exc.snippet,
+            )
+            text = pick_loop_nudge_message(
+                config.thinking_loop_guard_nudge_messages, attempt
+            )
+            local_messages = [*messages, HumanMessage(content=text)]
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+async def run_subagent(
+    task: str,
+    tools: list[BaseTool],
+    system_prompt: str,
+    config: Config,
+    max_iterations: int,
+) -> str:
+    """独立した ReAct ループでタスクを処理し、最終回答のテキストのみを返す。
+
+    tool_calls が空になった時点の AIMessage.content を返す。max_iterations
+    に達してもループが終わらない場合は、その時点までの最後の応答に
+    打ち切りである旨を明記して返す。ツール実行時の例外はここで捕捉して
+    エラー文字列化しループを継続する（例外を外へ送出しない）。
+
+    Args:
+        task: サブエージェントに委譲するタスクの説明文。
+        tools: サブエージェントが使えるツールのリスト（dispatch_agent
+            自身は含めないこと。含めると再帰委譲が可能になってしまう）。
+        system_prompt: サブエージェント用のシステムプロンプト全文。
+        config: LLM 接続情報を含むアプリ設定。build_model 経由でモデル構築に使う。
+        max_iterations: agent→tools の遷移を許す最大回数。
+
+    Returns:
+        サブエージェントの最終回答テキスト。
+    """
+    model = build_model(config).bind_tools(tools)
+    tools_by_name = {t.name: t for t in tools}
+    messages: list = [SystemMessage(content=system_prompt), HumanMessage(content=task)]
+
+    logger.info("dispatch_agent 開始: task=%r max_iterations=%d", task, max_iterations)
+
+    for iteration in range(1, max_iterations + 1):
+        response = await _invoke_with_loop_retry(model, messages, config)
+        messages.append(response)
+        logger.info("subagent iter=%d ai=%r", iteration, str(response.content)[:500])
+
+        tool_calls = getattr(response, "tool_calls", None)
+        if not tool_calls:
+            logger.info("dispatch_agent 正常終了: %d回で完了", iteration)
+            return response.content
+
+        results = await asyncio.gather(
+            *(_run_one_tool_call(call, tools_by_name) for call in tool_calls)
+        )
+        for tool_message, followup in results:
+            messages.append(tool_message)
+            if followup is not None:
+                messages.append(followup)
+
+    logger.warning("dispatch_agent: 最大反復回数(%d)に到達したため打ち切り", max_iterations)
+    last = messages[-1]
+    last_text = last.content if isinstance(last, AIMessage) else ""
+    parts = [f"[サブエージェント: 最大反復回数({max_iterations})に達したため打ち切りました]"]
+    if last_text:
+        parts.append(last_text)
+    collected = _collect_tool_results_summary(messages)
+    if collected:
+        parts.append(
+            "[ここまでに収集できたツール実行結果（打ち切りにより要約や整理は未完了）。"
+            "委譲元はこれを踏まえて続きの調査が必要か判断すること]\n" + collected
+        )
+    return "\n\n".join(parts)
+
+
+_TOOL_RESULT_SNIPPET_LIMIT = 1500
+
+
+def _collect_tool_results_summary(messages: list) -> str:
+    """反復上限打ち切り時に、それまでの ToolMessage 内容を軽量に要約する。
+
+    実データ規模の探索（例: 100件超のファイル一覧取得）で反復上限に達すると、
+    せっかく収集できていた生データが呼び出し元に一切引き継がれず丸ごと
+    破棄される事象が確認された（tune-prompt調査、2026-07-18）。ここでは
+    完全な集約ロジックは持たず、各 ToolMessage の内容を一定文字数で
+    切り詰めて列挙するだけに留める（呼び出し元の会話がさらに肥大化し
+    すぎないようにするため）。
+
+    Args:
+        messages: これまでの会話履歴（SystemMessage/HumanMessage/AIMessage/
+            ToolMessage の列）。
+
+    Returns:
+        "- ツール=<name>: <内容（省略あり）>" を改行で連結した文字列。
+        ToolMessage が1件も無ければ空文字列。
+    """
+    snippets = []
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        content = str(msg.content)
+        if len(content) > _TOOL_RESULT_SNIPPET_LIMIT:
+            content = content[:_TOOL_RESULT_SNIPPET_LIMIT] + "...(以下省略)"
+        name = getattr(msg, "name", None) or "?"
+        snippets.append(f"- ツール={name}: {content}")
+    return "\n".join(snippets)

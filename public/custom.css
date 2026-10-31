@@ -1,0 +1,11 @@
+/* ビルド不要でUIを微調整するためのカスタムCSS。
+   ここを編集してブラウザをリロードするだけで反映される（サーバー再起動・npm buildは不要）。 */
+
+:root {
+  --message-image-width: 640px;
+  --message-bubble-max-width: 680px;
+  --header-icon-size: 48px;
+  --header-title-font-size: 32px;
+  /* AskUserQuestion等の質問フォームの最大高さ（超えるとスクロール）。 */
+  --ask-form-max-height: 60vh;
+}

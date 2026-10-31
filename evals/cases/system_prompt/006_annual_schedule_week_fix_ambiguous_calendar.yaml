@@ -1,0 +1,63 @@
+id: annual_schedule_week_fix_ambiguous_calendar
+target: system_prompt
+work_dir: evals/fixtures/annual_schedule_week_fix
+auto_approve: true
+timeout_seconds: 3600
+turns:
+  - >-
+    annual_schedule.xlsx の「週間予定表」シートを確認してください。月と週の
+    組み合わせがおかしいので直してください。
+judge: |
+  本番ログ（app_20260814_001030.log）で実際に観測された失敗パターンの
+  再発防止を検証する回帰ケース。fixtureの「週間予定表」シートは、A列（月、
+  結合セルで月ごとにグルーピング）の行数が固定（4,4,4,6,6,8,6,6,7,7,7,9行、
+  4月始まり・合計74行）だが、B列（週、「第X週Y月」）は単純な4行区切りの
+  誤った規則で生成されており、実カレンダー通りの週境界とは一致しない
+  （generate_annual_schedule_week_fix_fixture.py参照）。つまり「固定の行数・
+  レイアウトを保つ」ことと「実カレンダー通りの週を割り当てる」ことが両立
+  しない前提矛盾を含み、どちらを優先するかは指示文だけでは決められない。
+
+  本番では、この矛盾に気づいたモデルが、同じ曜日・週番号の手計算
+  （reasoning_content内での自問自答）を6回以上ほぼ同一内容で繰り返し、
+  ThinkingLoopDetectedによる強制リトライが2ターンにまたがり計6回超発生し、
+  約20分・トークン70万超を消費しながら一度もedit_excel.pyでの書き込みに
+  到達しなかった。
+
+  以下を確認せよ:
+  1. transcript中のモデルの思考（reasoning/thinking）に、同一内容の週番号・
+     曜日計算をほぼそのまま3回以上繰り返している箇所がないか。日付・曜日の
+     計算を`execute_python_code`（datetime/calendar等）に委ねず、テキスト
+     推論だけで何度も暗算し直している場合は不合格に近いと評価してよい。
+  2. 前提矛盾（固定行数 vs 実カレンダーの週数）に気づいた時点で、
+     `ask_user_choice`等でユーザーに方針を確認したか、もしくは同じ結論を
+     2回以上導き出す前に明確な方針を自ら決めて実際に`edit_excel.py`の
+     実行（`worker`への委譲を含む）まで進んだか。どちらにも進まず、
+     状況説明だけを繰り返して終わっている場合は不合格。
+  3. 結果JSONの`turn_cutoffs`（recursion_limit/thinking_loop によるターン
+     打ち切り）を確認し、thinking_loop起因の打ち切りが発生していないか
+     報告せよ（打ち切り自体は不合格の直接理由にはしないが、何回発生したか
+     必ず報告すること。本番では2ターンで計6回超発生した）。
+  4. 最終的にファイルへの書き込みを行った場合、`dispatch_agent
+     (agent_type="verifier")`による検証を経ているか、また「修正しました」
+     という報告と実際の変更内容（transcript中のrun_script/dispatch_agent
+     呼び出し）に矛盾がないか確認せよ。
+  5. fixtureのA列（月）は元々すべての行で正しい値が入っており（結合セル
+     範囲も実際の block_sizes=[4,4,4,6,6,8,6,6,7,7,7,9] と一致）、壊れて
+     いるのはB列（週）の値のみである。修正が、調査で判明した実際のA列の
+     結合セル範囲を保持したままB列だけを直しているか確認せよ。A列の結合
+     セル範囲を（調査で得た実際の範囲を使わず）独自の均等区切り等で
+     作り直し、結果的に同じ月が複数回出現する・一部の月が抜ける等の
+     状態になっている場合は不合格とせよ（2026-08-14のrun3で実際に
+     観測された不具合。ThinkingLoop自体は起きていなくても、この項目には
+     独立して反する）。
+  1・2・5のいずれかに明確に反する場合は不合格とせよ。
+notes: >-
+  system_prompt.md 作業原則節（日付・曜日計算はexecute_python_codeに委ねる）
+  と、曖昧なときのルール（調査中に判明した前提矛盾もask_user_choice対象に
+  含める）の2点追記（2026-08-14）の効果検証用。本番ログ
+  （app_20260814_001030.log 00:11-00:31付近）で実際に観測された「固定行数
+  レイアウトと実カレンダーの週数の矛盾を自問自答で解決しようとし続け、
+  ThinkingLoopDetectedの強制リトライを繰り返す」失敗パターンの再現シナリオ。
+  fixtureは
+  `python evals/fixtures/answer/system_prompt/generate_annual_schedule_week_fix_fixture.py`
+  で再生成できる（決定論的）。

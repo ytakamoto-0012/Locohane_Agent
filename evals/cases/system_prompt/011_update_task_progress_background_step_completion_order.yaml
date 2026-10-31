@@ -1,0 +1,55 @@
+id: update_task_progress_background_step_completion_order
+target: system_prompt
+auto_approve: true
+env:
+  SCRIPT_BACKGROUND_INLINE_WAIT_MAX_SECONDS: "2"
+  SCRIPT_BACKGROUND_MIN_POLL_INTERVAL_SECONDS: "0"
+turns:
+  - >-
+    5秒待ってから done と表示するだけのPythonコードをバックグラウンドで
+    実行し、その結果を使って短い報告を書いてください。
+expect:
+  tool_called_any: [update_task_progress]
+judge: |
+  update_task_progress のdocstring削減（コンテキスト削減作業）に先立って
+  追加した回帰ケース。呼び出し精度を検証する既存ケースが無かったツールの
+  ため新設した。system_prompt.md/update_task_progressのdocstringが定める
+  「バックグラウンドジョブを起動しただけのステップは、最終結果（running
+  以外の状態）を確認できるまで completed にしてはいけない」という制約が
+  実際に守られているかを検証する。
+
+  この環境の main_agent_tool_guard 設定では execute_python_code_background/
+  run_script_background/check_script_job はメインエージェントへ直接bind
+  されていない場合があり、dispatch_agent(agent_type="worker")への委譲に
+  よって「起動」と「結果確認」が1回のサブエージェント呼び出し内に収まる
+  ことがある（この場合、メインagent側からはstepの区別無く1回で完了報告が
+  返ってくる）。これ自体は誤りではない。
+
+  transcriptを確認し、以下の観点で判定せよ:
+  1. create_plan のsteps、またはモデルの実際の行動が、「バックグラウンド
+     起動」と「結果確認・報告」を別ステップ（またはdispatch_agentへの
+     別呼び出し）として扱っているか、少なくとも両者を同一の1アクションで
+     まとめて完了扱いにする際、実際に完了結果（"done"の出力）を確認して
+     からまとめているか。
+  2. update_task_progress が呼ばれている場合、いずれかの呼び出しで
+     status="completed" が設定されるのは、対応するバックグラウンド処理の
+     最終結果（"done"の出力、または実行中でない状態）を確認した**後**に
+     なっているか。ジョブを起動しただけ（job_id を受け取っただけ、または
+     worker委譲を投げただけでまだ結果が返っていない時点）で completed に
+     していたら不合格。
+  3. update_task_progress の step_index が、実際に対応するステップと
+     一致しているか（無関係なステップを誤ってcompletedにしていないか）。
+  4. 最終回答が実際の実行結果（done）に基づいた正直な報告になっているか
+     （実行が完了していないのに完了したかのように報告していたら不合格）。
+  2・4のいずれかに明確に反する場合は不合格とせよ。update_task_progress
+  自体が1回も呼ばれていない場合（create_planを使わずタスクを完結させた
+  場合）は、2・3は評価対象外とし、4のみで判定せよ。
+notes: >-
+  work_dirは指定せず config.ini の [default_workdir].dir を使う。
+  check_script_job/
+  check_dispatch_agent_job/update_task_progress/ask_user_choice の4ツールは
+  docstring削減前まで呼び出し精度を検証するevalケースが1件も無かったため、
+  削減の安全網として本ケース含む4件を新設した（009〜012）。009番の動作
+  確認で、execute_python_code_background等がメインエージェントへ直接bind
+  されておらずworker委譲に集約されることを確認済みのため、judgeはその
+  パターンを許容する書き方にしている。

@@ -1,0 +1,349 @@
+"""LLM 接続の共通ヘルパー（llama.cpp server / OpenAI 互換）。
+
+graph.py（メインの ReAct ループ）と subagent.py（サブエージェントの
+ReAct ループ）の両方から使う。tools.py が subagent.py を import する
+関係上、build_model を graph.py 側に置くと循環 import になるため
+ここへ切り出している。
+"""
+
+from __future__ import annotations
+
+import logging
+import random
+import zlib
+from typing import Any
+
+import httpx
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_openai import ChatOpenAI
+
+from .config import Config
+
+logger = logging.getLogger(__name__)
+
+
+class ThinkingLoopDetected(Exception):
+    """LLM応答（thinking/本文）が反復ループに陥ったと判定され、生成を打ち切ったことを示す。
+
+    ChatLlamaCpp._stream/_astream がストリーム中に送出する。呼び出し元
+    （src/graph.py の ainvoke_ensuring_final_text、app.py の on_message、
+    src/subagent.py の run_subagent）がこれを捕捉し、注意メッセージを注入して
+    再試行する。
+
+    Attributes:
+        snippet: 検知時点までにバッファされていた直近テキスト（末尾最大数百文字）。
+            真の反復ループ（同一文の繰り返し）なのか、たまたま圧縮率が下がった
+            構造化テキスト（表・JSON等）による誤検知なのかを事後に判別するための
+            診断用データ。呼び出し元はこれをログ・eval結果へ残すことができる。
+    """
+
+    def __init__(self, message: str, snippet: str = "") -> None:
+        super().__init__(message)
+        self.snippet = snippet
+
+
+_DEFAULT_LOOP_NUDGE = (
+    "直前の応答は同じ内容を繰り返すループに陥ったため打ち切りました。"
+    "落ち着いて、今のタスクの続きを行ってください。"
+)
+
+
+def pick_loop_nudge_message(messages: list[str], attempt_index: int) -> str:
+    """ループ検知時に注入する注意メッセージを選ぶ。
+
+    attempt_index（0始まり、何回目のループ検知リトライか）が messages の
+    範囲内ならその順番のメッセージを、範囲外（用意した数を使い切った場合）は
+    ランダムに選ぶ（同じ文言の繰り返しで同じ堂々巡りを誘発しないため）。
+
+    Args:
+        messages: config.ini の [thinking_loop_guard].nudge_messages 由来の
+            メッセージ候補（0件でもよい）。
+        attempt_index: 0始まりのループ検知リトライ回数。
+
+    Returns:
+        注入するメッセージ文字列。messages が空なら組み込みの既定文言を返す。
+    """
+    if not messages:
+        return _DEFAULT_LOOP_NUDGE
+    if attempt_index < len(messages):
+        return messages[attempt_index]
+    return random.choice(messages)
+
+
+class _ThinkingLoopDetector:
+    """LLM応答（thinking/content）のストリーミング中に文章の反復（暴走ループ）を検知する。
+
+    直近 window_chars 文字を zlib 圧縮し、圧縮後サイズ/元サイズの比が
+    compression_ratio_threshold を下回る状態が confirm_count 回連続したら
+    ループと判定する（1回だけの低圧縮率での誤検知を防ぐため連続性を要求する）。
+    自然な文章・多様なコードは通常ここまで圧縮率が高くならないが、同一の
+    文・コードブロックがほぼそのまま繰り返されると圧縮率が大きく下がることを
+    利用する。
+    """
+
+    def __init__(
+        self,
+        window_chars: int,
+        check_interval_chars: int,
+        compression_ratio_threshold: float,
+        confirm_count: int,
+    ) -> None:
+        self._buffer = ""
+        self._window_chars = window_chars
+        self._check_interval_chars = max(check_interval_chars, 1)
+        self._threshold = compression_ratio_threshold
+        self._confirm_count = max(confirm_count, 1)
+        self._checked_len = 0
+        self._consecutive_hits = 0
+
+    def snippet(self, max_chars: int = 400) -> str:
+        """検知時点の診断ログ用に、バッファ末尾の直近テキストを返す。"""
+        return self._buffer[-max_chars:]
+
+    def feed(self, text: str) -> bool:
+        """新しいテキスト断片を追加し、ループが確定判定されたら True を返す。"""
+        if not text:
+            return False
+        self._buffer += text
+        if len(self._buffer) < self._window_chars:
+            return False
+        if len(self._buffer) - self._checked_len < self._check_interval_chars:
+            return False
+        self._checked_len = len(self._buffer)
+        window = self._buffer[-self._window_chars :]
+        raw = window.encode("utf-8")
+        ratio = len(zlib.compress(raw, level=6)) / len(raw)
+        if ratio < self._threshold:
+            self._consecutive_hits += 1
+        else:
+            self._consecutive_hits = 0
+        return self._consecutive_hits >= self._confirm_count
+
+
+def _chunk_delta_text(chunk: Any) -> str:
+    """ストリームチャンク（ChatGenerationChunk）から、監視対象のテキストを取り出す。
+
+    content と reasoning_content（ChatLlamaCpp._convert_chunk_to_generation_chunk
+    が additional_kwargs へ拾い上げたもの）のデルタのみを対象にする。tool_call
+    引数のJSONは別チャンネル（message.tool_call_chunks）で流れるため、ここでは
+    自然に対象外となる。
+    """
+    message = getattr(chunk, "message", None)
+    if message is None:
+        return ""
+    parts = []
+    content = getattr(message, "content", None)
+    if isinstance(content, str) and content:
+        parts.append(content)
+    reasoning = (getattr(message, "additional_kwargs", None) or {}).get("reasoning_content")
+    if reasoning:
+        parts.append(reasoning)
+    return "".join(parts)
+
+
+class _DebugResponseLogger(BaseCallbackHandler):
+    """LLM応答本文・thinking（reasoning_content）・tool_callsを DEBUG レベルで記録する。
+
+    build_model() が構築するモデルインスタンスに常時アタッチする（コストは
+    logger.debug() 自体の isEnabledFor チェックのみで、config.ini の
+    [paths].log_level が "debug" 以外のときはほぼゼロオーバーヘッド）。
+    on_llm_end はチャットモデルでも呼ばれ、streaming=True の場合も最終的に
+    集約されたメッセージ1件を持つ LLMResult が渡される。graph.py（メイングラフ、
+    handwritten/prebuilt いずれの実装でも）・subagent.py（dispatch_agent内部の
+    ReAct ループ）の両方が build_model() 経由でモデルを作るため、この1箇所で
+    両方のLLM呼び出しを網羅できる。
+    """
+
+    def on_llm_end(self, response, **kwargs: Any) -> None:  # noqa: ANN001
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        for generation in response.generations:
+            for gen in generation:
+                message = getattr(gen, "message", None)
+                content = getattr(message, "content", None) if message is not None else gen.text
+                reasoning = None
+                tool_calls = None
+                if message is not None:
+                    reasoning = (getattr(message, "additional_kwargs", None) or {}).get(
+                        "reasoning_content"
+                    )
+                    tool_calls = getattr(message, "tool_calls", None)
+                logger.debug(
+                    "LLM応答: content=%r reasoning_content=%r tool_calls=%r",
+                    content,
+                    reasoning,
+                    tool_calls,
+                )
+
+
+class ChatLlamaCpp(ChatOpenAI):
+    """llama.cpp server（reasoning_format=deepseek）向けの ChatOpenAI 拡張。
+
+    llama-server は Qwen3 系の <think> ブロックを OpenAI 非標準の
+    delta.reasoning_content フィールドで返す（reasoning_in_content=false）。
+    ChatOpenAI はこの拡張フィールドを読み捨てる仕様（本家 docstring 参照）
+    のため、ここで additional_kwargs["reasoning_content"] に拾い上げて
+    UI 側（app.py）で思考過程として表示できるようにする。
+
+    あわせて、ストリーミング中の応答（thinking/本文）が反復ループに陥って
+    いないかを _ThinkingLoopDetector で監視し、検知したら ThinkingLoopDetected
+    を送出して生成を打ち切る（loop_guard_* フィールド、config.ini の
+    [thinking_loop_guard] 由来、build_model() が注入する）。
+    """
+
+    loop_guard_enabled: bool = True
+    loop_guard_window_chars: int = 600
+    loop_guard_check_interval_chars: int = 150
+    loop_guard_compression_ratio_threshold: float = 0.3
+    loop_guard_confirm_count: int = 2
+
+    def _convert_chunk_to_generation_chunk(
+        self,
+        chunk: dict,
+        default_chunk_class: type,
+        base_generation_info: dict | None,
+    ) -> Any:
+        generation_chunk = super()._convert_chunk_to_generation_chunk(
+            chunk, default_chunk_class, base_generation_info
+        )
+        if generation_chunk is None:
+            return generation_chunk
+        choices = chunk.get("choices") or []
+        if choices:
+            reasoning = (choices[0].get("delta") or {}).get("reasoning_content")
+            if reasoning:
+                generation_chunk.message.additional_kwargs["reasoning_content"] = reasoning
+        return generation_chunk
+
+    def _make_loop_detector(self) -> _ThinkingLoopDetector:
+        return _ThinkingLoopDetector(
+            self.loop_guard_window_chars,
+            self.loop_guard_check_interval_chars,
+            self.loop_guard_compression_ratio_threshold,
+            self.loop_guard_confirm_count,
+        )
+
+    def _stream(self, *args: Any, **kwargs: Any) -> Any:
+        if not self.loop_guard_enabled:
+            yield from super()._stream(*args, **kwargs)
+            return
+        detector = self._make_loop_detector()
+        for chunk in super()._stream(*args, **kwargs):
+            if detector.feed(_chunk_delta_text(chunk)):
+                snippet = detector.snippet()
+                logger.warning(
+                    "LLM応答のループを検知したため生成を打ち切ります（直近テキスト: %r）",
+                    snippet,
+                )
+                raise ThinkingLoopDetected(
+                    "LLM応答が反復ループに陥ったため打ち切りました", snippet=snippet
+                )
+            yield chunk
+
+    async def _astream(self, *args: Any, **kwargs: Any) -> Any:
+        if not self.loop_guard_enabled:
+            async for chunk in super()._astream(*args, **kwargs):
+                yield chunk
+            return
+        detector = self._make_loop_detector()
+        agen = super()._astream(*args, **kwargs)
+        try:
+            async for chunk in agen:
+                if detector.feed(_chunk_delta_text(chunk)):
+                    snippet = detector.snippet()
+                    logger.warning(
+                        "LLM応答のループを検知したため生成を打ち切ります（直近テキスト: %r）",
+                        snippet,
+                    )
+                    raise ThinkingLoopDetected(
+                        "LLM応答が反復ループに陥ったため打ち切りました", snippet=snippet
+                    )
+                yield chunk
+        finally:
+            try:
+                await agen.aclose()
+            except Exception:
+                # ここで送出される RuntimeError（cancel scope の task 不一致等）は
+                # ThinkingLoopDetected を握りつぶしてしまわないよう、ログのみに留める。
+                # 根本的な回避策は build_model() 側の keep-alive 無効化
+                # （壊れた接続を次のリクエストで再利用させない）。
+                logger.debug("ストリームの後始末中に例外が発生しました", exc_info=True)
+
+
+def build_model(config: Config) -> ChatOpenAI:
+    """llama.cpp server の OpenAI 互換エンドポイントに繋ぐ ChatOpenAI を作る。
+
+    Ollama 固有の API・ライブラリは使わず、langchain-openai の ChatOpenAI
+    を llama.cpp の OpenAI 互換サーバーへ向けて構築する。
+
+    top_p / max_tokens / frequency_penalty / presence_penalty は ChatOpenAI が
+    ネイティブに持つフィールドとしてそのまま渡す。top_k / repeat_penalty /
+    DRY サンプラー系（dry_*）は OpenAI 標準 API には無い llama.cpp 拡張
+    パラメータのため、model_kwargs では openai SDK の Completions.create() が
+    未知のキーワード引数として例外を起こしてしまう。extra_body（openai SDK の
+    正式な予約引数）に載せることで、HTTP リクエストボディのトップレベルに
+    マージされ llama-server に届く。
+
+    Args:
+        config: base_url / api_key / model / temperature / top_p / top_k /
+            repeat_penalty / frequency_penalty / presence_penalty /
+            max_tokens / dry_multiplier / dry_base / dry_allowed_length /
+            dry_penalty_last_n / dry_sequence_breakers / track_token_usage /
+            thinking_loop_guard_* を含むアプリ設定。未指定（None）の項目は
+            リクエストに含めず llama-server 側のデフォルトに委ねる。
+            thinking_loop_guard_* は ChatLlamaCpp の loop_guard_* フィールドへ
+            渡され、ストリーミング中の反復ループ検知（ThinkingLoopDetected）に使う。
+
+    Returns:
+        streaming=True で構築された ChatLlamaCpp インスタンス（未 bind_tools）。
+        config.track_token_usage が True の場合、stream_usage=True も
+        設定される（base_url を指定した ChatOpenAI は既定で usage 取得が
+        無効化されるため、明示的に有効化する必要がある）。
+    """
+    extra_body: dict[str, Any] = {}
+    if config.top_k is not None:
+        extra_body["top_k"] = config.top_k
+    if config.repeat_penalty is not None:
+        extra_body["repeat_penalty"] = config.repeat_penalty
+    if config.dry_multiplier is not None:
+        extra_body["dry_multiplier"] = config.dry_multiplier
+    if config.dry_base is not None:
+        extra_body["dry_base"] = config.dry_base
+    if config.dry_allowed_length is not None:
+        extra_body["dry_allowed_length"] = config.dry_allowed_length
+    if config.dry_penalty_last_n is not None:
+        extra_body["dry_penalty_last_n"] = config.dry_penalty_last_n
+    if config.dry_sequence_breakers is not None:
+        extra_body["dry_sequence_breakers"] = config.dry_sequence_breakers
+
+    # keep-alive接続を無効化する: 思考ループ検知時にストリームを正しく
+    # クローズできなかった場合（cancel scopeのtask不一致等）、壊れた接続が
+    # コネクションプールに残り続け、次のリクエストがそれを再利用して
+    # 応答ヘッダー待ちのまま無限にフリーズすることがある（実際に発生した
+    # インシデントより）。ローカルのllama-server相手のためTCP再確立の
+    # コストは無視できるレベルなので、毎回新規接続にして安全側に倒す。
+    no_keepalive_limits = httpx.Limits(max_keepalive_connections=0)
+
+    return ChatLlamaCpp(
+        base_url=config.base_url,
+        api_key=config.api_key,  # llama.cpp は認証不要のためダミー値
+        model=config.model,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        max_tokens=config.max_tokens,
+        frequency_penalty=config.frequency_penalty,
+        presence_penalty=config.presence_penalty,
+        extra_body=extra_body or None,
+        http_client=httpx.Client(limits=no_keepalive_limits),
+        http_async_client=httpx.AsyncClient(limits=no_keepalive_limits),
+        streaming=True,
+        stream_usage=config.track_token_usage,
+        callbacks=[_DebugResponseLogger()],
+        loop_guard_enabled=config.thinking_loop_guard_enabled,
+        loop_guard_window_chars=config.thinking_loop_guard_window_chars,
+        loop_guard_check_interval_chars=config.thinking_loop_guard_check_interval_chars,
+        loop_guard_compression_ratio_threshold=(
+            config.thinking_loop_guard_compression_ratio_threshold
+        ),
+        loop_guard_confirm_count=config.thinking_loop_guard_confirm_count,
+    )

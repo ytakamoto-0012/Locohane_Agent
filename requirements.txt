@@ -1,0 +1,84 @@
+# ローカルAIエージェント基盤 依存パッケージ（pip のみ / Windows ネイティブ）
+#
+# インストール（python_env.bat の PYTHON_DIR の環境へ入れる。コマンドプロンプトで実行）:
+#   call python_env.bat
+#   python -m pip install -r requirements.txt
+#
+# バージョンは 2026-07 時点で相互に競合なく解決できる組み合わせに固定。
+
+# --- エージェント基盤 ---
+langgraph==1.2.9
+langgraph-checkpoint-sqlite==3.1.2   # AsyncSqliteSaver（会話状態の永続化）
+aiosqlite==0.22.1                    # AsyncSqliteSaver用のsqlite3非同期接続（app.py/evals/run_case.pyが直接importするため明記）
+langchain-core==1.4.9
+langchain-openai==1.3.5              # ChatOpenAI 経由で llama-server の OpenAI 互換APIへ接続
+httpx>=0.28.1                        # src/llm.py: keep-alive無効化用の http_client/http_async_client 構築（openai/langchain-openaiの依存だが直接importするため明記）
+openai>=2.45.0                       # src/llm.py: LLM_CONNECTION_ERRORS で直接importするため明記
+
+# --- MCP（Model Context Protocol）サーバー接続（stdio transport、src/mcp_client.py） ---
+mcp==1.30.0                           # 公式Python SDK。chainlitの推移的依存として環境には既に導入済みだが、直接importするため明記
+
+# --- skills/ をMCPサーバーとして配布（mcp_server/、mcp_server/MCP_README.md参照） ---
+fastmcp==3.4.10                        # 非公式サードパーティ製ラッパー（Anthropic公式ではない）。SkillsDirectoryProviderを使用
+
+# --- UI ---
+chainlit==2.12.0
+
+# --- 設定ダッシュボード（管理ツール、admin/ パッケージ、admin.bat） ---
+# 3つともchainlitの推移的依存として環境には既に導入済みだが、admin/server.py
+# 等が直接importするため明記（バージョンは導入済みのものに固定）。
+fastapi==0.139.0
+uvicorn==0.51.0
+python-dotenv==1.2.2
+markdown-it-py==4.2.0                # admin/api_docs.py: APIリファレンス（admin/API_REFERENCE.md）のHTML化。同じくchainlitの推移的依存として導入済み
+
+# --- テスト（app.py 側の cl.Step 管理ロジック等の回帰テスト。evals/ の
+#     ヘッドレスハーネスは src/graph.py を直接叩く経路のため app.py の
+#     on_message は経由しない。純粋関数レベルの検証はpytestで別途行う） ---
+pytest==9.1.1
+pytest-asyncio==1.4.0
+
+# --- SKILL.md frontmatter のパース（環境に導入済みだが依存として明記） ---
+PyYAML==6.0.3
+
+# --- json_query ツール（JMESPath クエリ、src/file_tools.py） ---
+jmespath==1.1.0
+
+# --- ベクターDB（社内文書の意味検索、src/vector_db/）。Qdrant は httpx で REST を直接呼ぶため依存を足さない。
+#     文書の読み取りは下記の pypdf / python-docx / openpyxl / python-pptx を共用する ---
+python-calamine==0.9.0               # xlsx/xlsm のセルの値の読み取り（Rust 実装で openpyxl より大幅に速い。読めない・大きすぎるブックは openpyxl で読む。src/vector_db/extract.py）
+sqlite-vec==0.1.9                    # [vector_db] backend=sqlite_vec（既定）のベクター保存・近傍検索（SQLite 拡張）。langgraph-checkpoint-sqlite の依存として導入済みだが、直接importするため明記
+
+# --- pdf-tools スキル（PDF読み込み: pypdf / PDFページ画像化: pypdfium2 /
+#     PDF生成: reportlab（platypus）で自前のセマンティックHTML断片パーサーから
+#     Flowableを組み立てる。日本語はWindows同梱のTTFフォント（Yu Gothic/
+#     Yu Mincho等）をreportlabへ実グリフごと埋め込んで描画する。以前はxhtml2pdf
+#     経由でreportlab内蔵のCID内蔵フォントを使っていたが、xhtml2pdfが内部で
+#     フォークしているPragraph実装が登録済みTTFontを正しく参照できず日本語が
+#     tofu化けする不具合を確認したため、xhtml2pdf依存を廃した） ---
+pypdf==6.21.2
+pypdfium2==4.30.0
+reportlab==4.5.1
+
+# --- excel-read/excel-edit/excel-recalc/excel-vba-read/excel-vba-edit/excel-render
+#     スキル（xlsx/xlsm読み書き: openpyxl / レガシーxls読み込み: xlrd /
+#     VBAマクロコード読み取り: oletools（Excel本体不要） / VBAマクロコード書き込み・
+#     実行・数式再計算: pywin32（Excel COM経由、recalc_excel.py/edit_vba.py）） ---
+openpyxl==3.1.5
+xlrd==2.0.2
+oletools==0.60.2
+pywin32==311
+
+# --- docx-read/docx-create/docx-edit/docx-render
+#     スキル（Word文書（.docx）の読み込み・生成・編集） ---
+python-docx==1.2.0
+
+# --- pptx-read/pptx-create/pptx-inspect/pptx-edit/pptx-render
+#     スキル（PowerPoint文書（.pptx）の読み込み・生成・編集） ---
+python-pptx==1.0.2
+
+# openai は langchain-openai が要求する 2.x 系。src/llm.py が直接 import するため明示ピン。
+
+# 画像
+pillow>=13.0.0                       # 12.x 以前は画像のデコード（JPEG・TIFF・FlashPix 等）に既知の脆弱性があり、ナレッジの取り込みで利用者の置いた画像を開くため
+pillow-heif==1.5.0                   # HEIC/HEIF を Pillow で開く（ナレッジの取り込みの画像ファイル）

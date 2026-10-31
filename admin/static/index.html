@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Locohane 設定ダッシュボード</title>
+<link rel="stylesheet" href="/admin.css" />
+</head>
+<body>
+<div id="app">読み込み中...</div>
+
+<template id="tpl-login">
+  <div class="login-screen">
+    <form class="login-box" id="login-form">
+      <h1>Locohane 設定ダッシュボード</h1>
+      <p class="hint">管理者アカウントでログインしてください。</p>
+      <label>ユーザー名<input type="text" name="username" autocomplete="username" required /></label>
+      <label>パスワード<input type="password" name="password" autocomplete="current-password" required /></label>
+      <div class="error" id="login-error"></div>
+      <button type="submit">ログイン</button>
+      <div class="login-lang" id="login-lang"></div>
+    </form>
+  </div>
+</template>
+
+<template id="tpl-shell">
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">Locohane 設定ダッシュボード <span id="app-version" class="app-version"></span></div>
+      <nav class="tabs">
+        <button data-view="instances" class="tab-btn active">インスタンス</button>
+        <button data-view="skill-lab" class="tab-btn">スキル研究室</button>
+        <button data-view="settings" class="tab-btn">表示設定</button>
+        <button data-view="data-backup" class="tab-btn">データバックアップ</button>
+        <button data-view="admin-settings" class="tab-btn">管理者設定</button>
+        <button data-view="audit" class="tab-btn">変更履歴</button>
+        <button data-view="api-docs" class="tab-btn">APIリファレンス</button>
+      </nav>
+      <div class="topbar-right">
+        <button id="assistant-toggle-btn" class="hidden" title="困りごとを相談すると、どの画面・どの設定を変えればよいかをAIが助言します">AIに相談</button>
+        <span id="lang-select-slot"></span>
+        <span id="me-username"></span>
+        <button id="logout-btn" class="link-btn">ログアウト</button>
+      </div>
+    </header>
+    <main id="main"></main>
+  </div>
+</template>
+
+<template id="tpl-instances">
+  <div class="view-instances">
+    <div class="view-header">
+      <h2>インスタンス</h2>
+      <button id="add-instance-btn">＋ インスタンス追加</button>
+    </div>
+    <div id="instance-cards" class="instance-cards"></div>
+    <div id="lab-instance-section" class="lab-instance-section hidden">
+      <h3>スキル調整ワーカー</h3>
+      <div id="lab-instance-cards" class="instance-cards"></div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-instance-card">
+  <div class="instance-card">
+    <div class="card-top">
+      <span class="state-dot"></span>
+      <span class="display-name"></span>
+      <span class="badge-default">既定</span>
+      <span class="badge-lab hidden">スキル調整ワーカー</span>
+    </div>
+    <div class="card-meta">
+      <span class="addr"></span>
+      <span class="state-label"></span>
+    </div>
+    <div class="card-activity"></div>
+    <div class="card-context"></div>
+    <div class="card-ingest"></div>
+    <div class="card-actions">
+      <a class="open-link" target="_blank" rel="noopener">開く ↗</a>
+      <button class="btn-start">起動</button>
+      <button class="btn-stop">停止</button>
+      <button class="btn-restart">再起動</button>
+      <button class="btn-edit">編集</button>
+      <button class="btn-monitor">モニター</button>
+      <button class="btn-lab">研究テーマ</button>
+      <button class="btn-knowledge">ナレッジ</button>
+      <button class="btn-config">設定</button>
+      <button class="btn-delete">削除</button>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-create-instance">
+  <div class="modal-backdrop">
+    <div class="modal">
+      <h3>インスタンスを追加</h3>
+      <form id="create-instance-form">
+        <label>種類
+          <select name="kind">
+            <option value="app">Locohane 本体（チャット）</option>
+            <option value="skill_lab">スキル調整ワーカー（スキル研究室の実行役）</option>
+          </select>
+        </label>
+        <p class="hint lab-only hidden">スキル調整ワーカーは、上部の「スキル研究室」タブで頼んだ評価・AI 修正・下書きを裏で処理する実行役です（研究テーマは持たず、チャット画面・ポートもありません）。作成後、config.ini の [llm] main_url / sub_url にワーカー専用の接続先（本番と同じモデル）を設定してから起動してください。</p>
+        <label>インスタンス名（半角英数字・_・- のみ、6文字以内）<input type="text" name="name" required pattern="[A-Za-z0-9_-]{1,6}" maxlength="6" /></label>
+        <label>表示名<input type="text" name="display_name" /></label>
+        <label class="app-only">ホスト<input type="text" name="app_host" value="127.0.0.1" /></label>
+        <label class="app-only">ポート（空欄で自動提案）<input type="number" name="app_port" min="1024" max="65535" /></label>
+        <label class="checkbox"><input type="checkbox" name="autostart" /> 管理ツール起動時に自動起動する</label>
+        <label class="checkbox app-only"><input type="checkbox" name="headless" checked /> ヘッドレス（起動時にブラウザを自動で開かない）</label>
+        <label class="checkbox app-only"><input type="checkbox" name="watch" /> 自動リロード（-w、ファイル変更で再読込。本番運用では非推奨）</label>
+        <label>複製元（任意）
+          <select name="copy_from"><option value="">（複製しない）</option></select>
+        </label>
+        <label class="checkbox app-only"><input type="checkbox" name="copy_extensions" /> 複製元のインスタンス専用のスキル・サブエージェント（スキル研究室で昇格したもの）も複製する</label>
+        <div class="error" id="create-instance-error"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn-cancel">キャンセル</button>
+          <button type="submit">作成</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-edit-instance">
+  <div class="modal-backdrop">
+    <div class="modal">
+      <h3>インスタンス設定を編集</h3>
+      <form id="edit-instance-form">
+        <p class="hint">インスタンス名: <strong class="edit-instance-name"></strong>（変更不可。ディレクトリ名・API識別子として使われるため）</p>
+        <label>表示名<input type="text" name="display_name" /></label>
+        <label class="app-only">ホスト<input type="text" name="app_host" /></label>
+        <label class="app-only">ポート<input type="number" name="app_port" min="1024" max="65535" required /></label>
+        <label class="checkbox"><input type="checkbox" name="autostart" /> 管理ツール起動時に自動起動する</label>
+        <label class="checkbox app-only"><input type="checkbox" name="headless" /> ヘッドレス（起動時にブラウザを自動で開かない）</label>
+        <label class="checkbox app-only"><input type="checkbox" name="watch" /> 自動リロード（-w、ファイル変更で再読込。本番運用では非推奨）</label>
+        <p class="hint app-only">稼働中の場合、ホスト・ポートの変更は再起動後に反映されます。</p>
+        <div class="error" id="edit-instance-error"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn-cancel">キャンセル</button>
+          <button type="submit">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-delete-instance">
+  <div class="modal-backdrop">
+    <div class="modal modal-wide">
+      <h3>インスタンスを削除</h3>
+      <form id="delete-instance-form">
+        <p class="hint">インスタンス <strong class="delete-instance-name"></strong> の設定（instances/ 配下）を削除します。<br />
+          あわせて削除する永続データを選択してください（チェックしなかったデータは残ります）。</p>
+        <p class="extensions-warning warn-box hidden"></p>
+        <div class="data-path-list"></div>
+        <label>確認のため、インスタンス名を入力してください<input type="text" name="confirm_name" required autocomplete="off" /></label>
+        <div class="error" id="delete-instance-error"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn-cancel">キャンセル</button>
+          <button type="submit" class="btn-danger">削除</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-instance-detail">
+  <div class="view-instance-detail">
+    <div class="view-header">
+      <button class="back-btn">← インスタンス一覧</button>
+      <h2>インスタンス: <span class="detail-name"></span></h2>
+    </div>
+    <nav class="subtabs">
+      <button data-subview="monitor" class="subtab-btn">モニター</button>
+      <button data-subview="threads" class="subtab-btn">会話</button>
+      <button data-subview="logs" class="subtab-btn">ログ</button>
+      <button data-subview="config" class="subtab-btn active">config.ini</button>
+      <button data-subview="users" class="subtab-btn">ユーザー</button>
+      <button data-subview="env" class="subtab-btn">環境変数</button>
+      <button data-subview="display" class="subtab-btn">表示設定</button>
+      <button data-subview="backups" class="subtab-btn">バックアップ</button>
+      <button data-subview="skill-lab" class="subtab-btn">スキル研究室</button>
+      <button data-subview="knowledge" class="subtab-btn">ナレッジ</button>
+    </nav>
+    <div id="instance-subview"></div>
+  </div>
+</template>
+
+<template id="tpl-config-editor">
+  <div class="config-editor">
+    <div class="config-sidebar">
+      <input type="search" id="config-search" placeholder="キー名・説明で検索..." />
+      <label class="checkbox"><input type="checkbox" id="config-changed-only" /> 変更済みのみ</label>
+      <div id="preset-list" class="preset-list"></div>
+      <ul id="section-list" class="section-list"></ul>
+    </div>
+    <div class="config-main">
+      <div id="config-scope-note" class="config-scope-note hidden"></div>
+      <div id="restart-banner" class="restart-banner hidden">この変更を反映するには、インスタンスの再起動が必要です。 <button id="restart-now-btn">今すぐ再起動</button></div>
+      <div id="config-keys"></div>
+      <div class="config-footer">
+        <span id="dirty-count"></span>
+        <button id="preview-btn">変更を確認</button>
+        <button id="save-btn" disabled>保存</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-key-row">
+  <div class="key-row">
+    <div class="key-row-head">
+      <span class="key-label"></span>
+      <span class="env-badge hidden" title="環境変数で上書き中のため、ここでの変更は反映されません">環境変数で上書き中</span>
+      <span class="changed-badge hidden">変更済み</span>
+      <button class="reset-btn hidden">既定値に戻す</button>
+    </div>
+    <div class="key-desc"></div>
+    <div class="key-input-wrap"></div>
+  </div>
+</template>
+
+<template id="tpl-preview-modal">
+  <div class="modal-backdrop">
+    <div class="modal modal-wide">
+      <h3>変更内容の確認</h3>
+      <div id="preview-diff" class="diff-list"></div>
+      <div class="error" id="preview-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn-cancel">閉じる</button>
+        <button type="button" id="confirm-save-btn">この内容で保存</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-users">
+  <div class="view-users">
+    <p class="hint" id="users-inherited-note"></p>
+    <table class="data-table">
+      <thead><tr><th>ユーザー名</th><th>パスワード</th><th></th></tr></thead>
+      <tbody id="users-tbody"></tbody>
+    </table>
+    <form id="add-user-form" class="inline-form">
+      <input type="text" name="username" placeholder="新しいユーザー名" required />
+      <input type="password" name="password" placeholder="パスワード（空欄可）" />
+      <button type="submit">追加</button>
+    </form>
+    <div class="error" id="users-error"></div>
+    <hr />
+    <div class="secret-row">
+      <span>JWT署名鍵（CHAINLIT_AUTH_SECRET）: <span id="secret-status"></span></span>
+      <button id="gen-secret-btn">生成し直す</button>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-env">
+  <div class="view-env">
+    <table class="data-table">
+      <thead><tr><th>キー</th><th>値</th><th></th></tr></thead>
+      <tbody id="env-tbody"></tbody>
+    </table>
+    <form id="add-env-form" class="inline-form">
+      <input type="text" name="key" placeholder="環境変数名" required />
+      <input type="text" name="value" placeholder="値" />
+      <button type="submit">追加/更新</button>
+    </form>
+    <div class="error" id="env-error"></div>
+  </div>
+</template>
+
+<template id="tpl-backups">
+  <div class="view-backups">
+    <table class="data-table">
+      <thead><tr><th>ファイル名</th><th>日時</th><th></th></tr></thead>
+      <tbody id="backups-tbody"></tbody>
+    </table>
+  </div>
+</template>
+
+<template id="tpl-settings">
+  <div class="view-settings">
+    <h2 id="settings-title">表示設定（全インスタンス共通）</h2>
+    <p class="hint" id="settings-target-hint"></p>
+    <section class="settings-section" data-text="header.md">
+      <h3>ヘッダー文言（header.md） <span class="setting-source"></span></h3>
+      <textarea rows="2"></textarea>
+      <button class="save-setting-btn">保存</button>
+      <button class="reset-setting-btn hidden">共通に戻す</button>
+    </section>
+    <section class="settings-section" data-text="tab_title.md">
+      <h3>タブタイトル（tab_title.md） <span class="setting-source"></span></h3>
+      <textarea rows="2"></textarea>
+      <button class="save-setting-btn">保存</button>
+      <button class="reset-setting-btn hidden">共通に戻す</button>
+    </section>
+    <section class="settings-section" data-text="welcome.md">
+      <h3>ウェルカムメッセージ（welcome.md） <span class="setting-source"></span></h3>
+      <p class="hint"><code>{skills}</code> はスキル一覧に置換されます。</p>
+      <textarea rows="6"></textarea>
+      <button class="save-setting-btn">保存</button>
+      <button class="reset-setting-btn hidden">共通に戻す</button>
+    </section>
+    <section class="settings-section" data-image="icon">
+      <h3>アイコン（icon.*） <span class="setting-source"></span></h3>
+      <p class="hint">現在: <span class="image-current"></span></p>
+      <input type="file" accept=".png,.svg,.jpg,.jpeg" />
+      <button class="upload-image-btn">アップロード</button>
+      <button class="reset-setting-btn hidden">共通に戻す</button>
+    </section>
+    <section class="settings-section" data-image="favicon">
+      <h3>favicon（favicon.*） <span class="setting-source"></span></h3>
+      <p class="hint">現在: <span class="image-current"></span></p>
+      <input type="file" accept=".png,.svg,.ico" />
+      <button class="upload-image-btn">アップロード</button>
+      <button class="reset-setting-btn hidden">共通に戻す</button>
+    </section>
+    <div class="error" id="settings-error"></div>
+  </div>
+</template>
+
+<template id="tpl-audit">
+  <div class="view-audit">
+    <h2>変更履歴</h2>
+    <table class="data-table">
+      <thead><tr><th>日時</th><th>インスタンス</th><th>操作</th><th>実行者</th><th>詳細</th></tr></thead>
+      <tbody id="audit-tbody"></tbody>
+    </table>
+  </div>
+</template>
+
+<template id="tpl-api-docs">
+  <div class="view-api-docs">
+    <p class="hint">admin/API_REFERENCE.md の内容を表示しています（ファイルを編集すると、このメニューを開き直した時点で反映されます）。</p>
+    <div class="error" id="api-docs-error"></div>
+    <article id="api-docs-body" class="markdown-body"></article>
+  </div>
+</template>
+
+<template id="tpl-assistant">
+  <aside class="assistant-panel" id="assistant-panel">
+    <div class="assistant-head">
+      <strong>AIに相談</strong>
+      <label class="assistant-target">対象
+        <select id="assistant-instance"></select>
+      </label>
+      <button type="button" id="assistant-clear-btn" class="link-btn">会話をクリア</button>
+      <button type="button" id="assistant-close-btn" class="link-btn" title="閉じる">✕</button>
+    </div>
+    <p class="hint assistant-note">困りごとを書くと、どの画面・どの設定を変えればよいかを AI が助言します。AI は設定を読むだけで、変更・保存・起動停止は行いません（操作はご自身で行ってください）。回答は誤ることがあるため、保存前に「変更を確認」で確認してください。<span id="assistant-llm-note"></span></p>
+    <div class="assistant-messages" id="assistant-messages"></div>
+    <form class="assistant-form" id="assistant-form">
+      <textarea id="assistant-input" rows="3" placeholder="例: 2人同時に使うと片方の応答がずっと待たされる（Enter で送信、Shift+Enter で改行）"></textarea>
+      <div class="assistant-actions">
+        <span class="error" id="assistant-error"></span>
+        <button type="button" id="assistant-stop-btn" class="hidden">停止</button>
+        <button type="submit" class="primary" id="assistant-send-btn">送信</button>
+      </div>
+    </form>
+  </aside>
+</template>
+
+<!-- 表示言語: ui-config.js（既定言語）→ i18n_en.js（英訳）→ i18n.js（_t / applyI18n）の順に、ほかより先に読み込む -->
+<script src="/ui-config.js"></script>
+<script src="/i18n_en.js"></script>
+<script src="/i18n.js"></script>
+<script src="/admin.js"></script>
+<script src="/skill_lab.js"></script>
+<script src="/knowledge.js"></script>
+<script src="/data_backup.js"></script>
+<script src="/admin_settings.js"></script>
+<script src="/assistant.js"></script>
+</body>
+</html>
