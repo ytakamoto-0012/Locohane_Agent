@@ -123,6 +123,8 @@ the series colors of charts (only here does the behavior differ from other theme
 
 ## The basic recipe for good-looking tables (a mandatory rule)
 
+**Write sheet names, headers and cell text in the user's language** (the sheet names and values in the examples of this file are in English only for illustration; do not copy them).
+
 **For tabular data (reports, lists, schedules, etc.), just add `header_style` to `set_range`** (even an empty `{}` works as the signal "row 1 is the header"). Header colors, borders, banding, freezing the header row and column width adjustment are applied automatically. Avoid building `fill_color`/`font_color`/`border` cell by cell yourself (more calls and an inconsistent look). Override with the options of `format_table` (`header_fill`, etc.) only when colors are specified explicitly.
 
 ```json
@@ -279,7 +281,7 @@ Drop-down example:
 2. Run the command above.
 3. When using `--new`, if the target exists and it is unclear whether overwriting is OK, run once without `--overwrite` and confirm with the user based on the error.
 4. On success `{"path":...,"sheets":[...],"applied_ops":N,"warnings":[...],"sheet_summaries":[...]}` is returned, so tell the user the save path.
-5. **Read `warnings` and fix them in the same task before reporting** (the key is omitted when there are none). It lists, for the sheets the ops touched: values clamped by `set_column_width`/`set_row_height`, values discarded by `merge_cells` (merging across different values), text that may be cut off (no `wrap_text` and wider than the column), numeric/formula cells in one column with inconsistent `number_format` (e.g. `#,##0` in one row and General in the others), and runs of the same string in consecutive rows that are not merged. These are exactly what a verifier would report as NG, so fixing them now saves a whole fix-and-reverify round. If a warning is intended (e.g. a status column where each row is an independent value), leave it and say why in the report.
+5. **Read `warnings` and fix them in the same task before reporting** (the key is omitted when there are none). It lists, for the sheets the ops touched: values clamped by `set_column_width`/`set_row_height`, values discarded by `merge_cells` (merging across different values), text that may be cut off (no `wrap_text` and wider than the column), numeric/formula cells in one column with inconsistent `number_format` (e.g. `#,##0` in one row and General in the others), and, in a grouping column that already has merged groups, runs of the same value that were left unmerged. These are exactly what a verifier would report as NG, so fixing them now saves a whole fix-and-reverify round. If a warning is intended, leave it and say why in the report.
 6. `sheet_summaries` gives, for each touched sheet, `max_row`/`max_column`, `merged_cells`, the set `column_widths` and `freeze_panes` after the ops. Use it to confirm merges and widths instead of re-reading the sheet with excel-read (re-read only when you need cell values or styles).
 
 Edge cases: an extension other than xlsx/xlsm / ops not being a JSON array / an op without an `op` key / specifying a nonexistent sheet or op type / specifying an unsupported `theme` name / a missing file without `--new` / an existing file with `--new` and without `--overwrite` — all are errors with exit code 1 (the message includes which op, at which position, failed; use it as a clue to fix it and run again).

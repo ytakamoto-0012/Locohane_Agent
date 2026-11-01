@@ -96,9 +96,12 @@ def lint_sheet(ws) -> list[str]:
                 'If they are the same kind of value, apply the same number_format with set_style'
             )
 
-    # 結合されていない「同じ文字列が縦に2行以上続く」部分
+    # 結合されていない「同じ文字列が縦に2行以上続く」部分。既に縦の結合がある列（＝グループ列）だけを見る。
+    # 全列を見ると、備考・行事名など行ごとに独立した値まで毎回拾い、作業役が「意図どおり」と読み飛ばす
+    # ノイズになっていた（2026-11-01 evals: 毎回この警告だけが残り、判断に推論を使わせていた）。
+    grouping_cols = sorted({r.min_col for r in merged_ranges if r.min_col == r.max_col and r.max_row > r.min_row})
     runs: list[str] = []
-    for col in range(1, max_col + 1):
+    for col in grouping_cols:
         run_start = None
         prev_value = None
         for r in range(1, max_row + 2):
@@ -112,9 +115,9 @@ def lint_sheet(ws) -> list[str]:
             prev_value = value
     if runs:
         warnings.append(
-            f"{ws.title}: consecutive rows with the same value are not merged: {_join(runs)}. "
-            "If the column is a grouping column (month, category, owner, etc.), merge each run with merge_cells "
-            '+ set_style {"valign": "center"}; leave them as they are if each row is an independent value'
+            f"{ws.title}: in a grouping column that has merged cells elsewhere, consecutive rows with the same value are not merged: "
+            f"{_join(runs)}. Merge each run with merge_cells + set_style "
+            '{"valign": "center"} like the other groups of that column'
         )
     return warnings
 

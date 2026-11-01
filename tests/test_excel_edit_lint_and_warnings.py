@@ -115,17 +115,21 @@ def test_lint_reports_overflow_number_format_and_unmerged_runs():
         ["11月", 1200, _LONG_TEXT],
         ["11月", 300, "短い"],
         ["12月", "=B2+B3", "短い"],
+        ["12月", 50, "短い"],
     ]
     for r, row in enumerate(rows, start=1):
         for c, value in enumerate(row, start=1):
             ws.cell(row=r, column=c, value=value)
     ws["B2"].number_format = "#,##0"
+    ws.merge_cells("A4:A5")  # A列はグループ列（他のグループが結合済み）
 
     warnings = lint_sheet(ws)
     joined = "\n".join(warnings)
     assert "cut off" in joined and "C2" in joined
-    assert "column B" in joined and "B3:B4 are General" in joined
+    assert "column B" in joined and "B3:B5 are General" in joined
     assert "A2:A3='11月'" in joined
+    # 結合の無い列（行ごとに独立した値）の同じ値の連続は拾わない
+    assert "C3:C5" not in joined
 
 
 def test_lint_is_quiet_for_clean_sheet():
@@ -145,13 +149,15 @@ def test_edit_excel_returns_warnings_and_summaries_for_touched_sheets_only(tmp_p
     path = tmp_path / "book.xlsx"
     wb = openpyxl.Workbook()
     wb.active.title = "untouched"
-    wb.active["A1"] = "同じ"
-    wb.active["A2"] = "同じ"
+    wb.active["A1"] = 1
+    wb.active["A2"] = 2
+    wb.active["A1"].number_format = "#,##0"
     wb.save(path)
 
     ops = [
         {"op": "add_sheet", "name": "work"},
-        {"op": "set_range", "sheet": "work", "start_cell": "A1", "rows": [["担当"], ["役員"], ["役員"]], "header_style": {}},
+        {"op": "set_range", "sheet": "work", "start_cell": "A1", "rows": [["金額"], [1200], [300]], "header_style": {}},
+        {"op": "set_style", "sheet": "work", "range": "A2", "style": {"number_format": "#,##0"}},
         {"op": "rename_sheet", "name": "work", "new_name": "renamed"},
     ]
     proc = subprocess.run(
@@ -164,7 +170,7 @@ def test_edit_excel_returns_warnings_and_summaries_for_touched_sheets_only(tmp_p
     result = json.loads(proc.stdout.strip().splitlines()[-1])
 
     assert [s["sheet"] for s in result["sheet_summaries"]] == ["renamed"]
-    assert any("renamed: consecutive rows with the same value" in w for w in result["warnings"])
+    assert any(w.startswith("renamed: number formats are inconsistent") for w in result["warnings"])
     assert not any(w.startswith("untouched") for w in result["warnings"])
 
 

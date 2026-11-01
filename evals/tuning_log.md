@@ -5605,3 +5605,12 @@ system_prompt.md は「同じ処理を多数のファイルへ行うなら dispa
 - system_prompt_scale/001（timeout だけ 7200秒にした一時コピー）: タイムアウト。Excel の作成は edit_excel 1回（44 ops）で済んだが、main の指示文の
   週ブロックの算術矛盾（52週×7日 と W52=6日）で worker が書かずに差し戻し（17分）、verifier が参加人数を記録から再計算して30分、内容修正の worker 2回で
   使い切った。いずれも Excel ツールではなく指示内容の問題。シート名が英語（Monthly schedule）になっていた（SKILL.md の英語の例の名前に引きずられた疑い）。
+
+### office-edit-iter03（instance: yt001、qwen3.8-flash-next-iq2_xs）
+- 変更: excel-edit の保存後チェックの「同じ値の未結合」を、既に縦の結合がある列（グループ列）だけに限定。excel-edit SKILL.md に「シート名・見出し・
+  本文はユーザーの言語で書く（例は説明用）」。system_prompt.md の worker 委譲前の自己点検に「規則で決まる値（日付・週範囲・行数・合計）は規則だけを書き、
+  頭で計算した件数・範囲・例を添えない」（退避: evals/history/excel-skills/office_iter03_before_system_prompt.md）。
+- system_prompt_scale/001（timeout 7200秒の一時コピー）: 合格。約67分で完了（iter02 は 7200秒でタイムアウト）。年5件の explore→ask_user_choice 2回→
+  計画→worker 1回（18分、edit_excel で作成・修正、差し戻しなし）→verifier PASS（21分、途中でループ検知1回・打ち切りなし）。シート名は「月別予定」「週別予定」。
+  edit_excel の失敗2回（作業フォルダ外への保存・--ops-file と --ops-json の併用）はどちらも数秒で立て直した。
+- system_prompt/006: 合格。約51分（ask_user_choice 2回のぶん長い）。A列の結合範囲と C〜F 列を保ったまま B列の24セルだけを変更、ループ検知なし。
