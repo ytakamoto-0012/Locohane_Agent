@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-11-02
+
 ### 追加
 
 - excel-edit の結果に `warnings` と `sheet_summaries` を加えました。`warnings` は、ops で触ったシートについて、保存の直後に
@@ -737,5 +739,6 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.4.7...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.4.8...HEAD
+[0.4.8]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/ytakamoto-0012/Locohane_Agent/commits/v0.4.7
