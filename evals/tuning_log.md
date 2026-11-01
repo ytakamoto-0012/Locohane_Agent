@@ -5595,3 +5595,13 @@ system_prompt.md は「同じ処理を多数のファイルへ行うなら dispa
     修正後の explore は `rows[*].{row: [0].ref, month_merged: [0].merged, ...}` で番地と結合範囲を1回で取れていた。
   - excel-skills/001: 両方とも5件すべて検出（judge 合格）。修正前はルール response_not_contains（「照合できません」の言い回し）で FAIL。
     修正後は約42分と長かったが、explore が最終報告に300行の表を書き出した1回の応答（24分）が原因で、今回の変更とは関係しない。
+
+### office-edit-iter02（instance: yt001、qwen3.8-flash-next-iq2_xs）
+- 変更: excel-edit の set_range に `title`（表の上のタイトル・前提行）を追加。system_prompt.md に「30行を超える表の全行をサブエージェントの回答へ
+  書き写させない（必要な事実を番地付きで求める）」を追加（退避: evals/history/excel-skills/office_iter02_before_system_prompt.md）。
+- excel-skills/001: 合格（5件すべてを番地付きで検出。P121 を「11月分」と書いた月の取り違え1件）。約32分（iter01 は約42分）。explore への指示に
+  「生データ全体を回答に貼らないこと」が入り、explore の回答は 51,138字→1,138字。
+- system_prompt/006: 合格。ask_user_choice で規則を確認→worker→verifier。A列の結合範囲を保ったまま B列だけを直した（基準5をより満たす）。約45分（iter01 と同じ）。
+- system_prompt_scale/001（timeout だけ 7200秒にした一時コピー）: タイムアウト。Excel の作成は edit_excel 1回（44 ops）で済んだが、main の指示文の
+  週ブロックの算術矛盾（52週×7日 と W52=6日）で worker が書かずに差し戻し（17分）、verifier が参加人数を記録から再計算して30分、内容修正の worker 2回で
+  使い切った。いずれも Excel ツールではなく指示内容の問題。シート名が英語（Monthly schedule）になっていた（SKILL.md の英語の例の名前に引きずられた疑い）。

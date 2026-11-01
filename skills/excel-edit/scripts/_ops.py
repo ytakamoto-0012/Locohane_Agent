@@ -223,7 +223,37 @@ def _write_rows(ws, min_row: int, min_col: int, op: dict) -> None:
 def op_set_range(wb, op: dict) -> None:
     ws = _sheet(wb, op["sheet"])
     min_col, min_row, _, _ = range_boundaries(f"{op['start_cell']}:{op['start_cell']}")
-    _write_rows(ws, min_row, min_col, op)
+    title = op.get("title")
+    if title is None:
+        _write_rows(ws, min_row, min_col, op)
+        return
+    # 表の上にタイトル行（前提・注記の行）を置く。header_style は rows の1行目にしか
+    # 効かないため、タイトルと見出しを1つの rows に入れる・別々の set_range に分ける等で
+    # LLM が迷い、ops 設計の長考とループ検知を招いていた（2026-11-01 evals 実害）。
+    # タイトルは表の幅で結合し、表は1行下から書く（見出し・装飾・見出し固定は表側に付く）。
+    rows = op.get("rows") or []
+    width = max((len(row) for row in rows), default=1)
+    _write_rows(ws, min_row + 1, min_col, op)
+    max_col = min_col + width - 1
+    cell = ws.cell(row=min_row, column=min_col, value=str(title))
+    apply_style(cell, {"bold": True, "valign": "center", "wrap_text": True, **(op.get("title_style") or {})})
+    if max_col > min_col:
+        ws.merge_cells(start_row=min_row, start_column=min_col, end_row=min_row, end_column=max_col)
+    _fit_title_row_height(ws, min_row, min_col, max_col, str(title))
+
+
+def _fit_title_row_height(ws, row: int, min_col: int, max_col: int, text: str) -> None:
+    """折り返したタイトルが隠れないよう、結合幅に収まる行数から行の高さを決める（縮めない）。"""
+    import math
+
+    from openpyxl.utils import get_column_letter
+
+    total = sum(ws.column_dimensions[get_column_letter(c)].width or 8.43 for c in range(min_col, max_col + 1))
+    lines = max(1, math.ceil(_display_width(text) / max(total, 1)))
+    height = min(15.0 * lines + 4, 409)
+    current = ws.row_dimensions[row].height
+    if current is None or height > current:
+        ws.row_dimensions[row].height = height
 
 
 def op_insert_row_group(wb, op: dict) -> None:

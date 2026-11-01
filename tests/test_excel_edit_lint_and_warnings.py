@@ -47,11 +47,36 @@ def test_set_style_valign_keeps_existing_wrap_and_align():
 
 def test_set_range_wraps_text_longer_than_autofit_limit():
     wb, ws = _wb()
-    apply_op(wb, {"op": "set_range", "sheet": "Sheet1", "start_cell": "A1", "rows": [["項目", "内容"], ["短い", "短い"], ["長い", _LONG_TEXT]], "header_style": {}})
+    rows = [["項目", "内容"], ["短い", "短い"], ["長い", _LONG_TEXT]]
+    apply_op(wb, {"op": "set_range", "sheet": "Sheet1", "start_cell": "A1", "rows": rows, "header_style": {}})
 
     assert ws.column_dimensions["B"].width == 60
     assert ws["B3"].alignment.wrap_text is True
     assert not ws["B2"].alignment.wrap_text
+
+
+def test_set_range_title_puts_merged_title_above_formatted_table():
+    wb, ws = _wb()
+    apply_op(
+        wb,
+        {
+            "op": "set_range",
+            "sheet": "Sheet1",
+            "start_cell": "A1",
+            "title": "前提：参加者30人・予算40,000円" * 3,
+            "rows": [["項目", "金額"], ["ケーキ", 12870], ["お菓子", 13500]],
+            "header_style": {},
+        },
+    )
+
+    assert ws["A1"].value.startswith("前提")
+    assert ws["A1"].font.bold and ws["A1"].alignment.wrap_text
+    assert [str(r) for r in ws.merged_cells.ranges] == ["A1:B1"]
+    assert ws.row_dimensions[1].height > 15
+    assert ws["A2"].value == "項目" and ws["A2"].font.bold  # 見出しは2行目
+    assert ws["A2"].fill.fgColor.rgb.endswith("1F4E78")
+    assert ws.freeze_panes == "A3"
+    assert lint_sheet(ws) == []
 
 
 def test_set_column_width_allows_up_to_255_and_warns_when_clamped():
@@ -105,7 +130,8 @@ def test_lint_reports_overflow_number_format_and_unmerged_runs():
 
 def test_lint_is_quiet_for_clean_sheet():
     wb, ws = _wb()
-    apply_op(wb, {"op": "set_range", "sheet": "Sheet1", "start_cell": "A1", "rows": [["時期", "単価"], ["11月", 1200], ["11月", 300], ["12月", 50]], "header_style": {}})
+    rows = [["時期", "単価"], ["11月", 1200], ["11月", 300], ["12月", 50]]
+    apply_op(wb, {"op": "set_range", "sheet": "Sheet1", "start_cell": "A1", "rows": rows, "header_style": {}})
     apply_op(wb, {"op": "set_style", "sheet": "Sheet1", "range": "B2:B4", "style": {"number_format": "#,##0"}})
     apply_op(wb, {"op": "merge_cells", "sheet": "Sheet1", "range": "A2:A3"})
 

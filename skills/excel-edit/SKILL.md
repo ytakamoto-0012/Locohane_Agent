@@ -44,7 +44,7 @@ python edit_excel.py "C:\Users\me\book.xlsx" --ops-file "C:\Users\me\ops.json"
 | `set_tab_color` | `sheet`,`color` | - | Change the color of the sheet tab (`color` is an RRGGBB hex string) |
 | `set_active_sheet` | `sheet` | - | Specify the sheet shown first when the workbook is opened |
 | `set_cell` | `sheet`,`cell` | `value`,`style`,`inherit_style`,`inherit_style_from` | Set the value and formatting of a single cell. If `style` is omitted and the target cell is a new cell that originally had no formatting (e.g. a row regenerated after `delete_rows`), no formatting is applied. To match the look of the surroundings, specify `inherit_style:true` to copy the formatting of an adjacent cell (the left one by default; `inherit_style_from` can choose `"left"`/`"right"`/`"above"`/`"below"`) |
-| `set_range` | `sheet`,`start_cell`,`rows` | `style`,`header_style`,`row_styles`,`format_table` | Write several rows at once from the start cell. `header_style` applies only to row 1. Column widths are adjusted automatically (full-width characters count as 2; never narrower than the existing width; at most 60), and string cells still wider than the column get `wrap_text` automatically so they are not cut off. **Passing `header_style` automatically applies the equivalent of `format_table` (header colors, borders, banding, freezing the header row, column width adjustment) by default** (can be disabled with `format_table:false`; conversely `format_table:true` forces it even without `header_style`) |
+| `set_range` | `sheet`,`start_cell`,`rows` | `title`,`title_style`,`style`,`header_style`,`row_styles`,`format_table` | Write several rows at once from the start cell. `header_style` applies only to row 1. Column widths are adjusted automatically (full-width characters count as 2; never narrower than the existing width; at most 60), and string cells still wider than the column get `wrap_text` automatically so they are not cut off. **Passing `header_style` automatically applies the equivalent of `format_table` (header colors, borders, banding, freezing the header row, column width adjustment) by default** (can be disabled with `format_table:false`; conversely `format_table:true` forces it even without `header_style`) |
 | `set_style` | `sheet`,`range` | `style` | Apply only formatting to existing cells without changing values |
 | `format_table` | `sheet`,`range` | `theme` (see below), `header_fill` (default `1F4E78` or `theme`'s primary), `header_font_color` (default `FFFFFF` or `theme`'s text_on_primary), `band_fill` (default `F2F2F2`), `banded` (default true), `border` (default `thin`), `freeze_header` (default true), `autofit` (default true) | Finish a table that has already been written. Row 1 of `range` is treated as the header. The font color and bold of body rows are not changed (so as not to break the `role` color coding) |
 | `insert_rows` | `sheet`,`index` | `count` (default 1) | Insert rows (1-based position. You need to calculate the absolute row number yourself. For inserting into tables grouped by month, category, etc., use `insert_row_group`) |
@@ -132,6 +132,14 @@ the series colors of charts (only here does the behavior differ from other theme
 ```
 
 Add `"format_table": false` only when automatic finishing is not wanted (raw data without a header, etc.).
+
+**A title or premise row above the table: add `title` to the same `set_range`** (do not put it into `rows`, and do not write it with a separate `set_cell`). The title goes into the `start_cell` row, merged across the table width, bold and wrapped (row height adjusted); the table (`rows`, with `header_style`) starts one row below. `title_style` overrides the title's style (same schema).
+
+```json
+[{"op": "set_range", "sheet": "Plan", "start_cell": "A1",
+  "title": "Premise: 30 participants, budget 40,000 yen",
+  "rows": [["Item","Owner"], ["Cake","Officers"]], "header_style": {}}]
+```
 
 **Put the header row and data rows in the `rows` of the same `set_range` call** (do not split the header and data into separate calls. There is a guard against wrongly decorating the first row as a header when split, but it only increases the number of calls with no benefit). When making several tables, calling a separate `set_range` for each table does not interfere.
 
