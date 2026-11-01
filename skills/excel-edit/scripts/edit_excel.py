@@ -28,8 +28,37 @@ from pathlib import Path
 _OFFICE_SHARED = Path(__file__).resolve().parent.parent.parent / "office_shared"
 if str(_OFFICE_SHARED) not in sys.path:
     sys.path.append(str(_OFFICE_SHARED))
-from excel_common import backup_before_overwrite, read_text_with_fallback, register_output_path, setup_utf8_stdio  # noqa: E402
-from _ops import apply_op  # noqa: E402
+from excel_common import (  # noqa: E402
+    backup_before_overwrite,
+    read_text_with_fallback,
+    register_output_path,
+    resolve_sheet_name,
+    setup_utf8_stdio,
+)
+from _lint import lint_sheet, sheet_summary  # noqa: E402
+from _ops import apply_op, pop_op_warnings  # noqa: E402
+
+
+def _touched_sheet(wb, op: dict, after: bool):
+    """op が対象にするシート（Worksheet）を返す。解決できなければ None。
+
+    名前ではなく Worksheet オブジェクトで追跡するのは、同じバッチ内の rename_sheet の
+    後でも同じシートとして扱うため。add_sheet/rename_sheet は適用後の名前で引く。
+    """
+    if not after:
+        name = op.get("sheet")
+    elif op.get("op") == "add_sheet":
+        name = str(op.get("name"))[:31]
+    elif op.get("op") == "rename_sheet":
+        name = str(op.get("new_name"))[:31]
+    else:
+        return None
+    if name is None:
+        return None
+    try:
+        return wb[resolve_sheet_name(wb.sheetnames, name)]
+    except (KeyError, ValueError, TypeError):
+        return None
 
 
 def _load_json_arg(args: argparse.Namespace) -> str:
@@ -94,10 +123,13 @@ def main() -> int:
             print(f"Failed to read the file: {e}\n{traceback.format_exc()}", file=sys.stderr)
             return 1
 
+    pop_op_warnings()  # 同一プロセスで複数回呼ばれた場合（テスト等）に前回分を持ち越さない
+    touched = []
     for idx, op in enumerate(ops):
         if not isinstance(op, dict) or "op" not in op:
             print(f"ops[{idx}] is invalid (it must be an object with an 'op' key): {op!r}", file=sys.stderr)
             return 1
+        before = _touched_sheet(wb, op, after=False)
         try:
             apply_op(wb, op)
         except KeyError as e:
@@ -106,6 +138,9 @@ def main() -> int:
         except (ValueError, TypeError) as e:
             print(f"Failed to apply ops[{idx}] (op={op.get('op')!r}): {e}", file=sys.stderr)
             return 1
+        for ws in (before, _touched_sheet(wb, op, after=True)):
+            if ws is not None and all(ws is not t for t in touched):
+                touched.append(ws)
 
     if not wb.sheetnames:
         print("In the end there are no sheets at all (include add_sheet or review --new)", file=sys.stderr)
@@ -119,12 +154,20 @@ def main() -> int:
         print(f"Failed to save the file: {e}", file=sys.stderr)
         return 1
 
+    # 削除されたシートは除き、ワークブック上の並び順で返す
+    touched_sheets = [ws for ws in wb.worksheets if any(ws is t for t in touched)]
+    warnings = pop_op_warnings()
+    for ws in touched_sheets:
+        warnings.extend(lint_sheet(ws))
     result = {
         "path": str(output_path),
         "backup_path": str(backup_path) if backup_path else None,
         "sheets": wb.sheetnames,
         "applied_ops": len(ops),
     }
+    if warnings:
+        result["warnings"] = warnings
+    result["sheet_summaries"] = [sheet_summary(ws) for ws in touched_sheets]
     path_memory = register_output_path(output_path, description="file generated/updated by edit_excel")
     if path_memory:
         result["path_memory"] = path_memory

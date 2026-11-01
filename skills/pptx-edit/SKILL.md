@@ -73,9 +73,18 @@ Sample JSON:
 
 Output example:
 ```json
-{"output_path": "C:\\foo\\edited.pptx", "backup_path": null, "total_slides": 5, "size_bytes": 37998, "applied_operations": 4}
+{"output_path": "C:\\foo\\edited.pptx", "backup_path": null, "total_slides": 5, "size_bytes": 37998, "applied_operations": 4,
+ "warnings": ["slide 2: shape_index 3('Picture 3') sticks out 1.20cm past the right edge"],
+ "slide_summaries": [{"slide": 2, "shapes": [{"shape_index": 0, "name": "Title 1", "text_preview": "Sales", "left_cm": 1.0, "top_cm": 0.5, "width_cm": 30.0, "height_cm": 2.5}]}]}
 ```
 When generation is done, tell the user `output_path` and `total_slides`.
+
+- `warnings` (omitted when there are none): shapes on the slides this call changed that stick out of the slide
+  (the same check as `overflow_warnings` of `pptx-inspect`). Fix them with `set_shape_position` in the same task before reporting.
+- `slide_summaries`: for each slide whose content or look this call changed, the shapes after the edit
+  (`shape_index`, `name`, `text_preview`, `table_dims`, position/size in cm, `has_picture`). Use it to confirm the result
+  and to get the `shape_index` of a shape just added with `add_picture`/`add_chart`, instead of rerunning `pptx-inspect`.
+  `slide` here is the current (live) slide number after the edit.
 
 **`backup_path` (automatic backup)**: when a file already exists at `output_path`
 (when overwriting the template with `--overwrite`, or reusing an existing `output_path`),
@@ -94,7 +103,9 @@ Placeholders, text boxes, tables and images (`PICTURE`) can be duplicated.
 
 All the other ops of this skill replace only content (text, table values, images, slide structure)
 and **never touch the look** (keeping the template's theme, master and layouts
-is the reason this skill exists). `set_shape_style`/`set_shape_position` are
+is the reason this skill exists). When text is replaced (`set_title`/`set_text`/`set_table_cell`/`set_table`/`set_notes`),
+the paragraph formatting (alignment, etc.) and character formatting (color, bold, size, font) that the original text had
+are carried over to the new text (per bullet level for `set_text`), so a white bold header cell stays white and bold. `set_shape_style`/`set_shape_position` are
 the only exceptions; use them **only when the user explicitly asks to change the look or placement**, such as "make it look cooler",
 "easier to read", "center it", "make it bigger".
 Do not call them proactively when not asked.
@@ -126,7 +137,7 @@ and tell the user it cannot be done.
 - `set_shape_position` changes only those of `left_cm`/`top_cm`/`width_cm`/`height_cm` that are specified,
   leaving the omitted ones at their original values. It can be used as is on images and charts added with `add_picture`/`add_chart`
   (`shape_type` `PICTURE`/`CHART`)
-  (check the new `shape_index` with `pptx-inspect` after adding, then call it).
+  (the new `shape_index` is in `slide_summaries` of the result of the call that added it).
 - A call with only `theme` and no style keys is an error.
 
 **Not supported (what the current ops cannot do)**: cell border colors of table shapes, shape effects such as shadows, gradients and
@@ -159,7 +170,7 @@ boxes, autoshapes, etc.), recoloring charts already in the template
   `theme` is accepted mainly to keep the notation consistent with other ops such as heading;
   whichever theme name you specify, the series colors themselves do not change.
 - Added images and charts just go into `slide.shapes`, so to check their `shape_index`,
-  just rerun `pptx-inspect` as usual (there is no checking procedure specific to `add_picture`/`add_chart`).
+  read it from `slide_summaries` of the result (the added shape is the last one on that slide; rerunning `pptx-inspect` is not needed).
 - Slides containing charts added with `add_chart` cannot be duplicated with `duplicate_slide`
   (`UNSUPPORTED_DUPLICATE_TYPES` includes `CHART`, so it is an error like other charts).
 

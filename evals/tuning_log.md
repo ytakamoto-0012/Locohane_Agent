@@ -5583,3 +5583,15 @@ system_prompt.md は「同じ処理を多数のファイルへ行うなら dispa
   委譲という趣旨は守れているが、batch を4回に分けて呼ぶなど回り道があった。ケースの期待値（dispatch_agent のみ）が batch 導入前のままという面もある。
 
 ### en_iter02-scale（instance: default、Qwen3.6-35B-A3B-UD-Q2_K_XL、system_prompt_scale 全7ケース、変更なし）
+
+### office-edit-iter01（instance: yt001、モデル qwen3.8-flash-next-iq2_xs、excel/pptx/docx の編集スキル改善の回帰確認）
+- 変更: excel-edit の保存後チェック（warnings/sheet_summaries）・自動折り返し・set_style の配置保持・列幅上限255、excel-read のセル番地 `ref`/`merged`、
+  pptx-edit の差し替え時の書式保持と warnings/slide_summaries、docx-edit の run をまたぐ find_replace。
+- system_prompt_scale 001/002/003: 3件とも 3600秒でタイムアウト（未判定）。このモデルでは短い応答にも約30秒かかり、年ごとの調査と worker の
+  ops 設計（タイトル行の置き方で迷ってループ検知→再試行）だけで上限を使い切った。001 では保存後の warnings を見て number_format を1回で直していた。
+- 修正前（c30a480）との比較（同じインスタンス・同じモデル）:
+  - system_prompt/006: 修正後は合格（約45分。方針を ask_user_choice で確認→計画→worker→verifier、月の重複・抜けなし、ループ打ち切りなし）。
+    修正前は 3600秒でタイムアウト（explore を2回行い、2回目で JMESPath の `rows[*].[*].value` が null になり、データを手で Python へ打ち直していた）。
+    修正後の explore は `rows[*].{row: [0].ref, month_merged: [0].merged, ...}` で番地と結合範囲を1回で取れていた。
+  - excel-skills/001: 両方とも5件すべて検出（judge 合格）。修正前はルール response_not_contains（「照合できません」の言い回し）で FAIL。
+    修正後は約42分と長かったが、explore が最終報告に300行の表を書き出した1回の応答（24分）が原因で、今回の変更とは関係しない。

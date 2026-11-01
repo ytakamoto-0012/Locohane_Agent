@@ -63,13 +63,20 @@ def build_fill(style: dict) -> PatternFill | None:
     return PatternFill(fill_type="solid", start_color=color, end_color=color)
 
 
-def build_alignment(style: dict) -> Alignment | None:
+def build_alignment(style: dict, current: Alignment | None = None) -> Alignment | None:
+    """style に含まれる配置キーだけを current（セルの既存の配置）へ上書きした Alignment を返す。
+
+    指定しなかったキーは既存の値を引き継ぐ。従来は指定しなかったキーを既定値へ
+    戻していたため、結合後に `set_style {"valign":"center"}` を当てるだけで
+    既存の `wrap_text`/`align` が黙って消え、折り返しの不揃い（列幅超過の文字切れ）を
+    生んでいた（2026-11-01 実害: 執行計画xlsxの検証NG②）。
+    """
     if not any(k in style for k in ("align", "valign", "wrap_text")):
         return None
     return Alignment(
-        horizontal=style.get("align"),
-        vertical=style.get("valign"),
-        wrap_text=bool(style.get("wrap_text", False)),
+        horizontal=style["align"] if "align" in style else getattr(current, "horizontal", None),
+        vertical=style["valign"] if "valign" in style else getattr(current, "vertical", None),
+        wrap_text=bool(style["wrap_text"]) if "wrap_text" in style else bool(getattr(current, "wrap_text", False)),
     )
 
 
@@ -96,7 +103,7 @@ def apply_style(cell, style: dict | None) -> None:
     fill = build_fill(style)
     if fill is not None:
         cell.fill = fill
-    alignment = build_alignment(style)
+    alignment = build_alignment(style, cell.alignment)
     if alignment is not None:
         cell.alignment = alignment
     border = build_border(style)

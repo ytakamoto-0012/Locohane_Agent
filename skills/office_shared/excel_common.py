@@ -407,6 +407,40 @@ def _display_width(value: object) -> float:
     return width
 
 
+def exceeds_column_width(value: object, column_width: float | None) -> bool:
+    """折り返しなしのセル文字列が列幅に収まらず、表示時に切れる恐れがあるか。
+
+    excel-read の `--style` 時の warnings と excel-edit の保存後チェック・自動折り返しが
+    同じ基準で判定するための共通実装。列幅未設定（None）と数式文字列は判定しない
+    （数式は表示されるのが計算結果のため、数式文字列の長さでは判断できない）。
+    """
+    if column_width is None or value is None:
+        return False
+    text = str(value)
+    if not text or text.startswith("="):
+        return False
+    return _display_width(text) > max(column_width + 2, 8)
+
+
+_DEFAULT_COLUMN_WIDTH = 8.43
+
+
+def cell_column_width(ws, row: int, col: int, merged_range=None) -> float | None:
+    """セルの表示に使える列幅。横方向に結合されたアンカーは結合範囲の列幅の合計を返す。
+
+    列幅が1列も設定されていなければ None（`exceeds_column_width` が判定しない）を返す。
+    結合の合計では未設定の列を Excel の既定幅として数える。
+    """
+    from openpyxl.utils import get_column_letter
+
+    if merged_range is not None and merged_range.max_col > merged_range.min_col:
+        widths = [ws.column_dimensions[get_column_letter(c)].width for c in range(merged_range.min_col, merged_range.max_col + 1)]
+        if all(w is None for w in widths):
+            return None
+        return sum(w if w is not None else _DEFAULT_COLUMN_WIDTH for w in widths)
+    return ws.column_dimensions[get_column_letter(col)].width
+
+
 def column_index(column: str) -> int:
     """列アルファベット（例"A"）または1始まりの列番号（数値文字列、例"3"）を列番号へ変換する。
 

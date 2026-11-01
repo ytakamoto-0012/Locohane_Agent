@@ -41,7 +41,9 @@ if str(_OFFICE_SHARED) not in sys.path:
     sys.path.append(str(_OFFICE_SHARED))
 from excel_common import (  # noqa: E402
     _display_width,
+    cell_column_width,
     cell_to_json,
+    exceeds_column_width,
     group_column_values,
     parse_column_selection,
     resolve_sheet_name,
@@ -212,13 +214,39 @@ def _run_queries(ws, queries: list[dict], max_row: int) -> list[dict]:
     return results
 
 
-def _cell_json(cell, no_style: bool = False) -> object:
-    value = cell_to_json(cell.value)
+def _cell_json(cell, no_style: bool = False, ref: str | None = None, merged: str | None = None) -> object:
+    """1セルを `{"ref", "value", ["merged"], ["style"]}` の dict にする。
+
+    `ref`（"D3"等の番地）を必ず付けるのは、`rows[i][j]` の位置から番地を逆算させると
+    LLM が行・列の対応を推論の中で手作業で組み立て、取り違え・長考の原因になるため
+    （2026-11-01 実害: 執行計画xlsxの修正で1ステップ5,000トークン超の対応表作成と
+    行の取り違えが起きた）。`merged` は結合範囲に含まれるセル（左上のアンカーを含む）に
+    結合範囲を付け、非アンカーの value が null なのが空セルか結合かを区別できるようにする。
+    """
+    entry: dict = {"ref": ref} if ref else {}
+    entry["value"] = cell_to_json(cell.value)
+    if merged:
+        entry["merged"] = merged
     if no_style:
         number_format = extract_style(cell).get("number_format")
-        return {"value": value, "style": {"number_format": number_format}} if number_format else {"value": value}
+        if number_format:
+            entry["style"] = {"number_format": number_format}
+        return entry
     style = extract_style(cell)
-    return {"value": value, "style": style} if style else {"value": value}
+    if style:
+        entry["style"] = style
+    return entry
+
+
+def _merged_lookup(ws, min_row: int, max_row: int) -> dict[tuple[int, int], str]:
+    """(行, 列) -> 結合範囲文字列。返却する行範囲に掛かる結合だけを展開する。"""
+    lookup: dict[tuple[int, int], str] = {}
+    for merged_range in ws.merged_cells.ranges:
+        lo, hi = max(merged_range.min_row, min_row), min(merged_range.max_row, max_row)
+        for row in range(lo, hi + 1):
+            for col in range(merged_range.min_col, merged_range.max_col + 1):
+                lookup[(row, col)] = str(merged_range)
+    return lookup
 
 
 def _read_xlsx(
@@ -265,8 +293,19 @@ def _read_xlsx(
         if total_rows:
             max_row = min(total_rows, offset + limit)
             if offset < max_row:
-                for row in ws.iter_rows(min_row=offset + 1, max_row=max_row):
-                    rows.append([_cell_json(row[idx - 1], no_style) for idx in selected_indices])
+                merged = _merged_lookup(ws, offset + 1, max_row)
+                for row_num, row in enumerate(ws.iter_rows(min_row=offset + 1, max_row=max_row), start=offset + 1):
+                    rows.append(
+                        [
+                            _cell_json(
+                                row[idx - 1],
+                                no_style,
+                                ref=f"{get_column_letter(idx)}{row_num}",
+                                merged=merged.get((row_num, idx)),
+                            )
+                            for idx in selected_indices
+                        ]
+                    )
         result = {
             "path": str(path),
             "mode": "rows",
@@ -306,30 +345,26 @@ def _read_xlsx(
         result["row_heights"] = row_heights
 
         # 列幅超過の警告を生成
+        merged_by_coord = {r.coord.split(":")[0]: r for r in ws.merged_cells.ranges}
         warnings = []
         for row_offset, row in enumerate(rows):
             row_num = offset + 1 + row_offset
             for pos, cell in enumerate(row):
                 col_idx_actual = selected_indices[pos]  # 実列番号（1始まり、--columnsで間引かれていてもズレない）
                 col_letter = columns_out[pos]
-                cell_width = column_widths.get(col_letter)
-                # 各セルは _cell_json が {"value": ..., "style": {...}} の dict を返す
+                # 横結合のアンカーは結合範囲の列幅合計で判定する（excel-edit の保存後チェックと同じ基準）
+                cell_width = cell_column_width(ws, row_num, col_idx_actual, merged_by_coord.get(cell["ref"]))
+                # 各セルは _cell_json が {"ref": ..., "value": ..., "style": {...}} の dict を返す
                 cell_value = cell.get("value")
                 wrap_text = cell.get("style", {}).get("wrap_text", False)
                 # wrap_text が有効でない場合のみチェック
-                if cell_width is not None and not wrap_text:
-                    text_value = str(cell_value) if cell_value is not None else ""
-                    if text_value:
-                        display_width = _display_width(text_value)
-                        # 列幅に2を加えたデフォルト幅（_apply_col_widths のロジックに合わせる）
-                        target_width = min(max(cell_width + 2, 8), 60)
-                        if display_width > target_width:
-                            cell_ref = f"{resolved}!{col_letter}{row_num}"
-                            msg = (
-                                f"The string in '{cell_ref}' (estimated width {display_width:.1f}) "
-                                f"exceeds the column width ({cell_width:.1f}), so it may be cut off when displayed"
-                            )
-                            warnings.append(msg)
+                if not wrap_text and exceeds_column_width(cell_value, cell_width):
+                    cell_ref = f"{resolved}!{col_letter}{row_num}"
+                    msg = (
+                        f"The string in '{cell_ref}' (estimated width {_display_width(cell_value):.1f}) "
+                        f"exceeds the column width ({cell_width:.1f}), so it may be cut off when displayed"
+                    )
+                    warnings.append(msg)
                 # 循環参照の警告を生成（数式が自身の座標を範囲に含む場合。
                 # 例: N8セルに=SUM(B8:N8)（N8自身を含む）。--data-only指定時は
                 # 数式文字列ではなくキャッシュ値が入るため自動的にスキップされる。

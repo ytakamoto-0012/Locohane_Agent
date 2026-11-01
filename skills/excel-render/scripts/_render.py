@@ -436,7 +436,7 @@ def render_office_file(
             msg = (
                 "Warning: sheet " + ", ".join(split_sheets) + " has a total of column widths and row heights below the minimum scale for fitting it on one page"
                 " (10%). It does not fit on one page and is split into several pages. "
-                "Review the column widths with set_column_width of excel-edit (the unit is character width, roughly 1-60)."
+                "Review the column widths with set_column_width of excel-edit (the unit is character width, 1-255)."
             )
             warnings.append(msg)
             print(msg, file=sys.stderr)

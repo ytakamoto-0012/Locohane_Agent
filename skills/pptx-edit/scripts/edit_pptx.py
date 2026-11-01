@@ -28,7 +28,15 @@ from pathlib import Path
 _OFFICE_SHARED = Path(__file__).resolve().parent.parent.parent / "office_shared"
 if str(_OFFICE_SHARED) not in sys.path:
     sys.path.append(str(_OFFICE_SHARED))
-from pptx_common import backup_before_overwrite, read_text_with_fallback, register_output_path, setup_utf8_stdio  # noqa: E402
+from pptx_common import (  # noqa: E402
+    _length_cm,
+    backup_before_overwrite,
+    check_shape_overflow,
+    describe_shape,
+    read_text_with_fallback,
+    register_output_path,
+    setup_utf8_stdio,
+)
 from office_theme import CHART_PALETTE, THEMES, resolve_theme  # noqa: E402
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData
@@ -117,8 +125,61 @@ def _get_shape(slide, shape_index: int):
     return shapes[idx]
 
 
+def _capture_text_formats(text_frame) -> dict[int, tuple]:
+    """差し替え前の段落書式（a:pPr）と文字書式（最初のrunのa:rPr）を、段落レベルごとに控える。
+
+    python-pptx の `text_frame.text`/`cell.text` への代入は段落ごと作り直し、
+    `tf.clear()`+`p.text` は run を作り直すため、表の見出しセルの白文字・太字・
+    中央揃え等、テンプレートにrun/段落単位で直接付いていた書式が黙って消える
+    （紺地に黒文字になる等。Excel の set_style が既存の折り返しを消していたのと同種の問題）。
+    """
+    formats: dict[int, tuple] = {}
+    for paragraph in text_frame.paragraphs:
+        level = paragraph.level
+        if level in formats:
+            continue
+        p_pr = paragraph._p.find(qn("a:pPr"))
+        r_pr = next((r._r.find(qn("a:rPr")) for r in paragraph.runs if r._r.find(qn("a:rPr")) is not None), None)
+        if r_pr is not None:
+            r_pr = copy.deepcopy(r_pr)
+            # ハイパーリンクは元の文字列に対するものなので、新しい文字列へは引き継がない
+            for link in r_pr.findall(qn("a:hlinkClick")) + r_pr.findall(qn("a:hlinkMouseOver")):
+                r_pr.remove(link)
+        formats[level] = (copy.deepcopy(p_pr) if p_pr is not None else None, r_pr)
+    return formats
+
+
+def _restore_text_formats(text_frame, formats: dict[int, tuple]) -> None:
+    """`_capture_text_formats` で控えた書式を、差し替え後の段落・runへ当て直す（同じレベルが無ければレベル0の書式）。"""
+    if not formats:
+        return
+    fallback = formats.get(0) or next(iter(formats.values()))
+    for paragraph in text_frame.paragraphs:
+        level = paragraph.level
+        p_pr, r_pr = formats.get(level, fallback)
+        if p_pr is not None:
+            existing = paragraph._p.find(qn("a:pPr"))
+            if existing is not None:
+                paragraph._p.remove(existing)
+            paragraph._p.insert(0, copy.deepcopy(p_pr))
+            paragraph.level = level
+        if r_pr is not None:
+            for run in paragraph.runs:
+                existing = run._r.find(qn("a:rPr"))
+                if existing is not None:
+                    run._r.remove(existing)
+                run._r.insert(0, copy.deepcopy(r_pr))
+
+
+def _set_text_keep_format(text_frame, text: str) -> None:
+    formats = _capture_text_formats(text_frame)
+    text_frame.text = text
+    _restore_text_formats(text_frame, formats)
+
+
 def _set_bullets(text_frame, bullets: list) -> None:
     tf = text_frame
+    formats = _capture_text_formats(tf)
     tf.clear()
     first = True
     for item in bullets:
@@ -132,13 +193,14 @@ def _set_bullets(text_frame, bullets: list) -> None:
         first = False
         p.text = text
         p.level = level
+    _restore_text_formats(tf, formats)
 
 
 def op_set_title(ctx: EditContext, op: dict) -> None:
     slide = ctx.get_slide(_require(op, "slide"))
     if slide.shapes.title is None:
         raise ValueError("This slide has no title placeholder")
-    slide.shapes.title.text = str(op.get("text", ""))
+    _set_text_keep_format(slide.shapes.title.text_frame, str(op.get("text", "")))
 
 
 def op_set_text(ctx: EditContext, op: dict) -> None:
@@ -160,7 +222,7 @@ def op_set_table_cell(ctx: EditContext, op: dict) -> None:
     col = int(_require(op, "col"))
     if row < 0 or row >= len(table.rows) or col < 0 or col >= len(table.columns):
         raise ValueError(f"Out of the table's range (the existing table has {len(table.rows)} rows and {len(table.columns)} columns; specified row={row}, col={col})")
-    table.cell(row, col).text = str(op.get("text", ""))
+    _set_text_keep_format(table.cell(row, col).text_frame, str(op.get("text", "")))
 
 
 def op_set_table(ctx: EditContext, op: dict) -> None:
@@ -186,17 +248,17 @@ def op_set_table(ctx: EditContext, op: dict) -> None:
     r = 0
     if headers:
         for c, h in enumerate(headers):
-            table.cell(0, c).text = str(h)
+            _set_text_keep_format(table.cell(0, c).text_frame, str(h))
         r = 1
     for row_values in rows:
         for c, val in enumerate(row_values):
-            table.cell(r, c).text = str(val)
+            _set_text_keep_format(table.cell(r, c).text_frame, str(val))
         r += 1
 
 
 def op_set_notes(ctx: EditContext, op: dict) -> None:
     slide = ctx.get_slide(_require(op, "slide"))
-    slide.notes_slide.notes_text_frame.text = str(op.get("text", ""))
+    _set_text_keep_format(slide.notes_slide.notes_text_frame, str(op.get("text", "")))
 
 
 def op_replace_picture(ctx: EditContext, op: dict) -> None:
@@ -615,6 +677,55 @@ OP_HANDLERS = {
 }
 
 
+# スライドの中身・見た目を変える op（保存後チェックと要約の対象）。複製・削除・並び替えは対象外。
+_SLIDE_CONTENT_OPS = {
+    "set_title",
+    "set_text",
+    "set_table_cell",
+    "set_table",
+    "set_notes",
+    "replace_picture",
+    "add_picture",
+    "crop_picture",
+    "add_chart",
+    "set_shape_style",
+    "set_shape_position",
+}
+
+
+def _check_touched_slides(prs: Presentation, touched: list) -> tuple[list[str], list[dict]]:
+    """触ったスライドについて、スライド外へのはみ出し警告と shape の要約を返す。
+
+    はみ出しは pptx-inspect の `overflow_warnings` と同じ判定（check_shape_overflow）。
+    作業役が保存直後に気づいて同じ実行のうちに直せるようにし、要約は確認のための
+    pptx-inspect の再実行を省くために返す（Excel の edit_excel.py の warnings/sheet_summaries と同じ考え方）。
+    """
+    slide_width_cm = _length_cm(prs.slide_width)
+    slide_height_cm = _length_cm(prs.slide_height)
+    live = list(prs.slides._sldIdLst)
+    warnings: list[str] = []
+    summaries: list[dict] = []
+    for position, element in enumerate(live, start=1):
+        if all(element is not t for t in touched):
+            continue
+        slide = prs.slides[position - 1]
+        shapes = []
+        for index, shape in enumerate(slide.shapes):
+            info = describe_shape(shape, index)
+            overflow = check_shape_overflow(info, slide_width_cm, slide_height_cm)
+            if overflow:
+                warnings.append(f"slide {position}: {overflow}")
+            entry = {"shape_index": index, "name": info["name"]}
+            for key in ("text_preview", "table_dims", "left_cm", "top_cm", "width_cm", "height_cm"):
+                if info.get(key) is not None:
+                    entry[key] = info[key]
+            if info.get("has_picture"):
+                entry["has_picture"] = True
+            shapes.append(entry)
+        summaries.append({"slide": position, "shapes": shapes})
+    return warnings, summaries
+
+
 def main() -> int:
     setup_utf8_stdio()
     parser = argparse.ArgumentParser()
@@ -673,6 +784,7 @@ def main() -> int:
         return 1
 
     ctx = EditContext(prs)
+    touched = []  # 中身・見た目を変えたスライドの sldId 要素（削除・並び替え後も同一オブジェクトで追跡できる）
     for i, op in enumerate(operations):
         op_name = op.get("op") if isinstance(op, dict) else None
         handler = OP_HANDLERS.get(op_name)
@@ -685,6 +797,10 @@ def main() -> int:
         except ValueError as e:
             print(f"Failed to apply operation {i + 1} ({op_name}): {e}", file=sys.stderr)
             return 1
+        if op_name in _SLIDE_CONTENT_OPS:
+            element = ctx.get_slide_element(op["slide"])
+            if all(element is not t for t in touched):
+                touched.append(element)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     backup_path = backup_before_overwrite(output_path)
@@ -701,6 +817,10 @@ def main() -> int:
         "size_bytes": output_path.stat().st_size,
         "applied_operations": len(operations),
     }
+    warnings, summaries = _check_touched_slides(prs, touched)
+    if warnings:
+        result["warnings"] = warnings
+    result["slide_summaries"] = summaries
     path_memory = register_output_path(output_path, description="PPTX generated/updated by edit_pptx")
     if path_memory:
         result["path_memory"] = path_memory

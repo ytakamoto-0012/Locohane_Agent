@@ -16,7 +16,7 @@ A skill that creates new xlsx/xlsm files and edits existing ones. Runs `edit_exc
 ```bash
 python edit_excel.py "C:\Users\me\book.xlsx" --ops-json '[{"op": "set_cell", "sheet": "Sheet1", "cell": "A1", "value": "Total"}]'
 ```
-- Creating new: add `--new` at the end (`--overwrite` is also required if the file exists; otherwise it is an error).
+- Creating new: add `--new` at the end (`--overwrite` is also required if the file exists; otherwise it is an error). **A `--new` workbook starts with no sheets at all** (there is no default `Sheet`/`Sheet1`), so the first op must be `add_sheet`; do not `rename_sheet` a default sheet.
 - Without `--new`: reads the target path and edits it (an error if it does not exist). Existing cells, formatting and sheets you did not touch are kept as they are.
 - Omitting `--output` overwrites the target path. Add `--output <absolute path>` only when saving to another file.
 - `.xlsm` can be edited while keeping its macros (only without `--new`, because the existing file is read with `keep_vba=True`). Reading/writing the macros themselves is done by the excel-vba-read/excel-vba-edit skills.
@@ -44,7 +44,7 @@ python edit_excel.py "C:\Users\me\book.xlsx" --ops-file "C:\Users\me\ops.json"
 | `set_tab_color` | `sheet`,`color` | - | Change the color of the sheet tab (`color` is an RRGGBB hex string) |
 | `set_active_sheet` | `sheet` | - | Specify the sheet shown first when the workbook is opened |
 | `set_cell` | `sheet`,`cell` | `value`,`style`,`inherit_style`,`inherit_style_from` | Set the value and formatting of a single cell. If `style` is omitted and the target cell is a new cell that originally had no formatting (e.g. a row regenerated after `delete_rows`), no formatting is applied. To match the look of the surroundings, specify `inherit_style:true` to copy the formatting of an adjacent cell (the left one by default; `inherit_style_from` can choose `"left"`/`"right"`/`"above"`/`"below"`) |
-| `set_range` | `sheet`,`start_cell`,`rows` | `style`,`header_style`,`row_styles`,`format_table` | Write several rows at once from the start cell. `header_style` applies only to row 1. Column widths are adjusted automatically (full-width characters count as 2; never narrower than the existing width). **Passing `header_style` automatically applies the equivalent of `format_table` (header colors, borders, banding, freezing the header row, column width adjustment) by default** (can be disabled with `format_table:false`; conversely `format_table:true` forces it even without `header_style`) |
+| `set_range` | `sheet`,`start_cell`,`rows` | `style`,`header_style`,`row_styles`,`format_table` | Write several rows at once from the start cell. `header_style` applies only to row 1. Column widths are adjusted automatically (full-width characters count as 2; never narrower than the existing width; at most 60), and string cells still wider than the column get `wrap_text` automatically so they are not cut off. **Passing `header_style` automatically applies the equivalent of `format_table` (header colors, borders, banding, freezing the header row, column width adjustment) by default** (can be disabled with `format_table:false`; conversely `format_table:true` forces it even without `header_style`) |
 | `set_style` | `sheet`,`range` | `style` | Apply only formatting to existing cells without changing values |
 | `format_table` | `sheet`,`range` | `theme` (see below), `header_fill` (default `1F4E78` or `theme`'s primary), `header_font_color` (default `FFFFFF` or `theme`'s text_on_primary), `band_fill` (default `F2F2F2`), `banded` (default true), `border` (default `thin`), `freeze_header` (default true), `autofit` (default true) | Finish a table that has already been written. Row 1 of `range` is treated as the header. The font color and bold of body rows are not changed (so as not to break the `role` color coding) |
 | `insert_rows` | `sheet`,`index` | `count` (default 1) | Insert rows (1-based position. You need to calculate the absolute row number yourself. For inserting into tables grouped by month, category, etc., use `insert_row_group`) |
@@ -52,8 +52,8 @@ python edit_excel.py "C:\Users\me\book.xlsx" --ops-file "C:\Users\me\ops.json"
 | `delete_rows` | `sheet`,`index` | `count` (default 1) | Delete rows |
 | `insert_cols` | `sheet`,`index` | `count` (default 1) | Insert columns (1-based) |
 | `delete_cols` | `sheet`,`index` | `count` (default 1) | Delete columns |
-| `set_column_width` | `sheet`,`column`,`width` | - | Set a column width manually. The unit is Excel's character width (default about 8.43). Clamped to 1-60. `column` can be a column letter (`"A"`, etc.) or a 1-based column number (`1`, etc.) |
-| `set_row_height` | `sheet`,`row`,`height` | - | Set a row height manually (`row` is a 1-based row number, `height` in points. Clamped to 1-409) |
+| `set_column_width` | `sheet`,`column`,`width` | - | Set a column width manually. The unit is Excel's character width (default about 8.43). Clamped to 1-255 (Excel's limit; a clamped value is reported in `warnings`). `column` can be a column letter (`"A"`, etc.) or a 1-based column number (`1`, etc.). The automatic width adjustment of `set_range`/`format_table` stops at 60; for longer text prefer `wrap_text` (applied automatically, see below) over widening |
+| `set_row_height` | `sheet`,`row`,`height` | - | Set a row height manually (`row` is a 1-based row number, `height` in points. Clamped to 1-409; a clamped value is reported in `warnings`) |
 | `merge_cells` | `sheet`,`range` | - | Merge cells (e.g. `"A1:C1"`) |
 | `unmerge_cells` | `sheet`,`range` | - | Unmerge. Specifying an unmerged range is an error |
 | `add_table` | `sheet`,`name`,`range` | `style` (default `TableStyleMedium9`), `banded` (default true) | Create a structured table (with filters and structured references; different from the visual decoration of `format_table`). The existing values of row 1 of `range` become the header names. `name` is an identifier unique within the workbook |
@@ -78,7 +78,7 @@ Supplement: `sheet` is a sheet name or a 0-based index. `rows`/`value` are strin
  "align": "center", "valign": "center", "wrap_text": false,
  "border": "thin", "role": "input"}
 ```
-All keys are optional. `font_color`/`fill_color` are RRGGBB hex. `align` is `left`/`center`/`right`, `valign` is `top`/`center`/`bottom`. `border` is a string (`thin`/`medium`/`thick`, all 4 sides at once) or `{"top":"thin","bottom":"thin"}` (per side; keys `top`/`bottom`/`left`/`right`).
+All keys are optional. The alignment keys (`align`/`valign`/`wrap_text`) change only the keys you pass and keep the cell's other alignment settings (e.g. `set_style {"valign":"center"}` on merged cells keeps an existing `wrap_text`). `font_color`/`fill_color` are RRGGBB hex. `align` is `left`/`center`/`right`, `valign` is `top`/`center`/`bottom`. `border` is a string (`thin`/`medium`/`thick`, all 4 sides at once) or `{"top":"thin","bottom":"thin"}` (per side; keys `top`/`bottom`/`left`/`right`).
 
 Cell color coding by `role` (following Anthropic's official skill; recommended) — specifying `role` instead of writing `font_color` gives the conventional color automatically:
 
@@ -151,7 +151,7 @@ The first element of `row_styles` corresponds to the header row (when both `head
 
 For a column where the same value continues for 2 or more rows (e.g. a "Month" column), do not leave the value repeated; merge the cells.
 1. Write the table with `set_range` (at this point you may write the duplicate values as they are).
-2. Merge only the consecutive ranges with `merge_cells` (merging automatically clears values other than the top-left, so there is no need to blank them first).
+2. Merge only the consecutive ranges with `merge_cells` (merging automatically clears values other than the top-left, so there is no need to blank them first). Merge only rows that hold the same value: if the range contains different values, they are lost and listed in `warnings`.
 3. Applying `{"valign":"center"}` to the merged cells with `set_style` centers them vertically.
 
 ```json
@@ -270,7 +270,9 @@ Drop-down example:
 1. Build the ops from the request (combine data entry = `set_range`, appending to an existing table = `insert_rows` + `set_range`, visual finishing = `format_table`, adjusting individual cells = `set_style`, charts = `add_chart`).
 2. Run the command above.
 3. When using `--new`, if the target exists and it is unclear whether overwriting is OK, run once without `--overwrite` and confirm with the user based on the error.
-4. On success `{"path":...,"sheets":[...],"applied_ops":N}` is returned, so tell the user the save path.
+4. On success `{"path":...,"sheets":[...],"applied_ops":N,"warnings":[...],"sheet_summaries":[...]}` is returned, so tell the user the save path.
+5. **Read `warnings` and fix them in the same task before reporting** (the key is omitted when there are none). It lists, for the sheets the ops touched: values clamped by `set_column_width`/`set_row_height`, values discarded by `merge_cells` (merging across different values), text that may be cut off (no `wrap_text` and wider than the column), numeric/formula cells in one column with inconsistent `number_format` (e.g. `#,##0` in one row and General in the others), and runs of the same string in consecutive rows that are not merged. These are exactly what a verifier would report as NG, so fixing them now saves a whole fix-and-reverify round. If a warning is intended (e.g. a status column where each row is an independent value), leave it and say why in the report.
+6. `sheet_summaries` gives, for each touched sheet, `max_row`/`max_column`, `merged_cells`, the set `column_widths` and `freeze_panes` after the ops. Use it to confirm merges and widths instead of re-reading the sheet with excel-read (re-read only when you need cell values or styles).
 
 Edge cases: an extension other than xlsx/xlsm / ops not being a JSON array / an op without an `op` key / specifying a nonexistent sheet or op type / specifying an unsupported `theme` name / a missing file without `--new` / an existing file with `--new` and without `--overwrite` — all are errors with exit code 1 (the message includes which op, at which position, failed; use it as a clue to fix it and run again).
 

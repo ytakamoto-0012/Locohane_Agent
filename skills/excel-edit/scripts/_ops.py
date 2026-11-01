@@ -15,7 +15,13 @@ from pathlib import Path
 _OFFICE_SHARED = Path(__file__).resolve().parent.parent.parent / "office_shared"
 if str(_OFFICE_SHARED) not in sys.path:
     sys.path.append(str(_OFFICE_SHARED))
-from excel_common import _display_width, column_index, group_column_values, resolve_sheet_name  # noqa: E402
+from excel_common import (  # noqa: E402
+    _display_width,
+    column_index,
+    exceeds_column_width,
+    group_column_values,
+    resolve_sheet_name,
+)
 from _style import apply_style, extract_style, resolve_theme
 from office_theme import CHART_PALETTE  # noqa: E402
 from openpyxl.chart import BarChart, LineChart, PieChart, Reference, ScatterChart
@@ -41,6 +47,23 @@ _CHART_CLASSES = {
     "pie": PieChart,
     "scatter": ScatterChart,
 }
+
+
+# op の適用中に見つかった「エラーにはしないが LLM に伝えるべきこと」（値の頭打ち・
+# 結合で消えた値など）。edit_excel.py が `pop_op_warnings()` で取り出して結果JSONの
+# `warnings` に載せる（stderr ではなく結果に載せるのは、成功時に読み飛ばされず、
+# 仕様確認のためにソースを読みに行かせないため）。
+_OP_WARNINGS: list[str] = []
+
+
+def _warn(message: str) -> None:
+    _OP_WARNINGS.append(message)
+
+
+def pop_op_warnings() -> list[str]:
+    warnings = list(_OP_WARNINGS)
+    _OP_WARNINGS.clear()
+    return warnings
 
 
 def _sheet(wb, name: str):
@@ -75,6 +98,24 @@ def _apply_col_widths(ws, widths: dict[str, float]) -> None:
         current = ws.column_dimensions[letter].width
         if current is None or target > current:
             ws.column_dimensions[letter].width = target
+
+
+def _wrap_overflowing(ws, min_row: int, max_row: int, min_col: int, max_col: int) -> None:
+    """自動調整の上限（60）でも収まらない文字列のセルへ wrap_text を付ける。
+
+    列幅の自動調整は60で頭打ちになるため、それより長い文字列は折り返さないと
+    表示が切れる。作成時に付け忘れると検証でNGになり、修正の往復が1回増えていた
+    （2026-11-01 実害: 執行計画xlsxの検証NG②）。既に折り返し指定のあるセルと
+    数式セルには触れない。
+    """
+    from openpyxl.utils import get_column_letter
+
+    for col in range(min_col, max_col + 1):
+        width = ws.column_dimensions[get_column_letter(col)].width
+        for row in range(min_row, max_row + 1):
+            cell = ws.cell(row=row, column=col)
+            if isinstance(cell.value, str) and not cell.alignment.wrap_text and exceeds_column_width(cell.value, width):
+                apply_style(cell, {"wrap_text": True})
 
 
 def op_add_sheet(wb, op: dict) -> None:
@@ -163,6 +204,8 @@ def _write_rows(ws, min_row: int, min_col: int, op: dict) -> None:
             cell = ws.cell(row=min_row + r_offset, column=min_col + c_offset, value=value)
             apply_style(cell, row_style)
     _apply_col_widths(ws, _col_width_from_rows(rows, min_col))
+    if rows:
+        _wrap_overflowing(ws, min_row, min_row + len(rows) - 1, min_col, min_col + max(len(row) for row in rows) - 1)
 
     format_table_opt = op.get("format_table")
     # header_style を渡した時点で「1行目は見出し」という意図が明示されているので、
@@ -279,6 +322,7 @@ def _format_table_range(ws, min_row: int, max_row: int, min_col: int, max_col: i
     if opts.get("autofit", True):
         rows_values = [[ws.cell(row=r, column=c).value for c in range(min_col, max_col + 1)] for r in range(min_row, max_row + 1)]
         _apply_col_widths(ws, _col_width_from_rows(rows_values, min_col))
+        _wrap_overflowing(ws, min_row, max_row, min_col, max_col)
 
 
 def op_format_table(wb, op: dict) -> None:
@@ -394,7 +438,13 @@ def op_delete_cols(wb, op: dict) -> None:
 def op_set_column_width(wb, op: dict) -> None:
     from openpyxl.utils import get_column_letter
 
-    width = min(max(float(op["width"]), 1), 60)
+    # 上限は Excel の列幅の上限（255）。以前は自動調整と同じ60で頭打ちにしていたが、
+    # 「列幅を70〜80に」という指示が黙って60になり、検証→修正の往復と、仕様確認の
+    # ためのソース読みを招いていた（2026-11-01 実害）。頭打ちにした場合は warnings で知らせる。
+    requested = float(op["width"])
+    width = min(max(requested, 1), 255)
+    if width != requested:
+        _warn(f"set_column_width: width {requested:g} for column {op['column']!r} was clamped to {width:g} (allowed range 1-255)")
     column = op["column"]
     # LLMが列を1始まりの列番号（int）で渡すことも珍しくないため、
     # 列文字（"A"等）だけでなくintも受け付ける（従来はopenpyxlの
@@ -406,7 +456,10 @@ def op_set_column_width(wb, op: dict) -> None:
 
 
 def op_set_row_height(wb, op: dict) -> None:
-    height = min(max(float(op["height"]), 1), 409)
+    requested = float(op["height"])
+    height = min(max(requested, 1), 409)
+    if height != requested:
+        _warn(f"set_row_height: height {requested:g} for row {op['row']} was clamped to {height:g} (allowed range 1-409)")
     _sheet(wb, op["sheet"]).row_dimensions[int(op["row"])].height = height
 
 
@@ -422,6 +475,22 @@ def op_merge_cells(wb, op: dict) -> None:
         raise ValueError(
             f"The merge_cells range {op['range']!r} overlaps the existing merged ranges {conflicts}. "
             "Unmerge them first with unmerge_cells, or review the range."
+        )
+    # 結合は左上以外の値を消す。同じ値の連続を束ねる通常の使い方では問題ないが、
+    # 違う値をまたいで結合すると元の値が黙って失われる（2026-11-01 実害: 期限列を
+    # 7行まとめて結合し、行ごとの期限値が消えて検証NG③になった）ため、知らせる。
+    anchor_value = ws.cell(row=min_row, column=min_col).value
+    lost = [
+        f"{ws.cell(row=r, column=c).coordinate}={ws.cell(row=r, column=c).value!r}"
+        for r in range(min_row, max_row + 1)
+        for c in range(min_col, max_col + 1)
+        if (r, c) != (min_row, min_col) and ws.cell(row=r, column=c).value not in (None, "", anchor_value)
+    ]
+    if lost:
+        shown = ", ".join(lost[:8]) + (f" and {len(lost) - 8} more" if len(lost) > 8 else "")
+        _warn(
+            f"merge_cells {ws.title}!{op['range']}: the merge kept only {ws.cell(row=min_row, column=min_col).coordinate}={anchor_value!r} "
+            f"and discarded different values: {shown}. If those rows need their own values, unmerge and write them back"
         )
     ws.merge_cells(op["range"])
 

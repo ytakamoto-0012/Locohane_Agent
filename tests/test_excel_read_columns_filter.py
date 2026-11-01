@@ -75,13 +75,13 @@ class TestReadXlsxColumnsFilter:
         path = self._make_workbook(tmp_path)
         result = _read_xlsx(path, sheet_arg="Sheet1", offset=0, limit=200, data_only=False)
         assert result["columns"] == ["A", "B", "C"]
-        assert result["rows"][0] == [{"value": "id"}, {"value": "name"}, {"value": "value"}]
+        assert result["rows"][0] == [{"ref": "A1", "value": "id"}, {"ref": "B1", "value": "name"}, {"ref": "C1", "value": "value"}]
 
     def test_columns_filter_narrows_rows_in_matching_order(self, tmp_path):
         path = self._make_workbook(tmp_path)
         result = _read_xlsx(path, sheet_arg="Sheet1", offset=0, limit=200, data_only=False, columns="C,A")
         assert result["columns"] == ["A", "C"]
-        assert result["rows"][0] == [{"value": "id"}, {"value": "value"}]
+        assert result["rows"][0] == [{"ref": "A1", "value": "id"}, {"ref": "C1", "value": "value"}]
         # total_columns/total_rowsはシート全体基準のまま変わらない
         assert result["total_columns"] == 3
 

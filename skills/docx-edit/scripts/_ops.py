@@ -23,6 +23,7 @@ from _blocks import (
     resolve_theme,
 )
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 
 from _track_changes import (
     DEFAULT_AUTHOR,
@@ -66,13 +67,86 @@ class DocEditContext:
         return self.doc.paragraphs[live_idx]
 
 
-def _apply_plain_replace_to_run(run, old_text: str, new_text: str, occurrence: str) -> int:
-    text = run.text
-    if old_text not in text:
-        return 0
-    count = 1 if occurrence == "first" else text.count(old_text)
-    run.text = text.replace(old_text, new_text, 1 if occurrence == "first" else -1)
-    return count
+def _plain_run_groups(para) -> list[list]:
+    """段落の run を、置換対象にできる run（文字だけの run）が連続する塊ごとに分ける。
+
+    タブ・改行・フィールド等を含む run は塊の区切りとして扱い、それをまたぐ一致は置換しない。
+    """
+    groups: list[list] = [[]]
+    for run in para.runs:
+        if is_plain_text_run(run._r):
+            groups[-1].append(run)
+        elif groups[-1]:
+            groups.append([])
+    return [g for g in groups if g]
+
+
+def _replace_across_runs(para, old_text: str, new_text: str, occurrence: str) -> tuple[int, int]:
+    """段落内の一致を、run をまたぐものも含めて置換する。戻り値は (置換件数, うち run をまたいだ件数)。
+
+    Word は書式が同じでも校正情報等で1つの文を複数の run に分けて保存することが多く、
+    run 単位の検索だけでは「段落には見えているのに old_text not found」になり、作業役が
+    old_text を短くして何度も試す往復が起きる。またぐ一致は、一致が始まる run の書式で
+    新しい文字列を書き、一致に含まれる後続の run から一致部分を取り除く。
+    """
+    replaced = crossed = 0
+    for group in _plain_run_groups(para):
+        cursor = 0
+        while True:
+            texts = [r.text for r in group]
+            joined = "".join(texts)
+            pos = joined.find(old_text, cursor)
+            if pos < 0:
+                break
+            end = pos + len(old_text)
+            starts = []
+            offset = 0
+            for t in texts:
+                starts.append(offset)
+                offset += len(t)
+            first = next(i for i, t in enumerate(texts) if starts[i] <= pos < starts[i] + len(t))
+            last = next(i for i, t in enumerate(texts) if starts[i] < end <= starts[i] + len(t))
+            head = texts[first][: pos - starts[first]]
+            tail = texts[last][end - starts[last] :]
+            if last == first:
+                group[first].text = head + new_text + tail
+            else:
+                # 一致の後ろに残る文字列は元の run（の書式）に残し、間の run だけを取り除く
+                crossed += 1
+                group[first].text = head + new_text
+                removed = group[first + 1 : last] + ([] if tail else [group[last]])
+                if tail:
+                    group[last].text = tail
+                for run in removed:
+                    run._r.getparent().remove(run._r)
+                group = [r for r in group if all(r is not x for x in removed)]
+            replaced += 1
+            cursor = pos + len(new_text)
+            if occurrence == "first":
+                return replaced, crossed
+    return replaced, crossed
+
+
+def _not_found_hint(ctx: DocEditContext, old_text: str, track: bool) -> str:
+    """old_text が見つからないとき、段落・表のどこに文字列として見えているかを手掛かりとして返す。"""
+    doc = ctx.doc
+    para_hits = [i for i, p in enumerate(ctx._original_paragraph_elements) if old_text in "".join(t.text or "" for t in p.iter(qn("w:t")))]
+    table_hits = [i for i, t in enumerate(doc.tables) if any(old_text in cell.text for row in t.rows for cell in row.cells)]
+    hints = []
+    if para_hits:
+        if track:
+            hints.append(
+                f"it appears in paragraph(s) {para_hits[:10]} but spans several runs (or tracked changes), which track_changes:true cannot replace; "
+                "run without track_changes, or use a shorter old_text that has a single formatting"
+            )
+        else:
+            hints.append(
+                f"it appears in paragraph(s) {para_hits[:10]} but crosses a tab/line break/field "
+                "or existing tracked changes, which cannot be replaced"
+            )
+    if table_hits:
+        hints.append(f"it appears in table(s) {table_hits[:10]}, but find_replace searches only body paragraphs, not table cells")
+    return ("; " + "; ".join(hints)) if hints else ""
 
 
 def op_find_replace(ctx: DocEditContext, op: dict) -> dict:
@@ -93,28 +167,33 @@ def op_find_replace(ctx: DocEditContext, op: dict) -> dict:
     else:
         targets = doc.paragraphs
 
-    replaced = 0
+    replaced = crossed = 0
     for para in targets:
-        for run in list(para.runs):
-            if not is_plain_text_run(run._r):
-                continue
-            if track:
-                n = apply_tracked_replace_to_run(doc, run._r, old_text, new_text, occurrence, author, date)
-            else:
-                n = _apply_plain_replace_to_run(run, old_text, new_text, occurrence)
+        if track:
+            for run in list(para.runs):
+                if not is_plain_text_run(run._r):
+                    continue
+                replaced += apply_tracked_replace_to_run(doc, run._r, old_text, new_text, occurrence, author, date)
+                if occurrence == "first" and replaced:
+                    break
+        else:
+            n, c = _replace_across_runs(para, old_text, new_text, occurrence)
             replaced += n
-            if occurrence == "first" and replaced:
-                break
+            crossed += c
         if occurrence == "first" and replaced:
             break
 
     if replaced == 0:
         raise ValueError(
             f"old_text not found: {old_text!r}"
-            " (it must fit within a single run; strings with mixed formatting, strings spanning several runs,"
-            " and strings inside existing Track Changes cannot be detected)"
+            " (track_changes:true needs it within a single run; strings across tabs/line breaks/fields"
+            " and strings inside existing Track Changes cannot be detected)" + _not_found_hint(ctx, old_text, track)
         )
-    return {"op": "find_replace", "replaced_count": replaced}
+    result = {"op": "find_replace", "replaced_count": replaced}
+    if crossed:
+        # またいだ一致は一致が始まる run の書式で書かれる（太字の一部だけを置換した等で書式が変わり得る）ことを知らせる
+        result["cross_run_count"] = crossed
+    return result
 
 
 def op_append_block(ctx: DocEditContext, op: dict) -> dict:
