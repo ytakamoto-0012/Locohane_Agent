@@ -8,6 +8,7 @@ import { ChainlitContext, elementState, sessionIdState, type IStep } from '@chai
 import type { IMessageElement } from '@chainlit/react-client';
 import { useI18n } from '../i18n';
 import { FileLink } from './FileLink';
+import { stepDisplayLabel } from '../utils/stepLabel';
 import { SUBAGENT_MESSAGE_AUTHOR } from '../utils/messageTree';
 
 function MessageElements({ messageId }: { messageId: string }) {
@@ -98,7 +99,17 @@ function MessageBubble({ step }: { step: IStep }) {
   );
 }
 
-function TypingIndicator() {
+/** 応答待ちの「...」。横に今している処理（サイドパネルの実行中Stepと同じ表記）を出す。
+ *  サブエージェント実行中は「SUB: explore › ツール: Read」のように外側と一番内側の処理を並べる。 */
+function TypingIndicator({ runningSteps }: { runningSteps: IStep[] }) {
+  const { t } = useI18n();
+  const outer = runningSteps[0];
+  const inner = runningSteps[runningSteps.length - 1];
+  const activity = outer
+    ? inner === outer
+      ? stepDisplayLabel(outer, t)
+      : `${stepDisplayLabel(outer, t)} › ${stepDisplayLabel(inner, t)}`
+    : '';
   return (
     <div className="message-row message-row--assistant">
       <div className="avatar avatar--assistant">AI</div>
@@ -108,12 +119,25 @@ function TypingIndicator() {
           <span />
           <span />
         </span>
+        {activity ? (
+          <span className="typing-activity" title={activity}>
+            {activity}
+          </span>
+        ) : null}
       </div>
     </div>
   );
 }
 
-export function MessageThread({ messages, showTyping }: { messages: IStep[]; showTyping: boolean }) {
+export function MessageThread({
+  messages,
+  showTyping,
+  runningSteps
+}: {
+  messages: IStep[];
+  showTyping: boolean;
+  runningSteps: IStep[];
+}) {
   const { t } = useI18n();
   if (messages.length === 0 && !showTyping) {
     return <div className="message-thread-empty">{t('messages.empty')}</div>;
@@ -124,7 +148,7 @@ export function MessageThread({ messages, showTyping }: { messages: IStep[]; sho
       {messages.map((step) => (
         <MessageBubble key={step.id} step={step} />
       ))}
-      {showTyping ? <TypingIndicator /> : null}
+      {showTyping ? <TypingIndicator runningSteps={runningSteps} /> : null}
     </div>
   );
 }

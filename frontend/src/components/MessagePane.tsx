@@ -14,7 +14,15 @@ const AUTO_SCROLL_ENGAGE_THRESHOLD_PX = 4;
 // 最下部からこの距離(px)を超えて離れたら解除する。
 const AUTO_SCROLL_DISENGAGE_THRESHOLD_PX = 64;
 
-export function MessagePane({ messages, showTyping }: { messages: IStep[]; showTyping: boolean }) {
+export function MessagePane({
+  messages,
+  showTyping,
+  runningSteps
+}: {
+  messages: IStep[];
+  showTyping: boolean;
+  runningSteps: IStep[];
+}) {
   const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -94,7 +102,7 @@ export function MessagePane({ messages, showTyping }: { messages: IStep[]; showT
   return (
     <div className="messages-scroll-wrapper">
       <div className="messages-scroll" ref={containerRef} onScroll={handleScroll} onWheel={handleWheel}>
-        <MessageThread messages={messages} showTyping={showTyping} />
+        <MessageThread messages={messages} showTyping={showTyping} runningSteps={runningSteps} />
       </div>
       {!autoScroll ? (
         <button

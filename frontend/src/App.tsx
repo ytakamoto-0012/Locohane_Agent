@@ -32,6 +32,7 @@ import { StarterPrompts } from './components/StarterPrompts';
 import {
   selectMainThread,
   selectSideSteps,
+  selectRunningStepChain,
   selectLatestTokenUsage,
   selectLatestWorkDir,
   selectLatestPlan,
@@ -361,6 +362,9 @@ function App() {
   // 送信直後〜最終回答のストリーミング開始までの「空白時間」を可視化する。
   // 既に回答トークンが届き始めていれば streaming カーソル側で表現されるため不要。
   const showTyping = loading && !(lastMain?.type === 'assistant_message' && lastMain.streaming);
+  // 「...」の横に出す、今している処理（サイドパネルで実行中のStep）。
+  // 表示件数の間引き前の sideSteps から辿る（間引きで実行中のStepが落ちないように）。
+  const runningSteps = showTyping ? selectRunningStepChain(sideSteps) : [];
 
   if (!authReady) return null;
   if (requireLogin && !isAuthenticated) return <LoginForm />;
@@ -374,7 +378,7 @@ function App() {
           onOpenThreads={config?.dataPersistence ? () => setMobileDrawer('threads') : undefined}
           onOpenDetails={() => setMobileDrawer('details')}
         />
-        <MessagePane messages={displayMessages} showTyping={showTyping} />
+        <MessagePane messages={displayMessages} showTyping={showTyping} runningSteps={runningSteps} />
         <AskActionBar />
         <AskFormBar />
         <AskChoiceFormBar />

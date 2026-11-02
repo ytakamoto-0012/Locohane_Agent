@@ -361,6 +361,20 @@
 
 .message-bubble--typing {
   padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.typing-activity {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .message-bubble-content :first-child {

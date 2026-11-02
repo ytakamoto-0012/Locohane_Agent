@@ -132,6 +132,34 @@ export function selectSideSteps(messages: IStep[]): IStep[] {
   return out;
 }
 
+/** 実行中のStepか（StepItem の「実行中」バッジと同じ判定）。ループ検知等で打ち切られたStep・
+ *  dispatch_agent_batch の安全上限後も裏で動くグループは、今の応答の処理ではないので除く。 */
+function isRunningStep(step: IStep): boolean {
+  return (
+    Boolean(step.start) &&
+    !step.end &&
+    !step.isError &&
+    !step.metadata?.stopped_reason &&
+    !step.metadata?.background
+  );
+}
+
+/**
+ * 今まさに実行中の処理を、外側（メインエージェントのStep）から内側（サブエージェント配下のStep）
+ * へ辿った列で返す（チャット欄の応答待ち表示に使う）。sideSteps は selectSideSteps の戻り値。
+ * 各階層で実行中のStepが複数ある（並列のサブエージェント等）ときは最後に始まったものを選ぶ。
+ */
+export function selectRunningStepChain(sideSteps: IStep[]): IStep[] {
+  const chain: IStep[] = [];
+  let level = sideSteps;
+  for (;;) {
+    const running = level.filter(isRunningStep).pop();
+    if (!running) return chain;
+    chain.push(running);
+    level = running.steps ?? [];
+  }
+}
+
 /** 直近のトークン使用量メッセージ(cl.Messageとして届く)を1件だけ取り出す。 */
 export function selectLatestTokenUsage(messages: IStep[]): IStep | undefined {
   const usageMessages = flattenAll(messages).filter(isTokenUsageMessage);
