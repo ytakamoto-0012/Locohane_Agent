@@ -677,6 +677,8 @@ const I18N_EN = {
   "終了 {0}": "Finished {0}",
   "{0} のベクターをすべて消して、全ファイルを取り込み直します。よろしいですか？（埋め込みモデルを変えたときに必要です）": "Delete all vectors of {0} and ingest every file again? (Needed when you change the embedding model.)",
   "取り込み（差分）": "Ingest (diff)",
+  "{0} の取り込みを停止します。処理中のファイルが終わってから止まります（取り込み済みのファイルは残り、「取り込み（差分）」で続きから取り込めます）。よろしいですか？": "Stop ingesting {0}? It stops after the files in progress finish. (Files already ingested are kept; \"Ingest (diff)\" resumes from where it stopped.)",
+  "{0} のコピーを停止します。処理中のファイルが終わってから止まります。よろしいですか？": "Stop copying {0}? It stops after the files in progress finish.",
   "再構築": "Rebuild",
   "コレクション {0} と取り込み済みのベクターを削除します（取り込み元の文書は消えません）。よろしいですか？": "Delete collection {0} and its ingested vectors? (The source documents are not deleted.)",
   "例: 品質管理規程・手順書": "e.g. Quality control rules and procedures",

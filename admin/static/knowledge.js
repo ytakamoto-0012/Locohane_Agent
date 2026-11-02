@@ -473,6 +473,10 @@ function knowledgeActions(container, name, c, enabled) {
     const stopBtn = el("button", {
       text: c.job.stop_requested ? _t("停止中…") : idleText,
       onclick: async () => {
+        // 順番待ちの削除の取りやめは何も失わないため確かめない。取り込み・コピーは止めると途中で終わるため確かめる。
+        if (c.job.kind === "copy" && !confirm(_t(`{0} のコピーを停止します。処理中のファイルが終わってから止まります。よろしいですか？`, c.name))) return;
+        if (c.job.kind !== "copy" && c.job.kind !== "delete"
+          && !confirm(_t(`{0} の取り込みを停止します。処理中のファイルが終わってから止まります（取り込み済みのファイルは残り、「取り込み（差分）」で続きから取り込めます）。よろしいですか？`, c.name))) return;
         stopBtn.disabled = true;
         stopBtn.textContent = _t("停止中…");
         if (await knowledgeAction(() => api(knowledgePath(name, `${path}/stop`), { method: "POST" }))) renderKnowledgePanel(container, name);
