@@ -1485,6 +1485,17 @@ def test_scan_skips_paths_matching_exclude_keywords(tmp_path):
     assert len(ingest.list_source_files(tmp_path / "x", True, (".md",), exclude_keywords=[tmp_path.name])) == 1
 
 
+def test_scan_exclude_keywords_match_lookalike_characters(tmp_path):
+    # 半角カナ・全角英字・互換漢字（U+F9E4 の「理」）の名前にも、ふつうの文字で書いたキーワードを当てる（NFKC）。
+    for rel in ("ﾒｰｶｰ別標準/a.md", "ＯＬＤ/b.md", "管理表.md", "c.md"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x", encoding="utf-8")
+    files = ingest.list_source_files(tmp_path, True, (".md",), exclude_keywords=["old", "管理", "メーカー別標準"])
+    assert files == [tmp_path / "c.md"]
+    # キーワードの側が半角カナでも同じ。
+    assert ingest.list_source_files(tmp_path, True, (".md",), include_keywords=["ﾒｰｶｰ"]) == [tmp_path / "ﾒｰｶｰ別標準" / "a.md"]
+
+
 def test_scan_keeps_only_paths_matching_include_keywords(tmp_path):
     for rel in ("a.md", "b.txt", "manual/c.md", "x/Manual/y/d.txt", "old/manual_e.md"):
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)

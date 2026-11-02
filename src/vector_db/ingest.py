@@ -25,6 +25,7 @@ from pathlib import Path
 import tempfile
 import threading
 import time
+import unicodedata
 import zipfile
 from typing import Callable, Collection, NamedTuple, Sequence
 
@@ -467,9 +468,15 @@ class _Subdirectory:
     link_target: str | None = None
 
 
+def _fold_path_text(text: str) -> str:
+    """取り込み除外・対象キーワードとパスを比べる形にする（NFKC で半角カナ・全角英数字・互換漢字を
+    ふつうの文字にそろえ、大文字小文字を区別しない）。見た目が同じでも文字コードが違う名前に当てるため。"""
+    return unicodedata.normalize("NFKC", text).casefold()
+
+
 def _keyword_patterns(keywords: Sequence[str]) -> tuple[str, ...]:
-    """取り込み除外・対象キーワードを、_matches_keywords() で比べる形（区切りを / にそろえ、大文字小文字を区別しない）にする。"""
-    return tuple(k.strip().replace("\\", "/").casefold() for k in keywords if k.strip())
+    """取り込み除外・対象キーワードを、_matches_keywords() で比べる形（区切りを / にそろえ、_fold_path_text()）にする。"""
+    return tuple(_fold_path_text(k.strip().replace("\\", "/")) for k in keywords if k.strip())
 
 
 def _matches_keywords(root: Path, path: Path, is_dir: bool, patterns: tuple[str, ...]) -> bool:
@@ -478,14 +485,14 @@ def _matches_keywords(root: Path, path: Path, is_dir: bool, patterns: tuple[str,
     フォルダ名・ファイル名もパスの一部なので、名前に含むものも当てはまる。前後に / を付けて比べるため、
     "/old/" のように書けば名前が old ちょうどのフォルダ（とその中）だけに当てられる。取り込み元フォルダ自身のパスは比べない。
     "*.xlsx" のように "*." で始まるキーワードは拡張子の指定とし、ファイル名がそれで終わるファイルだけに当てる
-    （フォルダには当てない）。
+    （フォルダには当てない）。半角カナ・全角英数字・互換漢字の違いは区別しない（_fold_path_text()）。
     """
     try:
         relative = path.relative_to(root).as_posix()
     except ValueError:
         relative = path.name
     text = f"/{relative}/" if is_dir else f"/{relative}"
-    text = text.casefold()
+    text = _fold_path_text(text)
     for p in patterns:
         if p.startswith("*."):
             if not is_dir and text.endswith(p[1:]):
