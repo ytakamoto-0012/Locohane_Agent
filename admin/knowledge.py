@@ -40,7 +40,7 @@ from src.vector_db.collection_copy import CopyError, check_compatible, copy_coll
 from src.vector_db.embeddings import EmbeddingError, embedding_model
 from src.vector_db.ingest import IngestError, IngestSlots, effective_extensions, ingest_collection
 from src.vector_db.journal import open_journal
-from src.vector_db.keyword_index import open_keyword_index
+from src.vector_db.keyword_index import open_keyword_index, remove_keyword_index
 from src.vector_db.store import StoreError, open_store, path_collection_name, storage_collection_names
 
 from . import audit
@@ -378,9 +378,10 @@ def run_delete_job(cfg: Config, instance: str, job: IngestJob, jobs: _JobRegistr
                     store.drop_collection(storage)
             finally:
                 store.close()
-            with open_keyword_index(cfg.vector_db_dir) as keywords:
+            with open_keyword_index(cfg.vector_db_dir, job.collection) as keywords:
                 keywords.drop_collection(job.collection)
                 keywords.drop_collection(path_collection_name(job.collection))
+            remove_keyword_index(cfg.vector_db_dir, job.collection)
             catalog.delete(job.collection)
             journal.clear(job.collection)
         job.state = "done"

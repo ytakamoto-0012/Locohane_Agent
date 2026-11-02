@@ -126,7 +126,7 @@ def test_file_with_many_chunks_is_written_in_parts(env, monkeypatch):
     record = _record(env, path)
     assert record.size == path.stat().st_size and record.chunk_count == 30
     assert _journal(env) == []
-    with open_keyword_index(env["cfg"].vector_db_dir) as keywords:
+    with open_keyword_index(env["cfg"].vector_db_dir, "docs") as keywords:
         assert len(keywords.source_rows("docs", str(path))) == 30
     hits = search.search(env["cfg"], "第7条 項目7の基準は7mmとする。" + "あ" * 150, top_k=1, **env["kwargs"]).hits
     assert hits[0].text.startswith("第7条")
@@ -151,7 +151,7 @@ def test_file_with_many_chunks_is_written_in_parts(env, monkeypatch):
     assert len(chunks) == 10 and all("改" in c.text for c in chunks)
     # 10 行を 3 行ずつコミットしたうえで、最後のコミットで残りとカタログを書く。
     assert keyword_commits["n"] >= 4
-    with open_keyword_index(env["cfg"].vector_db_dir) as keywords:
+    with open_keyword_index(env["cfg"].vector_db_dir, "docs") as keywords:
         rows = keywords.source_rows("docs", str(path))
     assert len(rows) == 10 and all("改" in text for _, _, text in rows)
     assert _journal(env) == []
@@ -237,7 +237,7 @@ def test_half_written_new_file_is_removed_when_the_file_is_gone(env):
     path.unlink()
     _ingest(env)
     assert _stored(env, path)[0] == [] and _journal(env) == []
-    with open_keyword_index(env["cfg"].vector_db_dir) as keywords:
+    with open_keyword_index(env["cfg"].vector_db_dir, "docs") as keywords:
         assert keywords.source_rows("docs", str(path)) is None
 
 
@@ -313,7 +313,7 @@ def test_copy_of_a_file_with_many_chunks_is_read_in_pages(env, tmp_path, monkeyp
     monkeypatch.undo()
     assert (result["files"], result["chunks"]) == (1, 600)
     assert _stored(env, path, dst, "copied") == _stored(env, path)
-    with open_keyword_index(env["cfg"].vector_db_dir) as a, open_keyword_index(dst.vector_db_dir) as b:
+    with open_keyword_index(env["cfg"].vector_db_dir, "docs") as a, open_keyword_index(dst.vector_db_dir, "copied") as b:
         assert b.source_rows("copied", str(path)) == a.source_rows("docs", str(path))
     with open_journal(dst.vector_db_dir) as journal:
         assert journal.sources("copied") == []
@@ -344,7 +344,7 @@ def test_copy_commits_in_the_middle_of_a_large_file(env, tmp_path, monkeypatch):
     assert max(applied) <= collection_copy._KEYWORD_PAGE_ROWS and len([n for n in applied if n]) >= 2
     for source in (path, env["docs"] / "small.md"):
         assert _stored(env, source, dst, "copied") == _stored(env, source)
-    with open_keyword_index(env["cfg"].vector_db_dir) as a, open_keyword_index(dst.vector_db_dir) as b:
+    with open_keyword_index(env["cfg"].vector_db_dir, "docs") as a, open_keyword_index(dst.vector_db_dir, "copied") as b:
         assert b.source_rows("copied", str(path)) == a.source_rows("docs", str(path))
         assert b.source_rows(path_collection_name("copied"), str(path)) == a.source_rows(path_collection_name("docs"), str(path))
     with vcat.open_catalog(dst.vector_db_dir) as catalog:

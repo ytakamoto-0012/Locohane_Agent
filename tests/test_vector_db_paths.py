@@ -108,7 +108,7 @@ def test_search_paths_filters_by_path_min_score_and_collection(env):
 
 
 def _path_keyword_sources(cfg) -> list[str]:
-    with open_keyword_index(cfg.vector_db_dir) as keywords:
+    with open_keyword_index(cfg.vector_db_dir, "docs") as keywords:
         texts = keywords.search(path_collection_name("docs"), "配管図面 会議資料", 100)
     return sorted(h.text for h in texts)
 
@@ -139,7 +139,7 @@ def test_path_keywords_follow_removal_and_backfill(env):
     ingest.ingest_collection(cfg, "docs", **kwargs)
     assert _path_keyword_sources(cfg) == ["会議資料/議事録.md", "配管図面/系統A.md"]
     # パスのキーワード検索の導入前に取り込んだ状態を再現すると、埋め込み直さずに索引だけ補う
-    with open_keyword_index(cfg.vector_db_dir) as keywords:
+    with open_keyword_index(cfg.vector_db_dir, "docs") as keywords:
         keywords.drop_collection(path_collection_name("docs"))
     before = len(env["embed"].requests)
     ingest.ingest_collection(cfg, "docs", **kwargs)

@@ -22,18 +22,19 @@ def test_tokens_split_japanese_into_bigrams_and_ascii_into_words():
 
 
 def test_keyword_index_ranks_exact_terms(tmp_path):
-    with open_keyword_index(tmp_path) as index:
+    with open_keyword_index(tmp_path, "docs") as index, open_keyword_index(tmp_path, "other") as other:
         index.replace_source("docs", "/a.md", [ChunkRecord("", "型番 XR-7741 の取付手順"), ChunkRecord("", "一般的な取付手順")])
         index.replace_source("docs", "/b.md", [])
-        index.replace_source("other", "/c.md", [ChunkRecord("", "XR-7741")])
+        other.replace_source("other", "/c.md", [ChunkRecord("", "XR-7741")])
         assert index.has_source("docs", "/b.md")  # チャンクが無くても索引済みとして記録する
         hits = index.search("docs", "XR-7741 はどこ？", 5)
         assert [h.text for h in hits] == ["型番 XR-7741 の取付手順"]
         assert index.search("docs", "の", 5) == []
         index.delete_source("docs", "/a.md")
         assert index.search("docs", "XR-7741", 5) == [] and not index.has_source("docs", "/a.md")
-        index.drop_collection("other")
-        assert index.search("other", "XR-7741", 5) == []
+        assert [h.text for h in other.search("other", "XR-7741", 5)] == ["XR-7741"]
+        other.drop_collection("other")
+        assert other.search("other", "XR-7741", 5) == []
 
 
 def test_fuse_merges_chunks_of_the_same_page_and_counts_only_the_best_rank():
@@ -83,7 +84,7 @@ def test_ingest_maintains_keyword_index(env):
     cfg, kwargs = env["cfg"], env["kwargs"]
     ingest.ingest_collection(cfg, "docs", **kwargs)
     # キーワード索引の導入前に取り込んだコレクションは、差分取り込みで埋め込み直さずに索引だけ作る
-    with open_keyword_index(cfg.vector_db_dir) as index:
+    with open_keyword_index(cfg.vector_db_dir, "docs") as index:
         index.drop_collection("docs")
     result = ingest.ingest_collection(cfg, "docs", **kwargs)
     assert result.unchanged == 2
@@ -93,7 +94,7 @@ def test_ingest_maintains_keyword_index(env):
     assert ingest.ingest_collection(cfg, "docs", **kwargs).removed == 1
     assert search.search(cfg, "XR-7741", **kwargs).hits == []
     ingest.ingest_collection(cfg, "docs", rebuild=True, **kwargs)
-    with open_keyword_index(cfg.vector_db_dir) as index:
+    with open_keyword_index(cfg.vector_db_dir, "docs") as index:
         assert [h.source_path for h in index.search("docs", "会議室", 5)] == [str(env["docs"] / "room.md")]
 
 

@@ -5,6 +5,7 @@
   プロセス内でこのロックを取ってから書く。同じインスタンスの複数のコレクションを同時に取り込むと、SQLite の
   busy handler は待つ順番が公平でなく、運の悪い接続が待たされ続けて「database is locked」になるため、
   プロセス内では順番に並べる（別のプロセスとの競合は busy timeout とやり直し（retry_locked）で待つ）。
+  キーワード索引はコレクションごとのファイルのため、ファイルごとのロックにする（keyword_index.KeywordIndex._write_lock）。
 - まとめ書き（SqliteBatchMixin.apply_deferred）。取り込みはファイルごとに数回の書き込みをするため、1回ずつ
   コミットすると（WAL でもコミットごとにディスクへの書き出しを待つため）ファイル数が多いほど遅くなる。
   書き込みをためておき、1つの短いトランザクションでまとめて書く。
@@ -165,10 +166,14 @@ class SqliteBatchMixin:
     path: Path
     _batching: bool = False
 
+    def _write_lock(self) -> threading.RLock:
+        """書き込むときに取るプロセス内のロック（既定はインスタンスの書き込みロック。キーワード索引はファイルごと）。"""
+        return instance_write_lock(self.path.parent)
+
     @contextmanager
     def _write(self):
-        """インスタンスの書き込みロックを取り、抜けるときにコミットする（例外なら巻き戻す）。"""
-        with instance_write_lock(self.path.parent), self._conn:
+        """書き込みのロック（_write_lock）を取り、抜けるときにコミットする（例外なら巻き戻す）。"""
+        with self._write_lock(), self._conn:
             yield
 
     @contextmanager
@@ -193,7 +198,7 @@ class SqliteBatchMixin:
             return
 
         def attempt() -> None:
-            with instance_write_lock(self.path.parent), busy_timeout_for(self._conn, should_stop):
+            with self._write_lock(), busy_timeout_for(self._conn, should_stop):
                 if not self._conn.in_transaction:
                     self._conn.execute("BEGIN IMMEDIATE")
                 self._batching = True

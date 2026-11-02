@@ -72,7 +72,7 @@ def test_copy_duplicates_vectors_keywords_and_file_records(env):
     dst_records, dst_text, dst_paths = _sources(env["dst"], "manuals", t)
     assert dst_records == src_records
     assert dst_text == src_text and dst_paths == src_paths
-    with open_keyword_index(env["src"].vector_db_dir) as src_kw, open_keyword_index(env["dst"].vector_db_dir) as dst_kw:
+    with open_keyword_index(env["src"].vector_db_dir, "docs") as src_kw, open_keyword_index(env["dst"].vector_db_dir, "manuals") as dst_kw:
         for p in src_records:
             assert dst_kw.source_rows("manuals", p) == src_kw.source_rows("docs", p)
             assert dst_kw.source_rows(path_collection_name("manuals"), p) == src_kw.source_rows(path_collection_name("docs"), p)

@@ -863,7 +863,7 @@ def ingest_collection(
             )
         # Qdrant へ送り直しを待つ間も「停止」に応じる（[vector_db].qdrant_max_retries = -1 なら無制限に待つため）。
         store = open_store(cfg, transport=store_transport, should_stop=should_stop)
-        keywords = open_keyword_index(cfg.vector_db_dir)
+        keywords = open_keyword_index(cfg.vector_db_dir, name)
         # 埋め込みサーバーへの接続は取り込み全体で使い回す（embeddings.open_client 参照）。
         embedding_client = open_client(cfg, transport=embedding_transport, concurrency=slots.capacity("embed"))
         try:

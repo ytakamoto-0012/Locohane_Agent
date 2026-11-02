@@ -20,7 +20,7 @@ from _vector_db_fakes import FakeEmbeddingServer, FakeQdrant, make_config
 from src.vector_db import catalog as vcat
 from src.vector_db import collection_copy, embeddings, ingest, qdrant_store, sqlite_batch
 from src.vector_db.journal import open_journal
-from src.vector_db.keyword_index import KEYWORDS_FILENAME
+from src.vector_db.keyword_index import keyword_index_path
 from src.vector_db.store import StoreStopped
 
 
@@ -210,8 +210,8 @@ def test_sqlite_locks_are_not_held_while_sending_to_qdrant(tmp_path, monkeypatch
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/points/batch"):
-            for name in (vcat.CATALOG_FILENAME, KEYWORDS_FILENAME):
-                attempts.append(_try_write(cfg.vector_db_dir / name))
+            for path in (cfg.vector_db_dir / vcat.CATALOG_FILENAME, keyword_index_path(cfg.vector_db_dir, "docs")):
+                attempts.append(_try_write(path))
         return qdrant.handler(request)
 
     result = ingest.ingest_collection(
@@ -238,8 +238,8 @@ def test_copy_does_not_hold_sqlite_locks_while_sending_to_qdrant(tmp_path, monke
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/points/batch") and "locohane_dst_" in request.url.path:
-            for name in (vcat.CATALOG_FILENAME, KEYWORDS_FILENAME):
-                attempts.append(_try_write(dst.vector_db_dir / name))
+            for path in (dst.vector_db_dir / vcat.CATALOG_FILENAME, keyword_index_path(dst.vector_db_dir, "copied")):
+                attempts.append(_try_write(path))
         return qdrant.handler(request)
 
     t = httpx.MockTransport(handler)

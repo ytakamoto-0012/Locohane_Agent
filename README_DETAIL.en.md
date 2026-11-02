@@ -439,7 +439,7 @@ Locohane/
 │   │   ├── embeddings.py     # computing embeddings with /v1/embeddings
 │   │   ├── catalog.py        # collection definitions and records of ingested files (catalog.sqlite)
 │   │   ├── store.py / sqlite_vec_store.py / qdrant_store.py # where vectors are stored (sqlite-vec / Qdrant)
-│   │   ├── keyword_index.py  # keyword index of the text (keywords.sqlite, BM25 of SQLite FTS5)
+│   │   ├── keyword_index.py  # keyword index of the text (keywords/<collection name>.sqlite, BM25 of SQLite FTS5)
 │   │   ├── sqlite_batch.py   # batched commits of SQLite writes (for ingestion; WAL, synchronous=NORMAL)
 │   │   ├── journal.py        # ingestion journal (ingest_journal.sqlite; cleans up files left half-written by a forced termination)
 │   │   ├── gc_pacer.py       # periodic collection of cyclic garbage (httpx responses) during ingestion and copying
@@ -575,7 +575,7 @@ and WAL cannot be used). Use "Data backup" (in the settings dashboard section) t
 | `data/chat_threads.sqlite` | Metadata for the conversation thread list (left sidebar) and resuming (thread names, owners, Chainlit Step history). A separate file from `checkpoints.sqlite` (see `[thread_store]`) | When the list/resume feature is no longer needed | Delete the file (while the app is stopped; `checkpoints.sqlite` itself remains, so conversation state is not lost) |
 | `data/logs/app.log` | App operation log | Any time | Delete the file |
 | `data/memory/` | Persistent memory (`user`/`feedback`/`project`/`reference` subfolders + the `MEMORY.md` index) | When the accumulated memories are no longer needed | Delete the folder contents (`MEMORY.md` is regenerated on the next save) |
-| `data/vector_db/` | The vector DB's `catalog.sqlite` (collection definitions, records of ingested files), the vectors `vectors.sqlite` with `backend = sqlite_vec`, the keyword index of the text `keywords.sqlite`, and the ingestion journal `ingest_journal.sqlite` that records files left half-written by a forced termination (`[vector_db] dir`). `catalog.sqlite` also holds references to collections of other instances (the `collection_refs` table). The source documents themselves are not copied | When a collection is no longer needed | Delete the collection on the Knowledge screen of the settings dashboard (to delete the whole folder, stop the app and the admin tool's ingestion first; with `backend = qdrant` the vectors remain on the Qdrant side) |
+| `data/vector_db/` | The vector DB's `catalog.sqlite` (collection definitions, records of ingested files), the vectors `vectors.sqlite` with `backend = sqlite_vec`, the keyword index of the text `keywords/<collection name>.sqlite` (one file per collection), and the ingestion journal `ingest_journal.sqlite` that records files left half-written by a forced termination (`[vector_db] dir`). `catalog.sqlite` also holds references to collections of other instances (the `collection_refs` table). The source documents themselves are not copied | When a collection is no longer needed | Delete the collection on the Knowledge screen of the settings dashboard (to delete the whole folder, stop the app and the admin tool's ingestion first; with `backend = qdrant` the vectors remain on the Qdrant side) |
 | `data/plans/` | Detailed plan Markdown when `create_plan` is passed the `detail_markdown` argument (`[paths] plans_dir`) | When old plans are no longer needed | Delete the folder contents |
 | `data/skill_drafts/<username>/` | Per-user draft skills created by skill-creator (`<skill name>/`) and their evaluation results (`_workspace/`). `[skill_creator] draft_dir`. Rejected drafts also remain as records (not shown in the list) | When there are unneeded drafts | Delete the draft folder (the creator can also delete it with `delete_draft.py` of skill-creator). Not deleted automatically |
 | `data/<instance name>/skill_drafts_archive/<username>/<skill name>_<date time>/` | Where promoted drafts are moved (together with `_workspace/`; `[skill_creator] archive_dir`) | When the records are no longer needed | Delete the folder |
@@ -1117,8 +1117,9 @@ when looking for facts, figures or document contents (when disabled or nothing i
   with 300,000 as the practical limit** (it has no index and compares against everything on every search, so with 300,000 one search takes about 1 second), and Qdrant is
   **up to 1 million** with `qdrant_preset = none`, and **1 to 10 million** with `1m`-`10m` (see "Using Qdrant"). With
   `chunk_size = 800`, chunks are roughly 1-2 per densely written A4 page; page images with `image_input = true` add one per page, and file paths (for `search_document_paths`) add one per file separately.
-  Both compare by cosine similarity. Regardless of the storage, text chunks are also put in `keywords.sqlite` (SQLite FTS5) in the same folder
-  for keyword search (`src/vector_db/keyword_index.py`).
+  Both compare by cosine similarity. Regardless of the storage, text chunks are also put in `keywords/<collection name>.sqlite` (SQLite FTS5; one file per collection,
+  so search and writes do not depend on the size of other collections) in the same folder for keyword search (`src/vector_db/keyword_index.py`).
+  The single `keywords.sqlite` of older versions (all collections in one file) is split into per-collection files once, the first time it is opened after updating, and then removed.
 - **Ingestion** (`src/vector_db/ingest.py`): the supported formats are `.pdf` (per page), `.docx`, `.xlsx`/`.xlsm` (per sheet), `.pptx`
   (per slide, including notes) and `.md`/`.txt`/`.csv` (can be narrowed with `[vector_db] include_extensions`; Office temporary files `~$*` are excluded).
   Application-specific extensions whose content is text (`.step`, `.igs`, AutoForm material files `.mat`, etc.) can be ingested as text like `.txt`
@@ -1174,7 +1175,7 @@ when looking for facts, figures or document contents (when disabled or nothing i
   ingestion embeds, one per file, each file's **path relative to the source folder** (e.g. `ProductA/exterior_photos/weld_NG_example.jpg`; parts above the source
   are common to all files and not useful as clues, so they are not included) (with `document_prefix`, sent at the end of the same request as the text chunks),
   and puts them in a separate collection `<collection name>.path`. The same relative paths also go into the keyword index
-  (`keywords.sqlite`; the collection name inside the index is also `<collection name>.path`, so it does not mix with the keyword search of the text)
+  (a table separate from the text in `keywords/<collection name>.sqlite`, so it does not mix with the keyword search of the text)
   (extensions such as `pdf` and `jpg` would match all files of the same format, so they are not included as index words; relative paths in results include extensions).
   Search looks separately with path embeddings (similarity of `path_min_score` or more) and path keywords (BM25; picks up exact matches of model numbers, part numbers, dates, etc.;
   words are split the same way as the keyword search of the text), merges the ranks with the same formula as `search_documents` (weight 1.0 for embeddings,
@@ -1733,7 +1734,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[vector_db]` | `enabled` | Enables/disables the vector DB (semantic search of internal documents) (default false). While false, `search_documents`/`list_document_collections` return that it is disabled, and ingestion from the dashboard cannot be done either (see "Vector DB (semantic search of internal documents)") | `VECTOR_DB_ENABLED` |
 | `[vector_db]` | `backend` | Where vectors are stored (`sqlite_vec` default / `qdrant`) | `VECTOR_DB_BACKEND` |
 | `[vector_db]` | `distance` | Distance function of collections (`Cosine` default / `Euclid` / `Manhattan` / `Dot`; `Dot` only with `backend = qdrant`). **Existing collections need a rebuild after changing it**. The similarity of `Euclid`/`Manhattan` is converted to `1 / (1 + distance)` | `VECTOR_DB_DISTANCE` |
-| `[vector_db]` | `dir` | Where `catalog.sqlite` (collection definitions, records of ingested files), `vectors.sqlite` with `sqlite_vec`, and the keyword index `keywords.sqlite` are saved (default `${common_data_dir}/vector_db`) | `VECTOR_DB_DIR` |
+| `[vector_db]` | `dir` | Where `catalog.sqlite` (collection definitions, records of ingested files), `vectors.sqlite` with `sqlite_vec`, and the keyword index `keywords/` (one `.sqlite` per collection) are saved (default `${common_data_dir}/vector_db`) | `VECTOR_DB_DIR` |
 | `[vector_db]` | `qdrant_url` | URL of the Qdrant server with `backend = qdrant` (e.g. `http://localhost:6333`). The API key is `QDRANT_API_KEY` in `.env` | `VECTOR_DB_QDRANT_URL` |
 | `[vector_db]` | `qdrant_collection_prefix` | Prefix of collection names on Qdrant (default `locohane_${instance}_`). Collections without this prefix are not touched | `VECTOR_DB_QDRANT_COLLECTION_PREFIX` |
 | `[vector_db]` | `qdrant_timeout_seconds` | Timeout in seconds per request to Qdrant (default 120) | `VECTOR_DB_QDRANT_TIMEOUT_SECONDS` |

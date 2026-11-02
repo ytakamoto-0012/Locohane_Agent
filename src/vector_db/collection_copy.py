@@ -125,8 +125,8 @@ def copy_collection(
         # Qdrant へ送り直しを待つ間も「停止」に応じる（[vector_db].qdrant_max_retries = -1 なら無制限に待つため）。
         src_store = open_store(src_cfg, transport=src_store_transport, should_stop=should_stop)
         dst_store = open_store(dst_cfg, transport=dst_store_transport, should_stop=should_stop)
-        src_keywords = open_keyword_index(src_cfg.vector_db_dir)
-        dst_keywords = open_keyword_index(dst_cfg.vector_db_dir)
+        src_keywords = open_keyword_index(src_cfg.vector_db_dir, src_name)
+        dst_keywords = open_keyword_index(dst_cfg.vector_db_dir, dst_name)
         # 強制終了等で書きかけになったファイルは、コピー先での次の取り込みが片付ける（journal 参照）。
         journal = open_journal(dst_cfg.vector_db_dir)
         # 同じ名前の前のコレクションの削除が途中で止まった印が残っていても、今作ったコレクションには関係しない。

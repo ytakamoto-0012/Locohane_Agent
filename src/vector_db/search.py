@@ -10,17 +10,13 @@ from ..config import Config
 from . import references
 from .catalog import Collection, catalog_exists, open_catalog
 from .embeddings import embed_texts, embedding_model, shared_client
-from .keyword_index import KEYWORDS_FILENAME, open_keyword_index
+from .keyword_index import keyword_index_exists, open_keyword_index
 from .store import Hit, image_collection_name, open_store, path_collection_name
 
 # Reciprocal Rank Fusion の定数（順位 r の項目に 重み / (_RRF_K + r) を足す。一般的な既定値の 60）。
 _RRF_K = 60
 # 各一覧から取る候補の数（top_k の何倍か）。同じページのチャンクをまとめた後も top_k 件残るよう多めに取る。
 _CANDIDATE_FACTOR = 4
-
-
-def keyword_index_exists(directory) -> bool:
-    return (directory / KEYWORDS_FILENAME).is_file()
 
 
 class SearchError(Exception):
@@ -116,10 +112,11 @@ def search(
                     lists.append(("image", cfg.vector_db_rrf_weight_image, images))
         finally:
             store.close()
-        if cfg.vector_db_rrf_weight_keyword > 0 and keyword_index_exists(location.vector_db_dir):
-            with open_keyword_index(location.vector_db_dir) as keywords:
-                for t in group:
-                    hits = [replace(h, collection=t.name) for h in keywords.search(t.storage, query, candidates)]
+        if cfg.vector_db_rrf_weight_keyword > 0:
+            for t in group:
+                if keyword_index_exists(location.vector_db_dir, t.storage):
+                    with open_keyword_index(location.vector_db_dir, t.storage) as keywords:
+                        hits = [replace(h, collection=t.name) for h in keywords.search(t.storage, query, candidates)]
                     lists.append(("keyword", cfg.vector_db_rrf_weight_keyword, hits))
     result.hits = _fuse(lists)[:limit]
     return result
@@ -162,10 +159,11 @@ def search_paths(
                 lists.append(("path", 1.0, hits))
         finally:
             store.close()
-        if cfg.vector_db_rrf_weight_path_keyword > 0 and keyword_index_exists(location.vector_db_dir):
-            with open_keyword_index(location.vector_db_dir) as keywords:
-                for t in group:
-                    hits = [replace(h, collection=t.name) for h in keywords.search(path_collection_name(t.storage), query, candidates)]
+        if cfg.vector_db_rrf_weight_path_keyword > 0:
+            for t in group:
+                if keyword_index_exists(location.vector_db_dir, t.storage):
+                    with open_keyword_index(location.vector_db_dir, t.storage) as keywords:
+                        hits = [replace(h, collection=t.name) for h in keywords.search(path_collection_name(t.storage), query, candidates)]
                     lists.append(("path_keyword", cfg.vector_db_rrf_weight_path_keyword, hits))
     result.hits = _fuse(lists)[:limit]
     return result

@@ -443,7 +443,7 @@ Locohane/
 │   │   ├── embeddings.py     # /v1/embeddings による埋め込み計算
 │   │   ├── catalog.py        # コレクション定義・取り込み済みファイルの記録（catalog.sqlite）
 │   │   ├── store.py / sqlite_vec_store.py / qdrant_store.py # ベクターの保存先（sqlite-vec / Qdrant）
-│   │   ├── keyword_index.py  # 本文のキーワード索引（keywords.sqlite、SQLite FTS5 の BM25）
+│   │   ├── keyword_index.py  # 本文のキーワード索引（keywords/<コレクション名>.sqlite、SQLite FTS5 の BM25）
 │   │   ├── sqlite_batch.py   # SQLite の書き込みのまとめコミット（取り込み用。WAL・synchronous=NORMAL）
 │   │   ├── journal.py        # 取り込みジャーナル（ingest_journal.sqlite。強制終了で書きかけになったファイルの片付け用）
 │   │   ├── gc_pacer.py       # 取り込み・コピー中の循環参照のゴミ（httpx の応答）の定期回収
@@ -580,7 +580,7 @@ Locohane/
 | `data/chat_threads.sqlite` | 会話スレッド一覧（画面左サイドバー）・再開用のメタデータ（スレッド名・所有者・Chainlitの Step 履歴）。`checkpoints.sqlite` とは別ファイル（`[thread_store]`参照） | 一覧・再開機能が不要になったとき | ファイルを削除（アプリ停止中に。`checkpoints.sqlite` 自体は消えないため会話状態は失われない） |
 | `data/logs/app.log` | アプリの動作ログ | いつでも | ファイルを削除 |
 | `data/memory/` | 永続メモリー（`user`/`feedback`/`project`/`reference` サブフォルダ＋`MEMORY.md`索引） | 蓄積した記憶が不要になったとき | フォルダ内を削除（`MEMORY.md`は次回保存時に再生成される） |
-| `data/vector_db/` | ベクターDB の `catalog.sqlite`（コレクション定義・取り込み済みファイルの記録）と、`backend = sqlite_vec` 時のベクター `vectors.sqlite`、本文のキーワード索引 `keywords.sqlite`、強制終了で書きかけになったファイルを記録する取り込みジャーナル `ingest_journal.sqlite`（`[vector_db] dir`）。`catalog.sqlite` には別のインスタンスのコレクションの参照（`collection_refs` 表）も入る。取り込み元の文書そのものは複製しない | コレクションが不要になったとき | 設定ダッシュボードのナレッジ画面でコレクションを削除する（フォルダごと消す場合はアプリと管理ツールの取り込みを止めてから。`backend = qdrant` のベクターは Qdrant 側に残る） |
+| `data/vector_db/` | ベクターDB の `catalog.sqlite`（コレクション定義・取り込み済みファイルの記録）と、`backend = sqlite_vec` 時のベクター `vectors.sqlite`、本文のキーワード索引 `keywords/<コレクション名>.sqlite`（コレクションごとに1ファイル）、強制終了で書きかけになったファイルを記録する取り込みジャーナル `ingest_journal.sqlite`（`[vector_db] dir`）。`catalog.sqlite` には別のインスタンスのコレクションの参照（`collection_refs` 表）も入る。取り込み元の文書そのものは複製しない | コレクションが不要になったとき | 設定ダッシュボードのナレッジ画面でコレクションを削除する（フォルダごと消す場合はアプリと管理ツールの取り込みを止めてから。`backend = qdrant` のベクターは Qdrant 側に残る） |
 | `data/plans/` | `create_plan` が `detail_markdown` 引数を渡した場合の詳細計画Markdown（`[paths] plans_dir`） | 古い計画が不要になったとき | フォルダ内を削除 |
 | `data/skill_drafts/<ユーザー名>/` | skill-creator が作ったユーザー別ドラフトスキル（`<スキル名>/`）と、その評価結果（`_workspace/`）。`[skill_creator] draft_dir`。不採用のドラフトも記録として残る（一覧には出ない） | 不要なドラフトがあるとき | ドラフトのフォルダを削除（作成者は skill-creator の `delete_draft.py` でも消せる）。自動削除はされない |
 | `data/<インスタンス名>/skill_drafts_archive/<ユーザー名>/<スキル名>_<日時>/` | 昇格したドラフトの退避先（`_workspace/` ごと移る。`[skill_creator] archive_dir`） | 記録が不要になったとき | フォルダを削除 |
@@ -1144,8 +1144,9 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   〜30万件が実用の上限**（索引を持たず検索のたびに全件と比べるため、30万件で検索1回が1秒前後）、Qdrant が
   `qdrant_preset = none` で **〜100万件**、`1m`〜`10m` で **100万〜1000万件**（「Qdrant を使う」参照）。チャンクは
   `chunk_size = 800` なら文字の詰まった A4 1ページあたり 1〜2件で、`image_input = true` のページ画像は1ページ1件が、ファイルパス（`search_document_paths` 用）は1ファイル1件が別に加わる。
-  どちらもコサイン類似度で比べる。本文のチャンクは保存先によらず、同じフォルダの `keywords.sqlite`（SQLite FTS5）にも
-  キーワード検索用に入れる（`src/vector_db/keyword_index.py`）。
+  どちらもコサイン類似度で比べる。本文のチャンクは保存先によらず、同じフォルダの `keywords/<コレクション名>.sqlite`（SQLite FTS5。コレクションごとに1ファイルで、
+  検索・書き込みがほかのコレクションの大きさに左右されない）にもキーワード検索用に入れる（`src/vector_db/keyword_index.py`）。
+  旧版の全コレクションで1ファイルの `keywords.sqlite` は、更新後に最初に開いたときに1回だけコレクションごとのファイルへ分けて消す。
 - **取り込み**（`src/vector_db/ingest.py`）: 対応形式は `.pdf`（ページ単位）・`.docx`・`.xlsx`/`.xlsm`（シート単位）・`.pptx`
   （スライド単位、ノート含む）・`.md`/`.txt`/`.csv`（`[vector_db] include_extensions` で絞れる。Office の一時ファイル `~$*` は除く）。
   アプリ専用の拡張子でも中身がテキストの形式（`.step`・`.igs`・AutoForm の材料ファイル `.mat` 等）は、`[vector_db] text_extensions` に書くと
@@ -1200,7 +1201,7 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   取り込みでは各ファイルの**取り込み元フォルダからの相対パス**（例: `製品A/外観写真/溶接部_NG例.jpg`。取り込み元より上は
   全ファイル共通で手がかりにならないため含めない）を1ファイル1件で埋め込み（`document_prefix` を付け、本文のチャンクと同じ
   リクエストの末尾で送る）、別のコレクション `<コレクション名>.path` に入れる。同じ相対パスはキーワード索引
-  （`keywords.sqlite`。索引の中のコレクション名も `<コレクション名>.path` で、本文のキーワード検索には混ざらない）にも入れる
+  （`keywords/<コレクション名>.sqlite` の、本文とは別の表。本文のキーワード検索には混ざらない）にも入れる
   （拡張子は `pdf`・`jpg` 等が同じ形式の全ファイルに一致してしまうため索引の語に含めない。結果の相対パスは拡張子付き）。
   検索ではパスの埋め込み（類似度 `path_min_score` 以上）とパスのキーワード（BM25。型番・品番・日付等の完全一致を拾う。
   語の区切り方は本文のキーワード検索と同じ）を別々に探し、`search_documents` と同じ式で順位を統合して（重みは埋め込みが 1.0、
@@ -1764,7 +1765,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[vector_db]` | `enabled` | ベクターDB（社内文書の意味検索）の有効/無効（既定 false）。false の間は `search_documents`/`list_document_collections` が「無効です」を返し、ダッシュボードからの取り込みもできない（「ベクターDB（社内文書の意味検索）」参照） | `VECTOR_DB_ENABLED` |
 | `[vector_db]` | `backend` | ベクターの保存先（`sqlite_vec` 既定 / `qdrant`） | `VECTOR_DB_BACKEND` |
 | `[vector_db]` | `distance` | コレクションの距離関数（`Cosine` 既定 / `Euclid` / `Manhattan` / `Dot`。`Dot` は `backend = qdrant` のみ）。**変えた後は既存のコレクションの再構築が必要**。`Euclid`・`Manhattan` の類似度は `1 / (1 + 距離)` に換算 | `VECTOR_DB_DISTANCE` |
-| `[vector_db]` | `dir` | `catalog.sqlite`（コレクション定義・取り込み済みファイルの記録）と、`sqlite_vec` 時の `vectors.sqlite`、キーワード索引 `keywords.sqlite` の保存先（既定 `${common_data_dir}/vector_db`） | `VECTOR_DB_DIR` |
+| `[vector_db]` | `dir` | `catalog.sqlite`（コレクション定義・取り込み済みファイルの記録）と、`sqlite_vec` 時の `vectors.sqlite`、キーワード索引 `keywords/`（コレクションごとの `.sqlite`）の保存先（既定 `${common_data_dir}/vector_db`） | `VECTOR_DB_DIR` |
 | `[vector_db]` | `qdrant_url` | `backend = qdrant` 時の Qdrant サーバー URL（例 `http://localhost:6333`）。API キーは `.env` の `QDRANT_API_KEY` | `VECTOR_DB_QDRANT_URL` |
 | `[vector_db]` | `qdrant_collection_prefix` | Qdrant 上のコレクション名の接頭辞（既定 `locohane_${instance}_`）。この接頭辞以外のコレクションには触れない | `VECTOR_DB_QDRANT_COLLECTION_PREFIX` |
 | `[vector_db]` | `qdrant_timeout_seconds` | Qdrant への1リクエストのタイムアウト秒数（既定120。検索は最大30秒、接続は最大10秒） | `VECTOR_DB_QDRANT_TIMEOUT_SECONDS` |
