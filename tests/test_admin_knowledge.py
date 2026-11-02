@@ -89,7 +89,7 @@ def test_jobs_endpoint_returns_only_jobs_and_workers(env):
     # 設定が読めなくても（カタログを開かなくても）返せる。
     env["configs"].pop("org_a")
     res = client.get("/api/instances/org_a/knowledge/jobs").json()
-    assert set(res) == {"jobs", "workers"}
+    assert set(res) == {"jobs", "outgoing_copies", "workers"}
     assert res["jobs"]["docs"]["state"] == "running" and res["workers"]["embed"] == [None]
     assert client.get("/api/instances/lab1/knowledge/jobs").status_code == 400
     assert client.get("/api/instances/nothing/knowledge/jobs").status_code == 404
@@ -385,6 +385,25 @@ def test_copy_source_cannot_be_ingested_or_deleted_while_copying(multi):
     busy = knowledge._JobRegistry()
     busy.start("org_a", knowledge.IngestJob(collection="docs", rebuild=False, actor="admin"))
     assert not busy.start_copy("org_b", knowledge.IngestJob(collection="m", rebuild=False, actor="admin", kind="copy"), "org_a", "docs")
+
+
+def test_copy_can_be_seen_and_stopped_from_source(multi):
+    client, jobs = multi["client"], multi["router"].ingest_jobs
+    job = knowledge.IngestJob(collection="manuals", rebuild=False, actor="admin", kind="copy", source="org_a/docs")
+    assert jobs.start_copy("org_b", job, "org_a", "docs")
+    # コピー元の一覧・軽い API に、コピー先のインスタンス名つきで出る（コピー先の一覧には出ない）。
+    [c] = client.get("/api/instances/org_a/knowledge").json()["collections"]
+    assert [(o["dest_instance"], o["collection"], o["state"]) for o in c["outgoing_copies"]] == [("org_b", "manuals", "running")]
+    status = client.get("/api/instances/org_a/knowledge/jobs").json()
+    assert [o["dest_instance"] for o in status["outgoing_copies"]["docs"]] == ["org_b"]
+    assert client.get("/api/instances/org_b/knowledge/jobs").json()["outgoing_copies"] == {}
+    # 画面はコピー先のインスタンスの停止 API で止める。
+    assert client.post("/api/instances/org_b/knowledge/collections/manuals/stop").json()["stop_requested"] is True
+    # 終わったコピーは出さない。
+    job.state = "stopped"
+    jobs.finish_copy("org_a", "docs")
+    [c] = client.get("/api/instances/org_a/knowledge").json()["collections"]
+    assert c["outgoing_copies"] == []
 
 
 def test_references_between_instances(multi):

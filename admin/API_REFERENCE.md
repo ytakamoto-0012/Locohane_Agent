@@ -578,7 +578,9 @@ $C -X POST $BASE/api/instances/default/knowledge/collections/manuals/stop -H "$H
 $C -X DELETE $BASE/api/instances/default/knowledge/collections/manuals -H "$H"
 # 別のインスタンス（org_b）へコピー。with_vectors=true はベクター・キーワード索引・ファイル記録まで複製する
 # （コピー先と埋め込みモデル・document_prefix・距離関数が違えば 400。false なら定義だけ）。進捗はコピー先の
-# .../org_b/knowledge/collections/<dest_name>/job（kind が "copy"）。コピー中のコピー元は取り込み・削除が 409
+# .../org_b/knowledge/collections/<dest_name>/job（kind が "copy"）。停止はコピー先の .../org_b/knowledge/collections/<dest_name>/stop。
+# コピー元の一覧の各コレクションの outgoing_copies にも、動いているコピーが dest_instance（コピー先）つきで出る。
+# コピー中のコピー元は取り込み・削除が 409
 $C -X POST $BASE/api/instances/default/knowledge/collections/manuals/copy -H "$H" -H "$J" \
   -d '{"dest_instance":"org_b","dest_name":"manuals","with_vectors":true,"include_schedule":false}'
 # コピー先・参照元に選べるインスタンスと、そのコレクション・埋め込みの設定の一覧

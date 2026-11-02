@@ -259,6 +259,22 @@ class _JobRegistry:
         with self._lock:
             return {c: j for (i, c), j in self._jobs.items() if i == instance}
 
+    def outgoing_copies(self, instance: str) -> dict[str, list[dict]]:
+        """instance のコレクションをコピー元とする、動いている（順番待ちを含む）コピーのジョブ。
+
+        コピー元のコレクション名 → [IngestJob.to_dict() に dest_instance（コピー先のインスタンス名）を足したもの]。
+        コピーのジョブはコピー先のインスタンスに登録されるため、コピー元の画面から進み具合を見て止められるように使う。
+        """
+        with self._lock:
+            result: dict[str, list[dict]] = {}
+            for (i, _c), j in sorted(self._jobs.items()):
+                if j.kind != "copy" or not _active(j) or not j.source:
+                    continue
+                src_instance, _, src_collection = j.source.partition("/")
+                if src_instance == instance:
+                    result.setdefault(src_collection, []).append({**j.to_dict(), "dest_instance": i})
+            return result
+
     def running(self) -> dict[str, list[IngestJob]]:
         """取り込み中（順番待ちを含む）のジョブをインスタンス名ごとに返す（インスタンス一覧のカード用）。"""
         with self._lock:
@@ -712,7 +728,9 @@ def build_router(
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=_t("インスタンス {0} の設定を読めません: {1}", name, exc)) from exc
 
-    def _collection_dict(c: vcat.Collection, job: IngestJob | None, referenced_by: list[str] | None = None) -> dict:
+    def _collection_dict(
+        c: vcat.Collection, job: IngestJob | None, referenced_by: list[str] | None = None, outgoing_copies: list[dict] | None = None
+    ) -> dict:
         next_run = next_scheduled_run(c, datetime.now())
         return {
             **asdict(c),
@@ -721,6 +739,8 @@ def build_router(
             "next_scheduled_at": next_run.isoformat(timespec="seconds") if next_run else None,
             "job": job.to_dict() if job else None,
             "referenced_by": referenced_by or [],
+            # このコレクションをコピー元とする動いているコピー（_JobRegistry.outgoing_copies）。
+            "outgoing_copies": outgoing_copies or [],
         }
 
     def _app_instances() -> list[str]:
@@ -823,6 +843,7 @@ def build_router(
                 collections = catalog.list_collections()
                 refs = catalog.list_references()
         running = jobs.for_instance(name)
+        outgoing = jobs.outgoing_copies(name)
         referenced_by = _referenced_by(name)
         names = {c.name for c in collections}
         endpoints = cfg.vector_db_embedding_endpoints
@@ -842,7 +863,7 @@ def build_router(
             "image_input_extensions": list(cfg.vector_db_image_input_extensions),
             "embedded_images": cfg.vector_db_embedded_images,
             "max_file_mb": cfg.vector_db_max_file_mb,
-            "collections": [_collection_dict(c, running.get(c.name), referenced_by.get(c.name)) for c in collections],
+            "collections": [_collection_dict(c, running.get(c.name), referenced_by.get(c.name), outgoing.get(c.name)) for c in collections],
             # コピーを始めた直後で、まだ catalog にできていないコピー先のジョブ・定義の作成で失敗したコピーのジョブ。
             "copy_jobs": [j.to_dict() for c, j in running.items() if j.kind == "copy" and c not in names],
             "references": [_reference_dict(name, cfg, r) for r in refs],
@@ -852,14 +873,19 @@ def build_router(
 
     @router.get("/api/instances/{name}/knowledge/jobs")
     def get_knowledge_jobs(name: str, user: str = Depends(require_login)):
-        """name のジョブ（コレクション名 → IngestJob.to_dict()）と取り込みの枠の状態だけを返す（取り込み中の画面のポーリング用）。
+        """name のジョブ（コレクション名 → IngestJob.to_dict()）・name をコピー元とするコピー（_JobRegistry.outgoing_copies）と
+        取り込みの枠の状態だけを返す（取り込み中の画面のポーリング用）。
 
         GET /api/instances/{name}/knowledge と違い、設定・カタログ（ファイル数の集計）・ほかのインスタンスの参照を読まない
         （大量の取り込みを同時に動かしている間も軽く返すため）。件数等は、ジョブが始まった・終わったときと、取り込み中は
         10 秒ごと（admin/static/knowledge.js の KNOWLEDGE_FULL_REFRESH_MS）に画面が一覧を取り直す。
         """
         _check_app_instance(name)
-        return {"jobs": {c: j.to_dict() for c, j in jobs.for_instance(name).items()}, "workers": slots.snapshot()}
+        return {
+            "jobs": {c: j.to_dict() for c, j in jobs.for_instance(name).items()},
+            "outgoing_copies": jobs.outgoing_copies(name),
+            "workers": slots.snapshot(),
+        }
 
     @router.get("/api/knowledge/workers")
     def get_knowledge_workers(user: str = Depends(require_login)):

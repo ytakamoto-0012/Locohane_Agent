@@ -254,7 +254,9 @@ async function renderKnowledgePanel(container, name) {
     const rows = collections.map((c) => [
       el("div", {}, [el("strong", { text: c.name }), c.description ? el("div", { class: "hint", text: c.description }) : null]),
       knowledgeActions(container, name, c, data.enabled),
-      knowledgeJobCell(c.job, data.max_file_mb, knowledgeJobWorkers(d.workers, name, c.name)),
+      c.outgoing_copies.length
+        ? el("div", {}, [c.job ? knowledgeJobCell(c.job, data.max_file_mb, knowledgeJobWorkers(d.workers, name, c.name)) : null, ...c.outgoing_copies.map(knowledgeOutgoingCopyCell)])
+        : knowledgeJobCell(c.job, data.max_file_mb, knowledgeJobWorkers(d.workers, name, c.name)),
       el("div", {}, [
         ...c.source_folders.map((p) => el("div", { text: p })),
         el("div", { class: "hint", text: c.recursive ? _t("サブフォルダも含む") : _t("直下のみ") }),
@@ -276,17 +278,26 @@ async function renderKnowledgePanel(container, name) {
     );
     // コピーを始めた直後（コピー先の定義ができる前）と、定義を作れずに終わったコピーのジョブ。
     for (const job of d.copy_jobs || []) {
-      list.append(el("div", { class: "hint" }, [_t(`{0}（{1} から）: `, job.collection, job.source), knowledgeJobCell(job, d.max_file_mb, null)]));
+      list.append(
+        el("div", { class: "hint" }, [
+          _t(`{0}（{1} から）: `, job.collection, job.source),
+          knowledgeJobCell(job, d.max_file_mb, null),
+          knowledgeJobActive(job) ? knowledgeCopyStopButton(container, name, name, job) : null,
+        ])
+      );
     }
   };
   draw(data);
 
-  // 取り込み・コピー・削除中（順番待ちを含む）のジョブか、ほかのインスタンスの取り込みが枠を使っている間（と、
+  // 取り込み・コピー・削除中（順番待ちを含む）のジョブか、このインスタンスをコピー元とするコピー、
+  // ほかのインスタンスの取り込みが枠を使っている間（と、
   // 終わった直後の1回）だけ表示を更新する（編集中の追加フォームを描き直さないよう、一覧の表と枠の表示だけを差し替える）。
   // ポーリングはジョブと枠の状態だけを返す軽い API で行い、ジョブが始まった・終わったときと KNOWLEDGE_FULL_REFRESH_MS ごとに
   // だけ一覧（ファイル数の集計・ほかのインスタンスの参照を読むため重い）を取り直す。状態が前回と同じなら描き直さない。
   const hasRunning = (d) =>
-    d.collections.some((c) => knowledgeJobActive(c.job)) || (d.copy_jobs || []).some(knowledgeJobActive) || knowledgeWorkersBusy(d.workers);
+    d.collections.some((c) => knowledgeJobActive(c.job) || c.outgoing_copies.length > 0) ||
+    (d.copy_jobs || []).some(knowledgeJobActive) ||
+    knowledgeWorkersBusy(d.workers);
   let wasRunning = hasRunning(data);
   let activeKey = knowledgeActiveJobsKey(knowledgeDataJobs(data));
   let lastStatus = "";
@@ -296,7 +307,7 @@ async function renderKnowledgePanel(container, name) {
     const status = await api(knowledgePath(name, "/jobs"));
     let latest;
     // 取り込み中も、文書の件数（記録まで終わったファイル）が進み具合とずれ続けないよう、一覧を間隔を空けて取り直す。
-    if (knowledgeActiveJobsKey(Object.values(status.jobs)) !== activeKey || Date.now() - lastFull >= KNOWLEDGE_FULL_REFRESH_MS) {
+    if (knowledgeActiveJobsKey(knowledgeStatusJobs(status)) !== activeKey || Date.now() - lastFull >= KNOWLEDGE_FULL_REFRESH_MS) {
       latest = await api(knowledgePath(name));
       lastFull = Date.now();
       lastStatus = "";
@@ -315,16 +326,22 @@ async function renderKnowledgePanel(container, name) {
 // 取り込み中に一覧（ファイル数の集計を含む重い API）を取り直す間隔（ミリ秒）。間のポーリングはジョブと枠の状態だけを取る。
 const KNOWLEDGE_FULL_REFRESH_MS = 10000;
 
-// 一覧（GET /api/instances/{name}/knowledge）に含まれるジョブ。
+// 一覧（GET /api/instances/{name}/knowledge）に含まれるジョブ（このインスタンスをコピー元とするコピーを含む）。
 function knowledgeDataJobs(d) {
-  return [...d.collections.map((c) => c.job).filter(Boolean), ...(d.copy_jobs || [])];
+  return [...d.collections.map((c) => c.job).filter(Boolean), ...d.collections.flatMap((c) => c.outgoing_copies), ...(d.copy_jobs || [])];
+}
+
+// 軽い API（GET /api/instances/{name}/knowledge/jobs）の status に含まれるジョブ（knowledgeDataJobs と同じ範囲）。
+function knowledgeStatusJobs(status) {
+  return [...Object.values(status.jobs), ...Object.values(status.outgoing_copies).flat()];
 }
 
 // 動いている（順番待ちを含む）ジョブの組み合わせ。変わったら（始まった・終わった）一覧を取り直す。
+// dest_instance はこのインスタンスをコピー元とするコピーだけにある（コピー先のインスタンス名）。
 function knowledgeActiveJobsKey(jobs) {
   return jobs
     .filter(knowledgeJobActive)
-    .map((j) => `${j.kind}:${j.collection}:${j.state}`)
+    .map((j) => `${j.kind}:${j.dest_instance || ""}:${j.collection}:${j.state}`)
     .sort()
     .join("|");
 }
@@ -334,7 +351,7 @@ function knowledgeMergeJobs(d, status) {
   const names = new Set(d.collections.map((c) => c.name));
   return {
     ...d,
-    collections: d.collections.map((c) => ({ ...c, job: status.jobs[c.name] || null })),
+    collections: d.collections.map((c) => ({ ...c, job: status.jobs[c.name] || null, outgoing_copies: status.outgoing_copies[c.name] || [] })),
     copy_jobs: Object.values(status.jobs).filter((j) => j.kind === "copy" && !names.has(j.collection)),
     workers: status.workers,
   };
@@ -523,7 +540,43 @@ function knowledgeActions(container, name, c, enabled) {
     });
     buttons.push(deleteBtn);
   }
-  return el("div", { class: "inline-actions" }, buttons);
+  // このコレクションをコピー元とするコピー（ジョブはコピー先のインスタンスにある）も、コピー元の画面から止められるようにする。
+  const copyStops = c.outgoing_copies.map((job) => knowledgeCopyStopButton(container, name, job.dest_instance, job));
+  return el("div", { class: "inline-actions" }, [...copyStops, ...buttons]);
+}
+
+// コピー先のインスタンス destInstance のコピーのジョブ job を止めるボタン（name は表示中のインスタンス）。
+// コピー元の画面と、コピー先の定義ができる前（順番待ち等）のコピーの行で使う。
+function knowledgeCopyStopButton(container, name, destInstance, job) {
+  const idleText = _t("コピーを止める");
+  const target = `${destInstance}/${job.collection}`;
+  const btn = el("button", {
+    text: job.stop_requested ? _t("停止中…") : idleText,
+    onclick: async () => {
+      if (!confirm(_t(`{0} へのコピーを停止します。処理中のファイルが終わってから止まります。よろしいですか？`, target))) return;
+      btn.disabled = true;
+      btn.textContent = _t("停止中…");
+      const path = `/collections/${encodeURIComponent(job.collection)}/stop`;
+      if (await knowledgeAction(() => api(knowledgePath(destInstance, path), { method: "POST" }))) renderKnowledgePanel(container, name);
+      else {
+        btn.disabled = false;
+        btn.textContent = idleText;
+      }
+    },
+  });
+  btn.disabled = !!job.stop_requested;
+  return btn;
+}
+
+// このコレクションをコピー元とするコピー（_JobRegistry.outgoing_copies。進み具合はコピー先の画面と同じ）。
+function knowledgeOutgoingCopyCell(job) {
+  const label = job.state === "running" && job.stop_requested ? _t("停止中") : KNOWLEDGE_COPY_LABELS[job.state] || job.state;
+  const parts = [el("strong", { text: label }), el("div", { class: "hint", text: _t(`コピー先 {0}`, `${job.dest_instance}/${job.collection}`) })];
+  if (job.state === "running") {
+    parts.push(knowledgeProgressBar(job.done, job.total));
+    parts.push(el("div", { class: "hint", text: _t(`{0} / {1} ファイル`, job.done, job.total || "?") }));
+  }
+  return el("div", {}, parts);
 }
 
 function collectionFields(c) {
@@ -748,7 +801,7 @@ async function openCopyCollectionDialog(container, name, c) {
     el("label", { class: "checkbox" }, [withVectors, _t(" ベクターごとコピーする")]),
     compat,
     el("label", { class: "checkbox" }, [schedule, _t(" 自動取り込みの設定も引き継ぐ")]),
-    el("p", { class: "hint", text: _t("進捗はコピー先のインスタンスのナレッジ画面に出ます。コピー中はコピー元のコレクションの取り込み・削除はできません。") }),
+    el("p", { class: "hint", text: _t("進捗はコピー先のインスタンスのナレッジ画面と、この画面のコピー元の行に出ます（どちらからもコピーを止められます）。コピー中はコピー元のコレクションの取り込み・削除はできません。") }),
     error,
     el("div", { class: "modal-actions" }, [el("button", { type: "button", text: _t("キャンセル"), onclick: close }), el("button", { type: "submit", class: "primary", text: _t("コピー") })]),
   ]);
