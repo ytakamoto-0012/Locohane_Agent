@@ -578,7 +578,9 @@ $C -X POST $BASE/api/instances/default/knowledge/collections/manuals/stop -H "$H
 $C -X DELETE $BASE/api/instances/default/knowledge/collections/manuals -H "$H"
 # Copy to another instance (org_b). with_vectors=true duplicates the vectors, keyword index and file records
 # (400 if the embedding model, document_prefix or distance differs from the destination; false copies only the definition).
-# Progress: the destination's .../org_b/knowledge/collections/<dest_name>/job (kind "copy"). Ingesting/deleting the source while copying is 409
+# Progress: the destination's .../org_b/knowledge/collections/<dest_name>/job (kind "copy"). Stop: the destination's .../org_b/knowledge/collections/<dest_name>/stop.
+# Each collection in the source's list also shows running copies in outgoing_copies, with dest_instance (the destination).
+# Ingesting/deleting the source while copying is 409
 $C -X POST $BASE/api/instances/default/knowledge/collections/manuals/copy -H "$H" -H "$J" \
   -d '{"dest_instance":"org_b","dest_name":"manuals","with_vectors":true,"include_schedule":false}'
 # Instances selectable as a copy destination or reference source, with their collections and embedding settings
