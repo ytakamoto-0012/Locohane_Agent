@@ -17,8 +17,9 @@ from .sqlite_batch import SqliteBatchMixin, configure_connection, connect
 CATALOG_FILENAME = "catalog.sqlite"
 
 # コレクション名は Qdrant のコレクション名・ログ・URL にそのまま使うため ASCII に限る。
-# 日本語の表示名は description に書く。
-_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
+# 日本語の表示名は description に書く。全角英数字・日本語等の2バイト文字は使えない（索引のファイル名にも使うため）。
+# 末尾は \Z で比べる（$ は末尾の改行の前でも当たり、"docs\n" を通してしまうため）。
+_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,48}\Z")
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 # 自動取り込みの時刻は1コレクションあたりこの数まで（毎時でも24で足りる）。
 MAX_SCHEDULE_TIMES = 24
@@ -127,7 +128,7 @@ class Reference:
 
 def validate_name(name: str) -> str:
     if not _NAME_RE.match(name or ""):
-        raise CatalogError(f"Collection names must be 1 to 48 characters of letters, digits, hyphens and underscores: {name!r}")
+        raise CatalogError(f"Collection names must be 1 to 48 characters of ASCII (half-width) letters, digits, hyphens and underscores: {name!r}")
     return name
 
 

@@ -541,15 +541,16 @@ function knowledgeActions(container, name, c, enabled) {
     buttons.push(deleteBtn);
   }
   // このコレクションをコピー元とするコピー（ジョブはコピー先のインスタンスにある）も、コピー元の画面から止められるようにする。
-  const copyStops = c.outgoing_copies.map((job) => knowledgeCopyStopButton(container, name, job.dest_instance, job));
+  const copyStops = c.outgoing_copies.map((job) => knowledgeCopyStopButton(container, name, job.dest_instance, job, true));
   return el("div", { class: "inline-actions" }, [...copyStops, ...buttons]);
 }
 
 // コピー先のインスタンス destInstance のコピーのジョブ job を止めるボタン（name は表示中のインスタンス）。
 // コピー元の画面と、コピー先の定義ができる前（順番待ち等）のコピーの行で使う。
-function knowledgeCopyStopButton(container, name, destInstance, job) {
-  const idleText = _t("コピーを止める");
+function knowledgeCopyStopButton(container, name, destInstance, job, showTarget = false) {
   const target = `${destInstance}/${job.collection}`;
+  // showTarget ならボタンにコピー先を出す（コピー元の行で、コピー先が複数あっても区別できるように）。
+  const idleText = showTarget ? _t(`{0} へのコピーを止める`, target) : _t("コピーを止める");
   const btn = el("button", {
     text: job.stop_requested ? _t("停止中…") : idleText,
     onclick: async () => {
@@ -650,7 +651,7 @@ function keywordFieldElements(f) {
     el("label", {}, [_t("取り込み除外キーワード"), f.excludes]),
     el("p", {
       class: "hint",
-      text: _t("取り込み元フォルダより下のパス（フォルダ名・ファイル名を含む）にキーワードを含むものは取り込みません（大文字小文字は区別しない）。/old/ のように / で囲むと、名前がちょうど old のフォルダだけを除外します。*.xlsx のように *. で始めると、その拡張子のファイルだけを除外します。"),
+      text: _t("取り込み元フォルダより下のパス（フォルダ名・ファイル名を含む）にキーワードを含むものは取り込みません（大文字小文字・半角と全角の違いは区別しない）。/old/ のように / で囲むと、名前がちょうど old のフォルダだけを除外します。*.xlsx のように *. で始めると、その拡張子のファイルだけを除外します。"),
     }),
   ];
 }

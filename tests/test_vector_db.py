@@ -1496,6 +1496,22 @@ def test_scan_exclude_keywords_match_lookalike_characters(tmp_path):
     assert ingest.list_source_files(tmp_path, True, (".md",), include_keywords=["ﾒｰｶｰ"]) == [tmp_path / "ﾒｰｶｰ別標準" / "a.md"]
 
 
+@pytest.mark.parametrize("name", ["ドキュメント", "ｄｏｃｓ", "docs１", "doc s", "docs\n", "a" * 49, ""])
+def test_collection_name_rejects_non_ascii_and_trailing_newline(name):
+    # 2バイト文字（全角英数字・日本語）と、末尾の改行（正規表現の $ ですり抜けていた）は使えない。
+    with pytest.raises(vcat.CatalogError):
+        vcat.validate_name(name)
+
+
+def test_scan_fullwidth_slash_in_names_is_not_a_folder_separator(tmp_path):
+    # 名前の全角「／」は区切りの "/" にそろえない（"/old/" が「a／old／b.md」に当たらない）。
+    for rel in ("a／old／b.md", "old/c.md"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x", encoding="utf-8")
+    assert ingest.list_source_files(tmp_path, True, (".md",), exclude_keywords=["/old/"]) == [tmp_path / "a／old／b.md"]
+    assert ingest.list_source_files(tmp_path, True, (".md",), exclude_keywords=["／old／"]) == [tmp_path / "old" / "c.md"]
+
+
 def test_scan_keeps_only_paths_matching_include_keywords(tmp_path):
     for rel in ("a.md", "b.txt", "manual/c.md", "x/Manual/y/d.txt", "old/manual_e.md"):
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)

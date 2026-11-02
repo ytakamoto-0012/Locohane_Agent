@@ -7,8 +7,7 @@
 索引はコレクションごとに1ファイルで、本文（body_*）とファイルパス（path_*。store.path_collection_name の
 コレクション）を別の表に持つ。全コレクションを1つの表に入れると、検索は語に当たった行を全コレクション分
 読んでから絞るため、コレクションが増えるほど遅くなり、書き込みもコレクション間でロックを待ち合うため。
-旧版の1ファイルの索引（keywords.sqlite）は、最初に開いたときに1回だけコレクションごとのファイルへ分ける
-（migrate_legacy_index）。
+旧版の1ファイルの索引（keywords.sqlite）は読まない（更新後は各コレクションを再構築する。CHANGELOG 参照）。
 
 日本語は単語に分けずに使えるよう、漢字・かな等の連続を2文字ずつ（バイグラム）に区切り、
 英数字は語ごとに小文字にして索引に入れる（_tokens）。ひらがなだけの2文字（「の幅」でなく
@@ -18,31 +17,19 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 import re
-import shutil
-import sqlite3
 import threading
-import time
 from typing import Iterable, Iterator
 import unicodedata
 
-from .sqlite_batch import SqliteBatchMixin, configure_connection, connect, instance_write_lock, retry_locked
-from .store import PATH_COLLECTION_SUFFIX, ChunkRecord, Hit, path_collection_name
+from .sqlite_batch import SqliteBatchMixin, configure_connection, connect, instance_write_lock
+from .store import ChunkRecord, Hit, path_collection_name
 
 logger = logging.getLogger(__name__)
 
 # コレクションごとの索引のファイルを置くフォルダ（[vector_db].dir の下）。
 KEYWORDS_DIRNAME = "keywords"
-# 旧版の全コレクションで1ファイルの索引（migrate_legacy_index で分けた後に消す）。
-LEGACY_KEYWORDS_FILENAME = "keywords.sqlite"
-# 旧版の索引を分けている途中のフォルダ（終わったら KEYWORDS_DIRNAME へ名前を変える）。
-_MIGRATING_DIRNAME = "keywords.migrating"
-# 旧版の索引を分ける間、ほかのプロセスが分け終えるのを待つ上限（秒）。
-_MIGRATE_WAIT_SECONDS = 3600.0
-# 旧版の索引を分けるときに、まとめて書く行の数。
-_MIGRATE_BATCH_ROWS = 5000
 
 # 本文・ファイルパスの表の接頭辞。
 _BODY, _PATH = "body", "path"
@@ -119,8 +106,19 @@ def _file_name(collection: str) -> str:
     """コレクション（catalog.validate_name の英数字・"-"・"_"）の索引のファイル名。
 
     Windows はファイル名の大文字小文字を区別しないため、大文字は "^" + 小文字にして "Docs" と "docs" を分ける。
+    Windows の予約名（con・nul・com1 等。Windows 10 では拡張子を付けてもデバイスとして扱われる）は "~" を前に付ける
+    （"~" はコレクション名に使えないため、ほかのコレクションのファイル名と重ならない）。
     """
-    return "".join("^" + c.lower() if c.isupper() else c for c in collection) + ".sqlite"
+    stem = "".join("^" + c.lower() if c.isupper() else c for c in collection)
+    if stem in _WINDOWS_RESERVED_NAMES:
+        stem = "~" + stem
+    return stem + ".sqlite"
+
+
+# Windows でファイル名（拡張子を除いた部分）に使えない予約名。
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"} | {f"{p}{n}" for p in ("com", "lpt") for n in range(10)}
+)
 
 
 def keyword_index_path(directory: Path, collection: str) -> Path:
@@ -129,8 +127,8 @@ def keyword_index_path(directory: Path, collection: str) -> Path:
 
 
 def keyword_index_exists(directory: Path, collection: str) -> bool:
-    """collection の索引があるか（分ける前の旧版の索引があれば、分ければあるかもしれないため True）。"""
-    return keyword_index_path(directory, collection).is_file() or (directory / LEGACY_KEYWORDS_FILENAME).is_file()
+    """collection の索引があるか。"""
+    return keyword_index_path(directory, collection).is_file()
 
 
 class KeywordIndex(SqliteBatchMixin):
@@ -300,8 +298,7 @@ class KeywordIndex(SqliteBatchMixin):
 
 
 def open_keyword_index(directory: Path, collection: str) -> KeywordIndex:
-    """コレクション collection の索引を開く（旧版の1ファイルの索引が残っていれば、先にコレクションごとに分ける）。"""
-    migrate_legacy_index(directory)
+    """コレクション collection の索引を開く（無ければ作る）。"""
     return KeywordIndex(directory, collection)
 
 
@@ -317,126 +314,3 @@ def remove_keyword_index(directory: Path, collection: str) -> None:
         path.unlink(missing_ok=True)
     except OSError as e:
         logger.info("vector_db: could not remove the keyword index %s (%s); leaving it empty.", path, e)
-
-
-# --- 旧版の1ファイルの索引（keywords.sqlite）をコレクションごとのファイルへ分ける -----------------------------
-
-_migrate_lock = threading.Lock()
-
-
-def migrate_legacy_index(directory: Path) -> None:
-    """[vector_db].dir/keywords.sqlite（旧版）があれば、コレクションごとのファイルへ分けてから消す。
-
-    分けるのは keywords/ がまだ無いときだけ。keywords.migrating/ に作り、作り終えたら keywords/ へ名前を変えるため、
-    途中で止まっても次に開いたときに最初から作り直す。プロセス内はロックで、別のプロセスとは旧版の索引の
-    書き込みのロック（BEGIN IMMEDIATE）で順番に並べる。分けた後に旧版の索引を消せなかった（ほかのプロセスが
-    開いている）ときは、次に開いたときに消す。
-    """
-    legacy = directory / LEGACY_KEYWORDS_FILENAME
-    if not legacy.is_file():
-        return
-    with _migrate_lock:
-        if not legacy.is_file():
-            return
-        if not (directory / KEYWORDS_DIRNAME).is_dir():
-            conn = connect(legacy)
-            try:
-                retry_locked(lambda: conn.execute("BEGIN IMMEDIATE"), what="split keyword index", seconds=_MIGRATE_WAIT_SECONDS)
-                if not (directory / KEYWORDS_DIRNAME).is_dir():  # ほかのプロセスが先に分けた
-                    _split_legacy(conn, directory)
-            finally:
-                conn.close()
-        for suffix in ("-wal", "-shm", ""):
-            try:
-                Path(f"{legacy}{suffix}").unlink(missing_ok=True)
-            except OSError as e:
-                logger.info("vector_db: could not remove the old keyword index %s%s yet (%s).", legacy, suffix, e)
-                return
-
-
-class _Shard:
-    """旧版の索引を分けるときの、1つのコレクションのファイル（keywords.migrating/ の下）への書き込み。"""
-
-    def __init__(self, path: Path):
-        # 作り終えるまで使わないファイルのため、ジャーナルを書かない（途中で止まったら作り直す）。
-        self.conn = sqlite3.connect(str(path))
-        self.conn.execute("PRAGMA journal_mode=OFF")
-        self.conn.execute("PRAGMA synchronous=OFF")
-        for statement in _SCHEMA:
-            self.conn.execute(statement)
-        self.conn.execute("BEGIN")
-        self.next_rowid = {_BODY: 1, _PATH: 1}
-        self.ranges: dict[str, list[list]] = {_BODY: [], _PATH: []}
-        self.pending: dict[str, list[tuple]] = {_BODY: [], _PATH: []}
-
-    def add(self, t: str, tokens: str, source_path: str, locator: str, text: str) -> None:
-        rowid = self.next_rowid[t]
-        self.next_rowid[t] = rowid + 1
-        ranges = self.ranges[t]
-        if ranges and ranges[-1][0] == source_path:
-            ranges[-1][2] = rowid
-        else:
-            ranges.append([source_path, rowid, rowid])
-        pending = self.pending[t]
-        pending.append((rowid, tokens, source_path, locator, text))
-        if len(pending) >= _MIGRATE_BATCH_ROWS:
-            self.flush(t)
-
-    def flush(self, t: str) -> None:
-        self.conn.executemany(
-            f"INSERT INTO {t}_chunks (rowid, tokens, source_path, locator, text) VALUES (?, ?, ?, ?, ?)", self.pending[t]
-        )
-        self.pending[t] = []
-
-    def finish(self, sources: dict[str, list[str]]) -> None:
-        for t in (_BODY, _PATH):
-            self.flush(t)
-            self.conn.executemany(f"INSERT INTO {t}_ranges (source_path, first_rowid, last_rowid) VALUES (?, ?, ?)", self.ranges[t])
-            self.conn.executemany(f"INSERT OR IGNORE INTO {t}_sources (source_path) VALUES (?)", ((s,) for s in sources.get(t, [])))
-        self.conn.commit()
-        self.conn.close()
-
-
-def _split_name(collection: str) -> tuple[str, str]:
-    """旧版の索引のコレクション名を (利用者のコレクション名, 表の接頭辞) にする。"""
-    if collection.endswith(PATH_COLLECTION_SUFFIX):
-        return collection[: -len(PATH_COLLECTION_SUFFIX)], _PATH
-    return collection, _BODY
-
-
-def _split_legacy(legacy: sqlite3.Connection, directory: Path) -> None:
-    started = time.monotonic()
-    tmp = directory / _MIGRATING_DIRNAME
-    shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True)
-    tables = {r[0] for r in legacy.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    logger.info("vector_db: splitting the keyword index %s into one file per collection (once after updating).", directory / LEGACY_KEYWORDS_FILENAME)
-    shards: dict[str, _Shard] = {}
-
-    def shard(name: str) -> _Shard:
-        s = shards.get(name)
-        if s is None:
-            s = shards[name] = _Shard(tmp / _file_name(name))
-        return s
-
-    rows = 0
-    if "keyword_chunks" in tables:
-        # 入れた順（rowid の順）に読むと、1ファイルの行は続けて並ぶため、範囲（{t}_ranges）が少なく済む。
-        for tokens, collection, source_path, locator, text in legacy.execute(
-            "SELECT tokens, collection, source_path, locator, text FROM keyword_chunks ORDER BY rowid"
-        ):
-            name, t = _split_name(collection)
-            shard(name).add(t, tokens, source_path, locator, text)
-            rows += 1
-    sources: dict[str, dict[str, list[str]]] = {}
-    if "keyword_sources" in tables:
-        for collection, source_path in legacy.execute("SELECT collection, source_path FROM keyword_sources"):
-            name, t = _split_name(collection)
-            shard(name)
-            sources.setdefault(name, {}).setdefault(t, []).append(source_path)
-    for name, s in shards.items():
-        s.finish(sources.get(name, {}))
-    os.replace(tmp, directory / KEYWORDS_DIRNAME)
-    logger.info(
-        "vector_db: split the keyword index into %d collections (%d rows) in %.1fs.", len(shards), rows, time.monotonic() - started
-    )

@@ -2,13 +2,12 @@
 
 - 索引はコレクションごとに1ファイル（本文とファイルパスは別の表）で、書き込みのロックもファイルごと。
 - FTS5 の source_path は UNINDEXED のため、ファイルの行の削除・読み出しは rowid の範囲で行う。
-- 旧版の1ファイルの索引（keywords.sqlite）は、最初に開いたときにコレクションごとのファイルへ分けて消す。
+- 旧版の1ファイルの索引（keywords.sqlite）は読まない（更新後は各コレクションを再構築する）。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-import sqlite3
 import threading
 
 from src.vector_db import keyword_index as ki
@@ -75,6 +74,16 @@ def test_collections_are_separate_files_even_if_only_case_differs(tmp_path: Path
     assert ki.keyword_index_path(tmp_path, "Docs") != ki.keyword_index_path(tmp_path, "docs")
 
 
+def test_windows_reserved_collection_names_get_a_prefix(tmp_path: Path):
+    assert ki.keyword_index_path(tmp_path, "con").name == "~con.sqlite"
+    assert ki.keyword_index_path(tmp_path, "com1").name == "~com1.sqlite"
+    assert ki.keyword_index_path(tmp_path, "CON").name == "^c^o^n.sqlite"  # 大文字は予約名にならない
+    assert ki.keyword_index_path(tmp_path, "console").name == "console.sqlite"
+    with ki.open_keyword_index(tmp_path, "nul") as idx:
+        idx.replace_source("nul", "a.txt", _chunks("予約名"))
+        assert [r[2] for r in idx.source_rows("nul", "a.txt")] == ["予約名"]
+
+
 def test_writing_one_collection_does_not_wait_for_another(tmp_path: Path):
     with ki.open_keyword_index(tmp_path, "a") as a, ki.open_keyword_index(tmp_path, "b") as b:
         held, release = threading.Event(), threading.Event()
@@ -106,61 +115,10 @@ def test_remove_keyword_index_deletes_a_dropped_collection(tmp_path: Path):
     assert not ki.keyword_index_path(tmp_path, "c").exists()
 
 
-def _write_legacy(directory: Path) -> None:
-    """旧版の1ファイルの索引（全コレクションの行が入った順に混ざっているもの）。"""
-    conn = sqlite3.connect(directory / ki.LEGACY_KEYWORDS_FILENAME)
-    conn.executescript(
-        """
-        CREATE VIRTUAL TABLE keyword_chunks USING fts5(
-            tokens, collection UNINDEXED, source_path UNINDEXED, locator UNINDEXED, text UNINDEXED);
-        CREATE TABLE keyword_sources (collection TEXT NOT NULL, source_path TEXT NOT NULL, PRIMARY KEY (collection, source_path));
-        """
-    )
-    rows = [
-        ("型番 xr", "c1", "a.txt", "0", "a0"),
-        ("型番", "c1", "a.txt", "1", "a1"),
-        ("型番", "C1", "b.txt", "0", "b0"),
-        ("a txt", "c1.path", "a.txt", "", "a.txt"),
-        ("型番", "c1", "a.txt", "2", "a2"),
-    ]
-    conn.executemany("INSERT INTO keyword_chunks (tokens, collection, source_path, locator, text) VALUES (?, ?, ?, ?, ?)", rows)
-    conn.executemany(
-        "INSERT INTO keyword_sources VALUES (?, ?)",
-        [("c1", "a.txt"), ("c1", "empty.txt"), ("C1", "b.txt"), ("c1.path", "a.txt")],
-    )
-    conn.commit()
-    conn.close()
-
-
-def test_legacy_index_is_split_per_collection_on_open(tmp_path: Path):
-    _write_legacy(tmp_path)
+def test_legacy_single_file_index_is_ignored(tmp_path: Path):
+    # 旧版の索引は分けずに残したまま使わない（更新後は再構築する）。
+    (tmp_path / "keywords.sqlite").write_bytes(b"legacy")
+    assert not ki.keyword_index_exists(tmp_path, "c1")
     with ki.open_keyword_index(tmp_path, "c1") as idx:
-        assert [r[2] for r in idx.source_rows("c1", "a.txt")] == ["a0", "a1", "a2"]
-        assert idx.source_rows("c1", "empty.txt") == []  # チャンクの無いファイルも索引済みのまま
-        assert idx.sources(path_collection_name("c1")) == {"a.txt"}
-        assert [h.text for h in idx.search("c1", "xr", 5)] == ["a0"]
-        assert _count(idx, "body_ranges") == 1  # 別のコレクションの行が間に入っていても、分けた先では続いた範囲1つ
-        idx.delete_source("c1", "a.txt")
-        assert _count(idx, "body_chunks") == 0
-    with ki.open_keyword_index(tmp_path, "C1") as idx:
-        assert [r[2] for r in idx.source_rows("C1", "b.txt")] == ["b0"]
-    assert not (tmp_path / ki.LEGACY_KEYWORDS_FILENAME).exists()
-    assert not (tmp_path / "keywords.migrating").exists()
-
-
-def test_interrupted_split_is_redone(tmp_path: Path):
-    _write_legacy(tmp_path)
-    (tmp_path / "keywords.migrating").mkdir()
-    (tmp_path / "keywords.migrating" / "c1.sqlite").write_bytes(b"half written")
-    with ki.open_keyword_index(tmp_path, "c1") as idx:
-        assert [r[2] for r in idx.source_rows("c1", "a.txt")] == ["a0", "a1", "a2"]
-
-
-def test_legacy_index_left_after_split_is_removed_later(tmp_path: Path):
-    # 分け終えた後に、ほかのプロセスが開いていて旧版の索引を消せなかった状態。
-    with ki.open_keyword_index(tmp_path, "c1") as idx:
-        idx.replace_source("c1", "new.txt", _chunks("新"))
-    _write_legacy(tmp_path)
-    with ki.open_keyword_index(tmp_path, "c1") as idx:
-        assert idx.sources("c1") == {"new.txt"}  # 分け直さない
-    assert not (tmp_path / ki.LEGACY_KEYWORDS_FILENAME).exists()
+        assert idx.sources("c1") == set()
+    assert (tmp_path / "keywords.sqlite").read_bytes() == b"legacy"

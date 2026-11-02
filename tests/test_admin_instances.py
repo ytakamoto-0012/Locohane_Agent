@@ -29,7 +29,7 @@ def test_validate_name_accepts_valid():
     inst.validate_name("test-2_ok")
 
 
-@pytest.mark.parametrize("name", ["", "has space", "has/slash", "a" * 33, "日本語"])
+@pytest.mark.parametrize("name", ["", "has space", "has/slash", "a" * 33, "日本語", "ａｂｃ", "abc\n"])
 def test_validate_name_rejects_invalid(name):
     with pytest.raises(inst.InstanceError):
         inst.validate_name(name)

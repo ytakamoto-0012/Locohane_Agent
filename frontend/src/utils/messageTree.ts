@@ -144,14 +144,34 @@ function isRunningStep(step: IStep): boolean {
   );
 }
 
+/** nodes のうち、木を先頭から辿った順で id のStepより後のもの（id のStep自身とその子を含む）だけを残す。 */
+function pruneBefore(nodes: IStep[], id: string, state: { found: boolean }): IStep[] {
+  const out: IStep[] = [];
+  for (const node of nodes) {
+    if (state.found || node.id === id) {
+      state.found = true;
+      out.push(node);
+    } else if (node.steps?.length) {
+      const children = pruneBefore(node.steps, id, state);
+      if (children.length) out.push({ ...node, steps: children });
+    }
+  }
+  return out;
+}
+
 /**
  * 今まさに実行中の処理を、外側（メインエージェントのStep）から内側（サブエージェント配下のStep）
- * へ辿った列で返す（チャット欄の応答待ち表示に使う）。sideSteps は selectSideSteps の戻り値。
+ * へ辿った列で返す（チャット欄の応答待ち表示に使う）。
+ * 最後のユーザー発言より後のStepだけを見る（中断等で終了が記録されないまま残った前のターンのStepを出さないため）。
  * 各階層で実行中のStepが複数ある（並列のサブエージェント等）ときは最後に始まったものを選ぶ。
  */
-export function selectRunningStepChain(sideSteps: IStep[]): IStep[] {
+export function selectRunningStepChain(messages: IStep[]): IStep[] {
+  const lastUser = flattenAll(messages)
+    .filter((s) => s.type === 'user_message')
+    .pop();
+  const turn = lastUser ? pruneBefore(messages, lastUser.id, { found: false }) : messages;
   const chain: IStep[] = [];
-  let level = sideSteps;
+  let level = selectSideSteps(turn);
   for (;;) {
     const running = level.filter(isRunningStep).pop();
     if (!running) return chain;

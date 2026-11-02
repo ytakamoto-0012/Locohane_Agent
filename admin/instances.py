@@ -25,7 +25,8 @@ from pathlib import Path
 from src.config import PROJECT_ROOT, is_instance_overridable, load_config
 from admin.i18n import t as _t
 
-_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+# 末尾は \Z で比べる（$ は末尾の改行の前でも当たり、"name\n" を通してしまうため）。
+_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}\Z")
 # 新規作成時のインスタンス名の上限文字数。インスタンス名は data/<name>/ 等のパスに
 # そのまま入るため、長いと配下（default_workdir の _tmp_*、スキルの生成物等）で
 # Windows のパス長上限（260文字）を超えやすい。既存インスタンス（default 等）の

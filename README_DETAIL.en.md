@@ -1119,7 +1119,7 @@ when looking for facts, figures or document contents (when disabled or nothing i
   `chunk_size = 800`, chunks are roughly 1-2 per densely written A4 page; page images with `image_input = true` add one per page, and file paths (for `search_document_paths`) add one per file separately.
   Both compare by cosine similarity. Regardless of the storage, text chunks are also put in `keywords/<collection name>.sqlite` (SQLite FTS5; one file per collection,
   so search and writes do not depend on the size of other collections) in the same folder for keyword search (`src/vector_db/keyword_index.py`).
-  The single `keywords.sqlite` of older versions (all collections in one file) is split into per-collection files once, the first time it is opened after updating, and then removed.
+  The single `keywords.sqlite` of 0.4.8 and earlier (all collections in one file) is not read, so "Rebuild" each collection after updating (you may delete `keywords.sqlite` by hand after rebuilding).
 - **Ingestion** (`src/vector_db/ingest.py`): the supported formats are `.pdf` (per page), `.docx`, `.xlsx`/`.xlsm` (per sheet), `.pptx`
   (per slide, including notes) and `.md`/`.txt`/`.csv` (can be narrowed with `[vector_db] include_extensions`; Office temporary files `~$*` are excluded).
   Application-specific extensions whose content is text (`.step`, `.igs`, AutoForm material files `.mat`, etc.) can be ingested as text like `.txt`
@@ -1329,8 +1329,9 @@ Operate it from the "Knowledge" button on the instance card (or the "Knowledge" 
    Files and folders whose names start with `.` or that have Windows' hidden attribute (`.git`, etc.) are
    not ingested (the source folder itself may be hidden).
    With "Exclusion keywords" (one per line; saved newline-separated in the `exclude_keywords` column of `catalog.sqlite`), anything whose
-   path below the source folder (including folder and file names) contains a keyword is not ingested (case-insensitive; a matching folder
-   is not traversed). Surround a keyword with `/` like `/old/` to exclude only folders named exactly `old` (`\` also works as the separator).
+   path below the source folder (including folder and file names) contains a keyword is not ingested (case-insensitive, and half-width
+   katakana, full-width alphanumerics and CJK compatibility ideographs match their ordinary forms (compared after NFKC; only a full-width
+   "／" in a name stays distinct from the `/` separator); a matching folder is not traversed). Surround a keyword with `/` like `/old/` to exclude only folders named exactly `old` (`\` also works as the separator).
    A keyword starting with `*.` like `*.xlsx` is an extension: only files whose names end with it are excluded (not names merely
    containing `.xlsx`, nor folders).
    The path of the source folder itself is not compared. After adding a keyword, already ingested files that now match it are removed

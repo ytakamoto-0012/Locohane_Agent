@@ -363,8 +363,8 @@ function App() {
   // 既に回答トークンが届き始めていれば streaming カーソル側で表現されるため不要。
   const showTyping = loading && !(lastMain?.type === 'assistant_message' && lastMain.streaming);
   // 「...」の横に出す、今している処理（サイドパネルで実行中のStep）。
-  // 表示件数の間引き前の sideSteps から辿る（間引きで実行中のStepが落ちないように）。
-  const runningSteps = showTyping ? selectRunningStepChain(sideSteps) : [];
+  // 表示件数の間引き前の messages から辿る（間引きで実行中のStepが落ちないように）。
+  const runningSteps = showTyping ? selectRunningStepChain(messages) : [];
 
   if (!authReady) return null;
   if (requireLogin && !isAuthenticated) return <LoginForm />;

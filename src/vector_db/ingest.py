@@ -470,8 +470,15 @@ class _Subdirectory:
 
 def _fold_path_text(text: str) -> str:
     """取り込み除外・対象キーワードとパスを比べる形にする（NFKC で半角カナ・全角英数字・互換漢字を
-    ふつうの文字にそろえ、大文字小文字を区別しない）。見た目が同じでも文字コードが違う名前に当てるため。"""
-    return unicodedata.normalize("NFKC", text).casefold()
+    ふつうの文字にそろえ、大文字小文字を区別しない）。見た目が同じでも文字コードが違う名前に当てるため。
+
+    全角の「／」（Windows のファイル名に使える）だけはそのまま残す。NFKC では区切りの "/" になり、
+    "/old/" のようなフォルダの指定が「a／old／b」のような名前に当たってしまうため。
+    """
+    return _FULLWIDTH_SLASH.join(unicodedata.normalize("NFKC", part).casefold() for part in text.split(_FULLWIDTH_SLASH))
+
+
+_FULLWIDTH_SLASH = "／"
 
 
 def _keyword_patterns(keywords: Sequence[str]) -> tuple[str, ...]:
