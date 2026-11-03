@@ -175,3 +175,30 @@ def test_translate_uses_selected_llm_and_does_not_save(env):
     assert [("into Japanese" in c[1]) for c in _FakeModel.calls] == [True]
     empty = env["client"].post("/api/instances/default/memories/translate", json={"description": " ", "content": ""})
     assert empty.status_code == 400
+
+
+def test_bulk_delete_is_all_or_nothing(env):
+    client = env["client"]
+    memory_dir = env["memory_dir"]
+    mem_store.create_memory(memory_dir, "a", "d", "feedback", "c")
+    mem_store.create_memory(memory_dir, "b", "d", "feedback", "c", owner="alice")
+    mem_store.create_memory(memory_dir, "keep", "d", "feedback", "c", owner="alice")
+    # 1件でも見つからなければ何も消さない
+    res = client.post(
+        "/api/instances/default/memories/delete",
+        json={"items": [{"name": "a"}, {"name": "nope", "owner": "alice"}]},
+    )
+    assert res.status_code == 404 and "alice / nope" in res.json()["detail"]
+    assert mem_store.find_memory(memory_dir, "a") is not None
+    assert client.post("/api/instances/default/memories/delete", json={"items": []}).status_code == 400
+    res = client.post(
+        "/api/instances/default/memories/delete",
+        json={"items": [{"name": "a"}, {"name": "b", "owner": "alice"}, {"name": "b", "owner": "alice"}]},
+    )
+    assert res.json() == {"deleted": 2}
+    assert mem_store.find_memory(memory_dir, "a") is None
+    assert mem_store.find_memory(memory_dir, "b", "alice") is None
+    assert mem_store.find_memory(memory_dir, "keep", "alice") is not None
+    backups = inst.backups_dir(env["root"], "default") / "memory"
+    assert (backups / "_common" / "a").is_dir() and (backups / "alice" / "b").is_dir()
+    assert _audit_actions(env["audit"]) == ["memory_delete", "memory_delete"]

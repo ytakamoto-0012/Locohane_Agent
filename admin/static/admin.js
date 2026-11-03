@@ -2474,26 +2474,63 @@ async function renderMemories(container, open) {
     await renderMemories(fresh, target);
   };
 
+  // まとめて削除の選択（表示中の行だけ。絞り込みを変えると選び直しになり、見えていない行は消さない）。
+  const selectAll = $("#memories-select-all", root);
+  const deleteBtn = $("#delete-memories-btn", root);
+  let checkboxes = []; // [{cb, m}]
+  const syncSelection = () => {
+    const checked = checkboxes.filter((c) => c.cb.checked).length;
+    deleteBtn.disabled = checked === 0;
+    selectAll.checked = checkboxes.length > 0 && checked === checkboxes.length;
+    selectAll.indeterminate = checked > 0 && checked < checkboxes.length;
+  };
+  selectAll.addEventListener("change", () => {
+    for (const c of checkboxes) c.cb.checked = selectAll.checked;
+    syncSelection();
+  });
+  deleteBtn.addEventListener("click", async () => {
+    const targets = checkboxes.filter((c) => c.cb.checked).map((c) => c.m);
+    if (targets.length === 0) return;
+    const labels = targets.map((m) => `${memoryOwnerLabel(m.owner)} / ${m.name}`);
+    if (!confirm(_t("選択した {0} 件のメモリーを削除しますか？（削除前の内容はバックアップに残ります）\n{1}", targets.length, labels.join("\n")))) return;
+    try {
+      await api(memoriesPath("/delete"), {
+        method: "POST",
+        body: { items: targets.map((m) => ({ name: m.name, owner: m.owner })) },
+      });
+    } catch (e) {
+      $("#memories-error", root).textContent = e.message;
+      return;
+    }
+    await reload();
+  });
+
   const renderList = () => {
     const owner = $("#memory-owner-filter", root).value;
     const type = $("#memory-type-filter", root).value;
     const q = $("#memory-search", root).value.trim().toLowerCase();
     const tbody = $("#memories-tbody", root);
     tbody.innerHTML = "";
+    checkboxes = [];
     const rows = data.memories.filter(
       (m) =>
         (owner === "*" || (m.owner || "") === owner) &&
         (!type || m.type === type) &&
         (!q || `${m.name}\n${m.description}`.toLowerCase().includes(q))
     );
+    selectAll.disabled = rows.length === 0;
+    syncSelection();
     if (rows.length === 0) {
-      tbody.appendChild(el("tr", {}, el("td", { colspan: "6", class: "hint", text: _t("メモリーはありません。") })));
+      tbody.appendChild(el("tr", {}, el("td", { colspan: "7", class: "hint", text: _t("メモリーはありません。") })));
       return;
     }
     for (const m of rows) {
       const link = el("a", { href: "#", text: m.name, onclick: (ev) => (ev.preventDefault(), openMemory(m.name, m.owner)) });
+      const cb = el("input", { type: "checkbox", onchange: syncSelection });
+      checkboxes.push({ cb, m });
       tbody.appendChild(
         el("tr", {}, [
+          el("td", { class: "col-check" }, cb),
           el("td", { text: memoryOwnerLabel(m.owner) }),
           el("td", { text: m.owner ? _t(MEMORY_VISIBILITY_LABELS[m.visibility]) : _t("全員") }),
           el("td", { text: m.type }),

@@ -327,4 +327,6 @@ EN: dict[str, str] = {
     '同じ名前のメモリーが既にあります: {0}': 'A memory with the same name already exists: {0}',
     '公開範囲が不正です: {0!r}': 'Invalid visibility: {0!r}',
     '翻訳する説明・本文がありません。': 'There is no description or content to translate.',
+    '削除するメモリーを選択してください。': 'Select the memories to delete.',
+    '（共通）': '(common)',
 }

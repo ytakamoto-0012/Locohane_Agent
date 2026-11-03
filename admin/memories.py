@@ -70,6 +70,15 @@ _TRANSLATE_SYSTEM = (
 )
 
 
+class MemoryRef(BaseModel):
+    name: str
+    owner: str | None = None
+
+
+class MemoriesDeleteBody(BaseModel):
+    items: list[MemoryRef]
+
+
 class MemoryEditBody(BaseModel):
     description: str
     type: str
@@ -266,6 +275,39 @@ def build_router(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _audit(request, user, name, "memory_create", body.name, owner)
         return {"success": True, "owner": owner, "visibility": mem_store.find_memory(root, body.name, owner).visibility}
+
+    @router.post("/api/instances/{name}/memories/delete")
+    def delete_memories(
+        name: str,
+        body: MemoriesDeleteBody,
+        request: Request,
+        user: str = Depends(require_login),
+        _csrf: None = Depends(require_csrf),
+    ):
+        """複数のメモリーをまとめて削除する。1件でも見つからなければ何も削除しない。"""
+        root = _memory_root(name)
+        targets = list(dict.fromkeys((item.name, _owner_scope(item.owner)) for item in body.items))
+        if not targets:
+            raise HTTPException(status_code=400, detail=_t("削除するメモリーを選択してください。"))
+        found: list[mem_store.Memory] = []
+        missing: list[str] = []
+        for memory_name, owner in targets:
+            _validate_name(memory_name)
+            try:
+                mem = mem_store.find_memory(root, memory_name, owner)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if mem is None:
+                missing.append(f"{owner or _t('（共通）')} / {memory_name}")
+            else:
+                found.append(mem)
+        if missing:
+            raise HTTPException(status_code=404, detail=_t("メモリーが見つかりません: {0}", ", ".join(missing)))
+        for mem in found:
+            _backup(name, mem)
+            mem_store.delete_memory(root, mem.name, mem.owner)
+            _audit(request, user, name, "memory_delete", mem.name, mem.owner)
+        return {"deleted": len(found)}
 
     @router.put("/api/instances/{name}/memories/{memory_name}")
     def edit_memory(

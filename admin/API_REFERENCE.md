@@ -417,6 +417,9 @@ $C -X PUT "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H" -H 
   -d '{"description":"一行の説明","type":"feedback","content":"新しい本文","visibility":"private"}'
 # 削除
 $C -X DELETE "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H"
+# まとめて削除（1件でも見つからなければ何も削除しない。owner を省くと共通）
+$C -X POST $BASE/api/instances/default/memories/delete -H "$H" -H "$J" \
+  -d '{"items":[{"name":"my-note","owner":"alice"},{"name":"old-note"}]}'
 # 翻訳（英語へ。保存はしない。応答は description/content/language/llm_instance）
 $C -X POST $BASE/api/instances/default/memories/translate -H "$H" -H "$J" -H "X-Locohane-Lang: en" \
   -d '{"description":"一行の説明","content":"本文"}'

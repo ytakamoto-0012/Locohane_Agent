@@ -420,6 +420,9 @@ $C -X PUT "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H" -H 
   -d '{"description":"One-line description","type":"feedback","content":"New text","visibility":"private"}'
 # Delete
 $C -X DELETE "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H"
+# Delete several at once (nothing is deleted if any of them is not found; omit owner for common)
+$C -X POST $BASE/api/instances/default/memories/delete -H "$H" -H "$J" \
+  -d '{"items":[{"name":"my-note","owner":"alice"},{"name":"old-note"}]}'
 # Translate (into English; not saved; the response has description/content/language/llm_instance)
 $C -X POST $BASE/api/instances/default/memories/translate -H "$H" -H "$J" -H "X-Locohane-Lang: en" \
   -d '{"description":"(one-line description in another language)","content":"(content in another language)"}'

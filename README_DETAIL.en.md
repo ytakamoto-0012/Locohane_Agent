@@ -1099,7 +1099,9 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
 - **Editing from the settings dashboard**: the "Memory" sub-tab of the instance detail lists, shows, creates, edits
   (description, type, content, visibility) and deletes the memories of all users and the common ones regardless of
   visibility (`admin/memories.py`; edits go through `edit_memory` in `src/memory.py`, which keeps `created` and `sources`
-  and rebuilds the index; the visibility rules are the same as above). They can be filtered by owner. "Translate with AI"
+  and rebuilds the index; the visibility rules are the same as above). They can be filtered by owner, and the shown
+  memories can be selected with checkboxes and deleted together (nothing is deleted if any of them is not found;
+  changing the filter clears the selection). "Translate with AI"
   in the edit form has the LLM translate the description and content into the dashboard's display language (Japanese /
   English) and only fills the fields, without saving (check, then press "Save"). Like "Ask AI", it uses
   the `[llm]` endpoints of the "LLM used for answers" in "Admin settings" (or the instance itself if empty). The content
