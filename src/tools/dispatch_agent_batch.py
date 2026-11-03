@@ -11,6 +11,7 @@ from typing import Annotated
 import asyncio
 import chainlit as cl
 import logging
+import os
 import time
 import uuid
 
@@ -38,6 +39,10 @@ logger = logging.getLogger(__name__)
 # メインの1リクエストあたりのトークンが当時の目標（64000）を超えた実測があるため
 # （evals/tuning_log.md par_iter01）、ここで機械的に切り詰める。
 _GROUP_RESULT_PREVIEW_CHARS = 400
+# files 指定（質問の答えを確かめる用途）のときの同じ上限。答えそのものが最終回答に
+# 入っているため、400字では切れてメインが thread note を読み直すことになる。
+# 1グループは [subagent].lookup_files_per_agent 件（既定2）と小さいので、この長さで足りる。
+_LOOKUP_RESULT_PREVIEW_CHARS = 1500
 
 # 各グループのジョブを包む Runnable の run_name。app.py はこの名前の
 # on_chain_start/on_chain_end でグループごとの中間Stepを作り、配下のサブエージェントの
@@ -152,6 +157,39 @@ def _list_target_files(base: Path, pattern: str) -> list[Path]:
     return files
 
 
+def _resolve_listed_files(raw_files: list[str]) -> tuple[list[Path], str | None]:
+    """files 引数（`@N`・絶対パス・作業ディレクトリ基準の相対パス）を実在するファイルの絶対パスへ解決する。
+
+    前段の explore が検索で見つけたファイルは複数フォルダに散らばるため、
+    pattern では指定できない。並び順は渡された順のまま（重複は除く）にし、
+    1件でも解決できなければ起動前にエラーを返す（推測で補わせない）。
+    """
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for raw in raw_files:
+        raw = (raw or "").strip()
+        if not raw:
+            continue
+        p, error = _resolve_file_tools_path(raw)
+        if error:
+            return [], f"{raw}: {error}"
+        if not p.is_file():
+            return [], f"file not found: {raw} ({p})"
+        resolved = p.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            files.append(resolved)
+    return files, None
+
+
+def _common_base(files: list[Path]) -> Path:
+    """files の共通の親フォルダ（結果の見出しを相対パスで示すため）。別ドライブ等で求まらなければ作業ディレクトリ。"""
+    try:
+        return Path(os.path.commonpath([str(p.parent) for p in files]))
+    except ValueError:
+        return _resolve_workdir()
+
+
 def _workdir_folders_hint() -> str:
     """対象フォルダが見つからない時に、作業ディレクトリ直下のフォルダ名を添える。
 
@@ -175,20 +213,35 @@ def _file_listing(group: list[Path]) -> str:
     return "\n".join(f"- {p}" for p in group)
 
 
-def _group_task(task: str, group: list[Path], index: int, group_count: int, start: int, total: int) -> str:
+def _group_task(task: str, group: list[Path], index: int, group_count: int, start: int, total: int, lookup: bool = False) -> str:
     """共通の指示文に、そのグループの担当ファイル（絶対パス）を機械的に付け足す。
 
     メインエージェントにファイル名を書き写させると、後半のグループで実在しない
     連番ファイル名を捏造した実測がある（evals/tuning_log.md par_iter01）ため、
     担当範囲はLLMを経由させずここで確定させる。
+
+    lookup（files 指定）は前段の調査で見つけたファイルを開いて質問の答えを確かめる用途のため、
+    件数ではなく確認した事実と出典を返させる（件数だけ返されると、メインが全グループの
+    thread note を読み直すことになる）。
     """
     end = start + len(group) - 1
+    if lookup:
+        closing = (
+            "Open only the assigned files above and confirm what the task asks for in them "
+            "(the other files are checked by other sub-agents; do not search for or open other files). "
+            "In your final answer, report concisely the facts you confirmed with their source (full path, page/section), "
+            "or \"not found in the assigned files\"."
+        )
+    else:
+        closing = (
+            "Process only the assigned files above (other files are processed in parallel by other sub-agents). "
+            "In your final answer, return only the number processed, the number written, and the failed targets with reasons, concisely (do not list every file name)."
+        )
     return (
         f"{task}\n\n"
         f"[Assigned files (group {index}/{group_count}, {len(group)} files; items {start} to {end} of {total})]\n"
         f"{_file_listing(group)}\n"
-        "Process only the assigned files above (other files are processed in parallel by other sub-agents). "
-        "In your final answer, return only the number processed, the number written, and the failed targets with reasons, concisely (do not list every file name)."
+        f"{closing}"
     )
 
 
@@ -306,7 +359,11 @@ async def _run_group_runnable(
 
 
 def _collect_group_results(
-    jobs: list[tuple[str, _DispatchAgentJob]], groups: list[list[Path]], size: int, base: Path
+    jobs: list[tuple[str, _DispatchAgentJob]],
+    groups: list[list[Path]],
+    size: int,
+    base: Path,
+    preview_chars: int = _GROUP_RESULT_PREVIEW_CHARS,
 ) -> tuple[list[str], list[str], list[str], dict[str, int]]:
     """各グループの状態を集計し、終わったグループのジョブをレジストリから取り除く。
 
@@ -341,7 +398,7 @@ def _collect_group_results(
         status = _group_status(job, result)
         counts[status] = counts.get(status, 0) + 1
         header = f"### {label}: {status}"
-        preview = result if len(result) <= _GROUP_RESULT_PREVIEW_CHARS else result[:_GROUP_RESULT_PREVIEW_CHARS] + "... (rest omitted)"
+        preview = result if len(result) <= preview_chars else result[:preview_chars] + "... (rest omitted)"
         if status == "done":
             summary_lines.append(f"{header}\n{preview}")
         else:
@@ -379,20 +436,29 @@ def _save_interrupted_note(
 async def dispatch_agent_batch(
     task: str,
     agent_type: str,
-    pattern: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
+    pattern: str = "",
+    files: list[str] | None = None,
     path: str = "",
     group_size: int = 15,
     orchestrator_skill: str | None = None,
     model: str | None = None,
 ) -> str:
-    """Split work that applies the same processing to many files in a folder into groups automatically and delegate them in parallel to several sub-agents.
+    """Split work over many files into groups automatically and delegate them in parallel to several sub-agents.
 
     When applying the same instruction to many files, such as "analyze every image in the images
     folder and write it out to md", call this once instead of calling dispatch_agent yourself many
     times. This tool gets the file list, splits it into groups of group_size, assigns the files to
     each sub-agent, runs them in parallel and collects the results. You do not need to list file
     names yourself or call dispatch_agent separately for each group.
+
+    Two ways to give the targets (give exactly one):
+    - pattern (+ path): all files in a folder that match a glob pattern.
+    - files: a list of files that an earlier sub-agent found (e.g. the `@N` list that `explore`
+      returned after a knowledge search or Grep, scattered over several folders). Use this to have
+      the files opened and checked to answer a question: agent_type="explore",
+      group_size=${subagent_lookup_files_per_agent}, and in task the user's question and what to
+      confirm. Each group then reports the facts it confirmed with their source.
 
     The task text passed to each sub-agent automatically gets "assigned files (a list of absolute
     paths)" appended after the common instruction. Write in task only the instruction common to
@@ -414,10 +480,15 @@ async def dispatch_agent_batch(
             Without "/", only files directly under path are targeted. To include subfolders,
             write e.g. "*/ocr_md/*.md" (in the ocr_md folder one level down) or "**/*.jpg"
             (all levels). Writing either the upper- or lower-case extension matches both.
-        path: The absolute path of the target folder (`@N` allowed). Defaults to the working
-            directory.
+            Leave it empty when you pass files.
+        files: The target files as a list of `@N` or absolute paths (e.g. ["@12", "@15", "@20"]).
+            Copy them as they were returned; do not guess file names. Leave it empty when you pass
+            pattern.
+        path: The absolute path of the target folder (`@N` allowed) for pattern. Defaults to the
+            working directory. Not used with files.
         group_size: The number of files per sub-agent (default 15; 15 or fewer when image
-            analysis is involved). Clamped to 1..[subagent].max_iterations.
+            analysis is involved; ${subagent_lookup_files_per_agent} when checking files to answer
+            a question). Clamped to 1..[subagent].max_iterations.
             If the number of groups exceeds the configured limit, it fails before starting (the
             limit is shown in the error).
         orchestrator_skill: Same as dispatch_agent (normally omitted).
@@ -440,40 +511,56 @@ async def dispatch_agent_batch(
     if resolved is None:
         available = ", ".join(sorted(_state._AGENT_TYPES)) or "(none registered)"
         return f"Error: unknown agent_type '{agent_type}'. Available: {available}"
-    base, error = _resolve_file_tools_path(path)
-    if error:
-        return f"Error: {error}"
-    if not base.is_dir():
-        hint = "(`@N` is example notation. Pass an actual number such as `@12`, or a path relative to the working directory such as `images`)" if "@N" in path else ""
-        return f"Error: target folder not found: {base}{hint}{_workdir_folders_hint()}"
-    try:
-        # "**" の再帰探索は大きなフォルダで時間がかかるため、イベントループ（他セッション・
-        # 進捗表示を含むサーバー全体）を止めないよう別スレッドで行う。
-        files = await asyncio.to_thread(_list_target_files, base, pattern)
-    except GLOB_PATTERN_ERRORS as e:
-        return f"Error: {glob_pattern_error_message(e)}"
-    if not files:
-        hint = "" if _is_subfolder_pattern(pattern) else "(For files in subfolders, include the levels, e.g. \"*/folder-name/*.md\" or \"**/*.jpg\")"
-        return f"Error: no files under {base} match pattern '{pattern}'. {hint}"
+    raw_files = [f for f in (files or []) if (f or "").strip()]
+    pattern = (pattern or "").strip()
+    if raw_files and pattern:
+        return "Error: pass either pattern (all matching files in a folder) or files (a list of `@N`/absolute paths), not both."
+    lookup = bool(raw_files)
+    if lookup:
+        target_files, error = _resolve_listed_files(raw_files)
+        if error:
+            return f"Error: {error} (copy the `@N`/paths exactly as the earlier result showed them; no jobs were started)"
+        base = _common_base(target_files)
+        source = f"the {len(target_files)} listed files"
+    else:
+        if not pattern:
+            return "Error: pass pattern (a glob pattern relative to path) or files (a list of `@N`/absolute paths)."
+        base, error = _resolve_file_tools_path(path)
+        if error:
+            return f"Error: {error}"
+        if not base.is_dir():
+            hint = "(`@N` is example notation. Pass an actual number such as `@12`, or a path relative to the working directory such as `images`)" if "@N" in path else ""
+            return f"Error: target folder not found: {base}{hint}{_workdir_folders_hint()}"
+        try:
+            # "**" の再帰探索は大きなフォルダで時間がかかるため、イベントループ（他セッション・
+            # 進捗表示を含むサーバー全体）を止めないよう別スレッドで行う。
+            target_files = await asyncio.to_thread(_list_target_files, base, pattern)
+        except GLOB_PATTERN_ERRORS as e:
+            return f"Error: {glob_pattern_error_message(e)}"
+        if not target_files:
+            hint = "" if _is_subfolder_pattern(pattern) else "(For files in subfolders, include the levels, e.g. \"*/folder-name/*.md\" or \"**/*.jpg\")"
+            return f"Error: no files under {base} match pattern '{pattern}'. {hint}"
+        source = f"the {len(target_files)} files under {base} matching pattern '{pattern}'"
 
     size = max(1, min(group_size, _state._SUBAGENT_MAX_ITERATIONS))
-    groups = [files[i : i + size] for i in range(0, len(files), size)]
+    groups = [target_files[i : i + size] for i in range(0, len(target_files), size)]
     # 1回の呼び出しで起動するグループ（=サブエージェントのジョブ）数の上限
     # （[subagent].batch_max_groups。0以下なら無制限）。pattern="*" で大きなフォルダを
     # 指定した場合等に、確認なしで数百件のジョブが起動されるのを防ぐ。
     max_groups = _state._DISPATCH_AGENT_BATCH_MAX_GROUPS
     if max_groups > 0 and len(groups) > max_groups:
+        narrow = "Pass fewer files, or call it several times" if lookup else "Narrow the pattern, or split the targets into subfolders and call it several times"
         return (
-            f"Error: the {len(files)} files under {base} matching pattern '{pattern}' would make "
+            f"Error: {source} would make "
             f"{len(groups)} groups ({size} each), exceeding the per-call limit ({max_groups} groups). "
-            "Narrow the pattern, or split the targets into subfolders and call it several times (no jobs were started)."
+            f"{narrow} (no jobs were started)."
         )
 
     common = _resolve_path_memory_tokens_in_text(task)
     task_texts: list[str] = []
     for index, group in enumerate(groups, start=1):
         start = (index - 1) * size + 1
-        text = _group_task(common, group, index, len(groups), start, len(files))
+        text = _group_task(common, group, index, len(groups), start, len(target_files), lookup=lookup)
         text = _task_with_work_dir_hint(text)
         text = _task_with_plan_hint(text)
         if orchestrator_skill is not None:
@@ -488,7 +575,7 @@ async def dispatch_agent_batch(
         agent_type,
         base,
         pattern,
-        len(files),
+        len(target_files),
         len(groups),
         size,
         model,
@@ -556,7 +643,9 @@ async def dispatch_agent_batch(
         progress_task.cancel()
         await asyncio.gather(progress_task, return_exceptions=True)
 
-    summary_lines, full_lines, pending, counts = _collect_group_results(jobs, groups, size, base)
+    summary_lines, full_lines, pending, counts = _collect_group_results(
+        jobs, groups, size, base, preview_chars=_LOOKUP_RESULT_PREVIEW_CHARS if lookup else _GROUP_RESULT_PREVIEW_CHARS
+    )
 
     note_line = ""
     if full_lines:
@@ -570,7 +659,7 @@ async def dispatch_agent_batch(
 
     count_text = ", ".join(f"{k} {v}" for k, v in counts.items())
     head = (
-        f"Split the {len(files)} files of {base} into {len(groups)} groups ({size} each) and "
+        f"Split {source} into {len(groups)} groups ({size} each) and "
         f"delegated them in parallel to {agent_type} ({count_text})."
     )
     tail: list[str] = []

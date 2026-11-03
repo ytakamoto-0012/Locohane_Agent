@@ -570,3 +570,95 @@ async def test_batch_saves_interrupted_note_on_cancel(monkeypatch, tmp_path) -> 
     assert "グループ1の処理結果" in content
     assert str((images / "c.png").resolve()) in content
     assert tools._dispatch_agent_job._DISPATCH_AGENT_JOBS == {}
+
+
+# --- files 指定（前段の explore が見つけたファイルを少数ずつ割り振る） ---
+# 1つの explore が検索から全ファイルの読み込みまでを抱えてコンテキストが膨らみ、
+# 1回の応答ごとに遅くなっていた本番実例（2026-11-03）への対応。
+
+
+def _make_scattered_files(tmp_path) -> list:
+    paths = []
+    for folder, name in [("2019", "p20.md"), ("2024", "IMG_1.md"), ("2019", "p6.md"), ("2025", "IMG_2.md"), ("2020", "IMG_3.md")]:
+        p = tmp_path / "workdir" / "Datas" / folder / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x", encoding="utf-8")
+        paths.append(p)
+    return paths
+
+
+@pytest.mark.asyncio
+async def test_batch_files_splits_listed_files_in_given_order(monkeypatch, tmp_path) -> None:
+    _setup(monkeypatch, tmp_path, [])
+    paths = _make_scattered_files(tmp_path)
+    captured = _capture_tasks(monkeypatch)
+
+    result = await _invoke(task="クリスマス会の日程を確認する", agent_type="worker", files=[str(p) for p in paths], group_size=2)
+
+    assert len(captured) == 3
+    by_group = sorted(captured, key=lambda t: t.split("(group ")[1])
+    # 並びはファイル名順に並べ替えず、渡された順のまま2件ずつ割り振る。
+    for task, group in zip(by_group, [paths[0:2], paths[2:4], paths[4:5]]):
+        assert "クリスマス会の日程を確認する" in task
+        for p in group:
+            assert str(p.resolve()) in task
+        # 確認した事実と出典を返させる（件数だけ返させない）。
+        assert "facts you confirmed with their source" in task
+        assert "the number written" not in task
+    assert "Split the 5 listed files into 3 groups" in result
+
+
+@pytest.mark.asyncio
+async def test_batch_files_accepts_relative_paths_and_drops_duplicates(monkeypatch, tmp_path) -> None:
+    _setup(monkeypatch, tmp_path, [])
+    paths = _make_scattered_files(tmp_path)
+    captured = _capture_tasks(monkeypatch)
+
+    await _invoke(task="t", agent_type="worker", files=["Datas/2019/p20.md", str(paths[0]), " "], group_size=2)
+
+    assert len(captured) == 1
+    assert captured[0].count(str(paths[0].resolve())) == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_files_missing_file_returns_error_without_jobs(monkeypatch, tmp_path) -> None:
+    _setup(monkeypatch, tmp_path, [])
+    paths = _make_scattered_files(tmp_path)
+    captured = _capture_tasks(monkeypatch)
+
+    result = await _invoke(task="t", agent_type="worker", files=[str(paths[0]), str(tmp_path / "nope.md")])
+
+    assert result.startswith("Error: file not found")
+    assert captured == []
+    assert tools._dispatch_agent_job._DISPATCH_AGENT_JOBS == {}
+
+
+@pytest.mark.asyncio
+async def test_batch_requires_exactly_one_of_pattern_and_files(monkeypatch, tmp_path) -> None:
+    images, _ = _setup(monkeypatch, tmp_path, ["a.png"])
+    paths = _make_scattered_files(tmp_path)
+    captured = _capture_tasks(monkeypatch)
+
+    both = await _invoke(task="t", agent_type="worker", pattern="*.png", path=str(images), files=[str(paths[0])])
+    neither = await _invoke(task="t", agent_type="worker")
+
+    assert both.startswith("Error: pass either pattern")
+    assert neither.startswith("Error: pass pattern")
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_batch_files_returns_longer_group_answers(monkeypatch, tmp_path) -> None:
+    _setup(monkeypatch, tmp_path, [])
+    paths = _make_scattered_files(tmp_path)
+
+    async def fake_run_subagent(task, tools_list, system_prompt, llm_config, max_iterations, **kwargs):
+        return "日程は12月14日" + "あ" * 1000
+
+    monkeypatch.setattr(tools._dispatch_agent_job.subagent, "run_subagent", fake_run_subagent)
+
+    result = await _invoke(task="t", agent_type="worker", files=[str(paths[0])])
+
+    # 答えそのものが入るため、pattern 指定時の400字では切らない。
+    assert "あ" * 1000 in result
+    assert "... (rest omitted)" not in result

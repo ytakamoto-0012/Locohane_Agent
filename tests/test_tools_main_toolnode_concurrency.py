@@ -182,3 +182,125 @@ async def test_main_toolnode_max_parallel_is_independent_per_session(monkeypatch
     # 各セッション内は2回の asyncio.sleep(0.05) を直列実行するため約0.1秒。
     # セッション間で待ち合っていれば約0.2秒（4回分の直列）になるはず。
     assert elapsed < 0.18
+
+
+@pytest.mark.asyncio
+async def test_main_toolnode_does_not_hold_dispatch_agent_before_start(monkeypatch) -> None:
+    """max_parallel=1 でも dispatch_agent はこの枠で開始前に待たされない。
+
+    開始前に待たされると on_tool_start が出ず、同じ応答で並べた委譲のStep（バッジ）が
+    画面に出なかったため。同時実行数はツール内の [subagent].max_parallel が別途ガードする。
+    """
+    _setup(monkeypatch)
+    monkeypatch.setattr(tools._state, "_TOOL_CALL_MAX_PARALLEL", 1)
+    started: list[str] = []
+    release = asyncio.Event()
+
+    @tool("dispatch_agent")
+    async def fake_dispatch_agent(x: str) -> str:
+        """ダミーの dispatch_agent。"""
+        started.append(x)
+        await release.wait()
+        return "ok"
+
+    @tool
+    async def dummy_a(x: str) -> str:
+        """ダミー非同期ツールA。"""
+        started.append(x)
+        await release.wait()
+        return "ok"
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", tools.ImageAwareToolNode([fake_dispatch_agent, dummy_a]))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    compiled = graph.compile()
+    tool_calls = [
+        {"name": "dispatch_agent", "args": {"x": "d1"}, "id": "call-0"},
+        {"name": "dispatch_agent", "args": {"x": "d2"}, "id": "call-1"},
+        {"name": "dummy_a", "args": {"x": "a"}, "id": "call-2"},
+    ]
+
+    run = asyncio.create_task(compiled.ainvoke({"messages": [AIMessage(content="", tool_calls=tool_calls)]}))
+    for _ in range(50):
+        if len(started) == 3:
+            break
+        await asyncio.sleep(0.01)
+    # どれも終わらせないうちに、3つとも開始している（dummy_a が枠を1つ使い、dispatch_agent は枠を使わない）。
+    started_before_release = sorted(started)
+    release.set()
+    await run
+
+    assert started_before_release == ["a", "d1", "d2"]
+
+
+def _graph_with(tool_list):
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", tools.ImageAwareToolNode(tool_list))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    return graph.compile()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_agent_with_lookup_in_same_response_is_not_started(monkeypatch) -> None:
+    """メモリー検索・Glob 等と同じ応答の委譲は開始せず差し戻す（本番ログ 2026-11-03）。
+
+    委譲の依頼文がそれらの結果を見ずに書かれており、同時に動かしても速くならないため。
+    """
+    _setup(monkeypatch)
+    ran: list[str] = []
+
+    @tool("dispatch_agent")
+    async def fake_dispatch_agent(x: str) -> str:
+        """ダミーの dispatch_agent。"""
+        ran.append("dispatch_agent")
+        return "ok"
+
+    @tool("search_memory")
+    async def fake_search_memory(x: str) -> str:
+        """ダミーの search_memory。"""
+        ran.append("search_memory")
+        return "No matching memories."
+
+    compiled = _graph_with([fake_dispatch_agent, fake_search_memory])
+    tool_calls = [
+        {"name": "search_memory", "args": {"x": "q"}, "id": "call-0"},
+        {"name": "dispatch_agent", "args": {"x": "d"}, "id": "call-1"},
+    ]
+    result = await compiled.ainvoke({"messages": [AIMessage(content="", tool_calls=tool_calls)]})
+
+    assert ran == ["search_memory"]
+    by_id = {m.tool_call_id: m for m in result["messages"] if getattr(m, "tool_call_id", None)}
+    assert by_id["call-1"].content.startswith("Error: not started.")
+    assert "search_memory" in by_id["call-1"].content
+    assert by_id["call-0"].content == "No matching memories."
+
+
+@pytest.mark.asyncio
+async def test_dispatch_agents_with_progress_update_run_together(monkeypatch) -> None:
+    """委譲同士と、進捗更新など同じ応答に並べる手順のツールは差し戻さない。"""
+    _setup(monkeypatch)
+    ran: list[str] = []
+
+    @tool("dispatch_agent")
+    async def fake_dispatch_agent(x: str) -> str:
+        """ダミーの dispatch_agent。"""
+        ran.append(x)
+        return "ok"
+
+    @tool("update_task_progress")
+    async def fake_update_task_progress(x: str) -> str:
+        """ダミーの update_task_progress。"""
+        ran.append(x)
+        return "ok"
+
+    compiled = _graph_with([fake_dispatch_agent, fake_update_task_progress])
+    tool_calls = [
+        {"name": "update_task_progress", "args": {"x": "p"}, "id": "call-0"},
+        {"name": "dispatch_agent", "args": {"x": "d1"}, "id": "call-1"},
+        {"name": "dispatch_agent", "args": {"x": "d2"}, "id": "call-2"},
+    ]
+    await compiled.ainvoke({"messages": [AIMessage(content="", tool_calls=tool_calls)]})
+
+    assert sorted(ran) == ["d1", "d2", "p"]

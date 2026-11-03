@@ -3503,6 +3503,47 @@ def _find_orphaned_tool_calls(messages: list) -> list[dict]:
     return orphaned
 
 
+def _pending_completed_tool_messages(state) -> list[ToolMessage]:
+    """中断した step で完了済みだったツールの ToolMessage（まだチェックポイントにコミットされていないもの）。
+
+    ToolNode は tool_call ごとに別タスクとして動き、完了したタスクの結果は step 全体が
+    終わるまで「pending write」としてだけ保存される。aget_state() はこれを values へ
+    適用して返すため、_find_orphaned_tool_calls からは回答済みに見えるが、aupdate_state()
+    で作る新しいチェックポイントには引き継がれない。停止ボタンで step が中断されると、
+    完了済みだったサブエージェントの結果が LLM の履歴から消え（画面には表示済み）、
+    次のターンで孤立 tool_call として「ユーザーの停止で中断」の仮結果に置き換わっていた
+    （本番ログ 2026-11-03: 同じ応答で並べた explore 2本のうち、完了済みだった1本の結果が
+    失われ、モデルが画面と食い違う説明をした）。修復時にこれらを書き戻す。
+    """
+    found: list[ToolMessage] = []
+    for task in getattr(state, "tasks", None) or ():
+        if getattr(task, "error", None) is not None:
+            continue
+        result = getattr(task, "result", None)
+        if not isinstance(result, dict):
+            continue
+        msgs = result.get("messages")
+        if msgs is None:
+            continue
+        for m in msgs if isinstance(msgs, list) else [msgs]:
+            if isinstance(m, ToolMessage):
+                found.append(m)
+    return found
+
+
+def _orphan_repair_messages(state, base_reason: str) -> tuple[list, int, int]:
+    """孤立 tool_call を修復するために aupdate_state へ渡すメッセージ列と、仮結果で埋めた件数・書き戻した件数。
+
+    完了済みだった（pending write にだけある）ToolMessage は本物をそのまま書き戻し、
+    本当に結果の無い tool_call だけをプレースホルダで埋める（_pending_completed_tool_messages 参照）。
+    """
+    messages = state.values.get("messages", []) if state else []
+    recovered = _pending_completed_tool_messages(state)
+    orphaned = _find_orphaned_tool_calls(messages)
+    repair = [*recovered, *(msg for tc in orphaned for msg in _build_orphaned_placeholder_messages(tc, base_reason))]
+    return repair, len(orphaned), len(recovered)
+
+
 def _dispatch_agent_rescue_note_paths(tc: dict) -> list[Path]:
     """孤立した dispatch_agent / dispatch_agent_batch の tool_call に対応する、実在する緊急退避ファイルの一覧。
 
@@ -3677,22 +3718,11 @@ async def _repair_orphaned_tool_calls(graph, config: dict) -> int:
             exc_info=True,
         )
         return 0
-    messages = state.values.get("messages", []) if state else []
-    orphaned = _find_orphaned_tool_calls(messages)
-    if not orphaned:
+    repair, orphaned_count, _ = _orphan_repair_messages(state, "Because the previous session ended abnormally, ")
+    if not repair:
         return 0
-    await graph.aupdate_state(
-        config,
-        {
-            "messages": [
-                msg
-                for tc in orphaned
-                for msg in _build_orphaned_placeholder_messages(tc, "Because the previous session ended abnormally, ")
-            ]
-        },
-        as_node="tools",
-    )
-    return len(orphaned)
+    await graph.aupdate_state(config, {"messages": repair}, as_node="tools")
+    return orphaned_count
 
 
 async def _remove_message_ids_if_present(graph, config: dict, ids: list[str]) -> None:
@@ -4649,23 +4679,14 @@ async def _on_message_impl(message: cl.Message) -> None:
             )
             try:
                 state = await graph.aget_state(config)
-                messages = state.values.get("messages", []) if state else []
-                orphaned = _find_orphaned_tool_calls(messages)
-                if orphaned:
-                    await graph.aupdate_state(
-                        config,
-                        {
-                            "messages": [
-                                msg
-                                for tc in orphaned
-                                for msg in _build_orphaned_placeholder_messages(tc, "Because the user stopped it (or similar), ")
-                            ]
-                        },
-                        as_node="tools",
-                    )
+                repair, orphaned_count, recovered_count = _orphan_repair_messages(state, "Because the user stopped it (or similar), ")
+                if repair:
+                    await graph.aupdate_state(config, {"messages": repair}, as_node="tools")
                     logging.getLogger(__name__).warning(
-                        "on_message: detected CancelledError and repaired the checkpoint by adding placeholder ToolMessages for %d orphaned tool_calls",
-                        len(orphaned),
+                        "on_message: detected CancelledError and repaired the checkpoint by adding placeholder ToolMessages for %d orphaned tool_calls"
+                        " (and recommitting %d results of tool calls that had completed)",
+                        orphaned_count,
+                        recovered_count,
                     )
             except _CheckpointerTimeout:
                 # checkpointerのロックが固着している可能性が高いが、

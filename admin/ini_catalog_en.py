@@ -208,6 +208,7 @@ DESCRIPTIONS: dict[str, str] = {
     'graph.max_parallel': (
         "How many tool calls of the main agent (via ImageAwareToolNode) may run in parallel at the same time per session. LangGraph's ToolNode runs multiple tool_calls in the same AIMessage fully in parallel with asyncio.gather(), so when the model calls several tools in one turn, the call order and the order in which responses are processed can diverge, and simultaneous access to shared resources (llama-server, DBs, etc.) can happen (the main agent version of the same reasoning as [subagent] max_parallel).\n"
         'Each session (thread_id) has its own asyncio.Semaphore (see _TOOL_CALL_SEMAPHORES in src/tools.py), so this value is the upper limit of "the slots one session can use at the same time"; it does not prevent several sessions from using these slots at the same time.\n'
+        'Note: dispatch_agent / dispatch_agent_batch do not use these slots (their concurrency is decided by [subagent].max_parallel). These slots make a call wait before the tool starts, so the second and later delegations issued in the same response were not shown on screen (they looked as if called one at a time), and other tools of the same response waited until the earlier delegation finished.\n'
         '1 or more: guard the number of concurrent runs to that value with asyncio.Semaphore(N) (default 1 = fully serialized; the call order is also kept to some extent by the FIFO queue of asyncio.Semaphore).\n'
         '0 or less: disable the guard and allow parallel calls as they are.\n'
         'Note: even if this value is larger than [llm].max_concurrent_requests, tools that use the LLM (analyze_image, etc.) just wait for a free LLM slot and do not error. Tools that do not use the LLM run concurrently up to this value (for details see the comment of [llm].max_concurrent_requests).\n'
@@ -245,6 +246,11 @@ DESCRIPTIONS: dict[str, str] = {
     'subagent.batch_max_groups': (
         'Upper limit on the number of groups (= sub-agents) that dispatch_agent_batch may start in one call. If the number of files ÷ group_size (rounded up) exceeds this value, an error is returned without starting any job (a safety valve that prevents hundreds of jobs from starting without confirmation because a wrong pattern matched a whole large folder).\n'
         'It is not the number running at the same time (that is decided by max_parallel above). 0 or less means unlimited.'
+    ),
+    'subagent.lookup_files_per_agent': (
+        'In information lookups (investigations that open files to answer a question), the number of source files one sub-agent may open by itself.\n'
+        'When the files to open found by a knowledge search, Grep, etc. exceed this number, the sub-agent returns the file list (@N and what to check) without reading them, and the main agent assigns them with dispatch_agent_batch(files=...) to other sub-agents, this many each (referenced from system_prompt.md and subagent_common.md as ${subagent_lookup_files_per_agent}).\n'
+        'When one sub-agent handles everything from the search to reading all the files, what it read piles up and every response gets slower, so the files are handed over in small pieces. The flow is the same regardless of max_parallel above. Values below 1 are treated as 1.'
     ),
     'subagent.batch_stop_after_unreachable_groups': (
         'During a dispatch_agent_batch run, when the number of groups cut off because LLM timeouts / communication errors continued even after background_llm_timeout_max_retries retries reaches this number, groups not started yet are not started and are returned as "not started" (prevents every group from waiting "timeout × number of retries" and being cut off while the LLM server stays down). Groups already running keep running to the end. 0 or less disables it (all groups are always started).'

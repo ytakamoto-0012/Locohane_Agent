@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from collections.abc import Sequence
 from dataclasses import dataclass
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
 from pathlib import Path
 import asyncio
@@ -156,6 +157,35 @@ _DISPATCH_AGENT_SEMAPHORES: "dict[str | None, asyncio.Semaphore]" = {}
 # 独立させる。既定値1は init_tools() 未実行時（テスト等）の安全側フォールバック。
 _TOOL_CALL_MAX_PARALLEL: int = 1
 _TOOL_CALL_SEMAPHORES: "dict[str | None, asyncio.Semaphore]" = {}
+# 上のセマフォで待たせないツール（_tool_call_semaphore_wrap の docstring 参照）。
+_UNGUARDED_TOOL_NAMES = frozenset({"dispatch_agent", "dispatch_agent_batch"})
+# サブエージェントへの委譲と同じ応答に並べてはいけない、情報を集めるツール
+# （_lookup_siblings 参照）。結果次第で委譲の要否や依頼文が変わるもの。
+# 進捗更新・thread note への書き込み・メモリーの保存は委譲と同じ応答に並べる手順があるため含めない。
+_LOOKUP_TOOL_NAMES = frozenset(
+    {
+        "search_memory",
+        "read_memory",
+        "list_memories",
+        "Glob",
+        "Grep",
+        "Read",
+        "json_query",
+        "check_work_dir_status",
+        "search_path_memory",
+        "list_document_collections",
+        "search_documents",
+        "search_document_paths",
+        "list_thread_notes",
+        "read_thread_note",
+        "read_skill",
+        "read_skill_file",
+        "get_tool_source",
+        "get_plan_status",
+        "analyze_image",
+        "help",
+    }
+)
 
 # `_tmp_<name>`（execute_python_code / run_script の中間生成物置き場）の
 # `<name>` 部分（作成時刻プレフィックス付きthread_id）を、スレッド（thread_id）
@@ -196,14 +226,63 @@ def forget_session_tool_semaphores(session_id: str) -> None:
     _EXEC_TMP_NAME_CACHE.pop(session_id, None)
 
 
+def _lookup_siblings(request) -> list[str]:
+    """この tool_call と同じ応答（AIMessage）に並んでいる、情報を集めるツールの名前（_LOOKUP_TOOL_NAMES）。
+
+    メインがメモリー検索・Glob 等とサブエージェントへの委譲を同じ応答に並べると、委譲の
+    依頼文はそれらの結果を見ずに書かれる（メモリーに答えがあれば委譲自体が不要だった）。
+    同時に動かしても何も速くならないため、委譲は結果を読んだ次の応答でサブエージェント
+    同士まとめて出させる（本番ログ 2026-11-03: search_memory・Glob・dispatch_agent を1応答で発行）。
+    """
+    state = request.state
+    if isinstance(state, dict):
+        messages = state.get("messages")
+    elif isinstance(state, list):
+        messages = state
+    else:
+        messages = getattr(state, "messages", None)
+    tc_id = request.tool_call.get("id")
+    for m in reversed(messages or []):
+        calls = getattr(m, "tool_calls", None)
+        if calls and any(c.get("id") == tc_id for c in calls):
+            names = [c.get("name") for c in calls if c.get("id") != tc_id and c.get("name") in _LOOKUP_TOOL_NAMES]
+            return sorted(set(names))
+    return []
+
+
 async def _tool_call_semaphore_wrap(request, execute):
     """ToolNode(awrap_tool_call=...) 用インターセプタ。
 
     全ツール呼び出し（同期/非同期問わず _execute_tool_async 経由で正しく
     振り分けられた実行）を、現在のセッション専用の Semaphore（_TOOL_CALL_SEMAPHORES
-    参照）で待ち合わせる。dispatch_agent は専用の _DISPATCH_AGENT_SEMAPHORES でも
-    重ねてガードされる形になるが、単に入れ子になるだけで問題ない。
+    参照）で待ち合わせる。
+
+    dispatch_agent / dispatch_agent_batch はここでは待たせない（_UNGUARDED_TOOL_NAMES）。
+    この待ちはツールの開始前（on_tool_start より前）に起きるため、同じ応答で並べた
+    2本目以降の委譲は画面にStep（バッジ）が出ず、メインが並列に呼んでいても1本ずつ
+    呼んだように見えていた。同じ応答の Glob 等も、先の委譲が終わるまで数分待たされていた。
+    この2つはツールの中で [subagent].max_parallel のセマフォ（_DISPATCH_AGENT_SEMAPHORES）が
+    同時実行数をガードし、待っている間もStepが出て「順番待ち」と表示される。
+
+    ただし同じ応答に情報を集めるツールが並んでいる委譲は開始せず、差し戻す（_lookup_siblings 参照）。
     """
+    name = request.tool_call.get("name")
+    if name in _UNGUARDED_TOOL_NAMES:
+        lookups = _lookup_siblings(request)
+        if lookups:
+            logger.info("tool_call: %s was not started because the same response also calls %s", name, ", ".join(lookups))
+            return ToolMessage(
+                content=(
+                    f"Error: not started. This response also calls {', '.join(lookups)}, so this delegation was written "
+                    "before their results were known. Read those results first; if the delegation is still needed, "
+                    "issue it in your next response together with all the other sub-agent delegations "
+                    "(sub-agents in parallel with each other, not with lookups)."
+                ),
+                tool_call_id=request.tool_call.get("id") or "",
+                name=name,
+                status="error",
+            )
+        return await execute(request)
     sem = _get_session_semaphore(_TOOL_CALL_SEMAPHORES, _TOOL_CALL_MAX_PARALLEL)
     if sem is None:
         return await execute(request)

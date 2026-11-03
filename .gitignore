@@ -15,6 +15,7 @@ evals/results/
 # 個人の実データ（金額・ファイルの場所）に依存する eval ケースとそのシード（ローカル専用）。
 evals/cases/system_prompt_scale/009_knowledge_single_value_lookup_no_overinvestigation.yaml
 evals/cases/system_prompt_scale/010_knowledge_value_from_sourced_memory.yaml
+evals/cases/system_prompt_scale/011_knowledge_lookup_two_phase_parallel_explore.yaml
 evals/fixtures/memory_seed_phone_charges/
 evals/fixtures/answer/system_prompt_scale/generate_memory_seed_phone_charges.py
 

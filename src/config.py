@@ -808,6 +808,14 @@ class Config:
             引継ぎ手順）のMarkdownファイルの絶対パス。
         subagent_max_iterations: dispatch_agent が内部で回す ReAct
             ループの最大反復回数（agent→tools 遷移の回数）。
+        subagent_lookup_files_per_agent: 情報探索（質問への回答のために
+            ファイルを開いて確かめる調査）で、1つのサブエージェントが自分で
+            開いてよい元ファイル数、かつ dispatch_agent_batch(files=...) で
+            割り振る1グループのファイル数。system_prompt.md・
+            subagent_common.md から ${subagent_lookup_files_per_agent} として
+            参照する。1つの explore が検索から全ファイルの読み込みまでを抱えて
+            コンテキストが膨らみ、1回の応答ごとに遅くなっていた本番実例
+            （2026-11-03）への対応。
         subagent_max_parallel: dispatch_agent ツールの実LLM呼び出しを、
             1セッションあたり同時に何件まで許可するか。単一インスタンスの
             llama-serverへdispatch_agentの並列リクエストが飛ぶとチェック
@@ -1326,6 +1334,7 @@ class Config:
     subagent_background_llm_timeout_max_retries: int
     subagent_batch_max_groups: int
     subagent_batch_stop_after_unreachable_groups: int
+    subagent_lookup_files_per_agent: int
 
     # --- ユーザー応答待ちタイムアウト（Chainlit の Ask*Message） ---
     approval_timeout_seconds: int
@@ -3775,6 +3784,16 @@ def load_config(
                 "SUBAGENT_BATCH_STOP_AFTER_UNREACHABLE_GROUPS",
                 subagent.get("batch_stop_after_unreachable_groups", 1),
             )
+        ),
+        # 1未満は「1ファイルずつ」と同じ意味に丸める（プロンプトの「N件を超えたら返す」が0件で常に返すにならないよう）。
+        subagent_lookup_files_per_agent=max(
+            1,
+            int(
+                os.getenv(
+                    "SUBAGENT_LOOKUP_FILES_PER_AGENT",
+                    subagent.get("lookup_files_per_agent", 2),
+                )
+            ),
         ),
         approval_timeout_seconds=int(os.getenv("APPROVAL_TIMEOUT_SECONDS", timeouts.get("approval_seconds", 300))),
         ask_user_question_timeout_seconds=int(os.getenv("ASK_USER_QUESTION_TIMEOUT_SECONDS", timeouts.get("ask_user_question_seconds", 60))),

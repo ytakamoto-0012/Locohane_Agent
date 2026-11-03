@@ -7,6 +7,7 @@ loop_nudge等の後続メッセージが追記される・コンテキスト圧�
 （issue/20260804_234928_orphaned_tool_call_dual_session_freeze.md の再発）。
 """
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app import _build_orphaned_placeholder_messages, _find_orphaned_tool_calls
@@ -151,3 +152,80 @@ def test_build_orphaned_placeholder_messages_for_batch_lists_all_group_rescue_fi
     assert tool_msg.content.index(str(paths[1])) < tool_msg.content.index(str(paths[0]))
     assert "delegation to dispatch_agent_batch was interrupted" in human_msg.content
     assert str(paths[0]) in human_msg.content
+
+
+# --- 中断した step で完了済みだったツールの結果を書き戻す（本番ログ 2026-11-03） ---
+# 同じ応答で並べた dispatch_agent 2本のうち1本が完了、もう1本の実行中に停止すると、
+# 完了済みの結果は pending write にしか無く、修復の aupdate_state で失われていた。
+
+
+@pytest.mark.asyncio
+async def test_repair_after_stop_keeps_result_of_tool_that_completed() -> None:
+    import asyncio
+
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.outputs import ChatGeneration, ChatResult
+    from langchain_core.tools import tool
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.prebuilt import create_react_agent
+
+    from app import _orphan_repair_messages
+
+    fast_done = asyncio.Event()
+
+    @tool
+    async def fast_tool() -> str:
+        """fast"""
+        fast_done.set()
+        return "ナレッジ検索の結果: 開くべきファイル @16 @72"
+
+    @tool
+    async def slow_tool() -> str:
+        """slow"""
+        await asyncio.sleep(30)
+        return "never"
+
+    class _TwoCallsModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "fake"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            msg = AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "fast_tool", "args": {}, "id": "call_fast", "type": "tool_call"},
+                    {"name": "slow_tool", "args": {}, "id": "call_slow", "type": "tool_call"},
+                ],
+            )
+            return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    graph = create_react_agent(_TwoCallsModel(), [fast_tool, slow_tool], checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "t1"}}
+
+    async def run() -> None:
+        async for _ in graph.astream({"messages": [HumanMessage(content="調べて")]}, config):
+            pass
+
+    task = asyncio.create_task(run())
+    await asyncio.wait_for(fast_done.wait(), timeout=10)
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    state = await graph.aget_state(config)
+    repair, orphaned_count, recovered_count = _orphan_repair_messages(state, "Because the user stopped it (or similar), ")
+    assert (orphaned_count, recovered_count) == (1, 1)
+    await graph.aupdate_state(config, {"messages": repair}, as_node="tools")
+
+    # 新しいチェックポイント（pending write を含まない）に、完了済みの本物の結果が残る。
+    tup = await graph.checkpointer.aget_tuple(config)
+    committed = tup.checkpoint["channel_values"]["messages"]
+    by_id = {m.tool_call_id: m.content for m in committed if isinstance(m, ToolMessage)}
+    assert "開くべきファイル @16 @72" in by_id["call_fast"]
+    assert by_id["call_slow"].startswith("Error: Because the user stopped it")
+    assert _find_orphaned_tool_calls(committed) == []
