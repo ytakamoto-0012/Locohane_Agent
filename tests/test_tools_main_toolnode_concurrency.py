@@ -278,6 +278,41 @@ async def test_dispatch_agent_with_lookup_in_same_response_is_not_started(monkey
 
 
 @pytest.mark.asyncio
+async def test_dispatch_agent_with_question_in_same_response_is_not_started(monkeypatch) -> None:
+    """ユーザーへの質問と同じ応答の委譲も差し戻す。
+
+    dispatch_agent は [graph].max_parallel の枠を使わないため、そのまま動かすと
+    ユーザーの回答を待たずに委譲が始まってしまう。
+    """
+    _setup(monkeypatch)
+    ran: list[str] = []
+
+    @tool("dispatch_agent")
+    async def fake_dispatch_agent(x: str) -> str:
+        """ダミーの dispatch_agent。"""
+        ran.append("dispatch_agent")
+        return "ok"
+
+    @tool("ask_user_choice")
+    async def fake_ask_user_choice(x: str) -> str:
+        """ダミーの ask_user_choice。"""
+        ran.append("ask_user_choice")
+        return "A"
+
+    compiled = _graph_with([fake_dispatch_agent, fake_ask_user_choice])
+    tool_calls = [
+        {"name": "ask_user_choice", "args": {"x": "q"}, "id": "call-0"},
+        {"name": "dispatch_agent", "args": {"x": "d"}, "id": "call-1"},
+    ]
+    result = await compiled.ainvoke({"messages": [AIMessage(content="", tool_calls=tool_calls)]})
+
+    assert ran == ["ask_user_choice"]
+    by_id = {m.tool_call_id: m for m in result["messages"] if getattr(m, "tool_call_id", None)}
+    assert by_id["call-1"].content.startswith("Error: not started.")
+    assert "the user's answer to ask_user_choice" in by_id["call-1"].content
+
+
+@pytest.mark.asyncio
 async def test_dispatch_agents_with_progress_update_run_together(monkeypatch) -> None:
     """委譲同士と、進捗更新など同じ応答に並べる手順のツールは差し戻さない。"""
     _setup(monkeypatch)

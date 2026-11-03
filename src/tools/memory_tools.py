@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 # read_memory の owner で共通のメモリーを指す値（一覧の " (common)" と同じ語）。
 _COMMON_OWNER_ARG = "common"
+# 一覧・検索では自分のメモリーを "(mine, ...)" と表示するため、owner="mine" は自分として受け付ける。
+_MINE_OWNER_ARG = "mine"
 
 
 def _require_memory_root() -> Path:
@@ -291,8 +293,8 @@ def read_memory(name: str, owner: str | None = None) -> str:
     Args:
         name: The name of the memory to read.
         owner: Usually omit it: your own memory with that name is read first, then the common
-            one, then another user's shared one. Pass "common", or the user shown as
-            "(user: <owner>)" in search results, to read that one instead.
+            one, then another user's shared one. Pass "mine" (your own), "common", or the user shown
+            as "(user: <owner>)" in search results, to read that one instead.
 
     Returns:
         The full text in the form "[type] name (owner)\\ndescription\\n\\ncontent". If the memory
@@ -307,7 +309,7 @@ def read_memory(name: str, owner: str | None = None) -> str:
         if owner is None:
             mem = memory.read_visible_memory(root, name, me)
         else:
-            scope = None if owner == _COMMON_OWNER_ARG else owner
+            scope = None if owner == _COMMON_OWNER_ARG else (me if owner == _MINE_OWNER_ARG else owner)
             mem = memory.read_visible_memory(root, name, me, scope, auto=False)
     except (RuntimeError, ValueError) as e:
         return f"Error: {e}"

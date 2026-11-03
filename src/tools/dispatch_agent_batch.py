@@ -10,13 +10,13 @@ from pathlib import Path
 from typing import Annotated
 import asyncio
 import chainlit as cl
-import hashlib
 import logging
 import os
 import time
 import uuid
 
 from .. import skill_drafts
+from ..memory import _sha256_of
 from ..i18n import current_lang, t
 from . import _dispatch_agent_job
 from . import _state
@@ -167,7 +167,12 @@ def _dedupe_identical_files(files: list[Path]) -> tuple[list[Path], list[tuple[P
     食い違って確認の往復が増える（2026-11-03 evals system_prompt_scale/001:
     同じ写真40枚の元とコピーが80件として配られた）。最初に出たものを残し、
     残りは (省いたファイル, 残したファイル) として返す。サイズが他と重ならない
-    ファイルはハッシュを計算しない。読めないファイルはまとめずに残す。
+    ファイルはハッシュを計算しない。読めないファイル・空のファイルはまとめずに残す
+    （空のファイル同士は「同じ中身」でも別物として扱う）。ハッシュは全体を読み込まず
+    少しずつ計算する（memory._sha256_of と同じ）。
+
+    files 指定（質問に答えるために読むだけ）でのみ使う。pattern での一括処理は
+    ファイルごとに出力を作ることがあり、黙って省くとそのファイルの出力が作られないため。
 
     Returns:
         (残すファイル, [(省いたファイル, 同じ内容で残したファイル), ...])
@@ -181,11 +186,11 @@ def _dedupe_identical_files(files: list[Path]) -> tuple[list[Path], list[tuple[P
     first_by_digest: dict[tuple[int, str], Path] = {}
     duplicate_of: dict[Path, Path] = {}
     for size, same_size in by_size.items():
-        if len(same_size) < 2:
+        if size == 0 or len(same_size) < 2:
             continue
         for p in same_size:
             try:
-                digest = hashlib.sha256(p.read_bytes()).hexdigest()
+                digest = _sha256_of(p)
             except OSError:
                 continue
             original = first_by_digest.setdefault((size, digest), p)
@@ -478,6 +483,11 @@ def _save_interrupted_note(
         logger.exception("dispatch_agent_batch: could not save the results at interruption to the thread note")
 
 
+# group_size を省いたときの1グループの件数。files は [subagent].lookup_files_per_agent（読めなければこの値）、pattern は15。
+DEFAULT_LOOKUP_GROUP_SIZE = 2
+DEFAULT_PATTERN_GROUP_SIZE = 15
+
+
 @tool
 async def dispatch_agent_batch(
     task: str,
@@ -486,7 +496,7 @@ async def dispatch_agent_batch(
     pattern: str = "",
     files: list[str] | None = None,
     path: str = "",
-    group_size: int = 15,
+    group_size: int | None = None,
     orchestrator_skill: str | None = None,
     model: str | None = None,
 ) -> str:
@@ -532,9 +542,10 @@ async def dispatch_agent_batch(
             pattern.
         path: The absolute path of the target folder (`@N` allowed) for pattern. Defaults to the
             working directory. Not used with files.
-        group_size: The number of files per sub-agent (default 15; 15 or fewer when image
-            analysis is involved; ${subagent_lookup_files_per_agent} when checking files to answer
-            a question). Clamped to 1..[subagent].max_iterations.
+        group_size: The number of files per sub-agent. Usually omit it: the default is
+            ${subagent_lookup_files_per_agent} with files (checking files to answer a question) and 15
+            with pattern (15 or fewer when image analysis is involved). Clamped to
+            1..[subagent].max_iterations.
             If the number of groups exceeds the configured limit, it fails before starting (the
             limit is shown in the error).
         orchestrator_skill: Same as dispatch_agent (normally omitted).
@@ -593,11 +604,18 @@ async def dispatch_agent_batch(
             return f"Error: no files under {base} match pattern '{pattern}'. {hint}"
         source = f"the {len(target_files)} files under {base} matching pattern '{pattern}'"
 
-    # 中身が同じファイル（コピー・バックアップ）は1回だけ配る。ハッシュ計算は別スレッドで行う。
-    target_files, duplicates = await asyncio.to_thread(_dedupe_identical_files, target_files)
+    # files 指定（読むだけ）では、中身が同じファイル（コピー・バックアップ）を1回だけ配る。
+    # pattern での一括処理はファイルごとに出力を作ることがあるため省かない。ハッシュ計算は別スレッドで行う。
+    duplicates: list[tuple[Path, Path]] = []
+    if lookup:
+        target_files, duplicates = await asyncio.to_thread(_dedupe_identical_files, target_files)
     if duplicates:
         source += f" ({len(duplicates)} identical copies left out, {len(target_files)} assigned)"
 
+    if group_size is None:
+        # files（質問に答えるための確認）は小さく分ける。書き忘れで1つの explore が15件を
+        # 抱え、2段階に分けた意味がなくなるのを防ぐ（[subagent].lookup_files_per_agent）。
+        group_size = getattr(_state._LLM_CONFIG, "subagent_lookup_files_per_agent", DEFAULT_LOOKUP_GROUP_SIZE) if lookup else DEFAULT_PATTERN_GROUP_SIZE
     size = max(1, min(group_size, _state._SUBAGENT_MAX_ITERATIONS))
     groups = [target_files[i : i + size] for i in range(0, len(target_files), size)]
     # 1回の呼び出しで起動するグループ（=サブエージェントのジョブ）数の上限

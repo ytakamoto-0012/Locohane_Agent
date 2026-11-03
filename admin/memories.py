@@ -113,6 +113,14 @@ class MemoryEditBody(BaseModel):
     visibility: str | None = None
 
 
+def _dashboard_editor(user: str) -> str:
+    """設定ダッシュボードで作成・編集した人として frontmatter（author / updated_by）に残す名前。
+
+    チャットのユーザー名と区別できるよう、ダッシュボードでの操作であることを添える。
+    """
+    return f"{user} (dashboard)"
+
+
 def _validate_fields(description: str, memory_type: str, content: str, visibility: str | None) -> None:
     if memory_type not in mem_store.MEMORY_TYPES:
         raise HTTPException(status_code=400, detail=_t("種類が不正です: {0!r}", memory_type))
@@ -326,7 +334,14 @@ def build_router(
             raise HTTPException(status_code=409, detail=_t("同じ名前のメモリーが既にあります: {0}", body.name))
         try:
             mem_store.create_memory(
-                root, body.name, body.description, body.type, body.content, owner=owner, visibility=body.visibility
+                root,
+                body.name,
+                body.description,
+                body.type,
+                body.content,
+                owner=owner,
+                visibility=body.visibility,
+                author=_dashboard_editor(user),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -390,6 +405,7 @@ def build_router(
                 content=body.content,
                 owner=scope,
                 visibility=body.visibility,
+                updated_by=_dashboard_editor(user),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

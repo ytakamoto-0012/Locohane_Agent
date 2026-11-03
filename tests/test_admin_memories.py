@@ -234,3 +234,17 @@ def test_bulk_delete_is_all_or_nothing(env):
     backups = inst.backups_dir(env["root"], "default") / "memory"
     assert (backups / "_common" / "a").is_dir() and (backups / "alice" / "b").is_dir()
     assert _audit_actions(env["audit"]) == ["memory_delete", "memory_delete"]
+
+
+def test_dashboard_records_author_and_updated_by(env):
+    """ダッシュボードで作成・編集した人を author / updated_by に残す（所有者とは別に分かるように）。"""
+    client = env["client"]
+    body = {"name": "by-admin", "description": "d", "type": "project", "content": "c"}
+    assert client.post("/api/instances/default/memories", json=body).status_code == 200
+    m = mem_store.read_memory(env["memory_dir"], "by-admin")
+    assert m.author is not None and m.author.endswith("(dashboard)")
+    assert m.updated_by is None
+    res = client.put("/api/instances/default/memories/by-admin", json={**body, "content": "c2"})
+    assert res.status_code == 200
+    m = mem_store.read_memory(env["memory_dir"], "by-admin")
+    assert m.updated_by is not None and m.updated_by.endswith("(dashboard)")

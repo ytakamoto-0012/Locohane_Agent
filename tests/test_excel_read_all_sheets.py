@@ -92,3 +92,61 @@ def test_single_sheet_mode_also_writes_text_path(tmp_path) -> None:
     assert proc.returncode == 0, proc.stderr
     summary = json.loads(proc.stdout)
     assert "A2=予算 | B2=40000" in Path(summary["text_path"]).read_text(encoding="utf-8")
+
+
+def _make_book_with_chartsheet(tmp_path) -> Path:
+    from openpyxl.chart import BarChart, Reference
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "データ"
+    for i, v in enumerate([3, 5, 2], start=1):
+        ws[f"A{i}"] = v
+    chart = BarChart()
+    chart.add_data(Reference(ws, min_col=1, min_row=1, max_row=3))
+    cs = wb.create_chartsheet("グラフ")
+    cs.add_chart(chart)
+    path = tmp_path / "chart.xlsx"
+    wb.save(path)
+    return path
+
+
+def test_chartsheet_does_not_crash_sheet_list_or_all_sheets(tmp_path) -> None:
+    """グラフだけのシート（Chartsheet）があると max_row 等が無く AttributeError で落ちていた。"""
+    path = _make_book_with_chartsheet(tmp_path)
+
+    listed = _run(tmp_path, str(path))
+    assert listed.returncode == 0, listed.stderr
+    listed_full = json.loads(Path(json.loads(listed.stdout)["result_path"]).read_text(encoding="utf-8"))
+    sheets = {s["name"]: s for s in listed_full["sheets"]}
+    assert sheets["グラフ"]["chartsheet"] is True
+    assert sheets["データ"]["max_row"] == 3
+
+    proc = _run(tmp_path, str(path), "--all-sheets")
+    assert proc.returncode == 0, proc.stderr
+    summary = json.loads(proc.stdout)
+    by_name = {s["sheet"]: s for s in summary["sheets"]}
+    assert by_name["グラフ"]["chartsheet"] is True
+    assert by_name["データ"]["total_rows"] == 3
+    assert "chart-only sheet" in Path(summary["text_path"]).read_text(encoding="utf-8")
+
+
+def test_all_sheets_loads_the_workbook_once(tmp_path, monkeypatch) -> None:
+    """シートごとにブック全体を読み直すと、大きいブックでスクリプトの時間切れになる。"""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("read_excel_under_test", _SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(_SCRIPT.parent))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(_SCRIPT.parent))
+    calls = []
+    real_load = openpyxl.load_workbook
+    monkeypatch.setattr(openpyxl, "load_workbook", lambda *a, **k: calls.append(1) or real_load(*a, **k))
+
+    result = module._read_all_sheets(_make_book(tmp_path), ".xlsx", 0, 100, False, None, True)
+
+    assert [s["sheet"] for s in result["sheets"]] == ["年度別比較", "当日の流れ"]
+    assert len(calls) == 1

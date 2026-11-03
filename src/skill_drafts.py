@@ -152,7 +152,10 @@ def access_error(path: Path, op: DraftOp, config: "Config | None", user: str | N
     他ユーザーのメモリーフォルダ（<memory_dir>/users/<他のユーザー>/）は、どの操作も常にエラー。
     """
     memory_owner = _memory_owner_of(path, config)
-    if memory_owner is not None and memory_owner != user:
+    # セッションが無い（eval 等）とき、メモリーのツールは匿名ユーザー（draft_owner_name(None)）として
+    # 自分のメモリーを扱う（src/tools/memory_tools.py）。ここでも同じ立場で判定し、自分のフォルダを拒否しない。
+    memory_user = user if user is not None else draft_owner_name(None)
+    if memory_owner is not None and memory_owner != memory_user:
         return f"Error: you cannot access another user's memories ({memory_owner}); use the memory tools instead."
     draft_dir = getattr(config, "skill_draft_dir", None)
     if draft_dir is None:

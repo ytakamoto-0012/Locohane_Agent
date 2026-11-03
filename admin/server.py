@@ -770,10 +770,29 @@ def list_users(name: str, user: str = Depends(require_login)):
     }
 
 
+def _ranks_env_override_error(name: str) -> str | None:
+    """環境変数 MEMORY_USER_RANKS がこのインスタンスで効いていれば、その旨のエラー文を返す。
+
+    環境変数は config_overrides.json より優先されるため、そのままではダッシュボードで変えたランクが
+    黙って無視される。起動時と同じ順（インスタンス .env > OS環境変数 > プロジェクト直下 .env）で見る。
+    """
+    effective_env = {
+        **env_files.read_values(PROJECT_ENV_PATH),
+        **os.environ,
+        **env_files.read_values(inst.env_path(INSTANCES_ROOT, name)),
+    }
+    if (effective_env.get("MEMORY_USER_RANKS") or "").strip():
+        return _t("環境変数 MEMORY_USER_RANKS が設定されているため、ここで変えたランクは使われません（環境変数を外してください）。")
+    return None
+
+
 def _user_ranks_view(name: str, usernames: list[str]) -> tuple[dict[str, int | None], int | None, str | None]:
     """ユーザー名ごとのランク（[memory] user_ranks。未設定は None）、既定のランク、設定を読めないときのエラー。"""
     from src.skill_drafts import draft_owner_name
 
+    env_error = _ranks_env_override_error(name)
+    if env_error:
+        return {u: None for u in usernames}, None, env_error
     try:
         cfg = monitor.instance_config(INSTANCES_ROOT, CONFIG_INI_PATH, name)
     except monitor.MonitorError as exc:
@@ -805,6 +824,9 @@ def set_user_rank(
     meta = _require_instance(name)
     if body.rank is not None and body.rank < 0:
         raise HTTPException(status_code=400, detail=_t("ランクは0以上の整数で指定してください。"))
+    env_error = _ranks_env_override_error(name)
+    if env_error:
+        raise HTTPException(status_code=409, detail=env_error)
     try:
         cfg = monitor.instance_config(INSTANCES_ROOT, CONFIG_INI_PATH, name)
     except monitor.MonitorError as exc:

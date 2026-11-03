@@ -1088,7 +1088,8 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   passed to the LLM (removed mechanically by `is_visible_to` in `src/memory.py`, not left to the LLM's judgment).
   Even `shared` ones are hidden from other users if their current content has signs of personal or confidential details
   (in case they were edited by hand after saving). `read_memory(name)` reads your own memory when names collide and,
-  for another user's memory, adds "if it conflicts with your own memory, follow your own". `update_memory`/`delete_memory`
+  for another user's memory, adds how to settle a conflict (without ranks, "follow your own"; with ranks, the "user
+  ranks" rule below). `update_memory`/`delete_memory`
   only work on your own memory (or else the common one) and refuse other users' memories (even a higher rank cannot
   change another user's memory).
 - **User ranks** (`[memory] user_ranks`, `default_rank`): a number (an integer of 0 or more; larger is more senior) so

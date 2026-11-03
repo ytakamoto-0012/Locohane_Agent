@@ -301,3 +301,30 @@ def test_tools_tell_to_follow_higher_rank(as_user, set_policy):
     memory_tools.create_memory.invoke({"name": "own", "description": "d", "memory_type": "feedback", "content": "y"})
     current["user"] = "boss"
     assert memory_tools.update_memory.invoke({"name": "own", "content": "z"}).startswith("Error: ")
+
+
+def test_guard_treats_no_session_as_anonymous_owner(tmp_path):
+    """セッションが無い（eval 等）とき、メモリーのツールは匿名ユーザーとして動くため、そのフォルダは読める。"""
+    root = tmp_path / "mem"
+    anonymous = skill_drafts.draft_owner_name(None)
+    memory.create_memory(root, "a", "d", "feedback", "c", owner=anonymous)
+    memory.create_memory(root, "b", "d", "feedback", "c", owner="bob")
+    config = types.SimpleNamespace(memory_dir=root, skill_draft_dir=None)
+    assert skill_drafts.access_error(root / "users" / anonymous / "feedback" / "a.md", "read", config, None) is None
+    assert skill_drafts.access_error(root / "users" / "bob" / "feedback" / "b.md", "read", config, None) is not None
+
+
+def test_read_memory_accepts_mine_as_owner(as_user):
+    root, current = as_user
+    memory.create_memory(root, "tips", "d", "feedback", "alice's", owner="alice")
+    memory.create_memory(root, "tips", "d", "feedback", "common one")
+    out = memory_tools.read_memory.invoke({"name": "tips", "owner": "mine"})
+    assert out.startswith("[feedback] tips (mine") and "alice's" in out
+
+
+def test_description_with_triple_dash_still_loads(tmp_path):
+    """説明・本文に --- が入っても frontmatter の区切りと取り違えない（AIで翻訳で混入しうる）。"""
+    memory.create_memory(tmp_path, "m", "before --- after", "feedback", "line1\n---\nline2", owner="alice")
+    mem = memory.read_memory(tmp_path, "m", "alice")
+    assert mem.description == "before --- after"
+    assert mem.content == "line1\n---\nline2"

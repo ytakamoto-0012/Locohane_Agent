@@ -329,6 +329,10 @@ def _safe_memory_path(memory_root: Path, memory_type: str, name: str, owner: str
     return candidate
 
 
+# 先頭の "---" 行から、次の "---" だけの行までを frontmatter とみなす（_split_frontmatter）。
+_FRONTMATTER_RE = re.compile(r"---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|$)", re.DOTALL | re.MULTILINE)
+
+
 def _split_frontmatter(text: str) -> tuple[dict | None, str]:
     """先頭 `---` で囲まれた YAML frontmatter を (dict, 本文) で返す。
 
@@ -346,9 +350,12 @@ def _split_frontmatter(text: str) -> tuple[dict | None, str]:
     if not text.lstrip().startswith("---"):
         return None, text
     stripped = text.lstrip()
-    parts = stripped.split("---", 2)
-    if len(parts) < 3:
+    # 区切りは「--- だけの行」で探す。単純に "---" で3分割すると、説明文や値に "---" が
+    # 含まれたとき（ダッシュボードの「AIで翻訳」で混入しうる）そこで切れ、メモリーが読めなくなる。
+    match = _FRONTMATTER_RE.match(stripped)
+    if match is None:
         return None, text
+    parts = ["", match.group(1), stripped[match.end():]]
     try:
         data = yaml.safe_load(parts[1])
     except yaml.YAMLError as e:
@@ -834,6 +841,7 @@ def edit_memory(
     content: str,
     owner: str | None = None,
     visibility: str | None = None,
+    updated_by: str | None = None,
 ) -> Path:
     """既存メモリーの説明・種類・本文（ユーザーのものは公開範囲も）をまとめて書き換え、索引を再構築する。
 
@@ -849,6 +857,7 @@ def edit_memory(
         content: 新しい本文。
         owner: 所有者。None なら共通のメモリー。
         visibility: ユーザーのメモリーの新しい公開範囲（None なら今の値のまま）。
+        updated_by: 書き換えた人（frontmatter の updated_by に記録する）。None なら記録済みの値のまま。
 
     Returns:
         書き換え後のファイルの絶対パス。
@@ -873,6 +882,7 @@ def edit_memory(
         content=content,
         sources=mem.sources,
         visibility=visibility if visibility is not None else mem.visibility,
+        updated_by=updated_by,
     )
 
 

@@ -98,3 +98,13 @@ def test_delete_users_requires_csrf_header(ctx) -> None:
     res = ctx["client"].post("/api/instances/default/users/delete", json={"usernames": ["alice"]})
     assert res.status_code == 403
     assert env_files.read_users(ctx["env"]) == {"alice": "a"}
+
+
+def test_rank_is_rejected_while_env_var_overrides_it(rank_ctx, monkeypatch) -> None:
+    """環境変数 MEMORY_USER_RANKS は config_overrides.json より優先されるため、黙って無視させない。"""
+    monkeypatch.setenv("MEMORY_USER_RANKS", '{"alice": 5}')
+    env_files.write_users(rank_ctx["env"], {"alice": "a"})
+    client = rank_ctx["client"]
+    res = client.put("/api/instances/default/users/alice/rank", headers=HEADERS, json={"rank": 2})
+    assert res.status_code == 409 and "MEMORY_USER_RANKS" in res.json()["detail"]
+    assert "MEMORY_USER_RANKS" in client.get("/api/instances/default/users").json()["rank_error"]

@@ -250,6 +250,7 @@ EN: dict[str, str] = {
     "LLM の応答が空でした。": "The LLM returned an empty response.",
     "清書する文章がありません。": "There is no text to polish.",
     "ランクは0以上の整数で指定してください。": "Enter the rank as an integer of 0 or more.",
+    "環境変数 MEMORY_USER_RANKS が設定されているため、ここで変えたランクは使われません（環境変数を外してください）。": "The environment variable MEMORY_USER_RANKS is set, so ranks changed here are not used (remove the environment variable).",
     'インスタンス {0!r} 自身の共有パス': 'the shared paths of instance {0!r} itself',
     '存在しません': 'Does not exist',
     'ドライブのルート・ホーム・プロジェクト等の上位ディレクトリのため削除できません': 'Cannot be deleted because it is a top-level directory such as a drive root, the home folder or the project',

@@ -250,6 +250,27 @@ def _merged_lookup(ws, min_row: int, max_row: int) -> dict[tuple[int, int], str]
     return lookup
 
 
+def _is_chartsheet(ws) -> bool:
+    """グラフだけのシート（Chartsheet）か。セル・行・print_area を持たない。"""
+    return not hasattr(ws, "iter_rows")
+
+
+def _chartsheet_rows_result(path: Path, name: str) -> dict:
+    """グラフだけのシートを --sheet / --all-sheets で読んだときの結果（セルは無い）。"""
+    return {
+        "path": str(path),
+        "mode": "rows",
+        "sheet": name,
+        "chartsheet": True,
+        "total_rows": 0,
+        "total_columns": 0,
+        "start_row": None,
+        "end_row": None,
+        "columns": [],
+        "rows": [],
+    }
+
+
 def _read_xlsx(
     path: Path,
     sheet_arg: str | None,
@@ -259,7 +280,9 @@ def _read_xlsx(
     queries: list[dict] | None = None,
     no_style: bool = False,
     columns: str | None = None,
+    wb=None,
 ) -> dict:
+    """xlsx/xlsm を読む。wb を渡すとそのブックを使い、閉じない（--all-sheets で1回だけ読み込むため）。"""
     import openpyxl
     from openpyxl.utils import get_column_letter
 
@@ -268,24 +291,35 @@ def _read_xlsx(
     if columns and sheet_arg is None:
         raise ValueError("--columns can be used only with --sheet")
 
-    wb = openpyxl.load_workbook(str(path), data_only=data_only, read_only=False)
+    owns_wb = wb is None
+    if owns_wb:
+        wb = openpyxl.load_workbook(str(path), data_only=data_only, read_only=False)
     try:
         names = wb.sheetnames
         if sheet_arg is None:
-            sheets = [
-                {
-                    "name": name,
-                    "max_row": wb[name].max_row or 0,
-                    "max_column": wb[name].max_column or 0,
-                    # openpyxlのprint_areaは未設定時Noneではなく空文字列""を返すためNoneに正規化する
-                    "print_area": wb[name].print_area or None,
-                }
-                for name in names
-            ]
+            sheets = []
+            for name in names:
+                sheet = wb[name]
+                if _is_chartsheet(sheet):
+                    sheets.append({"name": name, "chartsheet": True, "max_row": 0, "max_column": 0, "print_area": None})
+                    continue
+                sheets.append(
+                    {
+                        "name": name,
+                        "max_row": sheet.max_row or 0,
+                        "max_column": sheet.max_column or 0,
+                        # openpyxlのprint_areaは未設定時Noneではなく空文字列""を返すためNoneに正規化する
+                        "print_area": sheet.print_area or None,
+                    }
+                )
             return {"path": str(path), "mode": "sheets", "sheets": sheets}
 
         resolved = resolve_sheet_name(names, sheet_arg)
         ws = wb[resolved]
+        if _is_chartsheet(ws):
+            if queries or columns:
+                raise ValueError(f"'{resolved}' is a chart-only sheet (no cells); --query-json/--columns cannot be used")
+            return _chartsheet_rows_result(path, resolved)
         total_rows = ws.max_row or 0
         total_columns = ws.max_column or 0
         selected_indices = parse_column_selection(columns, total_columns) or list(range(1, total_columns + 1))
@@ -382,7 +416,8 @@ def _read_xlsx(
             result["query_results"] = _run_queries(ws, queries, total_rows)
         return result
     finally:
-        wb.close()
+        if owns_wb:
+            wb.close()
 
 
 def _read_xls(
@@ -460,8 +495,21 @@ def _read_all_sheets(
         names = [s["name"] for s in _read_xls(path, None, 0, 0)["sheets"]]
         sheets = [_read_xls(path, name, offset, limit) for name in names]
     else:
-        names = [s["name"] for s in _read_xlsx(path, None, 0, 0, data_only)["sheets"]]
-        sheets = [_read_xlsx(path, name, offset, limit, data_only, queries, no_style=no_style) for name in names]
+        import openpyxl
+
+        # ブックは1回だけ読み込む（シートごとに読み直すと、大きいブックでスクリプトの時間切れになる）。
+        wb = openpyxl.load_workbook(str(path), data_only=data_only, read_only=False)
+        try:
+            names = wb.sheetnames
+            # グラフだけのシートにはセルが無いため、--query-json は渡さない。
+            sheets = [
+                _chartsheet_rows_result(path, name)
+                if _is_chartsheet(wb[name])
+                else _read_xlsx(path, name, offset, limit, data_only, queries, no_style=no_style, wb=wb)
+                for name in names
+            ]
+        finally:
+            wb.close()
     for sheet in sheets:
         sheet.pop("path", None)
         sheet.pop("mode", None)
@@ -475,6 +523,8 @@ def _sheet_text(sheet: dict) -> str:
     """
     total = sheet.get("total_rows") or 0
     start, end = sheet.get("start_row"), sheet.get("end_row")
+    if sheet.get("chartsheet"):
+        return f"## {sheet['sheet']} (chart-only sheet: no cells; list its charts by opening the file in Excel or rendering it)"
     head = f"## {sheet['sheet']} (rows {start}-{end} of {total})" if start else f"## {sheet['sheet']} (no rows read; {total} rows)"
     lines = [head]
     if sheet.get("merged_cells"):
@@ -511,6 +561,7 @@ def _all_sheets_summary(result: dict) -> dict:
                 "total_columns": s["total_columns"],
                 "end_row": s["end_row"],
                 "truncated": bool(s["total_rows"]) and (s["end_row"] or 0) < s["total_rows"],
+                **({"chartsheet": True} if s.get("chartsheet") else {}),
                 **({"query_results_count": len(s["query_results"])} if "query_results" in s else {}),
             }
             for s in result["sheets"]

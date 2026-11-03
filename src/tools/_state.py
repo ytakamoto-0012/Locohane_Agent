@@ -184,8 +184,14 @@ _LOOKUP_TOOL_NAMES = frozenset(
         "get_plan_status",
         "analyze_image",
         "help",
+        # 読み取り専用のスクリプト実行も、結果次第で委譲の中身が変わる（委譲と並行して動かさない）。
+        "run_script",
+        "execute_python_code_readonly",
     }
 )
+# 委譲と同じ応答に並べてはいけない、ユーザーへの質問ツール。dispatch_agent が [graph].max_parallel の
+# 枠から外れた（_UNGUARDED_TOOL_NAMES）ため、同じ応答に並ぶと回答を待たずに委譲が始まってしまう。
+_ASK_TOOL_NAMES = frozenset({"AskUserQuestion", "ask_user_choice"})
 
 # `_tmp_<name>`（execute_python_code / run_script の中間生成物置き場）の
 # `<name>` 部分（作成時刻プレフィックス付きthread_id）を、スレッド（thread_id）
@@ -227,7 +233,8 @@ def forget_session_tool_semaphores(session_id: str) -> None:
 
 
 def _lookup_siblings(request) -> list[str]:
-    """この tool_call と同じ応答（AIMessage）に並んでいる、情報を集めるツールの名前（_LOOKUP_TOOL_NAMES）。
+    """この tool_call と同じ応答（AIMessage）に並んでいる、情報を集めるツール（_LOOKUP_TOOL_NAMES）と
+    ユーザーへの質問ツール（_ASK_TOOL_NAMES）の名前。
 
     メインがメモリー検索・Glob 等とサブエージェントへの委譲を同じ応答に並べると、委譲の
     依頼文はそれらの結果を見ずに書かれる（メモリーに答えがあれば委譲自体が不要だった）。
@@ -245,7 +252,11 @@ def _lookup_siblings(request) -> list[str]:
     for m in reversed(messages or []):
         calls = getattr(m, "tool_calls", None)
         if calls and any(c.get("id") == tc_id for c in calls):
-            names = [c.get("name") for c in calls if c.get("id") != tc_id and c.get("name") in _LOOKUP_TOOL_NAMES]
+            names = [
+                c.get("name")
+                for c in calls
+                if c.get("id") != tc_id and (c.get("name") in _LOOKUP_TOOL_NAMES or c.get("name") in _ASK_TOOL_NAMES)
+            ]
             return sorted(set(names))
     return []
 
@@ -271,12 +282,16 @@ async def _tool_call_semaphore_wrap(request, execute):
         lookups = _lookup_siblings(request)
         if lookups:
             logger.info("tool_call: %s was not started because the same response also calls %s", name, ", ".join(lookups))
+            asks = [n for n in lookups if n in _ASK_TOOL_NAMES]
+            wait_for = (
+                f"the user's answer to {', '.join(asks)}" if asks and len(asks) == len(lookups) else "their results"
+            )
             return ToolMessage(
                 content=(
                     f"Error: not started. This response also calls {', '.join(lookups)}, so this delegation was written "
-                    "before their results were known. Read those results first; if the delegation is still needed, "
+                    f"before {wait_for} was known. Read it first; if the delegation is still needed, "
                     "issue it in your next response together with all the other sub-agent delegations "
-                    "(sub-agents in parallel with each other, not with lookups)."
+                    "(sub-agents in parallel with each other, not with lookups or questions to the user)."
                 ),
                 tool_call_id=request.tool_call.get("id") or "",
                 name=name,

@@ -329,7 +329,7 @@ async def _run(
     from src.graph import ainvoke_ensuring_final_text, build_graph
     from src.llm import ThinkingLoopDetected, mark_user_turn
     from src import skill_drafts
-    from src.memory import rebuild_index, render_memory_block
+    from src.memory import MEMORY_INDEX_MARKER, rebuild_index, render_memory_block
     from src.tools.vector_db_tools import render_document_collections_block
     from src.skills import build_system_prompt, filter_skills_for_agent_type, render_skills_block, scan_skills
     from src.tools import get_all_tools, init_tools
@@ -463,15 +463,18 @@ async def _run(
             )
             for a in agent_type_defs
         ]
-        # メモリーのツールはセッション外では匿名ユーザーとして動く（src/tools/memory_tools.py）ため、索引も同じ立場で組み立てる。
-        system_prompt = system_prompt.replace(
-            "{{memory}}", render_memory_block(config.memory_dir, viewer=skill_drafts.draft_owner_name(None))
-        )
+        # 索引は config 変数の展開の後に差し込む（app.py と同じ）。メモリーの本文に "${" があると、
+        # 先に差し込んだ場合だけ expand_config_vars() が未定義変数として起動時に失敗するため。
+        system_prompt = system_prompt.replace("{{memory}}", MEMORY_INDEX_MARKER)
         system_prompt = system_prompt.replace("{{agent_types}}", agent_types_block)
         system_prompt = system_prompt.replace("{{document_collections}}", render_document_collections_block(config))
         # config.ini の値を ${変数名} として埋め込めるよう展開する（app.py の
         # _setup() と同じ手順、{{...}}置換完了後に行う）。
         system_prompt = expand_config_vars(system_prompt, config)
+        # メモリーのツールはセッション外では匿名ユーザーとして動く（src/tools/memory_tools.py）ため、索引も同じ立場で組み立てる。
+        system_prompt = system_prompt.replace(
+            MEMORY_INDEX_MARKER, render_memory_block(config.memory_dir, viewer=skill_drafts.draft_owner_name(None))
+        )
         # app.py の _setup() と同じく、メモリーの公開範囲の決め方を config 変数の展開の後に差し込む。
         system_prompt = system_prompt.replace("{{memory_visibility}}", render_memory_visibility_block(config))
         # 本番（app.py の _rebuild_graph）と同じく応答言語の指示を末尾に足す。セッションが

@@ -678,3 +678,59 @@ async def test_batch_files_returns_longer_group_answers(monkeypatch, tmp_path) -
     # 答えそのものが入るため、pattern 指定時の400字では切らない。
     assert "あ" * 1000 in result
     assert "... (rest omitted)" not in result
+
+
+@pytest.mark.asyncio
+async def test_batch_files_default_group_size_is_lookup_files_per_agent(monkeypatch, tmp_path) -> None:
+    """files 指定で group_size を省くと [subagent].lookup_files_per_agent 件ずつ（15件ずつにしない）。"""
+    _setup(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(tools._state, "_LLM_CONFIG", type("Cfg", (), {"subagent_lookup_files_per_agent": 2})())
+    paths = _make_scattered_files(tmp_path)
+    captured = _capture_tasks(monkeypatch)
+
+    await _invoke(task="t", agent_type="worker", files=[str(p) for p in paths])
+
+    assert len(captured) == 3
+
+
+@pytest.mark.asyncio
+async def test_batch_pattern_default_group_size_is_15(monkeypatch, tmp_path) -> None:
+    _setup(monkeypatch, tmp_path, [f"{i:02d}.png" for i in range(20)])
+    captured = _capture_tasks(monkeypatch)
+
+    await _invoke(task="t", agent_type="worker", pattern="*.png", path="images")
+
+    assert len(captured) == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_pattern_keeps_files_with_identical_content(monkeypatch, tmp_path) -> None:
+    """pattern の一括処理はファイルごとに出力を作ることがあるため、中身が同じでも省かない。"""
+    images, _ = _setup(monkeypatch, tmp_path, [])
+    for name in ("a.png", "b.png", "empty1.png", "empty2.png"):
+        (images / name).write_bytes(b"" if name.startswith("empty") else b"same")
+    captured = _capture_tasks(monkeypatch)
+
+    result = await _invoke(task="t", agent_type="worker", pattern="*.png", path="images", group_size=10)
+
+    assert len(captured) == 1
+    assert all(n in captured[0] for n in ("a.png", "b.png", "empty1.png", "empty2.png"))
+    assert "identical copies" not in result
+
+
+@pytest.mark.asyncio
+async def test_batch_files_leaves_out_identical_copies_but_not_empty_files(monkeypatch, tmp_path) -> None:
+    images, _ = _setup(monkeypatch, tmp_path, [])
+    (images / "a.png").write_bytes(b"same")
+    (images / "copy_of_a.png").write_bytes(b"same")
+    (images / "empty1.png").write_bytes(b"")
+    (images / "empty2.png").write_bytes(b"")
+    captured = _capture_tasks(monkeypatch)
+
+    names = ["a.png", "copy_of_a.png", "empty1.png", "empty2.png"]
+    result = await _invoke(task="t", agent_type="worker", files=[str(images / n) for n in names], group_size=10)
+
+    assert len(captured) == 1
+    assert "copy_of_a.png" not in captured[0].split("[Assigned files", 1)[1]
+    assert "empty1.png" in captured[0] and "empty2.png" in captured[0]
+    assert "1 identical copies left out" in result
