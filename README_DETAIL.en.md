@@ -2522,6 +2522,9 @@ and the authoritative value is kept in just one place, the `VERSION` file (one l
   Feature additions are also MINOR. Bump **PATCH** for only bug fixes and small compatible improvements.
 - **From 1.0.0 on**: MAJOR for incompatible changes, MINOR for compatible feature additions, PATCH for bug fixes.
 - Changes that only tune the prompts of `system_prompt/`, `agents/` and `skills/` are PATCH.
+- A **pre-release** (a version to try before the final one) adds `-rc.N` to the next number (e.g. `0.5.1-rc.1`). Use it
+  in `VERSION` and the tag (`v0.5.1-rc.1`), and create the GitHub Release as a Pre-release. Its notes are the contents of
+  `## [Unreleased]` in `CHANGELOG.md`, which stays `## [Unreleased]` until the final version is released.
 
 ### Change history (CHANGELOG.md)
 

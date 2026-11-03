@@ -2590,6 +2590,9 @@ md を編集すれば管理ツールを再起動せずに反映される）。�
   機能追加も MINOR。不具合修正と互換性を保った小さな改善だけなら **PATCH** を上げる。
 - **1.0.0 以降**: 互換性のない変更で MAJOR、互換性のある機能追加で MINOR、不具合修正で PATCH を上げる。
 - `system_prompt/`・`agents/`・`skills/` のプロンプトのチューニングだけの変更は PATCH とする。
+- **プレリリース**（正式版の前に試してもらう版）は、次の番号に `-rc.N` を付ける（例: `0.5.1-rc.1`）。`VERSION` とタグ
+  （`v0.5.1-rc.1`）にこの番号を使い、GitHub Release は Pre-release として作る。本文は `CHANGELOG.md` の
+  `## [Unreleased]` の内容を使い、`CHANGELOG.md` は正式版を出すまで `## [Unreleased]` のままにする。
 
 ### 変更履歴（CHANGELOG.md）
 

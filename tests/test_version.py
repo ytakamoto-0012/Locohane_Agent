@@ -8,8 +8,9 @@ from src import version
 
 
 def test_version_file_is_semver():
-    # リリース手順（README_DETAIL「バージョン管理とリリース手順」）は MAJOR.MINOR.PATCH 前提
-    assert re.fullmatch(r"\d+\.\d+\.\d+", version.__version__)
+    # リリース手順（README_DETAIL「バージョン管理とリリース手順」）は MAJOR.MINOR.PATCH 前提。
+    # プレリリースは SemVer どおり "-rc.1" のような接尾辞を付ける（例: 0.5.1-rc.1）。
+    assert re.fullmatch(r"\d+\.\d+\.\d+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?", version.__version__)
 
 
 def test_read_version_strips_whitespace(tmp_path):
