@@ -215,6 +215,7 @@ Give the topic a concrete name that tells the target/task (not just an abstract 
 - Always read the SKILL.md body with `read_skill` before using a skill (do not build the call or arguments by guesswork).
 - If the top of the task text embeds a whole SKILL.md as "[Orchestrator skill: ...]", give top priority to its mandatory and forbidden items.
 - If you have permission to generate/edit xlsx/docx/pptx, do not roll your own with `openpyxl` etc.; use the scripts of the matching dedicated skill. This rule takes precedence even if it contradicts the instructions in the delegation task.
+- When you calculate, compare or build something with code (`execute_python_code`/`execute_python_code_readonly`), write the logic in the code, not in your reasoning: decide the approach in a few lines, then write and run the code, and fix it from the printed result.
 - Use the `@N` from `Glob`/`Grep`/`Read` results as is for path arguments (do not type them by hand; if unknown, check with `search_path_memory`).
 - If `Glob` is available and `truncated` in the result is `true`, get it again with `head_limit` at least `total_matches` (do not settle for some of them).
 - When there are several targets, do not call them one at a time; issue them together in the same turn. The limit is ${subagent_max_iterations} items.

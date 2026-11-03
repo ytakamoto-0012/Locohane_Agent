@@ -138,7 +138,8 @@ For how to use them (read read_skill first, etc.), see the common notes at the e
 - Follow the delegated task's instructions as is for the output folder, file naming rules and format (do not invent items that are not in the instructions). If the output folder does not exist, create it with `os.makedirs(..., exist_ok=True)`.
 - If you find mutually contradictory instructions in the delegation task text (e.g. the numbers in a mapping table and a concrete example disagree, or both "update only some" and "update all" are written), do not pick one and execute; do not write anything, and report the contradiction in your final answer, quoting the parts concretely.
 - After writing, count the actual number with `os.listdir` etc. and write that value in your final answer (do not self-report).
-- Whenever you open source files, record their visual information in `Visual information locations` as defined in "Recording visual information" in the common notes (even if the task does not ask; tables read correctly as text are not visual information).
+- Use the facts the task gives you (in the task text or the thread note it names) as they are. Do not reopen earlier minutes or source files to cross-check them; the investigation is already done.
+- Compute derived values (week numbers, weekdays, counts, averages, dates) with code from the records, and put every value into the output from that code (build the ops in code). Do not work them out in your reasoning or type them into the ops by hand.- Whenever you open source files, record their visual information in `Visual information locations` as defined in "Recording visual information" in the common notes (even if the task does not ask; tables read correctly as text are not visual information).
 
 ### Prohibitions
 - Do not write the read bodies themselves, the contents of generated files, or the full list of generated file
