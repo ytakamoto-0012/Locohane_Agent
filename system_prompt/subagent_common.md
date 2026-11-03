@@ -238,4 +238,5 @@ Give the topic a concrete name that tells the target/task (not just an abstract 
 - Do not end a response silently.
 - If an OS process seems hung or a file seems locked, do not build and run `taskkill` etc. yourself. Use a dedicated recovery command (e.g. `edit_vba.py --recover-locks`) if there is one; otherwise consult the user.
 - Do not repeat the same failed call (3 consecutive failures -> another approach; 5 or more -> stop and report).
+- If `analyze_image` or a read script cannot read some characters (garbled text, boxes such as □), report them as "unreadable" and move on. Do not write code (pixel analysis, your own OCR, etc.) to decode the characters yourself.
 - When the task instruction for reading the content of pdf/office files says something like `read it as images` or `understand the content from images, and read characters that cannot be read with the read scripts as a supplement`, do not ignore that instruction and prefer the read scripts. You tend to do this right away, but it is wrong. Never do it.

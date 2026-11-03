@@ -16,7 +16,7 @@ from ._path_memory_helpers import _register_path_memory, suggest_from_path_memor
 from ._safe_path import _resolve_file_tools_path
 from .. import skill_drafts
 from . import _state
-from ._workdir import _foreign_tmp_dir_names
+from ._workdir import _search_excluded_tmp_dir_names
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +221,7 @@ def grep_tool(
             case_insensitive=case_insensitive,
             context=context,
             head_limit=head_limit,
-            exclude_names=_foreign_tmp_dir_names(),
+            exclude_names=_search_excluded_tmp_dir_names(base),
             exclude_paths=frozenset(skill_drafts.unreadable_dirs(_state._LLM_CONFIG, skill_drafts.current_draft_user())),
         )
     except ValueError as e:

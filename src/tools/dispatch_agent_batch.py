@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Annotated
 import asyncio
 import chainlit as cl
+import hashlib
 import logging
 import os
 import time
@@ -24,7 +25,7 @@ from ._dispatch_agent_job import _format_activity, _purge_stale_dispatch_agent_j
 from ._dispatch_agent_job import _wait_next_progress_push
 from ._path_memory_helpers import _resolve_path_memory_tokens_in_text
 from ._safe_path import _resolve_file_tools_path
-from ._workdir import _foreign_tmp_dir_names, _resolve_workdir
+from ._workdir import _search_excluded_tmp_dir_names, _resolve_workdir
 from .dispatch_agent import _task_with_orchestrator_skill_hint, _task_with_plan_hint, _task_with_work_dir_hint
 from .glob_tool import GLOB_PATTERN_ERRORS, _expand_braces, glob_pattern_error_message
 from .thread_notes import write_thread_note
@@ -124,13 +125,14 @@ def _list_target_files(base: Path, pattern: str) -> list[Path]:
     0件エラーになった本番実例（2026-10-02）への対応。Glob が直下限定なのは
     LLMが何度も呼ぶツールの応答時間を抑えるためで、1回呼ぶだけの本ツールには
     当てはまらない（大量に一致した場合は [subagent].batch_max_groups が起動前に止める）。
-    `{a,b}` のブレース展開と他セッションの一時ディレクトリ除外は Glob と揃える。
+    `{a,b}` のブレース展開と一時ディレクトリの除外（他セッション分、および base が自セッションの
+    `_tmp_` の外なら自セッション分も。_search_excluded_tmp_dir_names 参照）は Glob と揃える。
 
     pathlib の glob は pattern 中の ".." をそのまま辿る（"../other/*.jpg" で base の
     外が一致する）ため、解決後に base 配下でないもの（シンボリックリンク経由で外へ
     出るものを含む）は除く。
     """
-    exclude_names = _foreign_tmp_dir_names()
+    exclude_names = _search_excluded_tmp_dir_names(base)
     # 他ユーザーのドラフトスキル（読み取り不可のもの）は場所で除外する（src/skill_drafts.py）。
     exclude_dirs = skill_drafts.unreadable_dirs(_state._LLM_CONFIG, skill_drafts.current_draft_user())
     resolved_base = base.resolve()
@@ -155,6 +157,42 @@ def _list_target_files(base: Path, pattern: str) -> list[Path]:
                 files.append(resolved)
     files.sort(key=lambda p: _relative_sort_key(p, resolved_base))
     return files
+
+
+def _dedupe_identical_files(files: list[Path]) -> tuple[list[Path], list[tuple[Path, Path]]]:
+    """中身（サイズ＋SHA-256）が同じファイルを1つにまとめる。並び順は保つ。
+
+    バックアップ・コピーのフォルダや、スレッド専用フォルダへのシードの写しが
+    同じ検索に入ると、同じ内容を別のサブエージェントが2回読み、読み取りが
+    食い違って確認の往復が増える（2026-11-03 evals system_prompt_scale/001:
+    同じ写真40枚の元とコピーが80件として配られた）。最初に出たものを残し、
+    残りは (省いたファイル, 残したファイル) として返す。サイズが他と重ならない
+    ファイルはハッシュを計算しない。読めないファイルはまとめずに残す。
+
+    Returns:
+        (残すファイル, [(省いたファイル, 同じ内容で残したファイル), ...])
+    """
+    by_size: dict[int, list[Path]] = {}
+    for p in files:
+        try:
+            by_size.setdefault(p.stat().st_size, []).append(p)
+        except OSError:
+            continue
+    first_by_digest: dict[tuple[int, str], Path] = {}
+    duplicate_of: dict[Path, Path] = {}
+    for size, same_size in by_size.items():
+        if len(same_size) < 2:
+            continue
+        for p in same_size:
+            try:
+                digest = hashlib.sha256(p.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            original = first_by_digest.setdefault((size, digest), p)
+            if original != p:
+                duplicate_of[p] = original
+    kept = [p for p in files if p not in duplicate_of]
+    return kept, [(p, duplicate_of[p]) for p in files if p in duplicate_of]
 
 
 def _resolve_listed_files(raw_files: list[str]) -> tuple[list[Path], list[str]]:
@@ -204,7 +242,7 @@ def _workdir_folders_hint() -> str:
     """
     try:
         workdir = _resolve_workdir()
-        names = sorted((p.name for p in workdir.iterdir() if p.is_dir() and p.name not in _foreign_tmp_dir_names()), key=str.casefold)
+        names = sorted((p.name for p in workdir.iterdir() if p.is_dir() and p.name not in _search_excluded_tmp_dir_names(workdir)), key=str.casefold)
     except (OSError, RuntimeError):
         return ""
     shown = ", ".join(names[:20]) + ("…" if len(names) > 20 else "")
@@ -555,6 +593,11 @@ async def dispatch_agent_batch(
             return f"Error: no files under {base} match pattern '{pattern}'. {hint}"
         source = f"the {len(target_files)} files under {base} matching pattern '{pattern}'"
 
+    # 中身が同じファイル（コピー・バックアップ）は1回だけ配る。ハッシュ計算は別スレッドで行う。
+    target_files, duplicates = await asyncio.to_thread(_dedupe_identical_files, target_files)
+    if duplicates:
+        source += f" ({len(duplicates)} identical copies left out, {len(target_files)} assigned)"
+
     size = max(1, min(group_size, _state._SUBAGENT_MAX_ITERATIONS))
     groups = [target_files[i : i + size] for i in range(0, len(target_files), size)]
     # 1回の呼び出しで起動するグループ（=サブエージェントのジョブ）数の上限
@@ -681,6 +724,14 @@ async def dispatch_agent_batch(
             "These listed files could not be opened and were not assigned (they may have been moved or deleted "
             "after the knowledge was ingested; mention them as not found instead of guessing their content):\n"
             + "\n".join(f"- {s}" for s in skipped)
+        )
+    if duplicates:
+        shown = duplicates[:20]
+        tail.append(
+            "These files have exactly the same content as an assigned file and were not assigned again "
+            "(treat them as the same file; do not re-delegate them):\n"
+            + "\n".join(f"- {dup} = {orig}" for dup, orig in shown)
+            + (f"\n- … and {len(duplicates) - len(shown)} more" if len(duplicates) > len(shown) else "")
         )
     if set(counts) - {"done", "running"}:
         tail.append(

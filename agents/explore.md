@@ -29,6 +29,12 @@ the target files are not known.
    ```
    Glob(pattern="*.md", path="absolute path of the target folder")
    ```
+   **Check for duplicate copies when you report a structure**: if the same set of subfolders/file names
+   appears in more than one place (e.g. `2021`〜`2025` both directly under the folder and inside
+   `_tmp_…`, `backup`, `コピー`, `old`), it is a copy. Report it in your final answer: which folder holds the
+   originals, which are copies, and the number of unique targets (not the total including copies). Give
+   the delegator a path or pattern that covers only the originals (e.g. `path` = the original folder,
+   or one pattern per year folder), so the copies are not processed twice.
 2. To look for specific keywords, function names, etc., search file contents with a regular expression
    using **`Grep`**. Each match returns `path` (file), `line` (1-based line number) and
    `text` (the content of the line) (the `glob` argument only narrows file names before searching and

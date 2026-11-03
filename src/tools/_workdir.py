@@ -101,6 +101,45 @@ def _foreign_tmp_dir_names() -> frozenset[str]:
                 names.add(entry.name)
     return frozenset(names)
 
+def _search_excluded_tmp_dir_names(base: Path) -> frozenset[str]:
+    """base から再帰検索するとき除外する `_tmp_*` ディレクトリ名の集合を返す。
+
+    他セッションの `_tmp_<X>`（`_foreign_tmp_dir_names()`）に加え、base が
+    自セッションの `_tmp_<own>` の外（default_workdir 本体などの祖先）なら
+    自セッションの `_tmp_<own>` も除く。`_tmp_<own>` は初回作成時に
+    default_workdir 直下の中身がまるごとコピーされる（`_seed_exec_workdir()`）
+    ため、祖先から `**/*.png` 等で探すと元のファイルとそのコピーの両方が
+    一致し、同じファイルを2回処理してしまう（2026-11-03 evals
+    system_prompt_scale/001: 写真40枚が80枚として dispatch_agent_batch に
+    渡され、同じ写真の読み取りがグループ間で食い違って確認・推論に約15分
+    余計にかかった）。
+
+    base が `_tmp_<own>` 自身かその配下なら自セッション分は除かない
+    （呼び出し側は絶対パスの各階層と照合するため、除くと全件が消える）。
+
+    Args:
+        base: 検索の起点（解決済みでなくてもよい）。
+    """
+    names = set(_foreign_tmp_dir_names())
+    own_name = f"_tmp_{_exec_tmp_name()}"
+    try:
+        resolved = base.resolve()
+    except OSError:
+        return frozenset(names)
+    for parent in _tmp_dir_parents(_state._DEFAULT_WORKDIR):
+        own_dir = parent / own_name
+        try:
+            inside_own = resolved == own_dir.resolve() or own_dir.resolve() in resolved.parents
+        except OSError:
+            continue
+        if inside_own:
+            return frozenset(names)
+    for parent in _tmp_dir_parents(_state._DEFAULT_WORKDIR):
+        if (parent / own_name).is_dir():
+            names.add(own_name)
+            break
+    return frozenset(names)
+
 def _resolve_workdir(need_write: bool = False) -> Path:
     """run_script/Glob/Read等が使う「現在の作業ディレクトリ」を決定する。
 

@@ -13,7 +13,7 @@ from ._duplicate_guard import _check_file_tools_duplicate
 from ._file_tools_common import looks_binary, read_text_with_fallback, suggest_similar_dir
 from ._path_memory_helpers import _dedupe_paths_with_path_memory, _register_path_memory, suggest_from_path_memory
 from ._safe_path import _resolve_file_tools_path
-from ._workdir import _foreign_tmp_dir_names
+from ._workdir import _search_excluded_tmp_dir_names
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +218,7 @@ def glob_tool(pattern: str, path: str = "", head_limit: int = 200) -> str:
     if dup_error:
         return dup_error
     try:
-        result = glob_search(base, pattern, head_limit=head_limit, exclude_names=_foreign_tmp_dir_names())
+        result = glob_search(base, pattern, head_limit=head_limit, exclude_names=_search_excluded_tmp_dir_names(base))
     except ValueError as e:
         hint = suggest_from_path_memory(str(base)) if not base.exists() else ""
         return f"Error: {e}{hint}"

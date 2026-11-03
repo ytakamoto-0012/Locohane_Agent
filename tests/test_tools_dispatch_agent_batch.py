@@ -56,7 +56,7 @@ def _setup(monkeypatch, tmp_path, names: list[str]) -> tuple:
     images = workdir / "images"
     images.mkdir(parents=True)
     for name in names:
-        (images / name).write_bytes(b"x")
+        (images / name).write_bytes(name.encode("utf-8"))  # 中身を変える（同一内容はまとめられるため）
     monkeypatch.setattr(tools._state, "_DEFAULT_WORKDIR", workdir)
     notes: list[dict] = []
 
@@ -397,8 +397,8 @@ async def test_batch_subfolder_pattern_collects_nested_files(monkeypatch, tmp_pa
     for year in ("2024", "2023"):
         ocr = root / year / "ocr_md"
         ocr.mkdir(parents=True)
-        (ocr / f"{year}_a.md").write_text("x", encoding="utf-8")
-        (root / year / "photo.jpg").write_bytes(b"x")
+        (ocr / f"{year}_a.md").write_text(year, encoding="utf-8")
+        (root / year / "photo.jpg").write_bytes(year.encode("utf-8"))
     captured = _capture_tasks(monkeypatch)
 
     result = await _invoke(task="t", agent_type="worker", pattern="**/ocr_md/*.md", path=str(root), group_size=1)
@@ -582,7 +582,7 @@ def _make_scattered_files(tmp_path) -> list:
     for folder, name in [("2019", "p20.md"), ("2024", "IMG_1.md"), ("2019", "p6.md"), ("2025", "IMG_2.md"), ("2020", "IMG_3.md")]:
         p = tmp_path / "workdir" / "Datas" / folder / name
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("x", encoding="utf-8")
+        p.write_text(str(p), encoding="utf-8")
         paths.append(p)
     return paths
 
@@ -617,7 +617,9 @@ async def test_batch_files_accepts_relative_paths_and_drops_duplicates(monkeypat
     await _invoke(task="t", agent_type="worker", files=["Datas/2019/p20.md", str(paths[0]), " "], group_size=2)
 
     assert len(captured) == 1
-    assert captured[0].count(str(paths[0].resolve())) == 1
+    # 相対パスはスレッド専用フォルダ（default_workdir のシード写し）側に解決されうるが、
+    # 中身が同じなので1件だけ割り振られる。
+    assert captured[0].count("p20.md") == 1
 
 
 @pytest.mark.asyncio
