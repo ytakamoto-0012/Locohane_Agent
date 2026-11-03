@@ -484,7 +484,7 @@ def test_return_applies_fixes_to_draft(lab_env):
 
 
 def test_skill_lab_instance_has_no_port_and_runs_worker(lab_env):
-    meta = inst.create_instance(lab_env["root"], Path("config.ini"), name="lab3", kind=inst.KIND_SKILL_LAB)
+    meta, _ = inst.create_instance(lab_env["root"], Path("config.ini"), name="lab3", kind=inst.KIND_SKILL_LAB)
     assert meta.is_skill_lab and meta.app_port == 0
     assert inst.read_instance(lab_env["root"], "lab3").kind == inst.KIND_SKILL_LAB
     from admin.supervisor import Supervisor

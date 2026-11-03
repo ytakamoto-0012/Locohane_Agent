@@ -2102,8 +2102,10 @@ The names of new instances (not the display names) are limited to
 **6 characters or fewer** of half-width letters, digits, `_` and `-`. The name goes as is into paths such as `data/<instance name>/` and
 `instances/<instance name>/`, so long names make it easy to exceed Windows' path length limit (260 characters)
 with skill output etc. under them (existing instances created before the limit, such as
-`default`, can be used as they are). When creating, you can also copy the settings of an existing instance (even if the source
-has an override of `common_data_dir`, only that is not carried over). Ports and
+`default`, can be used as they are). When creating, you can also copy the settings of an existing instance (the setting overrides,
+`.env` and the display settings in `instances/<name>/settings/` are copied. An override of `common_data_dir` is carried
+over only when it contains `${instance}`, like `D:/data/${instance}`; a fixed path is not, since it would point to the
+source's location. Settings that were not carried over are shown by name, with the reason, after creation). Ports and
 data storage locations that overlap with other instances are refused as errors when creating and starting, and when
 saving or restoring backups on the settings screen.
 

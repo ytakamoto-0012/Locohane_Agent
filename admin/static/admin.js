@@ -588,9 +588,14 @@ function openCreateInstanceModal() {
       copy_extensions: form.get("copy_extensions") === "on",
     };
     try {
-      await api("/api/instances", { method: "POST", body });
+      const created = await api("/api/instances", { method: "POST", body });
       modal.remove();
       await refreshInstanceCards();
+      // 複製元から引き継がなかった設定（固定パスの common_data_dir 等）を知らせる。
+      const skipped = created.skipped_settings || [];
+      if (skipped.length) {
+        alert(_t(`インスタンス {0} を作成しました。複製元の次の設定は引き継いでいません:\n\n{1}`, created.name, skipped.map((s) => `・${s}`).join("\n")));
+      }
     } catch (e) {
       modal.querySelector("#create-instance-error").textContent = e.message;
     }

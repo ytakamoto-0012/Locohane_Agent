@@ -265,7 +265,7 @@ def create_instance(
     body: CreateInstanceBody, request: Request, user: str = Depends(require_login), _csrf: None = Depends(require_csrf)
 ):
     try:
-        meta = inst.create_instance(
+        meta, skipped = inst.create_instance(
             INSTANCES_ROOT,
             CONFIG_INI_PATH,
             name=body.name,
@@ -291,9 +291,11 @@ def create_instance(
             "copy_from": body.copy_from,
             "kind": body.kind,
             "copy_extensions": body.copy_extensions,
+            "skipped_settings": skipped,
         },
     )
-    return _instance_summary(meta.name)
+    # 複製元から引き継がなかった設定（固定パスの common_data_dir 等）。作成ダイアログが管理者に知らせる。
+    return {**_instance_summary(meta.name), "skipped_settings": skipped}
 
 
 class UpdateInstanceBody(BaseModel):

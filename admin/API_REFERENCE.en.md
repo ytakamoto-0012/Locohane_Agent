@@ -136,6 +136,9 @@ Everything except `name` is optional. If `app_port` is omitted, a free port is c
 Specify an existing instance name in `copy_from` to copy its settings.
 Specify `skill_lab` in `kind` to create a Skill Lab worker (no chat screen, no port) (default `app`).
 With `copy_extensions: true`, the source instance's own extension directory (skills and sub-agents promoted in the lab) is copied too.
+The response has the same fields as one entry of the list, plus `skipped_settings` (a list of messages naming the settings of the source
+that were not carried over and why: a `[paths] common_data_dir` with a fixed path that has no `${instance}`, settings not used by the kind
+of instance being created, etc. Empty if none).
 
 bash:
 

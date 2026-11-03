@@ -65,7 +65,7 @@ def test_list_instance_names_empty_when_missing(root):
 
 def test_create_and_list_instance(root):
     inst.ensure_default_instance(root)
-    meta = inst.create_instance(root, CONFIG_INI_PATH, name="test2", app_host="127.0.0.1")
+    meta, _ = inst.create_instance(root, CONFIG_INI_PATH, name="test2", app_host="127.0.0.1")
     assert meta.app_port != 8000
     assert inst.list_instance_names(root) == ["default", "test2"]
 
@@ -134,10 +134,53 @@ def test_create_instance_copy_from_copies_overrides_and_resets_data_dir(root):
     data["paths"] = {"common_data_dir": "./instances/source/data"}
     src_ov.write_text(json.dumps(data), encoding="utf-8")
 
-    inst.create_instance(root, CONFIG_INI_PATH, name="copy", copy_from="source")
+    _, skipped = inst.create_instance(root, CONFIG_INI_PATH, name="copy", copy_from="source")
     ov = json.loads(inst.overrides_path(root, "copy").read_text(encoding="utf-8"))
     assert ov["ui"]["max_display_messages"] == "77"
     assert "paths" not in ov
+    # 引き継がなかったことを管理者に知らせる。
+    assert len(skipped) == 1 and skipped[0].startswith("[paths] common_data_dir = ./instances/source/data")
+
+
+def test_create_instance_copies_common_data_dir_with_instance_placeholder(root, tmp_path):
+    """${instance} を含む common_data_dir は複製先では別の場所になるので引き継ぐ。"""
+    inst.ensure_default_instance(root)
+    shared_root = str(tmp_path / "data" / "${instance}")
+    inst.overrides_path(root, "default").write_text(
+        json.dumps({"paths": {"common_data_dir": shared_root}}), encoding="utf-8"
+    )
+    _, skipped = inst.create_instance(root, CONFIG_INI_PATH, name="copy", copy_from="default")
+    ov = json.loads(inst.overrides_path(root, "copy").read_text(encoding="utf-8"))
+    assert ov["paths"]["common_data_dir"] == shared_root
+    assert skipped == []
+
+
+def test_create_instance_copies_display_settings(root):
+    inst.ensure_default_instance(root)
+    src = inst.settings_dir(root, "default")
+    src.mkdir(parents=True)
+    (src / "welcome.md").write_text("ようこそ", encoding="utf-8")
+    (src / "icon.png").write_bytes(b"\x89PNG")
+    inst.create_instance(root, CONFIG_INI_PATH, name="copy", copy_from="default")
+    dst = inst.settings_dir(root, "copy")
+    assert (dst / "welcome.md").read_text(encoding="utf-8") == "ようこそ"
+    assert (dst / "icon.png").read_bytes() == b"\x89PNG"
+    # 研究室はチャット画面を持たないので写さない。
+    _, skipped = inst.create_instance(root, CONFIG_INI_PATH, name="lab", copy_from="default", kind=inst.KIND_SKILL_LAB)
+    assert not inst.settings_dir(root, "lab").exists()
+    assert any("settings/" in s for s in skipped)
+
+
+def test_create_instance_reports_keys_not_used_by_kind(root):
+    """種類違いで使わない設定（本体の [ui] をワーカーへ等）も、引き継がなかったものとして返す。"""
+    inst.ensure_default_instance(root)
+    inst.overrides_path(root, "default").write_text(
+        json.dumps({"ui": {"max_display_messages": "77"}, "llm": {"main_routing_strategy": "round_robin"}}), encoding="utf-8"
+    )
+    _, skipped = inst.create_instance(root, CONFIG_INI_PATH, name="lab", copy_from="default", kind=inst.KIND_SKILL_LAB)
+    ov = json.loads(inst.overrides_path(root, "lab").read_text(encoding="utf-8"))
+    assert ov == {"llm": {"main_routing_strategy": "round_robin"}}
+    assert skipped == ["[ui] max_display_messages（スキル調整ワーカーでは使わない設定のため）"]
 
 
 def test_delete_instance(root):
@@ -308,7 +351,7 @@ def test_default_instance_headless_true_watch_false(root):
 
 def test_create_instance_with_headless_watch(root):
     inst.ensure_default_instance(root)
-    meta = inst.create_instance(root, CONFIG_INI_PATH, name="test2", headless=False, watch=True)
+    meta, _ = inst.create_instance(root, CONFIG_INI_PATH, name="test2", headless=False, watch=True)
     assert meta.headless is False
     assert meta.watch is True
     reread = inst.read_instance(root, "test2")

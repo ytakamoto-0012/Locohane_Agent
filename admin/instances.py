@@ -63,16 +63,39 @@ def config_key_applies(kind: str, section: str, key: str) -> bool:
     return section != "skill_lab_worker"
 
 
-def filter_overrides_for_kind(kind: str, data: dict) -> dict:
-    """config_overrides.json の内容から、その種類のインスタンスで意味を持つキーだけを残す（複製時用）。"""
+def overrides_to_copy(kind: str, data: dict) -> tuple[dict, list[str]]:
+    """複製元の config_overrides.json の内容から、複製先へ写すキーを選ぶ。
+
+    その種類のインスタンスで意味を持たないキーと、${instance} を含まない固定パスの
+    common_data_dir（複製元と同じデータディレクトリを指してしまう）は写さない。
+
+    Returns:
+        (写す内容, 写さなかった設定の説明（管理者に見せる文言）のリスト)。
+    """
     result: dict = {}
+    skipped: list[str] = []
     for section, kv in data.items():
         if not isinstance(kv, dict):
             continue
-        kept = {k: v for k, v in kv.items() if config_key_applies(kind, section, k)}
+        kept: dict = {}
+        for k, v in kv.items():
+            if not is_instance_overridable(section, k):
+                skipped.append(_t("[{0}] {1}（インスタンスごとの上書きが効かない設定のため）", section, k))
+            elif not config_key_applies(kind, section, k):
+                if kind == KIND_SKILL_LAB:
+                    skipped.append(_t("[{0}] {1}（スキル調整ワーカーでは使わない設定のため）", section, k))
+                else:
+                    skipped.append(_t("[{0}] {1}（Locohane 本体では使わない設定のため）", section, k))
+            elif (section, k) == ("paths", "common_data_dir") and "${instance}" not in str(v):
+                # ${instance} を含む値（D:/data/${instance} 等）は複製先では別の場所になるので写す。
+                skipped.append(
+                    _t("[paths] common_data_dir = {0}（${{instance}} を含まない固定パスで、複製元と同じデータフォルダを指すため。config.ini の既定値を使います）", v)
+                )
+            else:
+                kept[k] = v
         if kept:
             result[section] = kept
-    return result
+    return result, skipped
 
 
 class InstanceError(Exception):
@@ -321,8 +344,12 @@ def create_instance(
     copy_from: str | None = None,
     kind: str = KIND_APP,
     copy_extensions: bool = False,
-) -> InstanceMeta:
+) -> tuple[InstanceMeta, list[str]]:
     """新しいインスタンスを作成する。
+
+    Returns:
+        (作成したインスタンス, 複製元から引き継がなかった設定の説明のリスト（overrides_to_copy() 参照。
+        管理者に見せる）)。
 
     kind は KIND_APP（Locohane 本体）か KIND_SKILL_LAB（スキル研究室）。
     copy_extensions=True なら、複製元のインスタンス専用の拡張ディレクトリ
@@ -330,8 +357,9 @@ def create_instance(
 
     データの分離は config.ini 既定の common_data_dir = ./data/${instance} に
     任せる（上書きは書かない）。copy_from を指定した場合はそのインスタンスの
-    config_overrides.json/.env の内容をコピーするが、common_data_dir の上書き
-    だけは除く（同じデータディレクトリを2インスタンスが指す事故を防ぐ）。
+    config_overrides.json/.env と表示設定（settings/、本体のみ）をコピーする。
+    common_data_dir の上書きは ${instance} を含む場合だけ引き継ぎ、固定パスなら
+    除く（同じデータディレクトリを2インスタンスが指す事故を防ぐ）。
 
     整合性チェック（ポート・データ保存先の重複）に失敗した場合は、作成した
     ディレクトリを削除してロールバックする。
@@ -359,17 +387,12 @@ def create_instance(
 
     try:
         base_overrides: dict = {}
+        skipped: list[str] = []
         if copy_from:
             src_ov = overrides_path(instances_root, copy_from)
             if src_ov.is_file():
                 # 種類が違うインスタンスから複製しても、効かない設定（本体の設定をワーカーへ等）は持ち込まない。
-                base_overrides = filter_overrides_for_kind(kind, json.loads(src_ov.read_text(encoding="utf-8")))
-
-        paths_ov = base_overrides.get("paths")
-        if isinstance(paths_ov, dict):
-            paths_ov.pop("common_data_dir", None)
-            if not paths_ov:
-                del base_overrides["paths"]
+                base_overrides, skipped = overrides_to_copy(kind, json.loads(src_ov.read_text(encoding="utf-8")))
 
         target_ov_path = overrides_path(instances_root, name)
         target_ov_path.parent.mkdir(parents=True, exist_ok=True)
@@ -382,6 +405,13 @@ def create_instance(
             src_env = env_path(instances_root, copy_from)
             if src_env.is_file():
                 shutil.copy2(src_env, env_path(instances_root, name))
+            # インスタンス専用の表示設定（ヘッダー・ようこそ文・アイコン等）。研究室はチャット画面を持たないので写さない。
+            src_settings = settings_dir(instances_root, copy_from)
+            if src_settings.is_dir() and any(src_settings.iterdir()):
+                if kind == KIND_APP:
+                    shutil.copytree(src_settings, settings_dir(instances_root, name))
+                else:
+                    skipped.append(_t("表示設定 settings/（スキル調整ワーカーはチャット画面を持たないため）"))
 
         meta = InstanceMeta(
             name=name,
@@ -401,7 +431,7 @@ def create_instance(
     except Exception:
         shutil.rmtree(instance_dir(instances_root, name), ignore_errors=True)
         raise
-    return meta
+    return meta, skipped
 
 
 def _instance_locohane_dir(instances_root: Path, config_ini_path: Path, name: str) -> Path:

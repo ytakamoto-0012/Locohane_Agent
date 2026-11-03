@@ -44,6 +44,7 @@ const I18N_EN = {
   "自動リロード（-w、ファイル変更で再読込。本番運用では非推奨）": "Auto reload (-w, reload on file changes; not recommended in production)",
   "複製元（任意）": "Copy from (optional)",
   "（複製しない）": "(do not copy)",
+  "インスタンス {0} を作成しました。複製元の次の設定は引き継いでいません:\n\n{1}": "Created instance {0}. The following settings of the source were not carried over:\n\n{1}",
   "複製元のインスタンス専用のスキル・サブエージェント（スキル研究室で昇格したもの）も複製する": "Also copy the skills and sub-agents dedicated to the source instance (those promoted in Skill Lab)",
   "キャンセル": "Cancel",
   "作成": "Create",
