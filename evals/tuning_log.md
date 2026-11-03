@@ -5614,3 +5614,30 @@ system_prompt.md は「同じ処理を多数のファイルへ行うなら dispa
   計画→worker 1回（18分、edit_excel で作成・修正、差し戻しなし）→verifier PASS（21分、途中でループ検知1回・打ち切りなし）。シート名は「月別予定」「週別予定」。
   edit_excel の失敗2回（作業フォルダ外への保存・--ops-file と --ops-json の併用）はどちらも数秒で立て直した。
 - system_prompt/006: 合格。約51分（ask_user_choice 2回のぶん長い）。A列の結合範囲と C〜F 列を保ったまま B列の24セルだけを変更、ループ検知なし。
+
+### note-iter01（instance: yt001、qwen3.8-flash-next-iq2_xs、サブエージェント終了時の write_thread_note 重複の解消）
+- 変更（評価前に実施）: subagent_common.md に「Recording visual information」節を新設し、Visual information の定義（抽出テキストだけでは意味が
+  失われる・誤読しうるもの。テキストとして正しく読めた表は含めない。type は image|photo|chart|diagram|scan|table-image）を1か所に集約。
+  explore.md・worker.md・verifier.md・system_prompt.md の列挙をこの定義にそろえ、委譲元へ記録を依頼する流れ（一覧返却時の「開いた側が記録する」）
+  を止めた。Assigned files 実行では議事録・事実トピック・list_thread_notes を除外（例外なしで書かれていたルールに除外を明記）。
+  退避: evals/history/system_prompt_scale/note_iter00_baseline_subagent_common.md（HEAD 時点）。
+- 009: 合格。10,409円・出典 PDF p.1。explore 1本5反復、入力約12.5万トークン。write_thread_note は議事録1回のみ（表の視覚情報記録なし）。
+- 011: 合格（judge 1・3・4 を満たす）。batch 6グループ中5グループが write_thread_note 0回、1グループは色分け凡例を diagram として記録（定義どおり）。
+  ただし1段階目の explore（一覧を返して終了）が「事実トピック＋議事録」の2回を書いた（L120 の禁止より例外なしの L137/L141 に従った）。
+  要確認: 終盤に同じ task の dispatch_agent（ノート転記）が2回。
+- 001: ERROR（3600秒タイムアウト）。worker 約20分・verifier 約10分・修正 worker 途中で上限。office-edit-iter02/03 と同じく本モデルでは
+  3600秒では完走しない既知の状況で、今回の変更とは無関係と判断。年ごとの explore 5本は写真を Visual information locations に記録し、議事録は無し。
+
+### note-iter02（instance: yt001）
+- ケース: 011 の1段階目 explore（一覧返却）が事実トピック＋議事録を書く。
+- 原因: 「事実を必ず書く」「最後に必ず議事録」に一覧返却時の除外が無く、L120 の禁止より優先された。
+- 変更: subagent_common.md の4か所（事実トピック・議事録の本文とチェックリスト）に「Finding information で一覧を返す実行を除く」を追記。
+  退避: evals/history/system_prompt_scale/note_iter02_before_subagent_common.md。
+- 009: 合格。explore 1本7反復・入力約12.5万トークン。書き込みは議事録＋Visual information（請求書 PDF の請求先名などがテキスト抽出で文字化け→
+  定義どおり table-image として1行）。最終回答は通信料6,204円を先に書き、請求総額10,409円を「支払総額」として出典付きで併記（judge 4 は満たす）。
+- 011: 合格。1段階目 explore（一覧返却）の write_thread_note は 0回に（iter01 は2回）。batch 5グループ中4グループが 0回、1グループは手書き議事録
+  OCR の文字化けを scan として記録（定義どおり）。差し戻し・打ち切りなし。
+
+### 完了サマリ（note-iter02）
+- 2イテレーション。変更は subagent_common.md（Visual information 定義の集約、Assigned files／一覧返却の実行で議事録・事実トピックを除外）、
+  explore.md・worker.md・verifier.md・system_prompt.md（定義への参照統一、委譲元への記録依頼の停止）。001 は 3600秒の既知タイムアウトで未判定。

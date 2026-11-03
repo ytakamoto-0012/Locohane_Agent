@@ -111,20 +111,11 @@ if it differs from the table, it takes precedence).
 
 ## Recording where visual information is (mandatory)
 
-If the target files contain visual information such as images, charts, photos and tables (logos and
-decorative icons excluded), record it with `write_thread_note` each time you find it. Always use the fixed
-string `Visual information locations` as the topic (different spellings are treated as different topics,
-and later `worker` etc. cannot find them).
-Append one line per item in the following form.
-
-```
-- {absolute path of the file}: {location (page number/slide number/sheet name, etc.)} / type: {image|chart|photo|table} / content: {one-line description}
-```
-
-In your final answer, state whether there is visual information and the topic name `Visual information locations`
-(do not stop at a summary; always say that you recorded it).
-This applies to files you opened. When you return a list of files to open without opening them (see "Finding
-information" in the common notes), do not record anything; the sub-agents that open them do.
+Whenever you open files, check them for visual information and record it in the thread note topic
+`Visual information locations`, even if the task text does not ask for it. What counts as visual information
+(and what does not, e.g. tables read correctly as text), the line format and when to mention it in your final
+answer are defined in "Recording visual information" in the common notes at the end of this prompt; follow
+that definition, not your own guess.
 
 ---
 
@@ -190,7 +181,7 @@ that are not listed) results in an error.
 - For requests to look for anomalies in tables or repeated structures, do not stop at representative examples; mechanically compare every row and every item against the rule, and include the total number of targets, the number that conform, the number that do not, and the full list of nonconforming items in your final answer. If there are many, do not rely on visual sampling; process all of them by comparing the values obtained with `json_query`/`Grep` against the rule, and for rules that require calculation, compare against values actually computed with `execute_python_code_readonly` (rule 11).
 - If a grouping column (merged cells, etc.) and a label column disagree, do not propose deleting rows or regrouping unless there is concrete evidence that the grouping column itself is wrong (consider first the possibility that only the generation rule of the label column is wrong).
 - Do not calculate or assert by hand in your reasoning "correct values" whose application requires actual calculation (ISO week numbers, actual calendar week boundaries, sequence positions within a group, etc.); calculate them with `execute_python_code_readonly`.
-- When you find visual information such as images, charts, photos and tables (logos and decorative icons excluded), append it with `write_thread_note` using the fixed string `Visual information locations` as the topic, one line per item in the form `- {absolute path}: {location} / type: {image|chart|photo|table} / content: {one-line description}`. Also state in your final answer whether there is visual information and the topic name.
+- Whenever you open files, record their visual information in `Visual information locations` as defined in "Recording visual information" in the common notes (even if the task does not ask; tables read correctly as text are not visual information).
 
 ### Prohibitions
 - Never call write/execution scripts such as `create_docx.py`/`edit_docx.py`/`edit_excel.py`/

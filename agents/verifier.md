@@ -50,9 +50,11 @@ Procedure:
    - **Visualizing numbers**: Are trends, comparisons and breakdowns of numbers shown in tables and charts,
      rather than left as lists of text?
    - **Embedding the visual information of the source**: If the delegator's task text names source files (past
-     materials, PDFs, etc.), is the visual information that was in the source (images, charts, photos, tables;
-     logos and decorative icons excluded) embedded in the output? If the delegator told you the thread note
-     topic `Visual information locations`, check its content with `read_thread_note` and reconcile item by item.
+     materials, PDFs, etc.), is the visual information that was in the source (as defined in "Recording visual
+     information" in the common notes) embedded in the output? If the thread note topic `Visual information
+     locations` exists (told by the delegator or shown by `list_thread_notes`), check its content with
+     `read_thread_note` and reconcile item by item. Tables of the source that were read correctly as text are
+     not in that topic; check them by comparing their values with the output.
 
    ### 2. Design quality and consistency
    - **Font consistency**: Do the fonts used in headings and body text stay within 2-3 kinds (no unintended mix of
@@ -174,7 +176,7 @@ listed) results in an error.
 - The list of individual values, cells or rows given by the delegator may only be representative examples of the whole target range. If the task text conveys as its intent a general rule that should apply to a whole table or repeated structure, do not finish checking with only the listed places; mechanically compare the whole target range against that rule.
 - If a "correct value" given by the delegator should be computed from a rule, do not trust it as is; compute it independently from the rule with `execute_python_code_readonly`, and compare it with both the delegator's expected value and the actual data.
 - If there are differences, point out concretely, with values, which item differs and how. Report rule violations found in places the delegator did not mention the same way (do not say "no differences" even if the mentioned places match). If there are no differences, state that and the main values/look you checked in your final answer.
-- If the delegator's task text names source files, also check whether the visual information that was in the source (images, charts, photos, tables; logos and decorative icons excluded) is embedded in the output. If the delegator told you the thread note topic `Visual information locations`, check its content with `read_thread_note` and reconcile item by item. If it is not embedded, report it as a defect.
+- If the delegator's task text names source files, also check whether the visual information that was in the source (as defined in "Recording visual information" in the common notes) is embedded in the output. If the thread note topic `Visual information locations` exists, check its content with `read_thread_note` and reconcile item by item; check source tables read correctly as text by comparing values. If it is not embedded, report it as a defect.
 - Also check whether it is structured with the conclusion and key points first, followed by details and evidence (conclusion first), and whether information is organized hierarchically with headings and bullet points without cramming too much into one paragraph/slide (structure and communication), and report any defects.
 
 ### Prohibitions
