@@ -206,6 +206,8 @@ EN: dict[str, str] = {
     "プロジェクト直下 .env のユーザー（管理者設定）はこの画面から変更・削除できません。": "Users in the project's .env (administrator setting) cannot be changed or deleted here.",
     "ユーザーが見つかりません（継承中の場合は先にユーザーを追加してください）。": "User not found (if users are inherited, add a user first).",
     "ユーザーが見つかりません。": "User not found.",
+    "ユーザーが見つかりません: {0}": "Users not found: {0}",
+    "削除するユーザーを選択してください。": "Select the users to delete.",
     "不正な種別です: {0}": "Invalid kind: {0}",
     "スレッドが見つかりません。": "Thread not found.",
     "resets の要素は [section, key] の2要素にしてください: {0!r}": "Each element of resets must be a two-element [section, key]: {0!r}",

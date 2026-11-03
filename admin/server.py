@@ -797,6 +797,47 @@ def delete_user(
     return {"usernames": sorted(users.keys())}
 
 
+class UsersDeleteBody(BaseModel):
+    usernames: list[str]
+
+
+@app.post("/api/instances/{name}/users/delete")
+def delete_users(
+    name: str,
+    body: UsersDeleteBody,
+    request: Request,
+    user: str = Depends(require_login),
+    _csrf: None = Depends(require_csrf),
+):
+    """複数ユーザーをまとめて削除する。1人でも削除できなければ何も削除しない。"""
+    _require_instance(name)
+    targets = list(dict.fromkeys(body.usernames))
+    if not targets:
+        raise HTTPException(status_code=400, detail=_t("削除するユーザーを選択してください。"))
+    for target_username in targets:
+        _reject_if_project_env_user(name, target_username)
+    env_path = inst.env_path(INSTANCES_ROOT, name)
+    users = env_files.read_users(env_path)
+    missing = [u for u in targets if u not in users]
+    if missing:
+        raise HTTPException(status_code=404, detail=_t("ユーザーが見つかりません: {0}", ", ".join(missing)))
+    for target_username in targets:
+        del users[target_username]
+    env_files.write_users(env_path, users)
+    for target_username in targets:
+        audit.append(
+            AUDIT_LOG_PATH,
+            {
+                "instance": name,
+                "actor": user,
+                "remote_addr": _client_ip(request),
+                "action": "user_delete",
+                "target_user": target_username,
+            },
+        )
+    return {"usernames": sorted(users.keys())}
+
+
 @app.post("/api/instances/{name}/auth-secret")
 def generate_auth_secret(
     name: str, request: Request, user: str = Depends(require_login), _csrf: None = Depends(require_csrf)

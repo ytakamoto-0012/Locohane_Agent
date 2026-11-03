@@ -2279,10 +2279,47 @@ async function renderUsers(container) {
     : _t("このインスタンス専用のユーザー設定です。");
   const tbody = $("#users-tbody");
   tbody.innerHTML = "";
+  const selectAll = $("#users-select-all");
+  const deleteBtn = $("#delete-users-btn");
+  const checkboxes = [];
+  const syncSelection = () => {
+    const checked = checkboxes.filter((cb) => cb.checked);
+    deleteBtn.disabled = checked.length === 0;
+    selectAll.checked = checkboxes.length > 0 && checked.length === checkboxes.length;
+    selectAll.indeterminate = checked.length > 0 && checked.length < checkboxes.length;
+  };
+  selectAll.disabled = data.inherited_from_project_env || data.usernames.length === 0;
+  selectAll.addEventListener("change", () => {
+    for (const cb of checkboxes) cb.checked = selectAll.checked;
+    syncSelection();
+  });
+  deleteBtn.addEventListener("click", async () => {
+    const names = checkboxes.filter((cb) => cb.checked).map((cb) => cb.value);
+    if (names.length === 0) return;
+    if (!confirm(_t("選択した {0} 人のユーザーを削除しますか？\n{1}", names.length, names.join(", ")))) return;
+    try {
+      await api(`/api/instances/${encodeURIComponent(currentInstanceName)}/users/delete`, {
+        method: "POST",
+        body: { usernames: names },
+      });
+    } catch (e) {
+      $("#users-error").textContent = e.message;
+      return;
+    }
+    const fresh = $("#instance-subview");
+    fresh.innerHTML = "";
+    renderUsers(fresh);
+  });
   for (const name of data.usernames) {
     const inherited = data.inherited_from_project_env;
     const tr = document.createElement("tr");
     if (inherited) tr.classList.add("row-inherited");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = name;
+    cb.disabled = inherited;
+    cb.addEventListener("change", syncSelection);
+    if (!inherited) checkboxes.push(cb);
     const pwInput = document.createElement("input");
     pwInput.type = "password";
     pwInput.placeholder = _t("新しいパスワード");
@@ -2304,23 +2341,9 @@ async function renderUsers(container) {
       pwInput.value = "";
       alert(_t("パスワードを変更しました。"));
     });
-    const delBtn = document.createElement("button");
-    delBtn.textContent = _t("削除");
-    delBtn.disabled = inherited;
-    delBtn.addEventListener("click", async () => {
-      if (!confirm(_t(`ユーザー "{0}" を削除しますか？`, name))) return;
-      try {
-        await api(`/api/instances/${encodeURIComponent(currentInstanceName)}/users/${encodeURIComponent(name)}`, {
-          method: "DELETE",
-        });
-      } catch (e) {
-        $("#users-error").textContent = e.message;
-        return;
-      }
-      const fresh = $("#instance-subview");
-      fresh.innerHTML = "";
-      renderUsers(fresh);
-    });
+    const tdCheck = document.createElement("td");
+    tdCheck.className = "col-check";
+    tdCheck.appendChild(cb);
     const tdName = document.createElement("td");
     tdName.textContent = name;
     if (inherited) {
@@ -2334,13 +2357,12 @@ async function renderUsers(container) {
     const tdPw = document.createElement("td");
     tdPw.appendChild(pwInput);
     tdPw.appendChild(pwBtn);
-    const tdActions = document.createElement("td");
-    tdActions.appendChild(delBtn);
+    tr.appendChild(tdCheck);
     tr.appendChild(tdName);
     tr.appendChild(tdPw);
-    tr.appendChild(tdActions);
     tbody.appendChild(tr);
   }
+  syncSelection();
 
   $("#add-user-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();

@@ -241,9 +241,12 @@
   <div class="view-users">
     <p class="hint" id="users-inherited-note"></p>
     <table class="data-table">
-      <thead><tr><th>ユーザー名</th><th>パスワード</th><th></th></tr></thead>
+      <thead><tr><th class="col-check"><input type="checkbox" id="users-select-all" title="すべて選択" /></th><th>ユーザー名</th><th>パスワード</th></tr></thead>
       <tbody id="users-tbody"></tbody>
     </table>
+    <div class="inline-actions">
+      <button type="button" id="delete-users-btn" class="btn-danger" disabled>選択したユーザーを削除</button>
+    </div>
     <form id="add-user-form" class="inline-form">
       <input type="text" name="username" placeholder="新しいユーザー名" required />
       <input type="password" name="password" placeholder="パスワード（空欄可）" />

@@ -247,6 +247,9 @@ select.le-type { width: auto; padding: 4px; font-size: 12px; flex-shrink: 0; }
 .data-table th.sortable:hover, .data-table th.sorted { color: var(--text); }
 .data-table th .sort-indicator { font-size: 11px; opacity: 0.6; }
 .data-table th.sorted .sort-indicator { opacity: 1; }
+.data-table .col-check { width: 1%; }
+.data-table .col-check input { width: auto; }
+.view-users > .inline-actions { margin-bottom: 14px; }
 .inline-form { display: flex; gap: 8px; align-items: center; max-width: 480px; }
 .secret-row { display: flex; align-items: center; gap: 10px; }
 

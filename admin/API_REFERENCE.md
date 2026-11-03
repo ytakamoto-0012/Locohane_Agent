@@ -338,6 +338,9 @@ $C -X PUT $BASE/api/instances/default/users/alice -H "$H" -H "$J" \
   -d '{"password":"new-secret"}'
 # 削除
 $C -X DELETE $BASE/api/instances/default/users/alice -H "$H"
+# まとめて削除（1人でも削除できなければ何も削除しない）
+$C -X POST $BASE/api/instances/default/users/delete -H "$H" -H "$J" \
+  -d '{"usernames":["alice","bob"]}'
 # JWT署名鍵（CHAINLIT_AUTH_SECRET）の再生成
 $C -X POST $BASE/api/instances/default/auth-secret -H "$H"
 ```
@@ -353,6 +356,8 @@ rem パスワード変更
 %C% -X PUT %BASE%/api/instances/default/users/alice -H %H% -H %J% -d "{\"password\":\"new-secret\"}"
 rem 削除
 %C% -X DELETE %BASE%/api/instances/default/users/alice -H %H%
+rem まとめて削除（1人でも削除できなければ何も削除しない）
+%C% -X POST %BASE%/api/instances/default/users/delete -H %H% -H %J% -d "{\"usernames\":[\"alice\",\"bob\"]}"
 rem JWT署名鍵（CHAINLIT_AUTH_SECRET）の再生成
 %C% -X POST %BASE%/api/instances/default/auth-secret -H %H%
 ```

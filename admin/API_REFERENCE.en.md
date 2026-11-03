@@ -339,6 +339,9 @@ $C -X PUT $BASE/api/instances/default/users/alice -H "$H" -H "$J" \
   -d '{"password":"new-secret"}'
 # Delete
 $C -X DELETE $BASE/api/instances/default/users/alice -H "$H"
+# Delete several at once (nothing is deleted if any of them cannot be)
+$C -X POST $BASE/api/instances/default/users/delete -H "$H" -H "$J" \
+  -d '{"usernames":["alice","bob"]}'
 # Regenerate the JWT signing key (CHAINLIT_AUTH_SECRET)
 $C -X POST $BASE/api/instances/default/auth-secret -H "$H"
 ```
@@ -354,6 +357,8 @@ rem Change password
 %C% -X PUT %BASE%/api/instances/default/users/alice -H %H% -H %J% -d "{\"password\":\"new-secret\"}"
 rem Delete
 %C% -X DELETE %BASE%/api/instances/default/users/alice -H %H%
+rem Delete several at once (nothing is deleted if any of them cannot be)
+%C% -X POST %BASE%/api/instances/default/users/delete -H %H% -H %J% -d "{\"usernames\":[\"alice\",\"bob\"]}"
 rem Regenerate the JWT signing key (CHAINLIT_AUTH_SECRET)
 %C% -X POST %BASE%/api/instances/default/auth-secret -H %H%
 ```
