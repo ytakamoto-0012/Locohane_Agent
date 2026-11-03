@@ -767,7 +767,7 @@ async function renderInstanceDetail(name, initialView) {
   const meta = instanceCache.find((i) => i.name === name);
   const isLab = meta && meta.kind === "skill_lab";
   $$(".subtab-btn").forEach((btn) => {
-    const hide = isLab ? ["monitor", "threads", "users", "display", "skill-lab", "knowledge"].includes(btn.dataset.subview) : false;
+    const hide = isLab ? ["monitor", "threads", "users", "display", "skill-lab", "knowledge", "memory"].includes(btn.dataset.subview) : false;
     btn.classList.toggle("hidden", hide);
   });
   await selectInstanceSubview(initialView || "config");
@@ -792,6 +792,7 @@ function renderInstanceSubview(view, opts) {
   if (view === "backups") return renderBackups(container);
   if (view === "skill-lab") return renderSkillLabPanel(container, currentInstanceName);
   if (view === "knowledge") return renderKnowledgePanel(container, currentInstanceName);
+  if (view === "memory") return renderMemories(container);
 }
 
 /* --- config.ini 編集 --- */
@@ -2435,6 +2436,201 @@ async function renderEnvVars(container) {
   });
 }
 
+/* --- メモリー（永続メモリーの閲覧・編集。admin/memories.py） --- */
+
+// owner: 所有者（ユーザーのフォルダ名）。null・空なら共通のメモリー。
+function memoriesPath(suffix, owner) {
+  const query = owner ? `?owner=${encodeURIComponent(owner)}` : "";
+  return `/api/instances/${encodeURIComponent(currentInstanceName)}/memories${suffix || ""}${query}`;
+}
+
+const MEMORY_SOURCE_STATES = { unchanged: "変更なし", changed: "変更あり", missing: "見つからない" };
+const MEMORY_VISIBILITY_LABELS = { private: "個人用", shared: "共有" };
+
+function memoryOwnerLabel(owner) {
+  return owner || _t("（共通）");
+}
+
+// open: 描画後に編集欄で開くメモリー（{name, owner}。保存直後に開き直す用）。
+async function renderMemories(container, open) {
+  container.appendChild(clone("tpl-memories"));
+  const root = container.querySelector(".view-memories");
+  const form = $("#memory-form", root);
+  const data = await api(memoriesPath());
+  $("#memory-dir", root).textContent = data.memory_dir;
+  for (const type of data.types) {
+    $("#memory-type-filter", root).appendChild(el("option", { value: type, text: type }));
+    form.elements.type.appendChild(el("option", { value: type, text: type }));
+  }
+  for (const owner of data.owners) {
+    $("#memory-owner-filter", root).appendChild(el("option", { value: owner, text: owner }));
+    $("#memory-owner-list", root).appendChild(el("option", { value: owner }));
+  }
+  let editing = null; // 編集中のメモリー {name, owner}（新規作成中は null）
+
+  const reload = async (target) => {
+    const fresh = $("#instance-subview");
+    fresh.innerHTML = "";
+    await renderMemories(fresh, target);
+  };
+
+  const renderList = () => {
+    const owner = $("#memory-owner-filter", root).value;
+    const type = $("#memory-type-filter", root).value;
+    const q = $("#memory-search", root).value.trim().toLowerCase();
+    const tbody = $("#memories-tbody", root);
+    tbody.innerHTML = "";
+    const rows = data.memories.filter(
+      (m) =>
+        (owner === "*" || (m.owner || "") === owner) &&
+        (!type || m.type === type) &&
+        (!q || `${m.name}\n${m.description}`.toLowerCase().includes(q))
+    );
+    if (rows.length === 0) {
+      tbody.appendChild(el("tr", {}, el("td", { colspan: "6", class: "hint", text: _t("メモリーはありません。") })));
+      return;
+    }
+    for (const m of rows) {
+      const link = el("a", { href: "#", text: m.name, onclick: (ev) => (ev.preventDefault(), openMemory(m.name, m.owner)) });
+      tbody.appendChild(
+        el("tr", {}, [
+          el("td", { text: memoryOwnerLabel(m.owner) }),
+          el("td", { text: m.owner ? _t(MEMORY_VISIBILITY_LABELS[m.visibility]) : _t("全員") }),
+          el("td", { text: m.type }),
+          el("td", {}, link),
+          el("td", { text: m.description }),
+          el("td", { text: new Date(m.mtime * 1000).toLocaleString(I18N_LOCALE) }),
+        ])
+      );
+    }
+  };
+
+  const syncVisibilityRow = () => {
+    const common = editing ? !editing.owner : !form.elements.owner.value.trim();
+    $$(".memory-visibility-row", root).forEach((row) => row.classList.toggle("hidden", common));
+  };
+
+  const showForm = (title, target) => {
+    editing = target;
+    $("#memory-form-title", root).textContent = title;
+    $("#memory-error", root).textContent = "";
+    $("#memory-translate-status", root).textContent = "";
+    form.elements.name.readOnly = Boolean(target);
+    form.elements.owner.readOnly = Boolean(target);
+    $("#memory-delete-btn", root).classList.toggle("hidden", !target);
+    syncVisibilityRow();
+    form.classList.remove("hidden");
+    form.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  async function openMemory(name, owner) {
+    let m;
+    try {
+      m = await api(memoriesPath(`/${encodeURIComponent(name)}`, owner));
+    } catch (e) {
+      alert(e.message);
+      return;
+    }
+    form.elements.owner.value = m.owner || "";
+    form.elements.name.value = m.name;
+    form.elements.type.value = m.type;
+    form.elements.visibility.value = m.visibility;
+    form.elements.description.value = m.description;
+    form.elements.content.value = m.content;
+    const sources = $("#memory-sources", root);
+    sources.innerHTML = "";
+    if (m.sources.length) {
+      sources.appendChild(el("div", { text: _t("元ファイル（内容の照合結果）:") }));
+      for (const s of m.sources) {
+        sources.appendChild(el("div", { text: `${s.path}: ${_t(MEMORY_SOURCE_STATES[s.state] || s.state)}` }));
+      }
+    }
+    showForm(_t("メモリーの編集: {0} / {1}", memoryOwnerLabel(m.owner), m.name), { name: m.name, owner: m.owner });
+  }
+
+  $("#memory-owner-filter", root).addEventListener("change", renderList);
+  $("#memory-type-filter", root).addEventListener("change", renderList);
+  $("#memory-search", root).addEventListener("input", renderList);
+  form.elements.owner.addEventListener("input", syncVisibilityRow);
+  $("#new-memory-btn", root).addEventListener("click", () => {
+    form.reset();
+    const owner = $("#memory-owner-filter", root).value;
+    form.elements.owner.value = owner === "*" ? "" : owner;
+    $("#memory-sources", root).innerHTML = "";
+    showForm(_t("メモリーの新規作成"), null);
+  });
+  $("#memory-cancel-btn", root).addEventListener("click", () => form.classList.add("hidden"));
+  $("#memory-translate-btn", root).addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    const status = $("#memory-translate-status", root);
+    $("#memory-error", root).textContent = "";
+    btn.disabled = true;
+    status.textContent = _t("翻訳しています…");
+    try {
+      const result = await api(memoriesPath("/translate"), {
+        method: "POST",
+        body: {
+          description: form.elements.description.value,
+          content: form.elements.content.value,
+        },
+      });
+      if (result.description) form.elements.description.value = result.description;
+      if (result.content) form.elements.content.value = result.content;
+      status.textContent = _t("翻訳しました（まだ保存していません。内容を確かめてから「保存」を押してください）。");
+    } catch (e) {
+      status.textContent = "";
+      $("#memory-error", root).textContent = e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  $("#memory-delete-btn", root).addEventListener("click", async () => {
+    if (!editing) return;
+    const label = `${memoryOwnerLabel(editing.owner)} / ${editing.name}`;
+    if (!confirm(_t("メモリー {0} を削除しますか？（削除前の内容はバックアップに残ります）", label))) return;
+    try {
+      await api(memoriesPath(`/${encodeURIComponent(editing.name)}`, editing.owner), { method: "DELETE" });
+      await reload();
+    } catch (e) {
+      $("#memory-error", root).textContent = e.message;
+    }
+  });
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const body = {
+      type: form.elements.type.value,
+      description: form.elements.description.value,
+      content: form.elements.content.value,
+      visibility: form.elements.visibility.value,
+    };
+    try {
+      let target, result;
+      if (editing) {
+        target = editing;
+        result = await api(memoriesPath(`/${encodeURIComponent(editing.name)}`, editing.owner), { method: "PUT", body });
+      } else {
+        const owner = form.elements.owner.value.trim();
+        result = await api(memoriesPath(), {
+          method: "POST",
+          body: { ...body, name: form.elements.name.value.trim(), owner: owner || null },
+        });
+        target = { name: form.elements.name.value.trim(), owner: result.owner };
+      }
+      await reload(target);
+      const forcedPrivate = target.owner && body.visibility === "shared" && result.visibility === "private";
+      alert(
+        forcedPrivate
+          ? _t("保存しました。個人情報・機密を含む（または種類が user の）ため、個人用で保存しました。")
+          : _t("保存しました（次の会話から反映されます）。")
+      );
+    } catch (e) {
+      $("#memory-error", root).textContent = e.message;
+    }
+  });
+  renderList();
+  if (open) await openMemory(open.name, open.owner);
+}
+
 /* --- バックアップ --- */
 
 async function renderBackups(container) {
@@ -2619,6 +2815,7 @@ function summarizeAuditEntry(entry) {
   }
   if (entry.action === "conversation_view") return _t(`会話閲覧: {0} / {1}`, entry.thread_owner || "", entry.thread_id || "");
   if (entry.target_user) return _t(`対象: {0}`, entry.target_user);
+  if (entry.memory) return _t(`メモリー: {0} / {1}`, entry.memory_owner || _t("（共通）"), entry.memory);
   if (entry.file) return _t(`ファイル: {0}`, entry.file);
   if (entry.key) return _t(`キー: {0}`, entry.key);
   return "";

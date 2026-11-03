@@ -1,12 +1,15 @@
 ---
 name: consolidate-memory
-description: Locohane の永続メモリー（全インスタンスの data/<インスタンス名>/memory/{user,feedback,project,reference}/*.md）を1日1回棚卸しし、同一テーマ・重複する内容を1本に統合してマージすることで、似たタスクの改善案がバラバラなnameで分散するのを防ぐ。スキル自身がCronCreateで日次・durable:trueの自己スケジュールを登録し、以後はcron発火のたびに自分自身を再度呼び出す。「メモリーを整理して」「重複メモリーを統合して」「/consolidate-memory」等で使う。統合の要否はLLM自身が本文を読んで判断し、機械的な文字列一致だけでは統合しない。
+description: Locohane の永続メモリー（全インスタンスの data/<インスタンス名>/memory/ の共通分 {user,feedback,project,reference}/*.md とユーザー別 users/<ユーザー>/{type}/*.md）を1日1回棚卸しし、同一テーマ・重複する内容を1本に統合してマージすることで、似たタスクの改善案がバラバラなnameで分散するのを防ぐ。スキル自身がCronCreateで日次・durable:trueの自己スケジュールを登録し、以後はcron発火のたびに自分自身を再度呼び出す。「メモリーを整理して」「重複メモリーを統合して」「/consolidate-memory」等で使う。統合の要否はLLM自身が本文を読んで判断し、機械的な文字列一致だけでは統合しない。
 ---
 
 # consolidate-memory: Locohane永続メモリーの重複統合
 
-`Locohane` は `<memory_dir>/{user,feedback,project,reference}/*.md` に YAML frontmatter
-付き Markdown として永続メモリーを保存する（`src/memory.py`）。`memory_dir` は
+`Locohane` は永続メモリーを YAML frontmatter 付き Markdown として保存する（`src/memory.py`）。
+メモリーはユーザー別で、`<memory_dir>/users/<ユーザー>/{user,feedback,project,reference}/*.md` に置かれ、
+frontmatter の `visibility`（`private`＝本人だけ／`shared`＝全ユーザーが検索できる。無ければ private 扱い）を持つ。
+ユーザー別になる前からある `<memory_dir>/{user,feedback,project,reference}/*.md` は「共通」のメモリー
+（全ユーザーが読み書きできる）。`memory_dir` は
 インスタンスごとに異なる（既定 `./data/<インスタンス名>/memory`。`config.ini` の
 `[paths] common_data_dir = ./data/${instance}` 由来で、管理ツールの
 `instances/<name>/config_overrides.json` で上書きされている場合もある）。Locohane側のエージェントは `search_memory`
@@ -63,10 +66,13 @@ Claude Code を開かない期間があると統合が止まるが、気づい�
 
    複数インスタンスが同じ `memory_dir` を指す場合（`${instance}` を含まない固定パスに
    上書きして共有している場合）は、1回だけ処理する。存在しない `memory_dir` は飛ばす。
-3. 以降（この手順2の4〜5、および手順3〜5）は `memory_dir` ごとに独立して行う
-   （**インスタンスをまたいで統合しない**。インスタンスごとに利用者・用途が異なるため）。
-4. `memory_dir/{user,feedback,project,reference}/*.md` を全件 `Glob`/`Read` で列挙し、
-   各ファイルの frontmatter（`name`/`description`/`type`/`created`/`updated`）と
+3. 以降（この手順2の4〜5、および手順3〜5）は `memory_dir` の中の**所有者ごと**（共通・各ユーザー）に
+   独立して行う（**インスタンスをまたいで統合しない**。インスタンスごとに利用者・用途が異なるため。
+   **所有者をまたいでも統合しない**。別ユーザー同士や、ユーザーのメモリーと共通のメモリーを1本にまとめると、
+   個人用の内容が他のユーザーに見える場所へ移ってしまうため）。
+4. 共通は `memory_dir/{user,feedback,project,reference}/*.md`、各ユーザーは
+   `memory_dir/users/<ユーザー>/{user,feedback,project,reference}/*.md` を全件 `Glob`/`Read` で列挙し、
+   各ファイルの frontmatter（`name`/`description`/`type`/`visibility`/`created`/`updated`）と
    本文を読む。
 5. 対象が数十件を超える場合は、`state.json` の `last_consolidated` より `updated` が
    新しいメモリー（＝前回統合以降に新規作成・更新されたもの）を「起点」とし、それぞれ
@@ -100,17 +106,20 @@ Claude Code を開かない期間があると統合が止まるが、気づい�
    を現在時刻（UTC、`YYYY-MM-DDTHH:MM:SSZ`形式）に更新する。`name`/`description`/
    `type`/`created` は変更しない（`description`は必要なら統合後の内容に合わせて
    書き直してよいが、`name`は変更しない＝索引の一意性を壊さない）。
+   `visibility` は、統合したもののどれか1つでも `private`（または `visibility` 無し）なら `private` にする
+   （共有のものに個人用の内容を混ぜて他のユーザーへ見せないため）。
 4. 吸収された側のファイルを削除する。
 
 ### 5. 索引の再構築
 
 ファイル操作をした `memory_dir` ごとに、必ず `MEMORY.md` 索引を再構築する（Locohane
-本体の `src/memory.py` の `rebuild_index()` をそのまま呼ぶ。索引を手で書き直さない）。
+本体の `src/memory.py` の `rebuild_all_indexes()` をそのまま呼ぶ。共通の分と各ユーザーの分をまとめて作り直す。
+索引を手で書き直さない）。
 `<memory_dir>` には手順2で取得した絶対パスを入れる。`python_env.bat` の `PYTHON_DIR` のPython（`<PYTHON_DIR>\Scripts\python.exe`）を
 使い、プロジェクトルートで実行する:
 
 ```
-"<PYTHON_DIR>\Scripts\python.exe" -c "from pathlib import Path; from src.memory import rebuild_index; rebuild_index(Path(r'<memory_dir>'))"
+"<PYTHON_DIR>\Scripts\python.exe" -c "from pathlib import Path; from src.memory import rebuild_all_indexes; rebuild_all_indexes(Path(r'<memory_dir>'))"
 ```
 
 ### 6. 状態更新と報告
@@ -131,6 +140,7 @@ Claude Code を開かない期間があると統合が止まるが、気づい�
 - 判断に迷うペアは統合せず見送る（1回の実行で無理に処理しきらない）。
 - 各インスタンスの `memory_dir` 配下以外のファイル（アプリ本体のコード・`config.ini`・
   `instances/` 配下等）は一切変更しない。
-- インスタンスをまたいだ統合・移動はしない。
+- インスタンスをまたいだ統合・移動はしない。所有者（共通・各ユーザー）をまたいだ統合・移動もしない。
+- 報告には、ユーザーの個人用（`private`）メモリーの本文を引用しない（name と件数だけにする）。
 - git へのコミット・ステージングは行わない（`data/` は `.gitignore` 済みのため、
   統合・削除はgitでは復元できない。だからこそ判断に迷うペアは見送る）。

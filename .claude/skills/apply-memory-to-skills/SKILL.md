@@ -1,6 +1,6 @@
 ---
 name: apply-memory-to-skills
-description: Locohane の指定インスタンスの永続メモリー（data/<インスタンス名>/memory/{user,feedback,project,reference}/*.md）を読み、そのインスタンスで使用可能なスキルのうち関係するスキルの改善・効率化につながる内容があれば、そのスキルの SKILL.md に反映し、関係する evals/cases のケースで tune-prompt の評価ループを回す。「メモリーをスキルに反映して」「メモリーからSKILL.mdを改善して」「/apply-memory-to-skills」等で使う。ケースが無い場合の新規作成は create-eval-case、メモリー同士の重複統合は consolidate-memory の担当。
+description: Locohane の指定インスタンスの永続メモリー（data/<インスタンス名>/memory/ の共通分と、ユーザー別 users/<ユーザー>/ のうち共有（visibility: shared）のもの）を読み、そのインスタンスで使用可能なスキルのうち関係するスキルの改善・効率化につながる内容があれば、そのスキルの SKILL.md に反映し、関係する evals/cases のケースで tune-prompt の評価ループを回す。「メモリーをスキルに反映して」「メモリーからSKILL.mdを改善して」「/apply-memory-to-skills」等で使う。ケースが無い場合の新規作成は create-eval-case、メモリー同士の重複統合は consolidate-memory の担当。
 ---
 
 # apply-memory-to-skills: 永続メモリーのSKILL.mdへの反映とtune-prompt
@@ -48,8 +48,12 @@ Python（`<PYTHON_DIR>\Scripts\python.exe`）を使い、プロジェクトル�
 
 ## 手順2: メモリーを読む
 
-1. `memory_dir/{user,feedback,project,reference}/*.md` を全件 `Glob`/`Read` で読む
-   （`MEMORY.md` 索引は読まなくてよい）。
+1. 共通の `memory_dir/{user,feedback,project,reference}/*.md` と、ユーザー別の
+   `memory_dir/users/<ユーザー>/{user,feedback,project,reference}/*.md` のうち frontmatter が
+   `visibility: shared` のものを `Glob`/`Read` で読む（`MEMORY.md` 索引は読まなくてよい）。
+   `visibility: private`（または `visibility` 無し）のユーザーのメモリーは**読まない・反映しない**
+   （本人以外に見せない約束のメモリーで、`skills/` は全インスタンス共有かつ公開リポジトリのため。
+   報告にも件数以外は書かない）。
 2. `state.json` の `last_checked` があれば、frontmatter の `updated`（無ければ
    `created`）がそれより新しいメモリーだけを候補にする。
 

@@ -391,6 +391,51 @@ rem Delete
 %C% -X DELETE %BASE%/api/instances/default/env/MY_VAR -H %H%
 ```
 
+## Memory (the instance's persistent memory)
+
+Reads and writes the memories under `[paths] memory_dir` of the instance's effective settings. Memory is per user;
+specify the owner with the query `owner` (the login username, normalized into the folder name by the same rule as the
+app). If omitted or empty, it means the common memories (those from before memory became per user). The admin API can
+read and write all of them regardless of visibility.
+`type` is `user`/`feedback`/`project`/`reference`; `visibility` is `private`/`shared` (users' memories only; if omitted,
+the per-type default on create and the current value on edit; type `user` and content with personal or confidential
+details become `private`). Editing cannot change `name` or the owner (the recorded source files `sources` are kept).
+The content before an edit or deletion is kept in `instances/<name>/backups/memory/<owner (_common for common)>/<memory name>/`.
+Translation has the LLM translate the description and content into the language of `X-Locohane-Lang` (`ja`/`en`;
+`ja` if absent) and only returns the result without saving (the LLM is the "LLM used for answers" in "Admin
+settings", or the `[llm]` endpoints of the instance itself if empty).
+
+bash:
+
+```bash
+# List (memory_dir, types, visibilities, owners, memories[]: name/description/type/owner (null for common)/visibility/mtime/sources (number of source files))
+$C $BASE/api/instances/default/memories
+# One memory (content and the check of each source file, sources[]: path/state)
+$C "$BASE/api/instances/default/memories/my-note?owner=alice"
+# Create (409 if the owner already has the name; common if owner is omitted; the response has the actual owner and visibility)
+$C -X POST $BASE/api/instances/default/memories -H "$H" -H "$J" \
+  -d '{"name":"my-note","description":"One-line description","type":"feedback","content":"Text","owner":"alice","visibility":"shared"}'
+# Edit (the response has the actual visibility)
+$C -X PUT "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H" -H "$J" \
+  -d '{"description":"One-line description","type":"feedback","content":"New text","visibility":"private"}'
+# Delete
+$C -X DELETE "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H"
+# Translate (into English; not saved; the response has description/content/language/llm_instance)
+$C -X POST $BASE/api/instances/default/memories/translate -H "$H" -H "$J" -H "X-Locohane-Lang: en" \
+  -d '{"description":"(one-line description in another language)","content":"(content in another language)"}'
+```
+
+cmd:
+
+```bat
+rem List
+%C% %BASE%/api/instances/default/memories
+rem Edit
+%C% -X PUT "%BASE%/api/instances/default/memories/my-note?owner=alice" -H %H% -H %J% -d "{\"description\":\"desc\",\"type\":\"feedback\",\"content\":\"text\",\"visibility\":\"shared\"}"
+rem Delete
+%C% -X DELETE "%BASE%/api/instances/default/memories/my-note?owner=alice" -H %H%
+```
+
 ## Display settings (header, tab title, welcome message, icons)
 
 With `?instance=<name>`, the settings of that instance only are targeted;

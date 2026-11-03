@@ -184,6 +184,7 @@
       <button data-subview="backups" class="subtab-btn">バックアップ</button>
       <button data-subview="skill-lab" class="subtab-btn">スキル研究室</button>
       <button data-subview="knowledge" class="subtab-btn">ナレッジ</button>
+      <button data-subview="memory" class="subtab-btn">メモリー</button>
     </nav>
     <div id="instance-subview"></div>
   </div>
@@ -273,6 +274,45 @@
       <button type="submit">追加/更新</button>
     </form>
     <div class="error" id="env-error"></div>
+  </div>
+</template>
+
+<template id="tpl-memories">
+  <div class="view-memories">
+    <p class="hint">このインスタンスの永続メモリー（スレッドをまたいで引き継ぐ記憶）です。メモリーはユーザー別で、AI は自分のメモリー・共通のメモリー・他のユーザーの「共有」のメモリーを検索します（他のユーザーの「個人用」は検索されません）。変更は次の会話から反映されます。書き換え・削除の前の内容は instances/&lt;インスタンス名&gt;/backups/memory/ に残ります。</p>
+    <p class="hint">保存先: <code id="memory-dir"></code></p>
+    <div class="inline-form">
+      <select id="memory-owner-filter"><option value="*">すべての所有者</option><option value="">共通</option></select>
+      <select id="memory-type-filter"><option value="">すべての種類</option></select>
+      <input type="search" id="memory-search" placeholder="名前・説明で絞り込み..." />
+      <button type="button" id="new-memory-btn">新規作成</button>
+    </div>
+    <table class="data-table">
+      <thead><tr><th>所有者</th><th>公開範囲</th><th>種類</th><th>名前</th><th>説明</th><th>更新日時</th></tr></thead>
+      <tbody id="memories-tbody"></tbody>
+    </table>
+    <form id="memory-form" class="memory-form hidden">
+      <h3 id="memory-form-title"></h3>
+      <label>所有者（ログインユーザー名。空欄なら共通）<input type="text" name="owner" list="memory-owner-list" /></label>
+      <datalist id="memory-owner-list"></datalist>
+      <label>名前（半角英数字・-・_）<input type="text" name="name" maxlength="64" required /></label>
+      <label>種類<select name="type"></select></label>
+      <label class="memory-visibility-row">公開範囲<select name="visibility"><option value="private">個人用（本人だけ）</option><option value="shared">共有（全ユーザーが検索できる）</option></select></label>
+      <p class="hint memory-visibility-row">種類 user と、個人情報・機密（メールアドレス・電話番号・カード番号・パスワード・社外秘・個人フォルダのパス等）を含むものは、共有を選んでも個人用で保存されます。</p>
+      <label>説明（一行。索引 MEMORY.md に載ります）<input type="text" name="description" required /></label>
+      <label>本文<textarea name="content" rows="14" required></textarea></label>
+      <div class="inline-form memory-translate">
+        <button type="button" id="memory-translate-btn" title="説明と本文を、このダッシュボードの表示言語へ AI に訳させます（保存はしません）">AIで翻訳</button>
+        <span class="hint" id="memory-translate-status"></span>
+      </div>
+      <div id="memory-sources" class="hint"></div>
+      <div class="error" id="memory-error"></div>
+      <div class="modal-actions">
+        <button type="button" id="memory-cancel-btn" class="btn-cancel">閉じる</button>
+        <button type="button" id="memory-delete-btn" class="btn-danger">削除</button>
+        <button type="submit" class="primary">保存</button>
+      </div>
+    </form>
   </div>
 </template>
 

@@ -390,6 +390,49 @@ rem 削除
 %C% -X DELETE %BASE%/api/instances/default/env/MY_VAR -H %H%
 ```
 
+## メモリー（インスタンスの永続メモリー）
+
+そのインスタンスの実効設定の `[paths] memory_dir` 配下のメモリーを読み書きする。メモリーはユーザー別で、
+所有者はクエリ `owner`（ログインユーザー名。本体と同じ規則でフォルダ名へ整える）で指定する。省略・空なら共通の
+メモリー（ユーザー別になる前からあるもの）。管理 API では公開範囲に関係なくすべて読み書きできる。
+`type` は `user`/`feedback`/`project`/`reference`、`visibility` は `private`/`shared`（ユーザーのメモリーだけ。
+省略時は作成なら種類ごとの既定値、編集なら今の値のまま。種類 `user` と個人情報・機密を含むものは `private` になる）。
+編集では `name`・所有者は変えられない（元ファイルの記録 `sources` は残る）。
+編集・削除の前の内容は `instances/<name>/backups/memory/<所有者（共通は _common）>/<メモリー名>/` に残る。
+翻訳は、説明と本文を `X-Locohane-Lang`（`ja`/`en`。無ければ `ja`）の言語へ LLM に訳させて返すだけで、保存しない
+（LLM は「管理者設定」の「回答に使う LLM」、空なら対象インスタンス自身の `[llm]` 接続先）。
+
+bash:
+
+```bash
+# 一覧（memory_dir・types・visibilities・owners・memories[]: name/description/type/owner（共通は null）/visibility/mtime/sources（元ファイルの数））
+$C $BASE/api/instances/default/memories
+# 1件（content と、元ファイルごとの照合結果 sources[]: path/state）
+$C "$BASE/api/instances/default/memories/my-note?owner=alice"
+# 作成（同じ所有者に同じ名前があれば 409。owner を省くと共通。応答に実際の owner・visibility）
+$C -X POST $BASE/api/instances/default/memories -H "$H" -H "$J" \
+  -d '{"name":"my-note","description":"一行の説明","type":"feedback","content":"本文","owner":"alice","visibility":"shared"}'
+# 編集（応答に実際の visibility）
+$C -X PUT "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H" -H "$J" \
+  -d '{"description":"一行の説明","type":"feedback","content":"新しい本文","visibility":"private"}'
+# 削除
+$C -X DELETE "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H"
+# 翻訳（英語へ。保存はしない。応答は description/content/language/llm_instance）
+$C -X POST $BASE/api/instances/default/memories/translate -H "$H" -H "$J" -H "X-Locohane-Lang: en" \
+  -d '{"description":"一行の説明","content":"本文"}'
+```
+
+cmd:
+
+```bat
+rem 一覧
+%C% %BASE%/api/instances/default/memories
+rem 編集
+%C% -X PUT "%BASE%/api/instances/default/memories/my-note?owner=alice" -H %H% -H %J% -d "{\"description\":\"desc\",\"type\":\"feedback\",\"content\":\"text\",\"visibility\":\"shared\"}"
+rem 削除
+%C% -X DELETE "%BASE%/api/instances/default/memories/my-note?owner=alice" -H %H%
+```
+
 ## 表示設定（ヘッダー・タブタイトル・ウェルカムメッセージ・アイコン）
 
 `?instance=<name>` を付けるとそのインスタンス専用の設定、

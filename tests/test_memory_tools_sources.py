@@ -14,7 +14,7 @@ def test_read_memory_reports_unchanged_and_changed(tmp_path, monkeypatch):
     memory.create_memory(root, "phone-bill", "d", "reference", "2025-09 total 1,234", [src])
 
     out = memory_tools.read_memory.invoke({"name": "phone-bill"})
-    assert out.startswith("[reference] phone-bill\nd\n\n2025-09 total 1,234")
+    assert out.startswith("[reference] phone-bill (common)\nd\n\n2025-09 total 1,234")
     assert f"- {src}: unchanged" in out
     assert "without opening them again" in out
 
@@ -28,7 +28,7 @@ def test_read_memory_without_sources_has_no_section(tmp_path, monkeypatch):
     root = tmp_path / "mem"
     monkeypatch.setattr(_state, "_MEMORY_ROOT", root)
     memory.create_memory(root, "plain", "d", "user", "body")
-    assert memory_tools.read_memory.invoke({"name": "plain"}) == "[user] plain\nd\n\nbody"
+    assert memory_tools.read_memory.invoke({"name": "plain"}) == "[user] plain (common)\nd\n\nbody"
 
 
 def test_create_memory_tool_returns_error_for_missing_source(tmp_path, monkeypatch):

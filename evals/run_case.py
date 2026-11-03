@@ -323,6 +323,7 @@ async def _run(
     from src.config import expand_config_vars, load_config, render_agent_type_run_script_allowlist_block
     from src.graph import ainvoke_ensuring_final_text, build_graph
     from src.llm import ThinkingLoopDetected, mark_user_turn
+    from src import skill_drafts
     from src.memory import rebuild_index, render_memory_block
     from src.tools.vector_db_tools import render_document_collections_block
     from src.skills import build_system_prompt, filter_skills_for_agent_type, render_skills_block, scan_skills
@@ -457,7 +458,10 @@ async def _run(
             )
             for a in agent_type_defs
         ]
-        system_prompt = system_prompt.replace("{{memory}}", render_memory_block(config.memory_dir))
+        # メモリーのツールはセッション外では匿名ユーザーとして動く（src/tools/memory_tools.py）ため、索引も同じ立場で組み立てる。
+        system_prompt = system_prompt.replace(
+            "{{memory}}", render_memory_block(config.memory_dir, viewer=skill_drafts.draft_owner_name(None))
+        )
         system_prompt = system_prompt.replace("{{agent_types}}", agent_types_block)
         system_prompt = system_prompt.replace("{{document_collections}}", render_document_collections_block(config))
         # config.ini の値を ${変数名} として埋め込めるよう展開する（app.py の

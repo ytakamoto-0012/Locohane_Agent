@@ -324,6 +324,7 @@ Locohane/
 │   ├── audit.py              # change history log (JSON Lines)
 │   ├── monitor.py            # read processing for the monitor screen (running status, conversations, token trends, logs, LLM endpoints)
 │   ├── knowledge.py          # HTTP API of the knowledge screen (vector DB collection management, ingestion jobs)
+│   ├── memories.py           # HTTP API of the memory screen (viewing and editing the instance's persistent memory)
 │   ├── assistant.py          # HTTP API of the admin assistant ("Ask AI" at the top right; only reads settings and advises)
 │   ├── assistant_index.py    # search for the admin assistant (simple RAG over config.ini, README_DETAIL.md and the API reference)
 │   ├── i18n.py               # server-side display language (English translations of error messages, middleware reading X-Locohane-Lang)
@@ -574,7 +575,7 @@ and WAL cannot be used). Use "Data backup" (in the settings dashboard section) t
 | `data/checkpoints.sqlite` | LangGraph conversation state (the history of all threads) | When past conversation history is no longer needed | Delete the file (while the app is stopped) |
 | `data/chat_threads.sqlite` | Metadata for the conversation thread list (left sidebar) and resuming (thread names, owners, Chainlit Step history). A separate file from `checkpoints.sqlite` (see `[thread_store]`) | When the list/resume feature is no longer needed | Delete the file (while the app is stopped; `checkpoints.sqlite` itself remains, so conversation state is not lost) |
 | `data/logs/app.log` | App operation log | Any time | Delete the file |
-| `data/memory/` | Persistent memory (`user`/`feedback`/`project`/`reference` subfolders + the `MEMORY.md` index) | When the accumulated memories are no longer needed | Delete the folder contents (`MEMORY.md` is regenerated on the next save) |
+| `data/memory/` | Persistent memory (common `user`/`feedback`/`project`/`reference` subfolders + the `MEMORY.md` index, and per-user `users/<user>/`) | When the accumulated memories are no longer needed | Delete the folder contents (`MEMORY.md` is regenerated on the next save). For one user only, delete `users/<user>/` |
 | `data/vector_db/` | The vector DB's `catalog.sqlite` (collection definitions, records of ingested files), the vectors `vectors.sqlite` with `backend = sqlite_vec`, the keyword index of the text `keywords/<collection name>.sqlite` (one file per collection), and the ingestion journal `ingest_journal.sqlite` that records files left half-written by a forced termination (`[vector_db] dir`). `catalog.sqlite` also holds references to collections of other instances (the `collection_refs` table). The source documents themselves are not copied | When a collection is no longer needed | Delete the collection on the Knowledge screen of the settings dashboard (to delete the whole folder, stop the app and the admin tool's ingestion first; with `backend = qdrant` the vectors remain on the Qdrant side) |
 | `data/plans/` | Detailed plan Markdown when `create_plan` is passed the `detail_markdown` argument (`[paths] plans_dir`) | When old plans are no longer needed | Delete the folder contents |
 | `data/skill_drafts/<username>/` | Per-user draft skills created by skill-creator (`<skill name>/`) and their evaluation results (`_workspace/`). `[skill_creator] draft_dir`. Rejected drafts also remain as records (not shown in the list) | When there are unneeded drafts | Delete the draft folder (the creator can also delete it with `delete_draft.py` of skill-creator). Not deleted automatically |
@@ -1048,13 +1049,40 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
 
 - **4 types**: `user` (the user's role and preferences) / `feedback` (corrections and confirmed
   approaches) / `project` (background of ongoing work) / `reference` (where external resources are).
-  Each is saved as one file `<name>.md` under `data/memory/<type>/`.
+  Each is saved as one file `<name>.md` (see "Per-user memories" below for where).
   Because `name` becomes the file name, it is limited to an ASCII slug (letters, digits, `-`, `_`, up to 64 characters). Write Japanese words in `description`.
-- **The index `MEMORY.md`**: a list of `name`+`description` of all saved memories.
-  It is fully rebuilt on every create/update/delete (by design, no differential updates).
-  This index is always inserted into `{{memory}}` of the system prompt, so the LLM knows the list of
-  all memories from startup (bodies are fetched each time with `read_memory`/`search_memory`).
-- Beyond 200 lines, it is truncated when inserted into the system prompt (`render_memory_block` in `src/memory.py`).
+  The description and content are written in the conversation's display language (`response_language_directive` in
+  `src/i18n.py`; the prompt is in English, so without this English and Japanese get mixed). Existing memories in mixed
+  languages can be unified with "Translate with AI" in the settings dashboard.
+- **Per-user memories**: a newly saved memory belongs to the login user of the conversation and is placed in
+  `data/memory/users/<user>/<type>/<name>.md` (`<user>` is the folder name normalized by the same rule as draft skills;
+  with `[auth] enabled = false` everyone is `anonymous`). Memories from before memory became per user,
+  `data/memory/<type>/<name>.md`, stay as **common** memories that all users can search, read and update.
+  `name` is unique per owner (the same name may exist for yourself, common and other users).
+- **Visibility (`visibility`)**: a user's memory has `private` (the owner only) or `shared` (all users can search and read
+  it; only the owner can change or delete it) in its frontmatter. If omitted in `create_memory`, `feedback` is `shared`
+  and `user`/`project`/`reference` are `private`. Type `user`, and content with signs of personal or confidential
+  details (e-mail addresses, phone numbers, card/ID numbers, passwords and the like, confidentiality labels, personal
+  folder paths such as `C:\Users\<name>\`; `_SENSITIVE_PATTERNS` in `src/memory.py`), are always saved as `private`.
+  A user's memory without a valid `visibility` is treated as `private`.
+- **Search and priority**: `search_memory`/`list_memories`/the index list your own memories, then common ones, then other
+  users' `shared` ones (marked `(mine, ...)`, `(common)`, `(user: <user>)`). Other users' `private` memories are never
+  passed to the LLM (removed mechanically by `is_visible_to` in `src/memory.py`, not left to the LLM's judgment).
+  Even `shared` ones are hidden from other users if their current content has signs of personal or confidential details
+  (in case they were edited by hand after saving). `read_memory(name)` reads your own memory when names collide and,
+  for another user's memory, adds "if it conflicts with your own memory, follow your own". `update_memory`/`delete_memory`
+  only work on your own memory (or else the common one) and refuse other users' memories.
+- **No opening the files directly**: other users' memory folders (`data/memory/users/<other user>/`) cannot be read
+  with `Read`/`Grep`/`Glob`/`execute_python_code` etc. either (`access_error`, `unreadable_dirs` etc. in
+  `src/skill_drafts.py`; the same mechanism that hides other users' draft skills).
+- **The index `MEMORY.md`**: `data/memory/MEMORY.md` for common memories and `data/memory/users/<user>/MEMORY.md` for each
+  user. It is fully rebuilt on every create/update/delete (by design, no differential updates).
+  `{{memory}}` of the system prompt receives the list of memories visible to the conversation's user (own, common,
+  other users' shared) at the start of each conversation (when the graph is built; `_apply_session_draft_skills` in
+  `app.py`; bodies are fetched each time with `read_memory`/`search_memory`). Newly saved memories appear from the next
+  conversation.
+- Beyond 200 lines, it is truncated when inserted into the system prompt (your own come first; `render_memory_block`
+  in `src/memory.py`).
 - **Memories with source files (`source_files`)**: when recording values, table rows or key points with page numbers
   read from files, pass those files (absolute paths or `@N`) in `source_files` of `create_memory`/`update_memory`.
   The tool records their current sha256 and size in `sources` of the frontmatter (at most 10 files; the body is
@@ -1066,7 +1094,18 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   recorded `sources` are kept; `[]` removes them. The hash only guarantees that the files have not changed since
   recording, not that the recorded content was read correctly (wrongly recorded content keeps being trusted until
   the file changes; if you notice it, fix or delete that memory file).
-- Sub-agents of `dispatch_agent` are not given memory tools (main agent only).
+- Sub-agents of `dispatch_agent` get memory tools narrowed per kind (`explore` and `verifier` only the reading tools,
+  `worker` all 6; `tools:` of `agents/*.md`). Sub-agents also act as the conversation's user.
+- **Editing from the settings dashboard**: the "Memory" sub-tab of the instance detail lists, shows, creates, edits
+  (description, type, content, visibility) and deletes the memories of all users and the common ones regardless of
+  visibility (`admin/memories.py`; edits go through `edit_memory` in `src/memory.py`, which keeps `created` and `sources`
+  and rebuilds the index; the visibility rules are the same as above). They can be filtered by owner. "Translate with AI"
+  in the edit form has the LLM translate the description and content into the dashboard's display language (Japanese /
+  English) and only fills the fields, without saving (check, then press "Save"). Like "Ask AI", it uses
+  the `[llm]` endpoints of the "LLM used for answers" in "Admin settings" (or the instance itself if empty). The content
+  before an edit or deletion is kept in `instances/<instance name>/backups/memory/<owner (_common for common)>/<memory name>/`
+  up to `[admin] backup_keep` generations, and the change history records `memory_create`/`memory_update`/`memory_delete`.
+  Changes take effect from the next conversation (no restart needed for a running instance).
 
 The criteria for saving and deleting (what should and should not be saved) are written in
 the "Memory System" section of `system_prompt/system_prompt.md`.

@@ -328,6 +328,7 @@ Locohane/
 │   ├── audit.py              # 変更履歴ログ（JSON Lines）
 │   ├── monitor.py            # モニター画面の読み取り処理（稼働状況・会話・トークン推移・ログ・LLM接続先）
 │   ├── knowledge.py          # ナレッジ画面の HTTP API（ベクターDB のコレクション管理・取り込みジョブ）
+│   ├── memories.py           # メモリー画面の HTTP API（インスタンスの永続メモリーの閲覧・編集）
 │   ├── assistant.py          # 管理アシスタント（右上の「AIに相談」。設定を読んで助言するだけ）の HTTP API
 │   ├── assistant_index.py    # 管理アシスタントの検索（config.ini・README_DETAIL.md・API リファレンスの簡易 RAG）
 │   ├── i18n.py               # サーバー側の表示言語（エラーメッセージの英訳・X-Locohane-Lang を読むミドルウェア）
@@ -579,7 +580,7 @@ Locohane/
 | `data/checkpoints.sqlite` | LangGraph の会話状態（全スレッドの履歴） | 過去の会話履歴が不要になったとき | ファイルを削除（アプリ停止中に） |
 | `data/chat_threads.sqlite` | 会話スレッド一覧（画面左サイドバー）・再開用のメタデータ（スレッド名・所有者・Chainlitの Step 履歴）。`checkpoints.sqlite` とは別ファイル（`[thread_store]`参照） | 一覧・再開機能が不要になったとき | ファイルを削除（アプリ停止中に。`checkpoints.sqlite` 自体は消えないため会話状態は失われない） |
 | `data/logs/app.log` | アプリの動作ログ | いつでも | ファイルを削除 |
-| `data/memory/` | 永続メモリー（`user`/`feedback`/`project`/`reference` サブフォルダ＋`MEMORY.md`索引） | 蓄積した記憶が不要になったとき | フォルダ内を削除（`MEMORY.md`は次回保存時に再生成される） |
+| `data/memory/` | 永続メモリー（共通の `user`/`feedback`/`project`/`reference` サブフォルダ＋`MEMORY.md`索引、ユーザー別の `users/<ユーザー>/`） | 蓄積した記憶が不要になったとき | フォルダ内を削除（`MEMORY.md`は次回保存時に再生成される）。特定のユーザーの分だけなら `users/<ユーザー>/` を削除 |
 | `data/vector_db/` | ベクターDB の `catalog.sqlite`（コレクション定義・取り込み済みファイルの記録）と、`backend = sqlite_vec` 時のベクター `vectors.sqlite`、本文のキーワード索引 `keywords/<コレクション名>.sqlite`（コレクションごとに1ファイル）、強制終了で書きかけになったファイルを記録する取り込みジャーナル `ingest_journal.sqlite`（`[vector_db] dir`）。`catalog.sqlite` には別のインスタンスのコレクションの参照（`collection_refs` 表）も入る。取り込み元の文書そのものは複製しない | コレクションが不要になったとき | 設定ダッシュボードのナレッジ画面でコレクションを削除する（フォルダごと消す場合はアプリと管理ツールの取り込みを止めてから。`backend = qdrant` のベクターは Qdrant 側に残る） |
 | `data/plans/` | `create_plan` が `detail_markdown` 引数を渡した場合の詳細計画Markdown（`[paths] plans_dir`） | 古い計画が不要になったとき | フォルダ内を削除 |
 | `data/skill_drafts/<ユーザー名>/` | skill-creator が作ったユーザー別ドラフトスキル（`<スキル名>/`）と、その評価結果（`_workspace/`）。`[skill_creator] draft_dir`。不採用のドラフトも記録として残る（一覧には出ない） | 不要なドラフトがあるとき | ドラフトのフォルダを削除（作成者は skill-creator の `delete_draft.py` でも消せる）。自動削除はされない |
@@ -1060,13 +1061,37 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
 
 - **4種類の type**: `user`（ユーザーの役割・選好）／`feedback`（訂正・確認済みの
   アプローチ）／`project`（進行中の作業の背景）／`reference`（外部リソースの所在）。
-  それぞれ `data/memory/<type>/` 配下に `<name>.md` として1ファイル保存される。
+  それぞれ `<name>.md` として1ファイル保存される（置き場所は次の「ユーザー別のメモリー」）。
   `name` はファイル名になるため ASCII のスラッグ（英数字・`-`・`_`、64文字まで）に限る。日本語は `description` に書く。
-- **索引 `MEMORY.md`**: 保存されている全メモリーの `name`+`description` 一覧。
+  説明・本文は会話の表示言語で書かせる（`src/i18n.py` の `response_language_directive`。プロンプトが英語のため、
+  指示しないと英語と日本語が混ざる）。言語が混ざった既存のメモリーは、設定ダッシュボードの「AIで翻訳」で揃えられる。
+- **ユーザー別のメモリー**: 新しく保存するメモリーは、会話のログインユーザーのものとして
+  `data/memory/users/<ユーザー>/<type>/<name>.md` に置かれる（`<ユーザー>` はスキルのドラフトと同じ規則で
+  整えたフォルダ名。`[auth] enabled = false` なら全員 `anonymous`）。ユーザー別になる前からある
+  `data/memory/<type>/<name>.md` は**共通**のメモリーとして残り、全ユーザーが検索・読み取り・更新できる。
+  `name` は所有者ごとに一意（自分と共通・他のユーザーで同じ名前があってもよい）。
+- **公開範囲（`visibility`）**: ユーザーのメモリーは frontmatter に `private`（本人だけ）か `shared`（全ユーザーが
+  検索・読み取りできる。書き換え・削除は本人だけ）を持つ。`create_memory` で省略すると `feedback` は `shared`、
+  `user`/`project`/`reference` は `private`。種類 `user` と、個人情報・機密の目印（メールアドレス・電話番号・
+  カード／ID 番号・パスワード等・社外秘等の表示・`C:\Users\<名前>\` の個人フォルダのパス。
+  `src/memory.py` の `_SENSITIVE_PATTERNS`）を含むものは、指定に関係なく `private` で保存される。
+  `visibility` が無い・壊れているユーザーのメモリーも `private` とみなす。
+- **検索と優先順位**: `search_memory`/`list_memories`/索引は、自分のメモリー → 共通 → 他のユーザーの `shared` の
+  メモリーの順に並べる（`(mine, ...)`・`(common)`・`(user: <ユーザー>)` を付ける）。他のユーザーの `private` の
+  メモリーは LLM に一切渡さない（LLM の判断に任せず、`src/memory.py` の `is_visible_to` で機械的に除く）。
+  `shared` でも、今の内容に個人情報・機密の目印があれば他のユーザーには見せない（保存後に手で書き換えられた場合の
+  備え）。`read_memory(name)` は同じ名前なら自分のものを読み、他のユーザーのものには「自分のメモリーと食い違えば
+  自分のものに従う」と添える。`update_memory`/`delete_memory` は自分のもの（無ければ共通のもの）だけが対象で、
+  他のユーザーのものは拒否する。
+- **ファイルを直接開かせない**: 他のユーザーのメモリーフォルダ（`data/memory/users/<他のユーザー>/`）は、
+  `Read`/`Grep`/`Glob`/`execute_python_code` 等からも読めない（`src/skill_drafts.py` の `access_error`・
+  `unreadable_dirs` 等。他のユーザーのドラフトスキルを隠す仕組みと同じ）。
+- **索引 `MEMORY.md`**: 共通の分は `data/memory/MEMORY.md`、ユーザーの分は `data/memory/users/<ユーザー>/MEMORY.md`。
   create/update/delete のたびに全再構築される（差分更新はしない設計）。
-  この索引はシステムプロンプトの `{{memory}}` に常時差し込まれ、LLM は起動時から
-  全メモリーの一覧を把握できる（本文は `read_memory`/`search_memory` で都度取得）。
-- 200行を超える場合はシステムプロンプトへの差込時に切り詰められる（`src/memory.py`
+  システムプロンプトの `{{memory}}` には、会話のユーザーから見えるメモリーの一覧（自分 → 共通 → 他のユーザーの
+  共有のもの）が、会話の開始（グラフの組み立て）ごとに差し込まれる（`app.py` の `_apply_session_draft_skills`。
+  本文は `read_memory`/`search_memory` で都度取得）。新しく保存したメモリーは次の会話から載る。
+- 200行を超える場合はシステムプロンプトへの差込時に切り詰められる（自分のものが先に残る。`src/memory.py`
   の `render_memory_block`）。
 - **元ファイル付きのメモリー（`source_files`）**: ファイルから読んだ値・表の行・ページ付きの要点を
   記録するときは、`create_memory`/`update_memory` の `source_files` に元ファイル（絶対パスまたは `@N`）を
@@ -1079,8 +1104,17 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   ハッシュが保証するのは「元ファイルが記録した時点から変わっていない」ことだけで、記録した内容の
   読み取りが正しいことは保証しない（間違って記録した内容は、ファイルが変わるまで信用され続ける。
   気づいたら該当のメモリーファイルを直すか消す）。
-- `dispatch_agent` のサブエージェントにはメモリー系ツールを渡さない（主エージェント
-  専用）。
+- `dispatch_agent` のサブエージェントは、種別ごとに絞ったメモリー系ツールを持つ（`explore`・`verifier` は読み取り系だけ、
+  `worker` は6つすべて。`agents/*.md` の `tools:`）。サブエージェントも会話のユーザーとして動く。
+- **設定ダッシュボードでの編集**: インスタンス詳細の「メモリー」サブタブで、全ユーザー・共通のメモリーを公開範囲に関係なく
+  一覧・閲覧・作成・編集（説明・種類・本文・公開範囲）・削除できる（`admin/memories.py`。書き換えは `src/memory.py` の
+  `edit_memory` で、`created` と `sources` は残し、索引も再構築する。公開範囲の規則は上と同じ）。所有者で絞り込める。
+  編集画面の「AIで翻訳」は、説明と本文をダッシュボードの表示言語（日本語 / English）へ LLM に訳させて入力欄へ
+  入れるだけで、保存はしない（確かめてから「保存」を押す）。LLM は「AIに相談」と同じく「管理者設定」の「回答に使う LLM」
+  （空なら対象インスタンス自身）の `[llm]` 接続先を使う。編集・削除の前の内容は
+  `instances/<インスタンス名>/backups/memory/<所有者（共通は _common）>/<メモリー名>/` に `[admin] backup_keep` 世代まで残り、
+  変更履歴に `memory_create`／`memory_update`／`memory_delete` として記録される。変更は次の会話から反映される
+  （稼働中でも再起動は要らない）。
 
 保存・削除の判断基準（何を保存すべきで何を保存すべきでないか）は
 `system_prompt/system_prompt.md` の「Memory System」セクションに記載している。

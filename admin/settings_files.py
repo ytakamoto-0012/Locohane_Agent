@@ -37,7 +37,8 @@ def read_text_file(settings_dir: Path, name: str) -> str:
     return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 
-def _backup_file(path: Path, backup_dir: Path, keep: int, prefix: str) -> None:
+def backup_file(path: Path, backup_dir: Path, keep: int, prefix: str) -> None:
+    """path を backup_dir/<prefix>_<日時><拡張子> へ写し、prefix の古いものを keep 世代まで減らす。"""
     if not path.is_file():
         return
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -58,7 +59,7 @@ def write_text_file(settings_dir: Path, name: str, content: str, backup_dir: Pat
     if name not in TEXT_FILE_NAMES:
         raise SettingsFileError(_t("{0} は編集できません。", name))
     path = settings_dir / name
-    _backup_file(path, backup_dir, backup_keep, prefix=f"settings_{name}")
+    backup_file(path, backup_dir, backup_keep, prefix=f"settings_{name}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
@@ -94,11 +95,11 @@ def write_image(
     for other_ext in allowed:
         other_path = settings_dir / f"{kind}.{other_ext}"
         if other_ext != ext and other_path.is_file():
-            _backup_file(other_path, backup_dir, backup_keep, prefix=f"settings_{kind}")
+            backup_file(other_path, backup_dir, backup_keep, prefix=f"settings_{kind}")
             other_path.unlink()
 
     dest = settings_dir / f"{kind}.{ext}"
-    _backup_file(dest, backup_dir, backup_keep, prefix=f"settings_{kind}")
+    backup_file(dest, backup_dir, backup_keep, prefix=f"settings_{kind}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(content)
     return dest.name
@@ -133,5 +134,5 @@ def delete_file(settings_dir: Path, target: str, backup_dir: Path, backup_keep: 
         raise SettingsFileError(_t("{0} は削除できません。", target))
     for path in paths:
         if path.is_file():
-            _backup_file(path, backup_dir, backup_keep, prefix=prefix)
+            backup_file(path, backup_dir, backup_keep, prefix=prefix)
             path.unlink()

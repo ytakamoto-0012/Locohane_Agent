@@ -10,6 +10,10 @@ read_skill_file / run_script の既存のパス解決がそのまま使える）
 他ユーザーのドラフトの扱いは [skill_creator].other_users_drafts で切り替える
 （SKILL_DRAFT_VISIBILITY_MODES）。本人のドラフトは常に全操作できる。
 
+ユーザー別の永続メモリー（`<memory_dir>/users/<ユーザー名>/`。src/memory.py）も、同じ判定で
+他ユーザーのフォルダを Read/Grep/Python 実行から隠す（設定に関係なく常に。メモリーのツールは
+共有のものだけを返すが、ファイルを直接開かれると個人用のものまで読めてしまうため）。
+
 「誰の会話か」は cl.user_session["draft_user"]（app.py がセッション開始・
 再開時に draft_owner_name() の結果を入れる）だけで判定する。このキーが
 無い文脈（evals のヘッドレス実行・Chainlit のセッション文脈外）では
@@ -27,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from .chat_log import resolve_log_username
+from .memory import USERS_DIRNAME as _MEMORY_USERS_DIRNAME
 from .skills import Skill, _parse_frontmatter, _skill_has_scripts, _validate
 
 if TYPE_CHECKING:
@@ -144,7 +149,11 @@ def access_error(path: Path, op: DraftOp, config: "Config | None", user: str | N
 
     draft_dir 直下（ユーザー名の一覧）は、他ユーザーのドラフトを読める
     モード（readable/full）のときだけ読める。draft_dir 配下以外は常に None。
+    他ユーザーのメモリーフォルダ（<memory_dir>/users/<他のユーザー>/）は、どの操作も常にエラー。
     """
+    memory_owner = _memory_owner_of(path, config)
+    if memory_owner is not None and memory_owner != user:
+        return f"Error: you cannot access another user's memories ({memory_owner}); use the memory tools instead."
     draft_dir = getattr(config, "skill_draft_dir", None)
     if draft_dir is None:
         return None
@@ -161,16 +170,46 @@ def access_error(path: Path, op: DraftOp, config: "Config | None", user: str | N
     return f"Error: you cannot {_OP_LABELS[op]} another user's draft skills ({owner})."
 
 
-def _other_owner_dirs(config: "Config | None", user: str | None, op: DraftOp) -> list[Path]:
-    """user に op が許されない他ユーザーのドラフトフォルダ（解決済み）の一覧。"""
-    draft_dir = getattr(config, "skill_draft_dir", None)
-    if draft_dir is None or op in _OTHER_USER_OPS.get(config.skill_other_users_drafts, frozenset()):
+def _memory_users_dir(config: "Config | None") -> Path | None:
+    memory_dir = getattr(config, "memory_dir", None)
+    return None if memory_dir is None else Path(memory_dir) / _MEMORY_USERS_DIRNAME
+
+
+def _memory_owner_of(path: Path, config: "Config | None") -> str | None:
+    """path がユーザー別メモリーのフォルダ配下なら、その所有者（直下のフォルダ名）。それ以外は None。"""
+    users_dir = _memory_users_dir(config)
+    if users_dir is None:
+        return None
+    try:
+        rel = path.resolve().relative_to(users_dir.resolve())
+    except (OSError, ValueError):
+        return None
+    return rel.parts[0] if rel.parts else None
+
+
+def _other_memory_dirs(config: "Config | None", user: str | None) -> list[Path]:
+    """user 以外のユーザーのメモリーフォルダ（解決済み）の一覧。"""
+    users_dir = _memory_users_dir(config)
+    if users_dir is None:
         return []
     try:
-        entries = list(draft_dir.iterdir())
+        entries = list(users_dir.iterdir())
     except OSError:
         return []
     return [e.resolve() for e in entries if e.is_dir() and e.name != user]
+
+
+def _other_owner_dirs(config: "Config | None", user: str | None, op: DraftOp) -> list[Path]:
+    """user に op が許されない他ユーザーのドラフトフォルダとメモリーフォルダ（解決済み）の一覧。"""
+    memory_dirs = _other_memory_dirs(config, user)
+    draft_dir = getattr(config, "skill_draft_dir", None)
+    if draft_dir is None or op in _OTHER_USER_OPS.get(config.skill_other_users_drafts, frozenset()):
+        return memory_dirs
+    try:
+        entries = list(draft_dir.iterdir())
+    except OSError:
+        return memory_dirs
+    return [e.resolve() for e in entries if e.is_dir() and e.name != user] + memory_dirs
 
 
 def unreadable_dirs(config: "Config | None", user: str | None) -> list[Path]:

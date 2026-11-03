@@ -142,7 +142,7 @@ from src.llm import (
 from src.llm.thinking_control import unknown_tool_names
 from src.log_rotation import LineCountRotatingFileHandler
 from src.mcp_client import init_mcp_tools, shutdown_mcp_tools
-from src.memory import render_memory_block
+from src.memory import MEMORY_INDEX_MARKER, render_memory_block
 from src import ask_reconnect
 from src.ask_relay import pending_asks as _pending_asks, resolve_pending_ask
 from src.plan_persist import plan_message_id, register_plan_persist
@@ -1880,9 +1880,10 @@ async def _setup() -> None:
         )
         for a in agent_type_defs
     ]
-    # 永続メモリーの索引（MEMORY.md）を {{memory}} へ差し込む（常に読み込まれる仕様）。
-    # subagent 側にはメモリーツールを渡さないため差し込まない。
-    system_prompt = system_prompt.replace("{{memory}}", render_memory_block(_config.memory_dir))
+    # 永続メモリーの索引はユーザー別（自分 → 共通 → 他のユーザーの共有のもの）のため、ここでは目印だけを残し、
+    # セッションごとに _apply_session_draft_skills() が差し替える（起動後に増えたメモリーも次の会話から載る）。
+    # subagent 側には差し込まない。
+    system_prompt = system_prompt.replace("{{memory}}", MEMORY_INDEX_MARKER)
     # dispatch_agent が選べるエージェント種別一覧を {{agent_types}} へ差し込む。
     system_prompt = system_prompt.replace("{{agent_types}}", agent_types_block)
     # 計画承認（Plan Mode）を免除される読み取り専用スクリプトのホワイトリストを
@@ -2129,6 +2130,8 @@ def _apply_session_draft_skills() -> str:
     "visible_draft_names" に入れる（src/tools/session_tools.py 参照）。
     組み立てに使ったドラフトの要約（skill_drafts.drafts_signature）も
     "drafts_signature" に残し、on_message が変化を検知して組み直せるようにする。
+    永続メモリーの索引（MEMORY_INDEX_MARKER）も、このユーザー向けのもの（src/memory.py の
+    render_memory_block）へ差し替える。
     """
     user = cl.user_session.get("user")
     draft_user = skill_drafts.draft_owner_name(user.identifier if user else None)
@@ -2136,7 +2139,9 @@ def _apply_session_draft_skills() -> str:
     drafts = skill_drafts.scan_visible_drafts(_config, draft_user)
     cl.user_session.set("visible_draft_names", [d.skill.name for d in drafts if d.readable])
     cl.user_session.set("drafts_signature", skill_drafts.drafts_signature(drafts))
-    return _system_prompt.replace(skill_drafts.DRAFT_SKILLS_MARKER, skill_drafts.render_draft_skills_block(drafts))
+    return _system_prompt.replace(
+        skill_drafts.DRAFT_SKILLS_MARKER, skill_drafts.render_draft_skills_block(drafts)
+    ).replace(MEMORY_INDEX_MARKER, render_memory_block(_config.memory_dir, viewer=draft_user))
 
 
 @cl.on_stop

@@ -45,6 +45,7 @@ from . import instances as inst
 from . import admin_settings as admin_settings_api
 from . import data_backup as data_backup_api
 from . import knowledge as knowledge_api
+from . import memories as memories_api
 from .skill_lab import api as skill_lab_api
 from .skill_lab import sources as skill_lab_sources
 from .ini_catalog import parse_file as parse_ini_file
@@ -1251,6 +1252,25 @@ _knowledge_router = knowledge_api.build_router(
     client_ip=_client_ip,
 )
 app.include_router(_knowledge_router)
+
+
+# ---------------------------------------------------------------------------
+# メモリー（インスタンスの永続メモリーの閲覧・編集。admin/memories.py）
+# ---------------------------------------------------------------------------
+
+app.include_router(
+    memories_api.build_router(
+        require_login=require_login,
+        require_csrf=require_csrf,
+        instances_root=INSTANCES_ROOT,
+        audit_log_path=AUDIT_LOG_PATH,
+        client_ip=_client_ip,
+        config_loader=lambda name: monitor.instance_config(INSTANCES_ROOT, CONFIG_INI_PATH, name),
+        backup_keep=_cfg.admin_backup_keep,
+        # 翻訳に使う LLM は管理アシスタントと同じ選び方（「管理者設定」の「回答に使う LLM」。空なら対象インスタンス）。
+        llm_instance=lambda name: admin_settings_api.current_admin_config(CONFIG_INI_PATH).admin_assistant_llm_instance or name,
+    )
+)
 
 
 # ---------------------------------------------------------------------------

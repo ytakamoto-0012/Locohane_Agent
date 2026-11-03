@@ -319,4 +319,12 @@ EN: dict[str, str] = {
     'インスタンス {0} には {1} という名前のコレクション（または参照）が既にあります。別の名前を指定してください。': 'Instance {0} already has a collection (or reference) named {1}. Specify another name.',
     'コピー先ではこのベクターを使えないため、ベクターごとはコピーできません（{0}）。定義だけをコピーしてコピー先で取り込んでください。': 'The vectors cannot be used in the destination, so they cannot be copied ({0}). Copy only the definition and ingest it in the destination.',
     'コピー元かコピー先のコレクションが取り込み中です。終わってからコピーしてください。': 'The source or destination collection is being ingested. Copy it after that finishes.',
+    '種類が不正です: {0!r}': 'Invalid type: {0!r}',
+    '説明を入力してください。': 'Enter a description.',
+    '本文を入力してください。': 'Enter the content.',
+    '名前は半角英数字・-・_ の64文字以内で指定してください: {0!r}': 'The name must be up to 64 ASCII letters, digits, - and _: {0!r}',
+    'メモリーが見つかりません: {0}': 'Memory not found: {0}',
+    '同じ名前のメモリーが既にあります: {0}': 'A memory with the same name already exists: {0}',
+    '公開範囲が不正です: {0!r}': 'Invalid visibility: {0!r}',
+    '翻訳する説明・本文がありません。': 'There is no description or content to translate.',
 }

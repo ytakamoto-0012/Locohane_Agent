@@ -252,6 +252,11 @@ select.le-type { width: auto; padding: 4px; font-size: 12px; flex-shrink: 0; }
 .view-users > .inline-actions { margin-bottom: 14px; }
 .inline-form { display: flex; gap: 8px; align-items: center; max-width: 480px; }
 .secret-row { display: flex; align-items: center; gap: 10px; }
+.view-memories > .inline-form { max-width: none; margin-bottom: 10px; }
+.memory-form { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-top: 14px; }
+.memory-form h3 { margin: 0 0 8px; font-size: 14px; }
+.memory-form label { display: block; margin-bottom: 10px; }
+.memory-form input[type=text], .memory-form select, .memory-form textarea { display: block; width: 100%; margin-top: 4px; }
 
 .settings-section { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 14px; }
 .settings-section h3 { margin: 0 0 8px; font-size: 14px; }
