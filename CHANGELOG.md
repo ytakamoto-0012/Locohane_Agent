@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-04
+
 ### 追加
 
 - 設定ダッシュボードのインスタンス詳細に「メモリー」サブタブを追加し、そのインスタンスの永続メモリーを一覧・閲覧・作成・編集
@@ -58,8 +60,20 @@
   ツールと同じ応答で呼んだ委譲は開始せずに差し戻し、それらの結果を読んでから次の応答で出し直させます（結果を見ずに
   依頼文を書いても速くならず、メモリーに答えがあれば委譲自体が不要だったため）。進捗更新・thread note・メモリーの保存は
   これまでどおり同じ応答で呼べます。
+- サブエージェントが調べた視覚情報（テキストだけでは意味が失われる・誤読されるもの）を自分で thread note に記録するように
+  しました。テキストで正しく読める表は記録しません。割り当てファイルを読むだけの実行は議事録等を書きません。これまでは
+  終わり際に同じ内容の thread note が重複して書かれていました。
+- `dispatch_agent_batch` は、中身が同じファイルを1回だけ割り振り、省いた複製を結果に載せるようにしました。サブエージェントは
+  読めない文字を、自分で OCR のコードを書いて解読しようとせず「読めない」と報告します。
+
+### 削除
+
+- `excel-knowledge` スキルを同梱から外しました（v0.4.x で使わなくなった後も同梱されたままでした）。
 
 ### 修正
+
+- `Glob`・`Grep`・`dispatch_agent_batch` で作業ディレクトリより上のフォルダから探すと、セッション用の `_tmp_` フォルダ
+  （`default_workdir` の複製）の中まで一致し、同じファイルが2回ずつ見つかって二重に読まれていた不具合を直しました。
 
 - Office 文書・PDF の読み取りスクリプトで、同じファイルを並列に読むと結果ファイル（`result_path`）の名前が重なり、
   後の結果が先の結果を上書きすることがあった不具合を直しました（Windows の時刻の分解能が粗いため）。AI がこれを避けようと
@@ -854,7 +868,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.4.9...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/ytakamoto-0012/Locohane_Agent/commits/v0.4.7

@@ -489,7 +489,6 @@ Locohane/
 │   ├── excel-vba-read/      # reading VBA macro code of xlsm/xls only
 │   ├── excel-vba-edit/      # adding/overwriting/deleting and running VBA macro code of xlsm
 │   ├── excel-render/        # rendering Excel sheets as images
-│   ├── excel-knowledge/     # local knowledge base of coding practices and pitfalls when using excel-edit/read/render/recalc
 │   ├── excel-vba-knowledge/ # local knowledge base of Excel VBA coding practices and pitfalls
 │   ├── pdf-tools/           # reading PDFs, rendering pages as images, generating PDFs
 │   ├── pptx-read/           # pptx read-only (extracting text, tables, speaker notes)
@@ -873,7 +872,6 @@ The SKILL.md files, references and script messages of the bundled skills are wri
 | `excel-vba-read` | `skills/` | Runs scripts | Reading VBA macro code of xlsm/xls only. |
 | `excel-vba-edit` | `skills/` | Runs scripts | Adding/overwriting/deleting and running VBA macro code of xlsm. |
 | `excel-render` | `skills/` | Runs scripts | Rendering Excel sheets as images (visually grasping borders, formatting, charts and layout). |
-| `excel-knowledge` | `skills/` | Reference only | Local knowledge base accumulating coding practices, standard techniques and pitfalls when using excel-edit/excel-read/excel-render/excel-recalc (see `references/`). |
 | `excel-vba-knowledge` | `skills/` | Reference only | Local knowledge base accumulating Excel VBA coding practices, standard techniques and pitfalls (see `references/`). |
 | `pptx-read` | `skills/` | Runs scripts | pptx read-only (extracting slide titles, body text, tables and speaker notes). |
 | `pptx-create` | `skills/` | Runs scripts | Generating new pptx (16:9 template method). |
