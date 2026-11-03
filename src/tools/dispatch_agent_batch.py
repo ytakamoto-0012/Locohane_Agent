@@ -231,10 +231,13 @@ def _group_task(task: str, group: list[Path], index: int, group_count: int, star
     """
     end = start + len(group) - 1
     if lookup:
+        # 各グループが議事録の確認・作成やメモリー検索などの共通手順に反復の約半分を使い、
+        # 最終回答も長くて切り詰められ、メインが議事録を読み直していた（本番ログ 2026-11-03）。
         closing = (
             "Open only the assigned files above and confirm what the task asks for in them "
-            "(the other files are checked by other sub-agents; do not search for or open other files). "
-            "In your final answer, report concisely the facts you confirmed with their source (full path, page/section), "
+            "(the other files are checked by other sub-agents; do not search for or open other files, "
+            "and do not read or write thread notes or search memory: the paths are given and your final answer is saved for you). "
+            "In your final answer, report the facts you confirmed with their source (full path, page/sheet) in about 1,200 characters, "
             "or \"not found in the assigned files\"."
         )
     else:

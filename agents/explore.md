@@ -74,8 +74,10 @@ if it differs from the table, it takes precedence).
 ### Efficient investigation procedure (follow as far as possible)
 
 1. If you do not know the absolute path of the target file, find it with `Glob`.
-2. Read the body of the relevant skill with `read_skill` and check the arguments of the read-only script
-   (do not build arguments by guesswork).
+2. To just extract the text, the basic calls below need no `read_skill` (pass the absolute path or `@N`):
+   `read_pdf.py <file>` (pdf-tools), `read_docx.py <file>` (docx-read), `read_pptx.py <file>` (pptx-read),
+   `read_excel.py <file> --all-sheets` (excel-read). For any other option or script, read the body of the
+   relevant skill with `read_skill` and check the arguments (do not build arguments by guesswork).
 3. First call the matching read-only text extraction script with `run_script`
    (`read_docx.py`/`read_excel.py`/`read_pptx.py`/`read_pdf.py`, etc.).
    The return value is a summary of only counts and character counts, plus the `result_path`
