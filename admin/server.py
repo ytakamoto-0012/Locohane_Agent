@@ -758,11 +758,86 @@ def list_users(name: str, user: str = Depends(require_login)):
     else:
         usernames = sorted(env_files.read_users(PROJECT_ENV_PATH).keys())
         inherited = True
+    ranks, default_rank, rank_error = _user_ranks_view(name, usernames)
     return {
         "usernames": usernames,
         "inherited_from_project_env": inherited,
         "auth_secret_set": bool(env_files.read_auth_secret(own_env_path)),
+        # メモリーの優先順位に使うランク（[memory] user_ranks。ユーザー名ごと、未設定なら null）。
+        "ranks": ranks,
+        "default_rank": default_rank,
+        "rank_error": rank_error,
     }
+
+
+def _user_ranks_view(name: str, usernames: list[str]) -> tuple[dict[str, int | None], int | None, str | None]:
+    """ユーザー名ごとのランク（[memory] user_ranks。未設定は None）、既定のランク、設定を読めないときのエラー。"""
+    from src.skill_drafts import draft_owner_name
+
+    try:
+        cfg = monitor.instance_config(INSTANCES_ROOT, CONFIG_INI_PATH, name)
+    except monitor.MonitorError as exc:
+        return {u: None for u in usernames}, None, str(exc)
+    return {u: cfg.memory_user_ranks.get(draft_owner_name(u)) for u in usernames}, cfg.memory_default_rank, None
+
+
+class UserRankBody(BaseModel):
+    # None ならランクの設定を外す（default_rank になる）。
+    rank: int | None = None
+
+
+@app.put("/api/instances/{name}/users/{target_username}/rank")
+def set_user_rank(
+    name: str,
+    target_username: str,
+    body: UserRankBody,
+    request: Request,
+    user: str = Depends(require_login),
+    _csrf: None = Depends(require_csrf),
+):
+    """メモリーの優先順位に使うユーザーのランクを、このインスタンスの [memory] user_ranks に保存する。
+
+    ランクはパスワードと違い機密ではないため、プロジェクト直下 .env から継承中のユーザーにも設定できる。
+    設定の保存（検証・バックアップ・変更履歴）は設定画面と同じ overrides.save() に任せる。
+    """
+    from src.skill_drafts import draft_owner_name
+
+    meta = _require_instance(name)
+    if body.rank is not None and body.rank < 0:
+        raise HTTPException(status_code=400, detail=_t("ランクは0以上の整数で指定してください。"))
+    try:
+        cfg = monitor.instance_config(INSTANCES_ROOT, CONFIG_INI_PATH, name)
+    except monitor.MonitorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    ranks = dict(cfg.memory_user_ranks)
+    key = draft_owner_name(target_username)
+    if body.rank is None:
+        ranks.pop(key, None)
+    else:
+        ranks[key] = body.rank
+    ov_path = inst.overrides_path(INSTANCES_ROOT, name)
+    try:
+        overrides.save(
+            path=ov_path,
+            updates=_flatten_updates({"memory": {"user_ranks": json.dumps(dict(sorted(ranks.items())), ensure_ascii=False)}}, meta.kind),
+            resets=[],
+            base_mtime=overrides.mtime_or_none(ov_path),
+            ini_catalog=parse_ini_file(CONFIG_INI_PATH),
+            config_ini_path=CONFIG_INI_PATH,
+            backup_dir=inst.backups_dir(INSTANCES_ROOT, name),
+            backup_keep=_cfg.admin_backup_keep,
+            audit_log_path=AUDIT_LOG_PATH,
+            instance_name=name,
+            actor=user,
+            remote_addr=_client_ip(request),
+            instances_root=INSTANCES_ROOT,
+        )
+    except overrides.ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except overrides.ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    needs_restart = _supervisor.status(name).state == supervisor.InstanceState.RUNNING
+    return {"rank": body.rank, "needs_restart": needs_restart}
 
 
 class UserAddBody(BaseModel):

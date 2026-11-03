@@ -1,6 +1,8 @@
-"""管理ツールのユーザー一括削除 API（POST /api/instances/{name}/users/delete）のテスト。"""
+"""管理ツールのユーザー API（一括削除 POST /api/instances/{name}/users/delete・ランク PUT .../users/{user}/rank）のテスト。"""
 
 from __future__ import annotations
+
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -54,6 +56,41 @@ def test_delete_users_rejects_inherited_project_users(ctx) -> None:
     res = ctx["client"].post("/api/instances/default/users/delete", headers=HEADERS, json={"usernames": ["alice"]})
     assert res.status_code == 403
     assert env_files.read_users(ctx["project_env"]) == {"alice": "a"}
+
+
+@pytest.fixture
+def rank_ctx(ctx, tmp_path, monkeypatch):
+    """ランクの API 用: 実際の config.ini と、tmp に置いたこのインスタンスの config_overrides.json を使う。"""
+    monkeypatch.setenv("COMMON_DATA_DIR", str(tmp_path / "data" / "${instance}"))
+    meta = inst.InstanceMeta(name="default", display_name="default", app_port=18001)
+    monkeypatch.setattr(server, "_require_instance", lambda name: meta)
+    return ctx
+
+
+def test_set_and_clear_user_rank(rank_ctx, tmp_path) -> None:
+    from src import memory
+
+    env_files.write_users(rank_ctx["env"], {"Alice": "a", "bob": "b"})
+    client = rank_ctx["client"]
+    res = client.put("/api/instances/default/users/Alice/rank", headers=HEADERS, json={"rank": 3})
+    assert res.status_code == 200 and res.json()["rank"] == 3
+    # ユーザー名はメモリーの所有者のフォルダ名（小文字）へ揃えて保存する
+    saved = json.loads(inst.overrides_path(tmp_path / "instances", "default").read_text(encoding="utf-8"))
+    assert json.loads(saved["memory"]["user_ranks"]) == {"alice": 3}
+    listed = client.get("/api/instances/default/users").json()
+    assert listed["ranks"] == {"Alice": 3, "bob": None} and listed["default_rank"] == memory.DEFAULT_RANK
+    # null で外すと、既定値（{}）に戻るので上書きからも消える
+    assert client.put("/api/instances/default/users/Alice/rank", headers=HEADERS, json={"rank": None}).status_code == 200
+    saved = json.loads(inst.overrides_path(tmp_path / "instances", "default").read_text(encoding="utf-8"))
+    assert "user_ranks" not in saved.get("memory", {})
+
+
+def test_rank_can_be_set_for_inherited_users_and_rejects_negative(rank_ctx) -> None:
+    env_files.write_users(rank_ctx["project_env"], {"alice": "a"})
+    client = rank_ctx["client"]
+    assert client.put("/api/instances/default/users/alice/rank", headers=HEADERS, json={"rank": 2}).status_code == 200
+    assert client.get("/api/instances/default/users").json()["ranks"] == {"alice": 2}
+    assert client.put("/api/instances/default/users/alice/rank", headers=HEADERS, json={"rank": -1}).status_code == 400
 
 
 def test_delete_users_requires_csrf_header(ctx) -> None:

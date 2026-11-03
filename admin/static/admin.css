@@ -253,6 +253,7 @@ select.le-type { width: auto; padding: 4px; font-size: 12px; flex-shrink: 0; }
 .data-table .col-check { width: 1%; }
 .data-table .col-check input { width: auto; }
 .view-users > .inline-actions, .view-memories > .inline-actions { margin-bottom: 14px; }
+.view-users .rank-input { width: 5em; margin-right: 6px; }
 .inline-form { display: flex; gap: 8px; align-items: center; max-width: 480px; }
 .secret-row { display: flex; align-items: center; gap: 10px; }
 .view-memories > .inline-form { max-width: none; margin-bottom: 10px; }

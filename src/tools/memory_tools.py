@@ -54,7 +54,8 @@ def _writable_owner(root: Path, name: str, me: str) -> str | None:
         raise ValueError(f"Memory not found: {name}") from None
     raise ValueError(
         f"The memory {name} belongs to another user ({other.owner}) and cannot be changed or deleted. "
-        "Save your own memory with create_memory instead (your own memories take precedence over other users')."
+        "Save your own memory with create_memory instead (your own memory takes precedence unless the other user "
+        "has a higher rank)."
     )
 
 
@@ -71,12 +72,14 @@ def _resolve_source_files(source_files: list[str] | None) -> list[Path] | None:
     return resolved
 
 
-def _visibility_note(mem: memory.Memory, requested: str | None) -> str:
-    """保存後の公開範囲の説明（shared を求めた・既定で shared のはずが private になった場合は理由も）。"""
+def _visibility_note(root: Path, mem: memory.Memory, requested: str | None) -> str:
+    """保存後の公開範囲の説明（shared を求めた・省略して shared のはずが private になった場合は理由も）。"""
     if mem.visibility == "shared":
         return "Visibility: shared (other users can find and read it)."
-    if requested == "shared" or (requested is None and mem.memory_type == "feedback"):
-        _, reasons = memory.resolve_visibility(mem.memory_type, "shared", mem.description, mem.content, mem.sources)
+    if requested != "private":
+        _, reasons = memory.resolve_visibility(
+            mem.memory_type, "shared", mem.description, mem.content, mem.sources, memory.policy_for(root)
+        )
         if reasons:
             return f"Visibility: private (not shared with other users because it contains: {', '.join(reasons)})."
     return "Visibility: private (only the current user can find and read it)."
@@ -107,8 +110,29 @@ def _render_source_checks(mem: memory.Memory) -> str:
     return "\n".join(lines)
 
 
-def _list_line(mem: memory.Memory, me: str) -> str:
-    return f"- [{mem.memory_type}] {mem.name}{memory.label_for(mem, me)}: {mem.description}"
+def _list_line(root: Path, mem: memory.Memory, me: str) -> str:
+    return f"- [{mem.memory_type}] {mem.name}{memory.label_for(mem, me, memory.policy_for(root))}: {mem.description}"
+
+
+def _other_user_note(policy: memory.MemoryPolicy, mem: memory.Memory, me: str) -> str:
+    """他のユーザーのメモリーを読んだときの、自分のメモリーと食い違ったときの従い方。"""
+    if not policy.uses_ranks:
+        return (
+            "\n\n(This is another user's shared memory. If one of your own memories covers the same topic "
+            "and says otherwise, follow your own.)"
+        )
+    theirs, mine = policy.rank_of(mem.owner), policy.rank_of(me)
+    if theirs > mine:
+        rule = "follow this one (its owner has a higher rank)"
+    elif theirs < mine:
+        rule = "follow your own (your rank is higher)"
+    else:
+        rule = "follow your own (same rank)"
+    return (
+        f"\n\n(This is another user's shared memory: owner's rank {theirs}, your rank {mine}. If another memory "
+        f"covers the same topic and says otherwise, follow the one whose owner has the higher rank; for your own "
+        f"memory, {rule}.)"
+    )
 
 
 @tool
@@ -144,10 +168,10 @@ def create_memory(
             content must be at most 4000 characters (keep only the relevant parts, not the
             whole file).
         visibility: "shared" lets other users of this system find and read the memory;
-            "private" keeps it to the current user. If omitted, feedback is shared and
-            user/project/reference are private. memory_type user, and content with personal
-            or confidential details (e-mail addresses, phone/card/ID numbers, passwords,
-            confidentiality labels, personal folder paths), are always saved as private.
+            "private" keeps it to the current user. Choose it by the content, following the
+            Visibility rules in the Memory System section of the system prompt. If omitted, it is
+            shared. Some memory_types and content with personal details are always saved as
+            private; the result tells the visibility it was saved with and why.
 
     Returns:
         A text telling the saved file path and the visibility it was saved with. If
@@ -171,8 +195,15 @@ def create_memory(
         mem = memory.read_memory(root, name, me)
     except (RuntimeError, ValueError) as e:
         return f"Error: {e}"
-    logger.info("create_memory: %s sources=%d visibility=%s", name, len(source_files or []), mem.visibility)
-    return f"Saved the memory: {path}\n{_visibility_note(mem, visibility)}"
+    logger.info(
+        "create_memory: %s type=%s sources=%d visibility=%s (requested=%s)",
+        name,
+        memory_type,
+        len(source_files or []),
+        mem.visibility,
+        visibility,
+    )
+    return f"Saved the memory: {path}\n{_visibility_note(root, mem, visibility)}"
 
 
 @tool
@@ -193,7 +224,7 @@ def update_memory(
             remove them. Same limits as create_memory.
         visibility: "shared" or "private" to change the visibility of your own memory (same rules
             as create_memory). If omitted, it stays as it is (but becomes private if the new
-            content has personal or confidential details). Ignored for common memories.
+            content has personal details). Ignored for common memories.
 
     Returns:
         A text telling the updated file path. If content is empty, no memory has that name,
@@ -202,17 +233,30 @@ def update_memory(
     """
     try:
         root = _require_memory_root()
-        owner = _writable_owner(root, name, _current_owner())
+        me = _current_owner()
+        owner = _writable_owner(root, name, me)
         path = memory.update_memory(
-            root, name, content, _resolve_source_files(source_files), owner=owner, visibility=visibility
+            root,
+            name,
+            content,
+            _resolve_source_files(source_files),
+            owner=owner,
+            visibility=visibility,
+            updated_by=me,
         )
         mem = memory.read_memory(root, name, owner)
     except (RuntimeError, ValueError) as e:
         return f"Error: {e}"
-    logger.info("update_memory: %s sources=%s", name, "kept" if source_files is None else len(source_files))
+    logger.info(
+        "update_memory: %s sources=%s visibility=%s (requested=%s)",
+        name,
+        "kept" if source_files is None else len(source_files),
+        mem.visibility,
+        visibility,
+    )
     if owner is None:
         return f"Updated the common memory: {path}"
-    return f"Updated the memory: {path}\n{_visibility_note(mem, visibility)}"
+    return f"Updated the memory: {path}\n{_visibility_note(root, mem, visibility)}"
 
 
 @tool
@@ -269,13 +313,13 @@ def read_memory(name: str, owner: str | None = None) -> str:
         return f"Error: {e}"
     checks = _render_source_checks(mem)
     logger.info("read_memory: %s owner=%s sources=%d", name, mem.owner, len(mem.sources))
-    note = ""
-    if mem.owner is not None and mem.owner != me:
-        note = (
-            "\n\n(This is another user's shared memory. If one of your own memories covers the same topic "
-            "and says otherwise, follow your own.)"
-        )
-    header = f"[{mem.memory_type}] {mem.name}{memory.label_for(mem, me)}"
+    policy = memory.policy_for(root)
+    note = _other_user_note(policy, mem, me) if mem.owner is not None and mem.owner != me else ""
+    header = f"[{mem.memory_type}] {mem.name}{memory.label_for(mem, me, policy)}"
+    if mem.author and mem.author != mem.owner:
+        header += f"\nAuthor: {mem.author}"
+    if mem.updated_by and mem.updated_by != mem.author:
+        header += f"\nLast updated by: {mem.updated_by}"
     return f"{header}\n{mem.description}\n\n{mem.content}{checks}{note}"
 
 
@@ -284,8 +328,9 @@ def search_memory(query: str, memory_type: str | None = None) -> str:
     """Search persistent memories by keyword substring match on name/description/body.
 
     Searches your own memories, the common memories and other users' shared memories (other
-    users' private memories are never included). Your own come first, marked "(mine, ...)",
-    then "(common)", then "(user: <owner>)".
+    users' private memories are never included), marked "(mine, ...)", "(common)" and
+    "(user: <owner>)". When ranks are shown ("rank N"; higher is more senior), hits are ordered
+    from the highest rank; within the same rank, your own first, then common, then other users'.
 
     Returns only a list (name+description), not the bodies (to save context).
     If you need the content itself, pass the name of a hit to read_memory.
@@ -302,18 +347,22 @@ def search_memory(query: str, memory_type: str | None = None) -> str:
     """
     try:
         me = _current_owner()
-        hits = memory.search_memories(_require_memory_root(), query, memory_type, viewer=me)
+        root = _require_memory_root()
+        hits = memory.search_memories(root, query, memory_type, viewer=me)
     except (RuntimeError, ValueError) as e:
         return f"Error: {e}"
     logger.info("search_memory: query=%r type=%s hits=%d", query, memory_type, len(hits))
     if not hits:
         return "No matching memories."
-    return f"{len(hits)} hits.\n" + "\n".join(_list_line(m, me) for m in hits)
+    return f"{len(hits)} hits.\n" + "\n".join(_list_line(root, m, me) for m in hits)
 
 
 @tool
 def list_memories(memory_type: str | None = None) -> str:
-    """List the persistent memories you can read (your own first, then common, then other users' shared ones).
+    """List the persistent memories you can read (your own, the common ones and other users' shared ones).
+
+    Ordered from the owner with the highest rank (when ranks are shown); within the same rank, your
+    own first, then common, then other users'.
 
     Args:
         memory_type: If given, narrow to one of "user"|"feedback"|"project"|"reference"
@@ -326,10 +375,11 @@ def list_memories(memory_type: str | None = None) -> str:
     """
     try:
         me = _current_owner()
-        mems = memory.list_memories(_require_memory_root(), memory_type, viewer=me)
+        root = _require_memory_root()
+        mems = memory.list_memories(root, memory_type, viewer=me)
     except (RuntimeError, ValueError) as e:
         return f"Error: {e}"
     logger.info("list_memories: type=%s count=%d", memory_type, len(mems))
     if not mems:
         return "No memories saved."
-    return "\n".join(_list_line(m, me) for m in mems)
+    return "\n".join(_list_line(root, m, me) for m in mems)

@@ -15,6 +15,9 @@ instances/<name>/backups/memory/<所有者（共通は _common）>/<メモリー
 X-Locohane-Lang）へ訳させて返すだけで、保存はしない（管理者が確かめてから
 保存する）。LLM は管理アシスタントと同じく [admin] assistant_llm_instance のインスタンス（空なら対象インスタンス
 自身）の [llm] 接続先を使う。
+
+設定画面の [memory] shared_criteria / private_criteria の「AIで清書」も同じ LLM で、管理者の下書きを
+ダッシュボードの表示言語の箇条書きへ整えて返すだけ（保存は設定画面の「保存」で行う）。
 """
 
 from __future__ import annotations
@@ -68,6 +71,30 @@ _TRANSLATE_SYSTEM = (
     "(ASCII slugs) or numbers, and keep the labels **Why:** and **How to apply:** as they are. If the text is "
     "already in {language}, output it unchanged."
 )
+
+
+class CriteriaPolishBody(BaseModel):
+    kind: str
+    text: str
+
+
+# [memory] shared_criteria / private_criteria の清書。結果はシステムプロンプトの「- "shared" for:」の下に
+# そのまま字下げして入る（src/memory.py の render_visibility_block）。言語はダッシュボードの表示言語。
+_POLISH_CRITERIA_SYSTEM = (
+    "An AI assistant runs on an in-house system shared by the members of one organization. When it saves a memory "
+    "it decides whether the memory is \"shared\" (every member can find and read it) or \"private\" (only the "
+    "current user). The administrator wrote a rough note of which memories should be {kind}. Rewrite it in "
+    "{language} as clear, concise criteria the assistant can apply to a memory's content. Keep every condition and "
+    "example in the note and add none of your own. One condition per line, each starting with \"- \"; put examples "
+    "in parentheses. Output only the criteria: no heading, no preface, no explanation, no code fence."
+)
+
+
+def _clean_criteria(text: str) -> str:
+    """清書の結果から、LLM が付けがちなコードフェンス・空行・行末の空白を外す（改行は残す）。"""
+    lines = [line.rstrip() for line in text.strip().splitlines()]
+    lines = [line for line in lines if line.strip() and not line.strip().startswith("```")]
+    return "\n".join(lines)
 
 
 class MemoryRef(BaseModel):
@@ -147,6 +174,9 @@ def build_router(
     router = APIRouter()
 
     async def _translate(config: Config, language: str, text: str) -> str:
+        return await _complete(config, _TRANSLATE_SYSTEM.format(language=language), text)
+
+    async def _complete(config: Config, system: str, text: str) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
 
         if model_factory is not None:
@@ -157,9 +187,7 @@ def build_router(
             model = build_model(config)
         if hasattr(model, "__await__"):
             model = await model
-        reply = await model.ainvoke(
-            [SystemMessage(content=_TRANSLATE_SYSTEM.format(language=language)), HumanMessage(content=text)]
-        )
+        reply = await model.ainvoke([SystemMessage(content=system), HumanMessage(content=text)])
         content = reply.content
         if isinstance(content, list):
             content = "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
@@ -252,6 +280,35 @@ def build_router(
             raise HTTPException(status_code=502, detail=_t("LLM の応答が空でした。"))
         # 説明は索引に1行で載るため、訳で改行が入っても1行に戻す。
         return {"description": " ".join(description.split()), "content": content, "language": current_lang(), "llm_instance": llm_name}
+
+    @router.post("/api/instances/{name}/memories/polish-criteria")
+    async def polish_criteria(
+        name: str,
+        body: CriteriaPolishBody,
+        user: str = Depends(require_login),
+        _csrf: None = Depends(require_csrf),
+    ):
+        """[memory] shared_criteria / private_criteria の下書きを、ダッシュボードの表示言語で清書して返す（保存はしない）。"""
+        _memory_root(name)
+        if body.kind not in mem_store.VISIBILITIES:
+            raise HTTPException(status_code=400, detail=_t("公開範囲が不正です: {0!r}", body.kind))
+        if not body.text.strip():
+            raise HTTPException(status_code=400, detail=_t("清書する文章がありません。"))
+        llm_name = llm_instance(name) or name
+        try:
+            system = _POLISH_CRITERIA_SYSTEM.format(kind=body.kind, language=TRANSLATE_LANGUAGES[current_lang()])
+            text = await _complete(config_loader(llm_name), system, body.text)
+        except Exception as exc:  # noqa: BLE001 - 接続失敗等は画面に出す
+            logger.warning("Criteria polishing failed (llm=%s): %s", llm_name, exc)
+            raise HTTPException(
+                status_code=502,
+                detail=_t("LLM（インスタンス {0!r} の [llm] 接続先）から応答を得られませんでした: {1}", llm_name, exc)
+                + _t("（「管理者設定」の「回答に使う LLM」で、LLM に接続できるインスタンスを選べます）"),
+            ) from exc
+        polished = _clean_criteria(text)
+        if not polished:
+            raise HTTPException(status_code=502, detail=_t("LLM の応答が空でした。"))
+        return {"text": polished, "language": current_lang(), "llm_instance": llm_name}
 
     @router.post("/api/instances/{name}/memories")
     def create_memory(

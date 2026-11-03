@@ -1027,6 +1027,20 @@ const CONFIG_PRESETS = [
     ],
   },
   {
+    name: _t("メモリー"),
+    keys: [
+      "memory.user_visibility",
+      "memory.feedback_visibility",
+      "memory.project_visibility",
+      "memory.reference_visibility",
+      "memory.shared_criteria",
+      "memory.private_criteria",
+      "memory.force_private_checks",
+      "memory.user_ranks",
+      "memory.default_rank",
+    ],
+  },
+  {
     name: _t("ベクターDB"),
     keys: [
       "vector_db.enabled",
@@ -1317,6 +1331,7 @@ function buildKeyRow(k) {
     input.addEventListener("input", () => setEdit(k, input.value));
     inputWrap.appendChild(input);
   }
+  if (!k.ignored && POLISH_CRITERIA_KEYS[id]) inputWrap.appendChild(buildPolishCriteria(k, POLISH_CRITERIA_KEYS[id], inputWrap));
 
   resetBtn.addEventListener("click", () => {
     delete dirtyEdits[id];
@@ -1327,6 +1342,42 @@ function buildKeyRow(k) {
   });
 
   return row;
+}
+
+// 「AIで清書」を付けるキー → 公開範囲（admin/memories.py の polish-criteria）。
+const POLISH_CRITERIA_KEYS = { "memory.shared_criteria": "shared", "memory.private_criteria": "private" };
+
+// メモリーの振り分け基準の下書きを、AI にダッシュボードの表示言語で清書させて入力欄へ入れる（保存はしない）。
+function buildPolishCriteria(k, kind, inputWrap) {
+  const status = el("span", { class: "hint" });
+  const btn = el("button", {
+    type: "button",
+    text: _t("AIで清書"),
+    title: _t("下書きを、AI がこのダッシュボードの表示言語の箇条書きへ整えます（保存はしません）"),
+  });
+  btn.addEventListener("click", async () => {
+    const field = inputWrap.querySelector("input[type=text], textarea");
+    if (!field || !field.value.trim()) {
+      status.textContent = _t("清書する文章を入力してください。");
+      return;
+    }
+    btn.disabled = true;
+    status.textContent = _t("清書しています…");
+    try {
+      const result = await api(`/api/instances/${encodeURIComponent(currentInstanceName)}/memories/polish-criteria`, {
+        method: "POST",
+        body: { kind, text: field.value },
+      });
+      field.value = result.text;
+      setEdit(k, result.text);
+      status.textContent = _t("清書しました（まだ保存していません。内容を確かめてから「保存」を押してください）。");
+    } catch (e) {
+      status.textContent = e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  return el("div", { class: "polish-row" }, [btn, status]);
 }
 
 function buildRawTextarea(k, value) {
@@ -2413,6 +2464,43 @@ async function doSave() {
 
 /* --- ユーザー管理 --- */
 
+// メモリーの優先順位に使うランクの欄（[memory] user_ranks。継承中のユーザーにも設定できる）。
+function buildUserRankCell(name, data) {
+  const td = document.createElement("td");
+  const input = el("input", { type: "number", min: "0", step: "1", class: "rank-input", placeholder: String(data.default_rank ?? "") });
+  const current = data.ranks ? data.ranks[name] : null;
+  input.value = current === null || current === undefined ? "" : String(current);
+  input.disabled = Boolean(data.rank_error);
+  const btn = el("button", { type: "button", text: _t("保存") });
+  btn.disabled = input.disabled;
+  btn.addEventListener("click", async () => {
+    const text = input.value.trim();
+    if (text !== "" && !/^\d+$/.test(text)) {
+      $("#users-error").textContent = _t("ランクは0以上の整数で指定してください。");
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const result = await api(
+        `/api/instances/${encodeURIComponent(currentInstanceName)}/users/${encodeURIComponent(name)}/rank`,
+        { method: "PUT", body: { rank: text === "" ? null : Number(text) } }
+      );
+      $("#users-error").textContent = "";
+      alert(
+        result.needs_restart
+          ? _t("ランクを保存しました。反映にはインスタンスの再起動が必要です。")
+          : _t("ランクを保存しました。")
+      );
+    } catch (e) {
+      $("#users-error").textContent = e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  td.append(input, btn);
+  return td;
+}
+
 async function renderUsers(container) {
   container.appendChild(clone("tpl-users"));
   const data = await api(`/api/instances/${encodeURIComponent(currentInstanceName)}/users`);
@@ -2502,9 +2590,13 @@ async function renderUsers(container) {
     tr.appendChild(tdCheck);
     tr.appendChild(tdName);
     tr.appendChild(tdPw);
+    tr.appendChild(buildUserRankCell(name, data));
     tbody.appendChild(tr);
   }
   syncSelection();
+  $("#users-rank-note").textContent = data.rank_error
+    ? _t("ランクを読み込めません: {0}", data.rank_error)
+    : _t("ランクは、内容が食い違うメモリーをどのユーザーのものに従わせるかに使います（数が大きいほど上位。空欄は {0}）。保存後、インスタンスの再起動で反映されます。", data.default_rank);
 
   $("#add-user-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();

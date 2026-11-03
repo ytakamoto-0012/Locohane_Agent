@@ -1071,18 +1071,48 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   `data/memory/<type>/<name>.md` は**共通**のメモリーとして残り、全ユーザーが検索・読み取り・更新できる。
   `name` は所有者ごとに一意（自分と共通・他のユーザーで同じ名前があってもよい）。
 - **公開範囲（`visibility`）**: ユーザーのメモリーは frontmatter に `private`（本人だけ）か `shared`（全ユーザーが
-  検索・読み取りできる。書き換え・削除は本人だけ）を持つ。`create_memory` で省略すると `feedback` は `shared`、
-  `user`/`project`/`reference` は `private`。種類 `user` と、個人情報・機密の目印（メールアドレス・電話番号・
-  カード／ID 番号・パスワード等・社外秘等の表示・`C:\Users\<名前>\` の個人フォルダのパス。
-  `src/memory.py` の `_SENSITIVE_PATTERNS`）を含むものは、指定に関係なく `private` で保存される。
-  `visibility` が無い・壊れているユーザーのメモリーも `private` とみなす。
+  検索・読み取りできる。書き換え・削除は本人だけ）を持つ。決め方は `config.ini` の `[memory]` で変えられる
+  （設定ダッシュボードの「メモリー」グループ。インスタンスごと）。社内のローカル運用が前提のため、既定は
+  「本人・家族のことだけ個人用、ほかは共有」。
+  - **LLM の判断**: LLM は、システムプロンプトの Memory System 節に差し込まれる振り分け基準（`shared_criteria` /
+    `private_criteria`。`{{memory_visibility}}` を `src/memory.py` の `render_visibility_block` が組み立てる）に沿って、
+    種類ではなく内容で `visibility` を選ぶ。省略すると `shared`。基準は言語を問わず、改行して複数の条件を書ける
+    （プロンプトの「- "shared" for:」「- "private" for:」の下に字下げして入る）。設定画面の「AIで清書」で、下書きを
+    LLM にダッシュボードの表示言語の箇条書きへ整えさせられる（`admin/memories.py` の `polish-criteria`。「AIに相談」と
+    同じく「管理者設定」の「回答に使う LLM」の接続先を使い、保存はしない）。
+  - **種類ごとの公開範囲**（`<type>_visibility`）: `private` の種類は、指定や内容に関係なく常に `private`
+    （既定は `user` だけ）。`shared` の種類は上の LLM の判断に従う。
+  - **強制的に private にする目印**（`force_private_checks`）: 有効にした目印が説明・本文・元ファイルのパスにあれば、
+    指定に関係なく `private` で保存する。`email`（メールアドレス）・`phone`（電話番号）・`card_id`（カード／ID 番号）・
+    `credential`（パスワード・口座番号・マイナンバー等の語）・`confidential_label`（社外秘等の表示）・
+    `personal_path`（`C:\Users\<名前>\` の個人フォルダのパス）から選ぶ（`src/memory.py` の `_SENSITIVE_PATTERNS`）。
+    既定は `card_id` と `credential` だけ。
+  - 規則は `load_config()` が `memory_dir` ごとに登録し（`memory.set_policy`）、ツール・索引・設定ダッシュボードの
+    編集が同じ規則を使う。変更はインスタンスの再起動後に効く（設定ダッシュボードの編集には保存直後から効く）。
+    保存済みのメモリーの `visibility` は書き換えないが、`private` にした
+    種類・有効にした目印に当たる `shared` のメモリーは、他のユーザーには見せなくなる。
+  - `visibility` が無い・壊れているユーザーのメモリーも `private` とみなす。ログ（`create_memory: ... visibility=...
+    (requested=...)`）には、LLM が指定した値（省略なら `None`）と実際に保存した値の両方が出る。
 - **検索と優先順位**: `search_memory`/`list_memories`/索引は、自分のメモリー → 共通 → 他のユーザーの `shared` の
   メモリーの順に並べる（`(mine, ...)`・`(common)`・`(user: <ユーザー>)` を付ける）。他のユーザーの `private` の
   メモリーは LLM に一切渡さない（LLM の判断に任せず、`src/memory.py` の `is_visible_to` で機械的に除く）。
   `shared` でも、今の内容に個人情報・機密の目印があれば他のユーザーには見せない（保存後に手で書き換えられた場合の
   備え）。`read_memory(name)` は同じ名前なら自分のものを読み、他のユーザーのものには「自分のメモリーと食い違えば
   自分のものに従う」と添える。`update_memory`/`delete_memory` は自分のもの（無ければ共通のもの）だけが対象で、
-  他のユーザーのものは拒否する。
+  他のユーザーのものは拒否する（ランクが上でも他のユーザーのメモリーは書き換えられない）。
+- **ユーザーのランク**（`[memory] user_ranks`・`default_rank`）: 組織で使うときに、上司のメモリーを部下のものより
+  優先させるための数字（0以上の整数。大きいほど上位）。設定ダッシュボードの「ユーザー」画面のランクの列でも設定でき、
+  `[memory] user_ranks` に `{"ユーザー名": ランク}` として保存される（パスワードと違い機密ではないため、プロジェクト
+  直下 `.env` から継承中のユーザーにも設定できる。インスタンスの再起動後に効く）。ランクを1人でも設定すると、
+  一覧・索引は所有者のランクが高い順に並び（同じランクの中は上の 自分 → 共通 → 他のユーザー の順）、各行に
+  `rank N` が付く。共通のメモリーと、`user_ranks` に無いユーザーのランクは `default_rank`（既定1）。
+  内容が食い違うメモリーは、所有者のランクが高い方に従う（同じなら自分のもの）よう、システムプロンプトと
+  `read_memory` の注記（相手と自分のランクを示す）で LLM に指示する。`user_ranks` が空なら従来どおり自分の
+  メモリーを優先し、ランクは表示しない。
+- **作成者・更新者の記録**: メモリーの frontmatter に、作ったユーザー（`author`）と、`update_memory` で最後に本文を
+  書き換えたユーザー（`updated_by`）を残す（共通のメモリーをだれが直したか分かるように）。`read_memory` は、
+  所有者と違う作成者・更新者がいれば `Author:`・`Last updated by:` として表示する。`author` の無い既存の
+  ユーザーのメモリーは所有者が作ったものとみなす。
 - **ファイルを直接開かせない**: 他のユーザーのメモリーフォルダ（`data/memory/users/<他のユーザー>/`）は、
   `Read`/`Grep`/`Glob`/`execute_python_code` 等からも読めない（`src/skill_drafts.py` の `access_error`・
   `unreadable_dirs` 等。他のユーザーのドラフトスキルを隠す仕組みと同じ）。
@@ -1108,7 +1138,8 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   `worker` は6つすべて。`agents/*.md` の `tools:`）。サブエージェントも会話のユーザーとして動く。
 - **設定ダッシュボードでの編集**: インスタンス詳細の「メモリー」サブタブで、全ユーザー・共通のメモリーを公開範囲に関係なく
   一覧・閲覧・作成・編集（説明・種類・本文・公開範囲）・削除できる（`admin/memories.py`。書き換えは `src/memory.py` の
-  `edit_memory` で、`created` と `sources` は残し、索引も再構築する。公開範囲の規則は上と同じ）。所有者で絞り込める。
+  `edit_memory` で、`created` と `sources` は残し、索引も再構築する。公開範囲の規則は上と同じで、そのインスタンスの
+  `[memory]` の設定を使う）。所有者で絞り込める。
   一覧のチェックボックスで表示中のメモリーを選んでまとめて削除できる（1件でも見つからなければ何も削除しない。
   絞り込みを変えると選択は外れる）。
   編集画面の「AIで翻訳」は、説明と本文をダッシュボードの表示言語（日本語 / English）へ LLM に訳させて入力欄へ
@@ -1795,6 +1826,10 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[context_compaction]` | `pre_note_warning_text` | 上記閾値到達時に注入する注意メッセージの文言 | `CONTEXT_COMPACTION_PRE_NOTE_WARNING_TEXT` |
 | `[token_ratio]` | `enabled` | 設定ダッシュボード専用（アプリ本体は読まない）。基準値`[graph] token_guard_soft_threshold`や比率を変更したときに、各閾値へ「基準値×比率」を自動入力するか | - |
 | `[token_ratio]` | `<セクション>.<キー>`（例: `subagent.token_guard_soft_threshold`） | 自動入力先の閾値の、基準値に対する比率（空欄なら連動させない） | - |
+| `[memory]` | `user_visibility` / `feedback_visibility` / `project_visibility` / `reference_visibility` | 種類ごとの永続メモリーの公開範囲。`private` の種類は常に個人用、`shared` の種類は LLM が振り分け基準で選ぶ（既定は `user` だけ `private`。「永続メモリー」参照） | `MEMORY_<TYPE>_VISIBILITY` |
+| `[memory]` | `shared_criteria` / `private_criteria` | LLM に渡す振り分け基準（言語は問わず、改行可。空欄なら既定の文言。設定ダッシュボードの「AIで清書」で表示言語の箇条書きに整えられる） | `MEMORY_SHARED_CRITERIA` / `MEMORY_PRIVATE_CRITERIA` |
+| `[memory]` | `user_ranks` / `default_rank` | メモリーの優先順位に使うユーザーのランク（`{"ユーザー名": ランク}`。0以上の整数で大きいほど上位。食い違うメモリーはランクの高い方に従う。設定ダッシュボードの「ユーザー」画面でも設定できる）と、未設定のユーザー・共通のメモリーのランク（既定1）。「永続メモリー」参照 | `MEMORY_USER_RANKS` / `MEMORY_DEFAULT_RANK` |
+| `[memory]` | `force_private_checks` | 指定に関係なく `private` にする目印のリスト（`email`／`phone`／`card_id`／`credential`／`confidential_label`／`personal_path`。既定 `["card_id", "credential"]`） | `MEMORY_FORCE_PRIVATE_CHECKS` |
 | `[path_memory]` | `dir` | パスメモリー機能のレジストリファイル（`<thread_id>.json`）保存先 | `PATH_MEMORY_DIR` |
 | `[path_memory]` | `retention_days` | パスメモリーのレジストリファイル保持日数 | `PATH_MEMORY_RETENTION_DAYS` |
 | `[path_memory]` | `cleanup_interval_hours` | パスメモリーの自動削除チェック間隔（時間） | `PATH_MEMORY_CLEANUP_INTERVAL_HOURS` |

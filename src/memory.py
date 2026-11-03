@@ -9,7 +9,8 @@ ClaudeCode 相当の「スレッド／セッションをまたいで共有され
    ユーザー別になる前からある memory_dir/<type>/<name>.md は「共通」のメモリーとして
    全ユーザーが読み書きできる。ユーザーのメモリーには公開範囲（private / shared）があり、
    他のユーザーに見せるのは shared のものだけ（見せる・見せないはこのモジュールで機械的に
-   決め、LLM の判断には任せない）。
+   決め、LLM の判断には任せない）。種類ごとの公開範囲・強制的に private にする目印は
+   config.ini [memory] で変えられる（MemoryPolicy。load_config() が memory_dir ごとに登録する）。
 3. 索引ファイル MEMORY.md を、保存されているメモリー群から都度再構築する
    （索引を差分更新せず常に全再構築することで整合ズレを防ぐ。共通の分は memory_dir 直下、
    ユーザーの分は users/<ユーザー>/ 直下）。
@@ -31,7 +32,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal
 from pathlib import Path
@@ -49,13 +51,13 @@ USERS_DIRNAME = "users"
 # 公開範囲。private は所有者だけ、shared は全ユーザーが検索・読み取りできる（書き換えは所有者だけ）。
 VISIBILITIES = ("private", "shared")
 Visibility = Literal["private", "shared"]
-# visibility を指定しなかったときの既定値。作業のやり方・訂正（feedback）は他のユーザーにも役立つため共有し、
-# 案件の事情（project）・ファイルから読んだ値や所在（reference）は個人や部署の事情を含みやすいため個人用にする。
-_DEFAULT_VISIBILITY: dict[str, Visibility] = {
+# 種類ごとの公開範囲の既定（config.ini [memory] の <type>_visibility の既定と同じ）。
+# private の種類は指定に関係なく常に個人用、shared の種類は LLM の指定に従う（省略時は shared）。
+DEFAULT_TYPE_VISIBILITY: dict[str, Visibility] = {
     "user": "private",
     "feedback": "shared",
-    "project": "private",
-    "reference": "private",
+    "project": "shared",
+    "reference": "shared",
 }
 
 # name 検証ルール: ASCII の英数字・ハイフン・アンダースコアのみ、1〜64文字（ファイル名として安全にするため）。
@@ -79,23 +81,118 @@ SOURCED_CONTENT_MAX_CHARS = 4000
 SOURCE_FILES_MAX = 10
 _HASH_CHUNK_BYTES = 1024 * 1024
 
-# 他のユーザーに見せてはいけない内容（個人情報・認証情報・機密の表示）の目印。
-# 1つでも当たれば、指定に関係なく個人用（private）にし、共有済みのものも他のユーザーには見せない。
+# 他のユーザーに見せてはいけない内容（個人情報・認証情報・機密の表示）の目印。(設定名, 英語のラベル, パターン)。
+# 有効なものに1つでも当たれば、指定に関係なく個人用（private）にし、共有済みのものも他のユーザーには見せない。
 # 取りこぼしより誤検知（共有されないだけ）の方が害が小さいため、広めに当てる。
-_SENSITIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("email address", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")),
-    ("phone number", re.compile(r"(?<!\d)0\d{1,4}[-‐－−(（ ]\d{1,4}[-‐－−)） ]?\d{3,4}(?!\d)|(?<!\d)0[5789]0\d{8}(?!\d)")),
-    ("card or ID number", re.compile(r"(?<!\d)\d{4}[- ]?\d{4}[- ]?\d{4}(?:[- ]?\d{4})?(?!\d)")),
+# どれを有効にするかは config.ini [memory] force_private_checks で選ぶ（社内で共有したい情報に当たるものは外せる）。
+_SENSITIVE_PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
+    ("email", "email address", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")),
     (
+        "phone",
+        "phone number",
+        re.compile(r"(?<!\d)0\d{1,4}[-‐－−(（ ]\d{1,4}[-‐－−)） ]?\d{3,4}(?!\d)|(?<!\d)0[5789]0\d{8}(?!\d)"),
+    ),
+    ("card_id", "card or ID number", re.compile(r"(?<!\d)\d{4}[- ]?\d{4}[- ]?\d{4}(?:[- ]?\d{4})?(?!\d)")),
+    (
+        "credential",
         "credential or personal ID",
         re.compile(
             r"パスワード|暗証番号|口座番号|マイナンバー|個人番号|クレジットカード|\bpassword\b|\bpasswd\b|\bapi[_ -]?key\b|\bsecret\b",
             re.IGNORECASE,
         ),
     ),
-    ("confidentiality label", re.compile(r"社外秘|極秘|部外秘|関係者外秘|\bconfidential\b", re.IGNORECASE)),
-    ("personal folder path", re.compile(r"[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s]+", re.IGNORECASE)),
+    ("confidential_label", "confidentiality label", re.compile(r"社外秘|極秘|部外秘|関係者外秘|\bconfidential\b", re.IGNORECASE)),
+    ("personal_path", "personal folder path", re.compile(r"[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s]+", re.IGNORECASE)),
 )
+# force_private_checks に書ける値（表示順）。
+PRIVATE_CHECKS: tuple[str, ...] = tuple(check for check, _, _ in _SENSITIVE_PATTERNS)
+_CHECK_LABELS: dict[str, str] = {check: label for check, label, _ in _SENSITIVE_PATTERNS}
+# 既定で有効な目印（config.ini の force_private_checks の既定と同じ）。社内のローカル運用が前提のため、
+# 社内で共有して困らないもの（メール・電話・機密の表示・個人フォルダのパス）は既定では見ない。
+DEFAULT_PRIVATE_CHECKS: frozenset[str] = frozenset({"card_id", "credential"})
+
+# LLM に渡す振り分け基準の既定（config.ini [memory] shared_criteria / private_criteria の既定と同じ）。
+DEFAULT_SHARED_CRITERIA = "know-how that helps anyone (how a task was done, corrections, where shared documents are)"
+DEFAULT_PRIVATE_CRITERIA = "anything about the user personally or their family"
+
+
+# ランクを設定していないユーザー・共通のメモリーのランク（config.ini [memory] default_rank の既定と同じ）。
+DEFAULT_RANK = 1
+
+
+@dataclass(frozen=True)
+class MemoryPolicy:
+    """ユーザーのメモリーの公開範囲と優先順位の規則（config.ini [memory]）。
+
+    Attributes:
+        type_visibility: 種類ごとの公開範囲。private の種類は常に個人用、shared の種類は指定に従う（省略時は shared）。
+        checks: 有効な個人情報・機密の目印（PRIVATE_CHECKS のうち）。当たれば常に個人用。
+        ranks: ユーザー（メモリーの所有者のフォルダ名）ごとのランク。数が大きいほど上位（上司）。
+            内容が食い違うメモリーは、所有者のランクが高い方に従わせる（同じなら自分のもの）。
+        default_rank: ranks に無いユーザーと、共通のメモリーのランク。
+    """
+
+    type_visibility: Mapping[str, Visibility] = field(default_factory=lambda: dict(DEFAULT_TYPE_VISIBILITY))
+    checks: frozenset[str] = DEFAULT_PRIVATE_CHECKS
+    ranks: Mapping[str, int] = field(default_factory=dict)
+    default_rank: int = DEFAULT_RANK
+
+    def private_types(self) -> tuple[str, ...]:
+        return tuple(t for t in MEMORY_TYPES if self.type_visibility.get(t, "private") == "private")
+
+    def rank_of(self, owner: str | None) -> int:
+        """所有者（None は共通）のランク。"""
+        return self.default_rank if owner is None else self.ranks.get(owner, self.default_rank)
+
+    @property
+    def uses_ranks(self) -> bool:
+        """ランクを設定しているか（していなければ一覧にランクを出さない）。"""
+        return bool(self.ranks)
+
+
+DEFAULT_POLICY = MemoryPolicy()
+# memory_root（解決済みパスの文字列）ごとの規則。load_config() が set_policy() で登録する
+# （設定ダッシュボードは複数のインスタンスを扱うため、プロセス全体で1つにはしない）。未登録なら DEFAULT_POLICY。
+_POLICIES: dict[str, MemoryPolicy] = {}
+
+
+def _policy_key(memory_root: Path) -> str:
+    return str(Path(memory_root).resolve())
+
+
+def set_policy(memory_root: Path, policy: MemoryPolicy) -> None:
+    """memory_root のメモリーに使う公開範囲の規則を登録する（load_config() から呼ぶ）。"""
+    _POLICIES[_policy_key(memory_root)] = policy
+
+
+def policy_for(memory_root: Path) -> MemoryPolicy:
+    """memory_root に登録された公開範囲の規則（未登録なら DEFAULT_POLICY）。"""
+    return _POLICIES.get(_policy_key(memory_root), DEFAULT_POLICY)
+
+
+def render_visibility_block(shared_criteria: str, private_criteria: str, policy: MemoryPolicy) -> str:
+    """system_prompt.md の {{memory_visibility}} へ差し込む、公開範囲の決め方の説明を組み立てる。"""
+    shared_types = [t for t in MEMORY_TYPES if t not in policy.private_types()]
+    if not shared_types:
+        return "All memories are saved as private (only the current user can find and read them); omit `visibility`."
+
+    def _indent(text: str) -> str:
+        # 基準は管理者の自由記述（改行可・表示言語のまま）。見出しの下にまとまって見えるよう字下げする。
+        return "\n".join(f"  {line}" for line in text.strip().splitlines() if line.strip())
+
+    lines = [
+        "Choose by the content, not by the memory_type. If omitted, it is shared.",
+        '- "shared" for:',
+        _indent(shared_criteria),
+        '- "private" for:',
+        _indent(private_criteria),
+    ]
+    if policy.private_types():
+        lines.append(f"- Memories of type {'/'.join(policy.private_types())} are always private.")
+    if policy.checks:
+        labels = ", ".join(_CHECK_LABELS[c] for c in PRIVATE_CHECKS if c in policy.checks)
+        lines.append(f"- Content with any of these is saved as private automatically: {labels}.")
+    return "\n".join(lines)
 
 SourceState = Literal["unchanged", "changed", "missing"]
 
@@ -141,6 +238,8 @@ class Memory:
         sources: 内容の元になったファイルの指紋（frontmatter の sources。無ければ空）。
         owner: 所有者（ユーザーのフォルダ名）。None なら共通のメモリー。
         visibility: "private" | "shared"。共通のメモリーは常に "shared"。
+        author: 作ったユーザー（frontmatter の author。記録が無ければ None）。
+        updated_by: 最後に本文を書き換えたユーザー（frontmatter の updated_by。記録が無ければ None）。
     """
 
     name: str
@@ -151,6 +250,8 @@ class Memory:
     sources: tuple[SourceFile, ...] = ()
     owner: str | None = None
     visibility: Visibility = "shared"
+    author: str | None = None
+    updated_by: str | None = None
 
 
 def ensure_dirs(memory_root: Path, owner: str | None = None) -> None:
@@ -273,6 +374,8 @@ def _serialize(
     updated: str,
     sources: tuple[SourceFile, ...] = (),
     visibility: str | None = None,
+    author: str | None = None,
+    updated_by: str | None = None,
 ) -> str:
     """メモリー1件を frontmatter 付き Markdown 文字列へ組み立てる（visibility は共通のメモリーでは書かない）。"""
     frontmatter: dict = {
@@ -282,6 +385,10 @@ def _serialize(
     }
     if visibility is not None:
         frontmatter["visibility"] = visibility
+    if author is not None:
+        frontmatter["author"] = author
+    if updated_by is not None:
+        frontmatter["updated_by"] = updated_by
     frontmatter["created"] = created
     frontmatter["updated"] = updated
     if sources:
@@ -332,6 +439,8 @@ def _load(path: Path, owner: str | None = None) -> Memory | None:
     else:
         raw_visibility = frontmatter.get("visibility")
         visibility = raw_visibility if raw_visibility in VISIBILITIES else "private"
+    author = frontmatter.get("author")
+    updated_by = frontmatter.get("updated_by")
     return Memory(
         name=name,
         description=description,
@@ -341,6 +450,9 @@ def _load(path: Path, owner: str | None = None) -> Memory | None:
         sources=_parse_sources(frontmatter.get("sources"), path),
         owner=owner,
         visibility=visibility,
+        # ユーザー名の記録が無い（ユーザー別になる前の）ユーザーのメモリーは、所有者が作ったものとみなす。
+        author=author if isinstance(author, str) and author else owner,
+        updated_by=updated_by if isinstance(updated_by, str) and updated_by else None,
     )
 
 
@@ -423,9 +535,18 @@ def _validate_sourced_content(content: str, sources: tuple[SourceFile, ...]) -> 
         )
 
 
-def detect_sensitive(text: str) -> list[str]:
-    """他のユーザーに見せてはいけない内容の目印を探し、当たった種類（英語のラベル）を返す。"""
-    return [label for label, pattern in _SENSITIVE_PATTERNS if pattern.search(text)]
+def detect_sensitive(text: str, checks: frozenset[str] | None = None) -> list[str]:
+    """他のユーザーに見せてはいけない内容の目印を探し、当たった種類（英語のラベル）を返す。
+
+    Args:
+        text: 調べる文字列。
+        checks: 有効な目印（PRIVATE_CHECKS のうち）。None なら全部。
+    """
+    return [
+        label
+        for check, label, pattern in _SENSITIVE_PATTERNS
+        if (checks is None or check in checks) and pattern.search(text)
+    ]
 
 
 def _sensitive_text(description: str, content: str, sources: tuple[SourceFile, ...]) -> str:
@@ -438,11 +559,12 @@ def resolve_visibility(
     description: str,
     content: str,
     sources: tuple[SourceFile, ...] = (),
+    policy: MemoryPolicy = DEFAULT_POLICY,
 ) -> tuple[Visibility, list[str]]:
     """ユーザーのメモリーの公開範囲を決める。
 
-    requested が None なら type ごとの既定値。type が user、または個人情報・機密の目印を含むなら、
-    指定に関係なく private にする。
+    requested が None なら shared。policy で private の種類、または有効な個人情報・機密の目印を
+    含むなら、指定に関係なく private にする。
 
     Returns:
         (公開範囲, shared にできなかった理由（shared を求めて private にしたときだけ。英語のラベル）)。
@@ -452,13 +574,12 @@ def resolve_visibility(
     """
     if requested is not None and requested not in VISIBILITIES:
         raise ValueError(f"visibility must be one of {VISIBILITIES}: {requested}")
-    wanted: Visibility = requested if requested is not None else _DEFAULT_VISIBILITY[memory_type]  # type: ignore[assignment]
-    if wanted == "private":
+    if requested == "private":
         return "private", []
     reasons: list[str] = []
-    if memory_type == "user":
-        reasons.append("memory_type user is always private")
-    reasons += detect_sensitive(_sensitive_text(description, content, sources))
+    if memory_type in policy.private_types():
+        reasons.append(f"memory_type {memory_type} is always private")
+    reasons += detect_sensitive(_sensitive_text(description, content, sources), policy.checks)
     return ("private", reasons) if reasons else ("shared", [])
 
 
@@ -500,28 +621,33 @@ def all_memories(memory_root: Path, memory_type: str | None = None) -> list[Memo
     return result
 
 
-def is_visible_to(mem: Memory, viewer: str | None) -> bool:
+def is_visible_to(mem: Memory, viewer: str | None, policy: MemoryPolicy = DEFAULT_POLICY) -> bool:
     """viewer（会話のユーザー）がこのメモリーを検索・読み取りできるか。
 
-    自分のもの・共通のものは常に見える。他のユーザーのものは shared で、しかも今の内容に
-    個人情報・機密の目印が無いものだけ（保存後に手で書き換えられた場合にも漏らさないため、毎回確かめる）。
+    自分のもの・共通のものは常に見える。他のユーザーのものは shared で、しかも今の規則（policy）で
+    private の種類でなく、今の内容に有効な個人情報・機密の目印が無いものだけ（保存後に手で書き換えられた
+    場合や、あとから規則を厳しくした場合にも漏らさないため、毎回確かめる）。
     """
     if mem.owner is None or mem.owner == viewer:
         return True
-    if mem.visibility != "shared":
+    if mem.visibility != "shared" or mem.memory_type in policy.private_types():
         return False
-    return not detect_sensitive(_sensitive_text(mem.description, mem.content, mem.sources))
+    return not detect_sensitive(_sensitive_text(mem.description, mem.content, mem.sources), policy.checks)
 
 
 def _viewer_rank(mem: Memory, viewer: str | None) -> int:
-    """並べ順: 自分（0）→ 共通（1）→ 他のユーザー（2）。似た内容があれば自分のものが先に目に入るようにする。"""
+    """同じランクの中の並べ順: 自分（0）→ 共通（1）→ 他のユーザー（2）。似た内容があれば自分のものが先に目に入るようにする。"""
     if mem.owner is not None and mem.owner == viewer:
         return 0
     return 1 if mem.owner is None else 2
 
 
-def _sorted_for(memories: list[Memory], viewer: str | None) -> list[Memory]:
-    return sorted(memories, key=lambda m: (_viewer_rank(m, viewer), m.memory_type, m.name, m.owner or ""))
+def _sorted_for(memories: list[Memory], viewer: str | None, policy: MemoryPolicy = DEFAULT_POLICY) -> list[Memory]:
+    """所有者のランクが高い順（上司のものが先）、同じランクなら 自分 → 共通 → 他のユーザー の順に並べる。"""
+    return sorted(
+        memories,
+        key=lambda m: (-policy.rank_of(m.owner), _viewer_rank(m, viewer), m.memory_type, m.name, m.owner or ""),
+    )
 
 
 def _find_memory(memory_root: Path, name: str, owner: str | None = None) -> Memory | None:
@@ -592,6 +718,7 @@ def create_memory(
     *,
     owner: str | None = None,
     visibility: str | None = None,
+    author: str | None = None,
 ) -> Path:
     """新しいメモリーを保存し、MEMORY.md 索引を再構築する。
 
@@ -604,8 +731,9 @@ def create_memory(
         source_files: 本文の元になったファイルの絶対パス。指定すると今の sha256 を記録する
             （本文は SOURCED_CONTENT_MAX_CHARS 文字まで）。
         owner: 所有者。None なら共通のメモリーとして保存する。
-        visibility: ユーザーのメモリーの公開範囲（None なら type ごとの既定値）。
-            resolve_visibility() の規則で private に倒すことがある。共通のメモリーでは無視する。
+        visibility: ユーザーのメモリーの公開範囲（None なら shared）。memory_root に登録された規則
+            （policy_for）に沿って resolve_visibility() が private に倒すことがある。共通のメモリーでは無視する。
+        author: 作ったユーザー（frontmatter の author に記録する）。None なら owner。
 
     Returns:
         作成したファイルの絶対パス。
@@ -625,7 +753,9 @@ def create_memory(
     sources = fingerprint_sources(source_files) if source_files else ()
     _validate_sourced_content(content, sources)
     final_visibility = (
-        None if owner is None else resolve_visibility(memory_type, visibility, description, content, sources)[0]
+        None
+        if owner is None
+        else resolve_visibility(memory_type, visibility, description, content, sources, policy_for(memory_root))[0]
     )
     ensure_dirs(memory_root, owner)
     now = _now()
@@ -639,6 +769,7 @@ def create_memory(
             updated=now,
             sources=sources,
             visibility=final_visibility,
+            author=author if author is not None else owner,
         ),
         encoding="utf-8",
     )
@@ -655,6 +786,7 @@ def update_memory(
     *,
     owner: str | None = None,
     visibility: str | None = None,
+    updated_by: str | None = None,
 ) -> Path:
     """既存メモリーの本文を更新し、MEMORY.md 索引を再構築する（name/description/type は不変）。
 
@@ -667,6 +799,7 @@ def update_memory(
         owner: 所有者。None なら共通のメモリーを更新する。
         visibility: ユーザーのメモリーの新しい公開範囲（None なら今の値のまま）。新しい本文が
             個人情報・機密の目印を含めば private にする。共通のメモリーでは無視する。
+        updated_by: 書き換えたユーザー（frontmatter の updated_by に記録する）。None なら記録済みの値のまま。
 
     Returns:
         更新したファイルの絶対パス。
@@ -688,6 +821,7 @@ def update_memory(
         content=content,
         sources=mem.sources if source_files is None else fingerprint_sources(source_files),
         visibility=visibility if visibility is not None else mem.visibility,
+        updated_by=updated_by,
     )
 
 
@@ -751,11 +885,14 @@ def _rewrite(
     content: str,
     sources: tuple[SourceFile, ...],
     visibility: str,
+    updated_by: str | None = None,
 ) -> Path:
-    """mem を新しい内容で書き直す（created は残す。type が変われば移す）。"""
+    """mem を新しい内容で書き直す（created・author は残す。type が変われば移す）。"""
     _validate_sourced_content(content, sources)
     final_visibility = (
-        None if mem.owner is None else resolve_visibility(memory_type, visibility, description, content, sources)[0]
+        None
+        if mem.owner is None
+        else resolve_visibility(memory_type, visibility, description, content, sources, policy_for(memory_root))[0]
     )
     frontmatter, _ = _split_frontmatter(mem.path.read_text(encoding="utf-8"))
     created = frontmatter.get("created") if frontmatter else None
@@ -771,6 +908,8 @@ def _rewrite(
             updated=_now(),
             sources=sources,
             visibility=final_visibility,
+            author=mem.author,
+            updated_by=updated_by if updated_by is not None else mem.updated_by,
         ),
         encoding="utf-8",
     )
@@ -828,9 +967,10 @@ def read_visible_memory(memory_root: Path, name: str, viewer: str | None, owner:
             または他のユーザーに同じ名前が複数ある場合。
     """
     _validate_name(name)
+    policy = policy_for(memory_root)
     if not auto:
         mem = _find_memory(memory_root, name, owner)
-        if mem is None or not is_visible_to(mem, viewer):
+        if mem is None or not is_visible_to(mem, viewer, policy):
             raise ValueError(f"Memory not found: {name}")
         return mem
     for scope in ([viewer] if viewer is not None else []) + [None]:
@@ -840,7 +980,7 @@ def read_visible_memory(memory_root: Path, name: str, viewer: str | None, owner:
     others = [
         m
         for o in list_owners(memory_root)
-        if o != viewer and (m := _find_memory(memory_root, name, o)) is not None and is_visible_to(m, viewer)
+        if o != viewer and (m := _find_memory(memory_root, name, o)) is not None and is_visible_to(m, viewer, policy)
     ]
     if not others:
         raise ValueError(f"Memory not found: {name}")
@@ -888,29 +1028,38 @@ def list_memories(memory_root: Path, memory_type: str | None = None, *, viewer: 
         viewer: 会話のユーザー（None ならどのユーザーでもない立場 = 共通と他のユーザーの共有のもの）。
 
     Returns:
-        Memory のリスト（自分 → 共通 → 他のユーザー、その中は memory_type→name の順）。
+        Memory のリスト（所有者のランクが高い順。同じランクなら 自分 → 共通 → 他のユーザー、
+        その中は memory_type→name の順）。
 
     Raises:
         ValueError: memory_type が不正な値の場合。
     """
-    visible = [m for m in all_memories(memory_root, memory_type) if is_visible_to(m, viewer)]
-    return _sorted_for(visible, viewer)
+    policy = policy_for(memory_root)
+    visible = [m for m in all_memories(memory_root, memory_type) if is_visible_to(m, viewer, policy)]
+    return _sorted_for(visible, viewer, policy)
 
 
-def label_for(mem: Memory, viewer: str | None) -> str:
-    """一覧・検索結果で name の後ろに付ける持ち主の表示（例: " (mine, private)"・" (common)"・" (user: alice)"）。"""
+def label_for(mem: Memory, viewer: str | None, policy: MemoryPolicy = DEFAULT_POLICY) -> str:
+    """一覧・検索結果で name の後ろに付ける持ち主の表示（例: " (mine, private)"・" (common)"・" (user: alice)"）。
+
+    ランクを設定していれば、所有者のランクも付ける（例: " (user: alice, rank 3)"）。
+    """
     if mem.owner is None:
-        return " (common)"
-    if mem.owner == viewer:
-        return " (mine, private)" if mem.visibility == "private" else " (mine, shared)"
-    return f" (user: {mem.owner})"
+        parts = ["common"]
+    elif mem.owner == viewer:
+        parts = ["mine", mem.visibility]
+    else:
+        parts = [f"user: {mem.owner}"]
+    if policy.uses_ranks:
+        parts.append(f"rank {policy.rank_of(mem.owner)}")
+    return f" ({', '.join(parts)})"
 
 
 def render_memory_block(memory_root: Path, viewer: str | None = None, max_lines: int = _INDEX_MAX_LINES) -> str:
     """system_prompt.md の {{memory}} プレースホルダーへ差し込むテキストを、viewer 向けに組み立てる。
 
-    viewer が見えるメモリー（自分 → 共通 → 他のユーザーの共有のもの）を1行ずつ並べ、
-    max_lines を超える場合は切り詰めて注記を付す（自分のものが先に残る）。
+    viewer が見えるメモリー（所有者のランクが高い順。同じランクなら 自分 → 共通 → 他のユーザーの共有のもの）を
+    1行ずつ並べ、max_lines を超える場合は切り詰めて注記を付す（先に並ぶものが残る）。
 
     Args:
         memory_root: メモリーストアのルートディレクトリ。
@@ -923,8 +1072,10 @@ def render_memory_block(memory_root: Path, viewer: str | None = None, max_lines:
     memories = list_memories(memory_root, viewer=viewer) if memory_root.is_dir() else []
     if not memories:
         return "(no memories saved)"
+    policy = policy_for(memory_root)
     lines = [
-        f"- [{m.memory_type}] {m.name}{label_for(m, viewer)}: {m.description}"[:_INDEX_ENTRY_MAX_CHARS] for m in memories
+        f"- [{m.memory_type}] {m.name}{label_for(m, viewer, policy)}: {m.description}"[:_INDEX_ENTRY_MAX_CHARS]
+        for m in memories
     ]
     if len(lines) > max_lines:
         lines = lines[:max_lines] + [

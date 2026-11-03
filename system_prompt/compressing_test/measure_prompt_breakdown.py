@@ -69,6 +69,7 @@ from src.config import (  # noqa: E402
     expand_config_vars,
     load_config,
     render_agent_type_run_script_allowlist_block,
+    render_memory_visibility_block,
     render_plan_approval_exempt_scripts_block,
 )
 from src.memory import render_memory_block  # noqa: E402
@@ -179,6 +180,7 @@ def build_production_system_prompt(config) -> tuple[str, str]:
         "{{project_instructions}}",
         render_project_instructions_block(config.project_instructions_paths),
     )
+    system_prompt = system_prompt.replace("{{memory_visibility}}", render_memory_visibility_block(config))
     return system_prompt, main_skills_block
 
 

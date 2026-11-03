@@ -749,6 +749,40 @@ DESCRIPTIONS: dict[str, str] = {
         'readable - shown in the skill list and can be read. Cannot be run, written or evaluated.\n'
         'full     - can be listed, read, run, written and evaluated.'
     ),
+    'memory.user_visibility': (
+        'Visibility of persistent memories (create_memory etc., src/memory.py). A user\'s memory is either shared (every user of the same instance can find and read it; only its owner can change or delete it) or private (only its owner).\n'
+        'Since the system is meant to run locally inside an organization, the default is "only things about the person and their family are private; everything else is shared". Changes apply after the instance restarts (the visibility of memories already saved is not rewritten; however, shared memories of a type set to private, or matching a check that is turned on, are no longer shown to other users).\n'
+        'Visibility per memory type (private / shared). Memories of a private type are always private, regardless of what the LLM asks or what they contain. For a shared type, the LLM chooses by the content following shared_criteria / private_criteria below (shared if it does not specify).\n'
+        'user: the user\'s role and preferences.'
+    ),
+    'memory.feedback_visibility': 'feedback: corrections and approaches that worked.',
+    'memory.project_visibility': 'project: the background of ongoing work (who, why, by when).',
+    'memory.reference_visibility': 'reference: where external documents and files are, and values read from files.',
+    'memory.shared_criteria': (
+        'Criteria given to the LLM (put, indented, under "- "shared" for:" and "- "private" for:" in the Memory System section of the system prompt).\n'
+        'Any language is fine, and several conditions can be written on separate lines (when writing directly in config.ini, indent the second and later lines with spaces). "Polish with AI" on the settings dashboard turns a draft into a bullet list in the dashboard\'s display language. If empty, the default wording is used.\n'
+        'shared_criteria: what should be shared.'
+    ),
+    'memory.private_criteria': (
+        'private_criteria: what should be private (applies to memories of a shared type). Written the same way as shared_criteria.'
+    ),
+    'memory.force_private_checks': (
+        'If the content has any of these, it is saved as private regardless of what the LLM asks, and shared memories are not shown to other users either (a broad check that prefers false positives to misses). Only the kinds in the list are used (an empty list checks nothing).\n'
+        'email              - e-mail addresses\n'
+        'phone              - phone numbers\n'
+        'card_id            - card or ID numbers (3 or 4 groups of 4 digits)\n'
+        'credential         - words such as password, PIN, bank account number, My Number, credit card, api key, secret\n'
+        'confidential_label - labels such as "confidential" (and the Japanese equivalents)\n'
+        'personal_path      - personal folder paths in the form C:\\Users\\<name>\\'
+    ),
+    'memory.user_ranks': (
+        'Rank per user (an integer of 0 or more; a larger number is more senior). Write it as {"username": rank, ...} (it can also be set on the "Users" screen of the settings dashboard).\n'
+        "No one can change or delete another user's memories, regardless of rank. When memories disagree, the one by the user with the higher rank is followed (on equal rank, your own), and lists and the index are ordered from the highest rank.\n"
+        'If empty ({}), ranks are not used and your own memories take precedence as before (ranks are not shown in lists either).'
+    ),
+    'memory.default_rank': (
+        'The rank of users not in user_ranks, and of common memories (those from before memories became per user, and those created without an owner on the settings dashboard).'
+    ),
     'skill_lab.instance_locohane_dir': (
         'Settings of the Skill Lab ("Skill Lab" tab of the admin tool, admin/skill_lab/) that apply on the side of the research theme\'s target instance (the promotion destination). Override them in the main instance\'s config_overrides.json.\n'
         'For the settings of the skill tuning worker itself, see [skill_lab_worker].\n'

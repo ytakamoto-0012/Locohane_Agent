@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
@@ -1157,6 +1158,19 @@ class Config:
     memory_dir: Path
     plans_dir: Path
     help_path: Path
+
+    # --- 永続メモリーの公開範囲と優先順位（[memory]、src/memory.py の MemoryPolicy） ---
+    # 種類ごとの公開範囲（private の種類は常に個人用、shared の種類は LLM の指定に従う）。
+    memory_type_visibility: dict[str, str]
+    # LLM に渡す振り分け基準（system_prompt.md の {{memory_visibility}} に入る）。
+    memory_shared_criteria: str
+    memory_private_criteria: str
+    # 強制的に個人用にする個人情報・機密の目印（memory.PRIVATE_CHECKS のうち）。
+    memory_force_private_checks: frozenset[str]
+    # ユーザー（メモリーの所有者のフォルダ名）ごとのランク。大きいほど上位で、食い違うメモリーはランクの高い方に従わせる。
+    memory_user_ranks: dict[str, int]
+    # user_ranks に無いユーザーと、共通のメモリーのランク。
+    memory_default_rank: int
 
     # --- ユーザー別ドラフトスキル（[skill_creator]、src/skill_drafts.py） ---
     # skill-creator が作るドラフトスキルの置き場。起動時のスキル走査対象
@@ -2542,6 +2556,105 @@ def _parse_skill_draft_visibility(value: object) -> str:
     return mode
 
 
+def _parse_memory_type_visibility(section: Mapping[str, str]) -> dict[str, str]:
+    """[memory].<type>_visibility（user/feedback/project/reference）を読む（環境変数 MEMORY_<TYPE>_VISIBILITY が優先）。
+
+    Raises:
+        ValueError: private / shared 以外の値の場合。
+    """
+    result: dict[str, str] = {}
+    for memory_type in memory.MEMORY_TYPES:
+        key = f"{memory_type}_visibility"
+        raw = os.getenv(f"MEMORY_{memory_type.upper()}_VISIBILITY", section.get(key, memory.DEFAULT_TYPE_VISIBILITY[memory_type]))
+        value = str(raw).strip().lower()
+        if value not in memory.VISIBILITIES:
+            raise ValueError(f"[memory].{key} must be one of {'/'.join(memory.VISIBILITIES)}: {raw!r}")
+        result[memory_type] = value
+    return result
+
+
+def _as_memory_criteria(value: object, default: str) -> str:
+    """[memory].shared_criteria / private_criteria を読む（改行は残し、空行と行末の空白は除く。空欄なら既定の文言）。"""
+    lines = [line.rstrip() for line in str(value or "").splitlines() if line.strip()]
+    return "\n".join(lines) or default
+
+
+def _parse_memory_force_private_checks(value: str | None) -> frozenset[str]:
+    """[memory].force_private_checks（memory.PRIVATE_CHECKS のうちのリスト）を読む。キーが無ければ既定。
+
+    Raises:
+        ValueError: リストとして読めない、または知らない値を含む場合。
+    """
+    if value is None:
+        return memory.DEFAULT_PRIVATE_CHECKS
+    checks = [c.strip() for c in _as_message_list(value)]
+    unknown = [c for c in checks if c not in memory.PRIVATE_CHECKS]
+    if unknown:
+        raise ValueError(
+            f"[memory].force_private_checks can only contain {', '.join(memory.PRIVATE_CHECKS)} (current value: {', '.join(unknown)})"
+        )
+    return frozenset(checks)
+
+
+def _as_memory_rank(value: object, key: str) -> int:
+    """ランク（0以上の整数）として解釈して返す。
+
+    Raises:
+        ValueError: 整数でない、または負の場合。
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer of 0 or more: {value!r}")
+    try:
+        rank = int(str(value).strip())
+    except ValueError as e:
+        raise ValueError(f"{key} must be an integer of 0 or more: {value!r}") from e
+    if rank < 0:
+        raise ValueError(f"{key} must be an integer of 0 or more: {value!r}")
+    return rank
+
+
+def _parse_memory_user_ranks(value: str | None) -> dict[str, int]:
+    """[memory].user_ranks（{"ユーザー名": ランク, ...}）を読む。
+
+    ユーザー名はメモリーの所有者のフォルダ名と同じ規則（skill_drafts.draft_owner_name。小文字に揃える等）で整える。
+
+    Raises:
+        ValueError: 辞書として読めない、またはランクが0以上の整数でない場合。
+    """
+    from .skill_drafts import draft_owner_name  # noqa: PLC0415 (skill_drafts が memory を import するため遅延)
+
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = ast.literal_eval(text)
+    except (ValueError, SyntaxError) as e:
+        raise ValueError(f'[memory].user_ranks must be a dict like {{"alice": 3}}: {text!r}') from e
+    if not isinstance(parsed, dict):
+        raise ValueError(f'[memory].user_ranks must be a dict like {{"alice": 3}}: {text!r}')
+    ranks: dict[str, int] = {}
+    for user, rank in parsed.items():
+        if not str(user).strip():
+            continue
+        ranks[draft_owner_name(str(user).strip())] = _as_memory_rank(rank, f"[memory].user_ranks[{user!r}]")
+    return ranks
+
+
+def memory_policy(config: Config) -> memory.MemoryPolicy:
+    """Config の [memory] から、メモリーの公開範囲と優先順位の規則を作る。"""
+    return memory.MemoryPolicy(
+        type_visibility=dict(config.memory_type_visibility),  # type: ignore[arg-type]
+        checks=config.memory_force_private_checks,
+        ranks=dict(config.memory_user_ranks),
+        default_rank=config.memory_default_rank,
+    )
+
+
+def render_memory_visibility_block(config: Config) -> str:
+    """system_prompt.md の {{memory_visibility}} へ差し込む、公開範囲の決め方の説明を組み立てる。"""
+    return memory.render_visibility_block(config.memory_shared_criteria, config.memory_private_criteria, memory_policy(config))
+
+
 def _positive_float(value: object, key: str) -> float:
     """0より大きい数値として解釈して返す。
 
@@ -3090,6 +3203,7 @@ def load_config(
     skill_lab_section = parser["skill_lab"] if parser.has_section("skill_lab") else {}
     skill_lab_worker_section = parser["skill_lab_worker"] if parser.has_section("skill_lab_worker") else {}
     path_memory = parser["path_memory"] if parser.has_section("path_memory") else {}
+    memory_section = parser["memory"] if parser.has_section("memory") else {}
     vector_db = parser["vector_db"] if parser.has_section("vector_db") else {}
     log_section = parser["log"] if parser.has_section("log") else {}
     chat_log = parser["chat_log"] if parser.has_section("chat_log") else {}
@@ -3355,6 +3469,22 @@ def load_config(
             PROJECT_ROOT, _sub_common_data_dir(os.getenv("PLANS_DIR", paths.get("plans_dir", "${common_data_dir}/plans")), common_data_dir, resolved_instance_name)
         ),
         help_path=_resolve(PROJECT_ROOT, os.getenv("HELP_PATH", paths.get("help_path", "./system_prompt/help.md"))),
+        memory_type_visibility=_parse_memory_type_visibility(memory_section),
+        memory_shared_criteria=_as_memory_criteria(
+            os.getenv("MEMORY_SHARED_CRITERIA", memory_section.get("shared_criteria", "")),
+            memory.DEFAULT_SHARED_CRITERIA,
+        ),
+        memory_private_criteria=_as_memory_criteria(
+            os.getenv("MEMORY_PRIVATE_CRITERIA", memory_section.get("private_criteria", "")),
+            memory.DEFAULT_PRIVATE_CRITERIA,
+        ),
+        memory_force_private_checks=_parse_memory_force_private_checks(
+            os.getenv("MEMORY_FORCE_PRIVATE_CHECKS", memory_section.get("force_private_checks", None))
+        ),
+        memory_user_ranks=_parse_memory_user_ranks(os.getenv("MEMORY_USER_RANKS", memory_section.get("user_ranks", ""))),
+        memory_default_rank=_as_memory_rank(
+            os.getenv("MEMORY_DEFAULT_RANK", memory_section.get("default_rank", memory.DEFAULT_RANK)), "[memory].default_rank"
+        ),
         skill_draft_dir=_resolve(
             PROJECT_ROOT,
             _sub_common_data_dir(
@@ -4108,6 +4238,8 @@ def load_config(
     cfg.plans_dir.mkdir(parents=True, exist_ok=True)
     cfg.skill_draft_dir.mkdir(parents=True, exist_ok=True)
     memory.ensure_dirs(cfg.memory_dir)
+    # メモリーの公開範囲の規則を memory_dir ごとに登録する（ツール・索引・設定ダッシュボードの編集が同じ規則を使う）。
+    memory.set_policy(cfg.memory_dir, memory_policy(cfg))
 
     return cfg
 

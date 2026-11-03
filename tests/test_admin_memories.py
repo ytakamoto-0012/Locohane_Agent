@@ -145,10 +145,10 @@ def test_owner_scoped_crud_and_visibility(env):
     assert sorted((m["owner"] or "", m["visibility"]) for m in data["memories"]) == [("", "shared"), ("alice", "shared")]
     res = client.put(
         "/api/instances/default/memories/tips?owner=alice",
-        json={"description": "d", "type": "feedback", "content": "電話 03-1234-5678", "visibility": "shared"},
+        json={"description": "d", "type": "feedback", "content": "パスワード xxx", "visibility": "shared"},
     )
     assert res.json()["visibility"] == "private"
-    assert client.get("/api/instances/default/memories/tips?owner=alice").json()["content"] == "電話 03-1234-5678"
+    assert client.get("/api/instances/default/memories/tips?owner=alice").json()["content"] == "パスワード xxx"
     assert client.get("/api/instances/default/memories/tips").json()["content"] == "c"
     assert client.delete("/api/instances/default/memories/tips?owner=alice").status_code == 200
     assert (inst.backups_dir(env["root"], "default") / "memory" / "alice" / "tips").is_dir()
@@ -175,6 +175,38 @@ def test_translate_uses_selected_llm_and_does_not_save(env):
     assert [("into Japanese" in c[1]) for c in _FakeModel.calls] == [True]
     empty = env["client"].post("/api/instances/default/memories/translate", json={"description": " ", "content": ""})
     assert empty.status_code == 400
+
+
+def test_polish_criteria_uses_dashboard_language_and_selected_llm(env):
+    _FakeModel.calls.clear()
+    res = env["client"].post(
+        "/api/instances/default/memories/polish-criteria", json={"kind": "private", "text": "顧客名\n金額"}
+    )
+    assert res.status_code == 200
+    # <think> を外し、改行は残す
+    assert res.json() == {"text": "EN:顧客名\n金額", "language": "ja", "llm_instance": "llm-inst"}
+    assert "should be private" in _FakeModel.calls[0][1] and "in Japanese" in _FakeModel.calls[0][1]
+    assert not env["memory_dir"].exists()
+    # 英語表示なら英語で清書させる
+    _FakeModel.calls.clear()
+    res = env["client"].post(
+        "/api/instances/default/memories/polish-criteria",
+        json={"kind": "shared", "text": "tips"},
+        headers={"X-Locohane-Lang": "en"},
+    )
+    assert res.json()["language"] == "en" and "in English" in _FakeModel.calls[0][1]
+    assert (
+        env["client"].post("/api/instances/default/memories/polish-criteria", json={"kind": "public", "text": "x"}).status_code
+        == 400
+    )
+    assert (
+        env["client"].post("/api/instances/default/memories/polish-criteria", json={"kind": "shared", "text": " "}).status_code
+        == 400
+    )
+
+
+def test_clean_criteria():
+    assert memories._clean_criteria("```\n- 顧客名  \n\n- 金額\n```\n") == "- 顧客名\n- 金額"
 
 
 def test_bulk_delete_is_all_or_nothing(env):

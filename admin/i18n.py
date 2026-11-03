@@ -248,6 +248,8 @@ EN: dict[str, str] = {
     "回答を考えています…": "Thinking about the answer…",
     "LLM（インスタンス {0!r} の [llm] 接続先）から応答を得られませんでした: {1}": "Got no response from the LLM (the [llm] endpoints of instance {0!r}): {1}",
     "LLM の応答が空でした。": "The LLM returned an empty response.",
+    "清書する文章がありません。": "There is no text to polish.",
+    "ランクは0以上の整数で指定してください。": "Enter the rank as an integer of 0 or more.",
     'インスタンス {0!r} 自身の共有パス': 'the shared paths of instance {0!r} itself',
     '存在しません': 'Does not exist',
     'ドライブのルート・ホーム・プロジェクト等の上位ディレクトリのため削除できません': 'Cannot be deleted because it is a top-level directory such as a drive root, the home folder or the project',

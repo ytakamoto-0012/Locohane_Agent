@@ -103,6 +103,7 @@ from src.config import (
     expand_config_vars,
     load_config,
     render_agent_type_run_script_allowlist_block,
+    render_memory_visibility_block,
     render_plan_approval_exempt_scripts_block,
     with_reasoning_effort,
 )
@@ -1901,6 +1902,9 @@ async def _setup() -> None:
         "{{project_instructions}}",
         render_project_instructions_block(_config.project_instructions_paths),
     )
+    # メモリーの公開範囲の決め方（[memory]）。振り分け基準は管理者の自由記述のため、project_instructions と同じく
+    # config 変数の展開の後に差し込む。
+    system_prompt = system_prompt.replace("{{memory_visibility}}", render_memory_visibility_block(_config))
 
     # サブエージェント共通の注意事項（反復回数の定義・フォールバック方針）を、
     # agents/*.md ファイル自体には書き込まず、各 agent_type の system_prompt

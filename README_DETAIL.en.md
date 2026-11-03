@@ -1060,18 +1060,53 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   `data/memory/<type>/<name>.md`, stay as **common** memories that all users can search, read and update.
   `name` is unique per owner (the same name may exist for yourself, common and other users).
 - **Visibility (`visibility`)**: a user's memory has `private` (the owner only) or `shared` (all users can search and read
-  it; only the owner can change or delete it) in its frontmatter. If omitted in `create_memory`, `feedback` is `shared`
-  and `user`/`project`/`reference` are `private`. Type `user`, and content with signs of personal or confidential
-  details (e-mail addresses, phone numbers, card/ID numbers, passwords and the like, confidentiality labels, personal
-  folder paths such as `C:\Users\<name>\`; `_SENSITIVE_PATTERNS` in `src/memory.py`), are always saved as `private`.
-  A user's memory without a valid `visibility` is treated as `private`.
+  it; only the owner can change or delete it) in its frontmatter. How it is decided can be changed in `[memory]` of
+  `config.ini` (the "Memory" group of the settings dashboard, per instance). Since the system is meant to run locally
+  inside an organization, the default is "only things about the person and their family are private; everything else
+  is shared".
+  - **The LLM's choice**: the LLM chooses `visibility` by the content, not by the type, following the criteria
+    (`shared_criteria` / `private_criteria`) put into the Memory System section of the system prompt
+    (`{{memory_visibility}}`, built by `render_visibility_block` in `src/memory.py`). If omitted, it is `shared`. The
+    criteria can be in any language and span several lines (they are put, indented, under "- "shared" for:" and
+    "- "private" for:" in the prompt). "Polish with AI" on the settings screen has the LLM turn a draft into a bullet list
+    in the dashboard's display language (`polish-criteria` in `admin/memories.py`; it uses the "LLM used for answers" of
+    the admin settings, like "Ask AI", and does not save).
+  - **Visibility per type** (`<type>_visibility`): memories of a `private` type are always `private`, regardless of the
+    request or content (by default only `user`). A `shared` type follows the LLM's choice above.
+  - **Checks that force `private`** (`force_private_checks`): if a check that is turned on matches the description,
+    content or source file paths, the memory is saved as `private` regardless of the request. Choose from `email`,
+    `phone`, `card_id` (card/ID numbers), `credential` (words such as password, bank account number, My Number),
+    `confidential_label` (labels such as "confidential") and `personal_path` (personal folder paths such as
+    `C:\Users\<name>\`) (`_SENSITIVE_PATTERNS` in `src/memory.py`). By default only `card_id` and `credential`.
+  - `load_config()` registers the rules per `memory_dir` (`memory.set_policy`), so the tools, the index and edits on the
+    settings dashboard use the same rules. Changes apply after the instance restarts (edits on the settings dashboard use
+    them right after saving). The `visibility` of memories already
+    saved is not rewritten, but `shared` memories of a type set to `private`, or matching a check that is turned on, are
+    no longer shown to other users.
+  - A user's memory without a valid `visibility` is treated as `private`. The log (`create_memory: ... visibility=...
+    (requested=...)`) shows both the value the LLM asked for (`None` if omitted) and the value actually saved.
 - **Search and priority**: `search_memory`/`list_memories`/the index list your own memories, then common ones, then other
   users' `shared` ones (marked `(mine, ...)`, `(common)`, `(user: <user>)`). Other users' `private` memories are never
   passed to the LLM (removed mechanically by `is_visible_to` in `src/memory.py`, not left to the LLM's judgment).
   Even `shared` ones are hidden from other users if their current content has signs of personal or confidential details
   (in case they were edited by hand after saving). `read_memory(name)` reads your own memory when names collide and,
   for another user's memory, adds "if it conflicts with your own memory, follow your own". `update_memory`/`delete_memory`
-  only work on your own memory (or else the common one) and refuse other users' memories.
+  only work on your own memory (or else the common one) and refuse other users' memories (even a higher rank cannot
+  change another user's memory).
+- **User ranks** (`[memory] user_ranks`, `default_rank`): a number (an integer of 0 or more; larger is more senior) so
+  that, in an organization, a manager's memories take precedence over their team members'. It can also be set in the rank
+  column of the "Users" screen of the settings dashboard, and is saved in `[memory] user_ranks` as `{"username": rank}`
+  (unlike passwords it is not secret, so it can be set for users inherited from the project's `.env` too; it applies
+  after the instance restarts). Once a rank is set for anyone, lists and the index are ordered from the highest owner
+  rank (within the same rank: your own, then common, then other users'), and each line shows `rank N`. Common memories
+  and users not in `user_ranks` have `default_rank` (default 1). The system prompt and the note `read_memory` adds
+  (showing the owner's rank and yours) tell the LLM to follow the memory whose owner has the higher rank when memories
+  disagree (on equal rank, your own). If `user_ranks` is empty, your own memories take precedence as before and ranks
+  are not shown.
+- **Author and updater**: a memory's frontmatter records the user who created it (`author`) and the user who last changed
+  its body with `update_memory` (`updated_by`), so you can tell who edited a common memory. `read_memory` shows them as
+  `Author:` and `Last updated by:` when they differ from the owner. Existing user memories without `author` are treated
+  as created by their owner.
 - **No opening the files directly**: other users' memory folders (`data/memory/users/<other user>/`) cannot be read
   with `Read`/`Grep`/`Glob`/`execute_python_code` etc. either (`access_error`, `unreadable_dirs` etc. in
   `src/skill_drafts.py`; the same mechanism that hides other users' draft skills).
@@ -1769,6 +1804,10 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[context_compaction]` | `skill_reattach_total_max_chars` | Maximum characters of the whole reattachment above. Older skills that do not fit are only listed by name | `CONTEXT_COMPACTION_SKILL_REATTACH_TOTAL_MAX_CHARS` |
 | `[context_compaction]` | `pre_note_threshold` | Threshold of the total_tokens of the most recent LLM call at which, before compaction fires, a warning message urging writing to `write_thread_note` is injected (0 or less disables it) | `CONTEXT_COMPACTION_PRE_NOTE_THRESHOLD` |
 | `[context_compaction]` | `pre_note_warning_text` | Text of the warning message injected when the above threshold is reached | `CONTEXT_COMPACTION_PRE_NOTE_WARNING_TEXT` |
+| `[memory]` | `user_visibility` / `feedback_visibility` / `project_visibility` / `reference_visibility` | Visibility of persistent memories per type. A `private` type is always private; for a `shared` type the LLM chooses by the criteria (by default only `user` is `private`; see "Persistent memory") | `MEMORY_<TYPE>_VISIBILITY` |
+| `[memory]` | `shared_criteria` / `private_criteria` | Criteria given to the LLM (any language, line breaks allowed; the default wording if empty; "Polish with AI" on the settings dashboard turns them into a bullet list in the display language) | `MEMORY_SHARED_CRITERIA` / `MEMORY_PRIVATE_CRITERIA` |
+| `[memory]` | `user_ranks` / `default_rank` | User ranks used to prioritize memories (`{"username": rank}`; an integer of 0 or more, larger is more senior; when memories disagree, the higher rank is followed; can also be set on the "Users" screen of the settings dashboard), and the rank of users without one and of common memories (default 1). See "Persistent memory" | `MEMORY_USER_RANKS` / `MEMORY_DEFAULT_RANK` |
+| `[memory]` | `force_private_checks` | List of checks that force `private` regardless of the request (`email` / `phone` / `card_id` / `credential` / `confidential_label` / `personal_path`; default `["card_id", "credential"]`) | `MEMORY_FORCE_PRIVATE_CHECKS` |
 | `[path_memory]` | `dir` | Where the registry files (`<thread_id>.json`) of path memory are saved | `PATH_MEMORY_DIR` |
 | `[path_memory]` | `retention_days` | Retention in days of the path memory registry files | `PATH_MEMORY_RETENTION_DAYS` |
 | `[path_memory]` | `cleanup_interval_hours` | Interval (hours) of the path memory automatic deletion check | `PATH_MEMORY_CLEANUP_INTERVAL_HOURS` |

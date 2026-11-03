@@ -355,6 +355,8 @@ $C -X POST $BASE/api/instances/default/users -H "$H" -H "$J" \
 # Change password
 $C -X PUT $BASE/api/instances/default/users/alice -H "$H" -H "$J" \
   -d '{"password":"new-secret"}'
+# Rank used to prioritize memories (saved in [memory] user_ranks; null removes it; can be set for inherited users too)
+$C -X PUT $BASE/api/instances/default/users/alice/rank -H "$H" -H "$J" -d '{"rank":3}'
 # Delete
 $C -X DELETE $BASE/api/instances/default/users/alice -H "$H"
 # Delete several at once (nothing is deleted if any of them cannot be)
@@ -373,6 +375,8 @@ rem Add
 %C% -X POST %BASE%/api/instances/default/users -H %H% -H %J% -d "{\"username\":\"alice\",\"password\":\"secret\"}"
 rem Change password
 %C% -X PUT %BASE%/api/instances/default/users/alice -H %H% -H %J% -d "{\"password\":\"new-secret\"}"
+rem Rank used to prioritize memories (null removes it)
+%C% -X PUT %BASE%/api/instances/default/users/alice/rank -H %H% -H %J% -d "{\"rank\":3}"
 rem Delete
 %C% -X DELETE %BASE%/api/instances/default/users/alice -H %H%
 rem Delete several at once (nothing is deleted if any of them cannot be)
@@ -416,8 +420,8 @@ specify the owner with the query `owner` (the login username, normalized into th
 app). If omitted or empty, it means the common memories (those from before memory became per user). The admin API can
 read and write all of them regardless of visibility.
 `type` is `user`/`feedback`/`project`/`reference`; `visibility` is `private`/`shared` (users' memories only; if omitted,
-the per-type default on create and the current value on edit; type `user` and content with personal or confidential
-details become `private`). Editing cannot change `name` or the owner (the recorded source files `sources` are kept).
+`shared` on create and the current value on edit; types set to `private` and content matching the checks turned on in
+`[memory]` of the instance become `private`). Editing cannot change `name` or the owner (the recorded source files `sources` are kept).
 The content before an edit or deletion is kept in `instances/<name>/backups/memory/<owner (_common for common)>/<memory name>/`.
 Translation has the LLM translate the description and content into the language of `X-Locohane-Lang` (`ja`/`en`;
 `ja` if absent) and only returns the result without saving (the LLM is the "LLM used for answers" in "Admin
@@ -444,6 +448,10 @@ $C -X POST $BASE/api/instances/default/memories/delete -H "$H" -H "$J" \
 # Translate (into English; not saved; the response has description/content/language/llm_instance)
 $C -X POST $BASE/api/instances/default/memories/translate -H "$H" -H "$J" -H "X-Locohane-Lang: en" \
   -d '{"description":"(one-line description in another language)","content":"(content in another language)"}'
+# Polish [memory] shared_criteria / private_criteria (kind is shared / private; written in the language of X-Locohane-Lang;
+# not saved; the response has text/language/llm_instance)
+$C -X POST $BASE/api/instances/default/memories/polish-criteria -H "$H" -H "$J" -H "X-Locohane-Lang: en" \
+  -d '{"kind":"private","text":"(a rough note of what should be private)"}'
 ```
 
 cmd:

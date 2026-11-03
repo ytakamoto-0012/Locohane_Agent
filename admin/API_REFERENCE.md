@@ -353,6 +353,8 @@ $C -X POST $BASE/api/instances/default/users -H "$H" -H "$J" \
 # パスワード変更
 $C -X PUT $BASE/api/instances/default/users/alice -H "$H" -H "$J" \
   -d '{"password":"new-secret"}'
+# メモリーの優先順位に使うランク（[memory] user_ranks へ保存。null で外す。継承中のユーザーにも設定できる）
+$C -X PUT $BASE/api/instances/default/users/alice/rank -H "$H" -H "$J" -d '{"rank":3}'
 # 削除
 $C -X DELETE $BASE/api/instances/default/users/alice -H "$H"
 # まとめて削除（1人でも削除できなければ何も削除しない）
@@ -371,6 +373,8 @@ rem 追加
 %C% -X POST %BASE%/api/instances/default/users -H %H% -H %J% -d "{\"username\":\"alice\",\"password\":\"secret\"}"
 rem パスワード変更
 %C% -X PUT %BASE%/api/instances/default/users/alice -H %H% -H %J% -d "{\"password\":\"new-secret\"}"
+rem メモリーの優先順位に使うランク（null で外す）
+%C% -X PUT %BASE%/api/instances/default/users/alice/rank -H %H% -H %J% -d "{\"rank\":3}"
 rem 削除
 %C% -X DELETE %BASE%/api/instances/default/users/alice -H %H%
 rem まとめて削除（1人でも削除できなければ何も削除しない）
@@ -413,7 +417,8 @@ rem 削除
 所有者はクエリ `owner`（ログインユーザー名。本体と同じ規則でフォルダ名へ整える）で指定する。省略・空なら共通の
 メモリー（ユーザー別になる前からあるもの）。管理 API では公開範囲に関係なくすべて読み書きできる。
 `type` は `user`/`feedback`/`project`/`reference`、`visibility` は `private`/`shared`（ユーザーのメモリーだけ。
-省略時は作成なら種類ごとの既定値、編集なら今の値のまま。種類 `user` と個人情報・機密を含むものは `private` になる）。
+省略時は作成なら `shared`、編集なら今の値のまま。そのインスタンスの `[memory]` で `private` にした種類と、有効にした目印に
+当たるものは `private` になる）。
 編集では `name`・所有者は変えられない（元ファイルの記録 `sources` は残る）。
 編集・削除の前の内容は `instances/<name>/backups/memory/<所有者（共通は _common）>/<メモリー名>/` に残る。
 翻訳は、説明と本文を `X-Locohane-Lang`（`ja`/`en`。無ければ `ja`）の言語へ LLM に訳させて返すだけで、保存しない
@@ -440,6 +445,10 @@ $C -X POST $BASE/api/instances/default/memories/delete -H "$H" -H "$J" \
 # 翻訳（英語へ。保存はしない。応答は description/content/language/llm_instance）
 $C -X POST $BASE/api/instances/default/memories/translate -H "$H" -H "$J" -H "X-Locohane-Lang: en" \
   -d '{"description":"一行の説明","content":"本文"}'
+# [memory] shared_criteria / private_criteria の清書（kind は shared / private。X-Locohane-Lang の言語で清書する。
+# 保存はしない。応答は text/language/llm_instance）
+$C -X POST $BASE/api/instances/default/memories/polish-criteria -H "$H" -H "$J" \
+  -d '{"kind":"private","text":"本人・家族のこと"}'
 ```
 
 cmd:

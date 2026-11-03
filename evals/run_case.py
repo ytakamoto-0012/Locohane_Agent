@@ -320,7 +320,12 @@ async def _run(
 
     from src import i18n
     from src.agent_types import render_agent_types_block, scan_agent_types
-    from src.config import expand_config_vars, load_config, render_agent_type_run_script_allowlist_block
+    from src.config import (
+        expand_config_vars,
+        load_config,
+        render_agent_type_run_script_allowlist_block,
+        render_memory_visibility_block,
+    )
     from src.graph import ainvoke_ensuring_final_text, build_graph
     from src.llm import ThinkingLoopDetected, mark_user_turn
     from src import skill_drafts
@@ -467,6 +472,8 @@ async def _run(
         # config.ini の値を ${変数名} として埋め込めるよう展開する（app.py の
         # _setup() と同じ手順、{{...}}置換完了後に行う）。
         system_prompt = expand_config_vars(system_prompt, config)
+        # app.py の _setup() と同じく、メモリーの公開範囲の決め方を config 変数の展開の後に差し込む。
+        system_prompt = system_prompt.replace("{{memory_visibility}}", render_memory_visibility_block(config))
         # 本番（app.py の _rebuild_graph）と同じく応答言語の指示を末尾に足す。セッションが
         # 無いため [ui].default_language（auto なら日本語）の言語になる。
         system_prompt += i18n.response_language_directive()

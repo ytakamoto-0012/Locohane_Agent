@@ -77,6 +77,11 @@ _KEY_CHOICES: dict[tuple[str, str], tuple[str, ...]] = {
     ("main_agent_tool_guard", "mode"): ("false", "tools_skills_only", "all"),
     ("main_agent_tool_guard", "visibility_mode"): ("strict", "hint", "all"),
     ("skill_creator", "other_users_drafts"): ("hidden", "listed", "readable", "full"),
+    # src/memory.py の VISIBILITIES と同じ値。
+    ("memory", "user_visibility"): ("private", "shared"),
+    ("memory", "feedback_visibility"): ("private", "shared"),
+    ("memory", "project_visibility"): ("private", "shared"),
+    ("memory", "reference_visibility"): ("private", "shared"),
     ("log", "level"): ("info", "debug", "none"),
     # src/config.py の UI_DEFAULT_LANGUAGES と同じ値。
     ("ui", "default_language"): ("auto", "ja", "en"),
@@ -95,6 +100,15 @@ _KEY_CHOICES: dict[tuple[str, str], tuple[str, ...]] = {
     ("thinking_control", "rule_consecutive_cap"): ("false", *_THINKING_LEVEL_CHOICES),
     ("thinking_control", "rule_after_tools"): ("false", *_THINKING_LEVEL_CHOICES),
 }
+
+
+# 既定値は1行でも、改行を入れて書けるキー（複数行の入力欄で表示する）。
+_MULTILINE_KEYS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("memory", "shared_criteria"),
+        ("memory", "private_criteria"),
+    }
+)
 
 
 # リスト値の構造定義。管理画面で「文字/数値」等の型を選ばせず、意味のある
@@ -230,6 +244,14 @@ _KEY_SCHEMAS: dict[tuple[str, str], dict[str, Any]] = {
             ],
         },
     },
+    # src/memory.py の PRIVATE_CHECKS と同じ値・順序。
+    ("memory", "force_private_checks"): {
+        "type": "list",
+        "item": {
+            "type": "choice",
+            "choices": ["email", "phone", "card_id", "credential", "confidential_label", "personal_path"],
+        },
+    },
 }
 
 
@@ -255,6 +277,8 @@ def _infer_ui_kind(section: str, key: str, value: str) -> str:
     """
     if (section, key) in _KEY_CHOICES:
         return "choice"
+    if (section, key) in _MULTILINE_KEYS:
+        return "multiline"
     stripped = value.strip()
     if stripped.startswith("["):
         try:

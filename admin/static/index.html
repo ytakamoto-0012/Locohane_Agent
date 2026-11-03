@@ -261,9 +261,10 @@
   <div class="view-users">
     <p class="hint" id="users-inherited-note"></p>
     <table class="data-table">
-      <thead><tr><th class="col-check"><input type="checkbox" id="users-select-all" title="すべて選択" /></th><th>ユーザー名</th><th>パスワード</th></tr></thead>
+      <thead><tr><th class="col-check"><input type="checkbox" id="users-select-all" title="すべて選択" /></th><th>ユーザー名</th><th>パスワード</th><th title="数が大きいほど上位。内容が食い違うメモリーは、ランクの高いユーザーのものに従います。">ランク</th></tr></thead>
       <tbody id="users-tbody"></tbody>
     </table>
+    <p class="hint" id="users-rank-note"></p>
     <div class="inline-actions">
       <button type="button" id="delete-users-btn" class="btn-danger" disabled>選択したユーザーを削除</button>
     </div>
