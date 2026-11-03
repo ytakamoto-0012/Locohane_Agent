@@ -252,20 +252,20 @@
   width: min(810px, calc(100% - 40px));
   display: block;
   padding: 8px 14px;
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-  border-left: 3px solid var(--accent);
+  /* アシスタントの吹き出し（アクセント色を薄く混ぜた背景）と同化しないよう、ユーザーの吹き出しと同じ塗りにして影で浮かせる。 */
+  border: 1px solid color-mix(in srgb, var(--accent) 70%, #000000);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
-  color: var(--text);
+  background: var(--accent);
+  color: #ffffff;
   font: inherit;
   font-size: 13px;
   text-align: left;
   cursor: pointer;
-  box-shadow: var(--shadow-sm);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.25);
 }
 
 .pinned-user-message:hover {
-  background: color-mix(in srgb, var(--accent) 20%, var(--surface));
+  background: color-mix(in srgb, var(--accent) 85%, #000000);
 }
 
 .pinned-user-message-text {
