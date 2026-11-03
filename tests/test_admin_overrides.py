@@ -322,3 +322,111 @@ def test_mtime_or_none(workdir, catalog):
     assert overrides.mtime_or_none(workdir / "nope.json") is None
     _save(workdir, catalog, updates={("ui", "max_display_messages"): "77"})
     assert overrides.mtime_or_none(workdir / "config_overrides.json") is not None
+
+
+# --- 他のインスタンスから設定をコピー（preview_copy / copy_from_instance） ---
+
+
+def _copy(workdir, source_path, keys=None, base_mtime=_CURRENT_MTIME, kind="app"):
+    path = workdir / "config_overrides.json"
+    if base_mtime is _CURRENT_MTIME:
+        base_mtime = overrides.mtime_or_none(path)
+    return overrides.copy_from_instance(
+        path=path,
+        source_path=source_path,
+        source_name="src",
+        kind=kind,
+        keys=keys,
+        base_mtime=base_mtime,
+        config_ini_path=CONFIG_INI_PATH,
+        backup_dir=workdir / "backups",
+        backup_keep=5,
+        audit_log_path=workdir / "audit.log",
+        instance_name="test",
+        actor="alice",
+        remote_addr="127.0.0.1",
+    )
+
+
+def _write_source(workdir, data):
+    source_path = workdir / "src_overrides.json"
+    source_path.write_text(json.dumps(data), encoding="utf-8")
+    return source_path
+
+
+def test_copy_preview_lists_changes_and_keeps_data_dir(workdir, catalog):
+    _save(workdir, catalog, updates={("ui", "max_display_messages"): "77", ("log", "max_lines"): "123"})
+    data = json.loads((workdir / "config_overrides.json").read_text(encoding="utf-8"))
+    data["paths"] = {"common_data_dir": "D:/own/${instance}"}
+    (workdir / "config_overrides.json").write_text(json.dumps(data), encoding="utf-8")
+    source = _write_source(
+        workdir, {"ui": {"max_display_messages": "88"}, "paths": {"common_data_dir": "D:/other/${instance}"}}
+    )
+
+    changes, skipped = overrides.preview_copy(path=workdir / "config_overrides.json", source_path=source, kind="app")
+
+    by_key = {(c["section"], c["key"]): (c["old"], c["new"]) for c in changes}
+    # コピー元に無いキーは既定値に戻る（new が None）。common_data_dir はコピー先の値を残すので変更点に出ない。
+    assert by_key == {("ui", "max_display_messages"): ("77", "88"), ("log", "max_lines"): ("123", None)}
+    assert len(skipped) == 1 and skipped[0].startswith("[paths] common_data_dir = D:/other/${instance}")
+
+
+def test_copy_applies_all_and_backs_up(workdir, catalog):
+    _save(workdir, catalog, updates={("ui", "max_display_messages"): "77", ("log", "max_lines"): "123"})
+    source = _write_source(workdir, {"ui": {"max_display_messages": "88"}})
+
+    result, changes = _copy(workdir, source)
+
+    assert result == {"ui": {"max_display_messages": "88"}}
+    assert len(changes) == 2
+    assert overrides.read(workdir / "config_overrides.json") == result
+    assert list((workdir / "backups").glob("config_overrides_*.json"))
+    entry = json.loads((workdir / "audit.log").read_text(encoding="utf-8").splitlines()[-1])
+    assert entry["action"] == "config_copy" and entry["copy_from"] == "src"
+
+
+def test_copy_applies_only_selected_keys(workdir, catalog):
+    _save(workdir, catalog, updates={("ui", "max_display_messages"): "77", ("log", "max_lines"): "123"})
+    source = _write_source(workdir, {"ui": {"max_display_messages": "88"}})
+
+    result, changes = _copy(workdir, source, keys=[("log", "max_lines")])
+
+    assert result == {"ui": {"max_display_messages": "77"}}
+    assert [(c["section"], c["key"]) for c in changes] == [("log", "max_lines")]
+
+
+def test_copy_rejects_key_not_in_changes(workdir, catalog):
+    _save(workdir, catalog, updates={("ui", "max_display_messages"): "77"})
+    source = _write_source(workdir, {"ui": {"max_display_messages": "77"}})
+    with pytest.raises(overrides.ValidationError):
+        _copy(workdir, source, keys=[("ui", "max_display_messages")])
+
+
+def test_copy_from_instance_without_overrides_resets_to_defaults(workdir, catalog):
+    _save(workdir, catalog, updates={("ui", "max_display_messages"): "77"})
+    result, changes = _copy(workdir, workdir / "missing.json")
+    assert result == {}
+    assert len(changes) == 1
+
+
+def test_copy_detects_conflict(workdir, catalog):
+    _save(workdir, catalog, updates={("ui", "max_display_messages"): "77"})
+    source = _write_source(workdir, {"ui": {"max_display_messages": "88"}})
+    with pytest.raises(overrides.ConflictError):
+        _copy(workdir, source, base_mtime=None)
+
+
+def test_copy_invalid_value_not_saved(workdir, catalog):
+    _save(workdir, catalog, updates={("ui", "max_display_messages"): "77"})
+    source = _write_source(workdir, {"ui": {"max_display_messages": "not-a-number"}})
+    with pytest.raises(overrides.ValidationError):
+        _copy(workdir, source)
+    assert overrides.read(workdir / "config_overrides.json") == {"ui": {"max_display_messages": "77"}}
+
+
+def test_copy_keeps_keys_not_used_by_target_kind(workdir, catalog):
+    # スキル調整ワーカーでは効かない [ui] の値は、コピー元に無くてもコピー先の値を残す。
+    _save(workdir, catalog, updates={("ui", "max_display_messages"): "77"})
+    source = _write_source(workdir, {"log": {"max_lines": "123"}})
+    result, _ = _copy(workdir, source, kind="skill_lab")
+    assert result == {"ui": {"max_display_messages": "77"}, "log": {"max_lines": "123"}}

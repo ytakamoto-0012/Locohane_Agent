@@ -668,6 +668,81 @@ def restore_backup(
 
 
 # ---------------------------------------------------------------------------
+# 他のインスタンスから設定をコピー（config_overrides.json）
+# ---------------------------------------------------------------------------
+
+
+def _require_copy_source(name: str, source: str) -> inst.InstanceMeta:
+    if source == name:
+        raise HTTPException(status_code=400, detail=_t("コピー元とコピー先が同じインスタンスです。"))
+    return _require_instance(source)
+
+
+class ConfigCopyPreviewBody(BaseModel):
+    source: str
+
+
+@app.post("/api/instances/{name}/config/copy-preview")
+def preview_config_copy(name: str, body: ConfigCopyPreviewBody, user: str = Depends(require_login)):
+    """source の設定をこのインスタンスへ写すと変わる設定の一覧（new が null のキーは既定値に戻る）。"""
+    meta = _require_instance(name)
+    _require_copy_source(name, body.source)
+    ov_path = inst.overrides_path(INSTANCES_ROOT, name)
+    try:
+        changes, skipped = overrides.preview_copy(
+            path=ov_path, source_path=inst.overrides_path(INSTANCES_ROOT, body.source), kind=meta.kind
+        )
+    except (overrides.ValidationError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"changes": changes, "skipped": skipped, "mtime": overrides.mtime_or_none(ov_path)}
+
+
+class ConfigCopyBody(BaseModel):
+    source: str
+    # 写すキー（[section, key]）。copy-preview の changes のうち選んだもの。省略なら全部。
+    keys: list[list[str]] | None = None
+    # copy-preview で受け取った mtime（他のセッションの保存との競合検出用）。
+    base_mtime: float | None = None
+
+
+@app.post("/api/instances/{name}/config/copy")
+def apply_config_copy(
+    name: str,
+    body: ConfigCopyBody,
+    request: Request,
+    user: str = Depends(require_login),
+    _csrf: None = Depends(require_csrf),
+):
+    meta = _require_instance(name)
+    _require_copy_source(name, body.source)
+    keys = _flatten_resets(body.keys) if body.keys is not None else None
+    ov_path = inst.overrides_path(INSTANCES_ROOT, name)
+    try:
+        result, changes = overrides.copy_from_instance(
+            path=ov_path,
+            source_path=inst.overrides_path(INSTANCES_ROOT, body.source),
+            source_name=body.source,
+            kind=meta.kind,
+            keys=keys,
+            base_mtime=body.base_mtime,
+            config_ini_path=CONFIG_INI_PATH,
+            backup_dir=inst.backups_dir(INSTANCES_ROOT, name),
+            backup_keep=_cfg.admin_backup_keep,
+            audit_log_path=AUDIT_LOG_PATH,
+            instance_name=name,
+            actor=user,
+            remote_addr=_client_ip(request),
+            instances_root=INSTANCES_ROOT,
+        )
+    except overrides.ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (overrides.ValidationError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    needs_restart = bool(changes) and _supervisor.status(name).state == supervisor.InstanceState.RUNNING
+    return {"overrides": result, "changes": changes, "needs_restart": needs_restart, "mtime": overrides.mtime_or_none(ov_path)}
+
+
+# ---------------------------------------------------------------------------
 # ユーザー管理（instances/<name>/.env）
 # ---------------------------------------------------------------------------
 

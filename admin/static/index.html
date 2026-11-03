@@ -203,6 +203,7 @@
       <div id="restart-banner" class="restart-banner hidden">この変更を反映するには、インスタンスの再起動が必要です。 <button id="restart-now-btn">今すぐ再起動</button></div>
       <div id="config-keys"></div>
       <div class="config-footer">
+        <button id="copy-config-btn" class="config-copy-btn" title="別のインスタンスの設定（config.ini の上書き）を、このインスタンスへ写します">他のインスタンスからコピー</button>
         <span id="dirty-count"></span>
         <button id="preview-btn">変更を確認</button>
         <button id="save-btn" disabled>保存</button>
@@ -233,6 +234,24 @@
       <div class="modal-actions">
         <button type="button" class="btn-cancel">閉じる</button>
         <button type="button" id="confirm-save-btn">この内容で保存</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-config-copy-modal">
+  <div class="modal-backdrop">
+    <div class="modal modal-wide">
+      <h3>他のインスタンスから設定をコピー</h3>
+      <label>コピー元のインスタンス <select id="copy-source"></select></label>
+      <p class="hint">コピー元と値が違う設定を一覧にします。写す設定を選んでください（コピー元で既定値のままの設定は、このインスタンスでも既定値に戻ります）。会話履歴・メモリー等の保存先（[paths] common_data_dir）、ユーザー・環境変数・表示設定は写しません。今の設定はバックアップされ、「バックアップ」タブから元に戻せます。</p>
+      <label class="checkbox"><input type="checkbox" id="copy-select-all" checked /> すべて選択</label>
+      <div id="copy-diff" class="diff-list"></div>
+      <div id="copy-skipped" class="hint"></div>
+      <div class="error" id="copy-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn-cancel">閉じる</button>
+        <button type="button" id="confirm-copy-btn" class="primary" disabled>選択した設定をコピー</button>
       </div>
     </div>
   </div>

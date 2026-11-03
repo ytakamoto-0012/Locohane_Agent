@@ -13,6 +13,21 @@ const AUTO_SCROLL_ENGAGE_THRESHOLD_PX = 4;
 // wheel イベントを伴わない移動(スクロールバードラッグ、キーボード操作等)で
 // 最下部からこの距離(px)を超えて離れたら解除する。
 const AUTO_SCROLL_DISENGAGE_THRESHOLD_PX = 64;
+// 固定表示したユーザー指示をクリックして戻ったとき、その発言の上に空ける余白(px)。
+const PINNED_JUMP_MARGIN_PX = 12;
+
+/** 表示中の位置より上で一番新しいユーザー指示のうち、上端より上へ完全に隠れたもの（今見えている応答の指示）。
+ *  見えている（一部でも）間は固定表示しない。 */
+function findHiddenUserMessageId(container: HTMLElement): string | null {
+  const top = container.getBoundingClientRect().top;
+  let found: string | null = null;
+  for (const row of container.querySelectorAll<HTMLElement>('[data-user-message-id]')) {
+    const rect = row.getBoundingClientRect();
+    if (rect.top >= top) break;
+    found = rect.bottom <= top ? row.dataset.userMessageId ?? null : null;
+  }
+  return found;
+}
 
 export function MessagePane({
   messages,
@@ -33,6 +48,13 @@ export function MessagePane({
   // しまうことがあるため、setAutoScrollBoth で state と同時に同期更新する。
   const autoScrollRef = useRef(true);
   const lastMessageIdRef = useRef<string | null>(null);
+  // スクロールで上に隠れたユーザー指示（Claude Code のように上端に固定表示する）。
+  const [pinnedId, setPinnedId] = useState<string | null>(null);
+  const updatePinned = () => {
+    const el = containerRef.current;
+    if (el) setPinnedId(findHiddenUserMessageId(el));
+  };
+  const pinnedMessage = pinnedId ? messages.find((m) => m.id === pinnedId) : undefined;
 
   const setAutoScrollBoth = (value: boolean) => {
     autoScrollRef.current = value;
@@ -56,8 +78,9 @@ export function MessagePane({
     const el = containerRef.current;
     if (!el) return;
     const scrollToBottom = () => {
-      if (!autoScrollRef.current) return;
-      el.scrollTop = el.scrollHeight;
+      if (autoScrollRef.current) el.scrollTop = el.scrollHeight;
+      // 高さが変わる（応答が伸びる・スレッドを切り替える）と、隠れている指示も変わる。
+      updatePinned();
     };
     scrollToBottom();
     const ro = new ResizeObserver(scrollToBottom);
@@ -74,6 +97,7 @@ export function MessagePane({
   const handleScroll = () => {
     const el = containerRef.current;
     if (!el) return;
+    updatePinned();
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (distanceFromBottom <= AUTO_SCROLL_ENGAGE_THRESHOLD_PX) {
       setAutoScrollBoth(true);
@@ -99,11 +123,34 @@ export function MessagePane({
     setAutoScrollBoth(true);
   };
 
+  // 固定表示した指示をクリックしたら、その発言の位置まで戻る（戻った先で追従を止める）。
+  const handlePinnedClick = () => {
+    const el = containerRef.current;
+    if (!el || !pinnedId) return;
+    const row = Array.from(el.querySelectorAll<HTMLElement>('[data-user-message-id]')).find(
+      (r) => r.dataset.userMessageId === pinnedId
+    );
+    if (!row) return;
+    const offset = row.getBoundingClientRect().top - el.getBoundingClientRect().top;
+    setAutoScrollBoth(false);
+    el.scrollTo({ top: el.scrollTop + offset - PINNED_JUMP_MARGIN_PX, behavior: 'smooth' });
+  };
+
   return (
     <div className="messages-scroll-wrapper">
       <div className="messages-scroll" ref={containerRef} onScroll={handleScroll} onWheel={handleWheel}>
         <MessageThread messages={messages} showTyping={showTyping} runningSteps={runningSteps} />
       </div>
+      {pinnedMessage ? (
+        <button
+          type="button"
+          className="pinned-user-message"
+          onClick={handlePinnedClick}
+          title={t('messages.pinnedPromptTitle')}
+        >
+          <span className="pinned-user-message-text">{(pinnedMessage.output || '').replace(/\s+/g, ' ').trim()}</span>
+        </button>
+      ) : null}
       {!autoScroll ? (
         <button
           type="button"

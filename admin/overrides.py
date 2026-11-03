@@ -260,16 +260,7 @@ def save(
         ValidationError: 存在しないキーが指定された、[admin] セクションが
             指定された、または新しい設定値で load_config() の検証が失敗した。
     """
-    actual_mtime = mtime_or_none(path)
-    if base_mtime is None:
-        if actual_mtime is not None:
-            raise ConflictError(
-                _t("他のセッション/ブラウザタブで既に保存されています。画面を再読み込みしてから編集し直してください。")
-            )
-    elif actual_mtime is not None and abs(actual_mtime - base_mtime) > 1e-6:
-        raise ConflictError(
-            _t("他のセッション/ブラウザタブで既に保存されています。画面を再読み込みしてから編集し直してください。")
-        )
+    _check_base_mtime(path, base_mtime)
 
     existing = read(path)
     new_data = _build_new_data(existing, updates, resets, ini_catalog)
@@ -312,6 +303,152 @@ def save(
     return new_data
 
 
+def _check_base_mtime(path: Path, base_mtime: float | None) -> None:
+    """編集開始時の mtime と今の mtime が食い違えば ConflictError（save() の docstring 参照）。"""
+    actual_mtime = mtime_or_none(path)
+    if base_mtime is None:
+        conflict = actual_mtime is not None
+    else:
+        conflict = actual_mtime is not None and abs(actual_mtime - base_mtime) > 1e-6
+    if conflict:
+        raise ConflictError(
+            _t("他のセッション/ブラウザタブで既に保存されています。画面を再読み込みしてから編集し直してください。")
+        )
+
+
+def _replace_checked(
+    *,
+    path: Path,
+    new_data: dict,
+    config_ini_path: Path,
+    backup_dir: Path,
+    backup_keep: int,
+    instance_name: str,
+    instances_root: Path | None,
+    error_message: str,
+) -> None:
+    """new_data で config_overrides.json を丸ごと置き換える（load_config() とデータ保存先の重複で検証し、今の内容を退避してから）。
+
+    Raises:
+        ValidationError: 検証に失敗した（error_message の {0} に原因を入れる。ファイルは書き換えない）。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".config_overrides_replace_", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(new_data, f, ensure_ascii=False, indent=2, sort_keys=True)
+        try:
+            load_config(config_path=config_ini_path, overrides_path=tmp_path, instance_name=instance_name)
+        except Exception as exc:  # noqa: BLE001 - 原因をそのままUIへ伝える
+            raise ValidationError(_t(error_message, exc)) from exc
+        _check_data_dir_conflict(instances_root, config_ini_path, instance_name=instance_name, tmp_path=tmp_path)
+
+        _backup(path, backup_dir, backup_keep)
+        os.replace(tmp_path, path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _copy_result(path: Path, source_path: Path, kind: str) -> tuple[dict, dict, list[str]]:
+    """(コピー先の今の内容, 全部写した後の内容, 写さなかった設定の説明)。"""
+    if not source_path.is_file():
+        source_data: dict = {}
+    else:
+        source_data = read(source_path)
+    existing = read(path)
+    full, skipped = inst.overrides_after_copy(kind, source_data, existing)
+    return existing, full, skipped
+
+
+def preview_copy(*, path: Path, source_path: Path, kind: str) -> tuple[list[dict], list[str]]:
+    """別のインスタンスの設定（source_path）を写すと変わる設定の一覧（「他のインスタンスから設定をコピー」の確認用）。
+
+    Returns:
+        (_diff() と同形式の変更点リスト。new が None のキーは既定値に戻る, 写さない設定の説明のリスト)。
+    """
+    existing, full, skipped = _copy_result(path, source_path, kind)
+    return _diff(existing, full), skipped
+
+
+def copy_from_instance(
+    *,
+    path: Path,
+    source_path: Path,
+    source_name: str,
+    kind: str,
+    keys: list[tuple[str, str]] | None,
+    base_mtime: float | None,
+    config_ini_path: Path,
+    backup_dir: Path,
+    backup_keep: int,
+    audit_log_path: Path,
+    instance_name: str,
+    actor: str,
+    remote_addr: str,
+    instances_root: Path | None = None,
+) -> tuple[dict[str, dict[str, str]], list[dict]]:
+    """別のインスタンスの設定（source_path の config_overrides.json）をこのインスタンスへ写す。
+
+    写す範囲は admin/instances.py の overrides_after_copy() に従う。keys を指定すると、preview_copy() の変更点のうち
+    その (section, key) だけを写す（ほかはこのインスタンスの今の値のまま）。None なら全部写す。
+    保存前に save() と同じ検証をし、今の内容を backups/ へ退避する（バックアップ画面から元に戻せる）。
+
+    Returns:
+        (保存後の overrides dict 全体, 実際に変えた設定の変更点リスト)。
+
+    Raises:
+        ConflictError: base_mtime が今の mtime と一致しない（save() と同じ）。
+        ValidationError: 変更点に無いキーを指定した、または写した後の設定で load_config() の検証が失敗した。
+    """
+    _check_base_mtime(path, base_mtime)
+    existing, full, _skipped = _copy_result(path, source_path, kind)
+    if keys is None:
+        new_data = full
+    else:
+        changed = {(c["section"], c["key"]) for c in _diff(existing, full)}
+        unknown = [f"[{s}].{k}" for s, k in keys if (s, k) not in changed]
+        if unknown:
+            raise ValidationError(
+                _t("コピー元と同じ値か、コピーの対象外のキーです（画面を開き直してください）: {0}", ", ".join(unknown))
+            )
+        new_data = {section: dict(kv) for section, kv in existing.items()}
+        for section, key in keys:
+            value = full.get(section, {}).get(key)
+            if value is None:
+                new_data.get(section, {}).pop(key, None)
+            else:
+                new_data.setdefault(section, {})[key] = value
+        new_data = {section: kv for section, kv in new_data.items() if kv}
+
+    changes = _diff(existing, new_data)
+    if not changes:
+        return existing, []
+    _replace_checked(
+        path=path,
+        new_data=new_data,
+        config_ini_path=config_ini_path,
+        backup_dir=backup_dir,
+        backup_keep=backup_keep,
+        instance_name=instance_name,
+        instances_root=instances_root,
+        error_message="設定の検証に失敗しました: {0}",
+    )
+    audit.append(
+        audit_log_path,
+        {
+            "instance": instance_name,
+            "actor": actor,
+            "remote_addr": remote_addr,
+            "action": "config_copy",
+            "copy_from": source_name,
+            "changes": changes,
+        },
+    )
+    return new_data, changes
+
+
 def restore(
     *,
     path: Path,
@@ -345,23 +482,16 @@ def restore(
         raise ValidationError(_t("{0}: トップレベルはオブジェクトである必要があります。", backup_file))
 
     existing = read(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".config_overrides_restore_", suffix=".tmp")
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(new_data, f, ensure_ascii=False, indent=2, sort_keys=True)
-        try:
-            load_config(config_path=config_ini_path, overrides_path=tmp_path, instance_name=instance_name)
-        except Exception as exc:  # noqa: BLE001
-            raise ValidationError(_t("バックアップの検証に失敗しました: {0}", exc)) from exc
-        _check_data_dir_conflict(instances_root, config_ini_path, instance_name=instance_name, tmp_path=tmp_path)
-
-        _backup(path, backup_dir, backup_keep)
-        os.replace(tmp_path, path)
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    _replace_checked(
+        path=path,
+        new_data=new_data,
+        config_ini_path=config_ini_path,
+        backup_dir=backup_dir,
+        backup_keep=backup_keep,
+        instance_name=instance_name,
+        instances_root=instances_root,
+        error_message="バックアップの検証に失敗しました: {0}",
+    )
 
     changes = _diff(existing, new_data)
     audit.append(

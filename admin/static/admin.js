@@ -750,12 +750,20 @@ async function openDeleteInstanceModal(inst) {
 
 let currentInstanceName = null;
 
+/** 「表示名（インスタンス名）」。表示名が無い・名前と同じなら名前だけ。 */
+function instanceLabel(meta, name) {
+  const display = meta && meta.display_name;
+  return display && display !== name ? `${display}（${name}）` : name;
+}
+
 async function renderInstanceDetail(name, initialView) {
   stopMonitorPolling();
   currentInstanceName = name;
   mainEl.innerHTML = "";
   mainEl.appendChild(clone("tpl-instance-detail"));
-  $(".detail-name").textContent = name;
+  const meta = instanceCache.find((i) => i.name === name);
+  // 一覧のカードは表示名で出すため、見出しも「表示名（インスタンス名）」にする（同じなら名前だけ）。
+  $(".detail-name").textContent = instanceLabel(meta, name);
   $(".back-btn").addEventListener("click", () => {
     stopMonitorPolling();
     renderInstances();
@@ -764,7 +772,6 @@ async function renderInstanceDetail(name, initialView) {
     btn.addEventListener("click", () => selectInstanceSubview(btn.dataset.subview));
   });
   // スキル調整ワーカーはチャットを持たないため、会話・ユーザー・表示設定・研究テーマの画面を出さない。
-  const meta = instanceCache.find((i) => i.name === name);
   const isLab = meta && meta.kind === "skill_lab";
   $$(".subtab-btn").forEach((btn) => {
     const hide = isLab ? ["monitor", "threads", "users", "display", "skill-lab", "knowledge", "memory"].includes(btn.dataset.subview) : false;
@@ -816,6 +823,140 @@ async function renderConfigEditor(container) {
   $("#config-changed-only").addEventListener("change", renderKeyList);
   $("#preview-btn").addEventListener("click", openPreviewModal);
   $("#save-btn").addEventListener("click", () => doSave(null));
+  $("#copy-config-btn").addEventListener("click", openConfigCopyModal);
+}
+
+/* 他のインスタンスの設定（config_overrides.json）を、このインスタンスへ写す。 */
+async function openConfigCopyModal() {
+  if (Object.keys(dirtyEdits).length || resetKeys.size) {
+    if (!confirm(_t("保存していない変更があります。コピーすると、その変更は破棄されます。続けますか？"))) return;
+  }
+  const target = currentInstanceName;
+  const modal = clone("tpl-config-copy-modal").firstElementChild;
+  document.body.appendChild(modal);
+  modal.querySelector(".btn-cancel").addEventListener("click", () => modal.remove());
+  const select = modal.querySelector("#copy-source");
+  const diffEl = modal.querySelector("#copy-diff");
+  const skippedEl = modal.querySelector("#copy-skipped");
+  const errEl = modal.querySelector("#copy-error");
+  const selectAll = modal.querySelector("#copy-select-all");
+  const confirmBtn = modal.querySelector("#confirm-copy-btn");
+  let preview = null;
+
+  const sources = instanceCache.filter((i) => i.name !== target);
+  if (sources.length === 0) {
+    errEl.textContent = _t("コピー元にできる他のインスタンスがありません。");
+    return;
+  }
+  for (const i of sources) {
+    const option = document.createElement("option");
+    option.value = i.name;
+    option.textContent = instanceLabel(i, i.name);
+    select.appendChild(option);
+  }
+
+  const checkboxes = () => Array.from(diffEl.querySelectorAll("input[type=checkbox]"));
+  const updateButton = () => {
+    const boxes = checkboxes();
+    const checked = boxes.filter((b) => b.checked).length;
+    confirmBtn.disabled = checked === 0;
+    selectAll.checked = boxes.length > 0 && checked === boxes.length;
+    selectAll.indeterminate = checked > 0 && checked < boxes.length;
+  };
+  selectAll.addEventListener("change", () => {
+    checkboxes().forEach((b) => (b.checked = selectAll.checked));
+    updateButton();
+  });
+
+  const load = async () => {
+    preview = null;
+    errEl.textContent = "";
+    skippedEl.textContent = "";
+    diffEl.textContent = _t("確認中...");
+    confirmBtn.disabled = true;
+    try {
+      preview = await api(`/api/instances/${encodeURIComponent(target)}/config/copy-preview`, {
+        method: "POST",
+        body: { source: select.value },
+      });
+    } catch (e) {
+      diffEl.textContent = "";
+      errEl.textContent = e.message;
+      return;
+    }
+    diffEl.innerHTML = "";
+    if (preview.changes.length === 0) {
+      diffEl.innerHTML = _t('<p class="hint">コピー元と違う設定はありません。</p>');
+    }
+    preview.changes.forEach((c, index) => {
+      const label = document.createElement("label");
+      label.className = "diff-item selectable";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = true;
+      box.dataset.index = String(index);
+      box.addEventListener("change", updateButton);
+      const body = document.createElement("span");
+      body.innerHTML = `<span class="diff-key">[${escapeHtml(c.section)}] ${escapeHtml(c.key)}</span><br/>
+        <span class="diff-old">${c.old === null ? _t("(既定値)") : escapeHtml(c.old)}</span> →
+        <span class="diff-new">${c.new === null ? _t("(既定値)") : escapeHtml(c.new)}</span>`;
+      label.append(box, body);
+      diffEl.appendChild(label);
+    });
+    if (preview.skipped.length) {
+      skippedEl.innerHTML = "";
+      const head = document.createElement("div");
+      head.textContent = _t("次の設定は写しません:");
+      const ul = document.createElement("ul");
+      for (const s of preview.skipped) {
+        const li = document.createElement("li");
+        li.textContent = s;
+        ul.appendChild(li);
+      }
+      skippedEl.append(head, ul);
+    }
+    updateButton();
+  };
+  select.addEventListener("change", load);
+
+  confirmBtn.addEventListener("click", async () => {
+    if (!preview) return;
+    const keys = checkboxes()
+      .filter((b) => b.checked)
+      .map((b) => {
+        const c = preview.changes[Number(b.dataset.index)];
+        return [c.section, c.key];
+      });
+    errEl.textContent = "";
+    confirmBtn.disabled = true;
+    try {
+      const result = await api(`/api/instances/${encodeURIComponent(target)}/config/copy`, {
+        method: "POST",
+        body: { source: select.value, keys, base_mtime: preview.mtime },
+      });
+      modal.remove();
+      await selectInstanceSubview("config");
+      if (result.needs_restart) {
+        const banner = $("#restart-banner");
+        banner.classList.remove("hidden");
+        $("#restart-now-btn").onclick = async () => {
+          await runInstanceAction(target, "restart");
+          banner.classList.add("hidden");
+        };
+      }
+      alert(_t("{0} 件の設定をコピーしました。", result.changes.length));
+    } catch (e) {
+      if (e.status === 409) {
+        await load();
+        errEl.textContent = _t("他のセッションで既に保存されています。一覧を取り直しました。");
+      } else {
+        errEl.textContent = e.message;
+        updateButton();
+      }
+    }
+  });
+
+  await load();
 }
 
 async function loadConfigKeys() {

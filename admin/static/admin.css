@@ -232,6 +232,9 @@ select.le-type { width: auto; padding: 4px; font-size: 12px; flex-shrink: 0; }
 
 .config-footer { display: flex; align-items: center; gap: 10px; position: sticky; bottom: 0; background: var(--bg); padding: 10px 0; }
 #dirty-count { color: var(--text-dim); font-size: 12px; }
+.config-copy-btn { margin-right: auto; }
+.diff-item.selectable { display: flex; gap: 8px; align-items: flex-start; }
+.diff-item.selectable input { margin-top: 3px; }
 
 .diff-list { max-height: 50vh; overflow: auto; }
 .diff-item { border-bottom: 1px solid var(--border); padding: 8px 0; font-size: 12.5px; }

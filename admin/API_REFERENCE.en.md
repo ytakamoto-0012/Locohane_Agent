@@ -320,6 +320,24 @@ $C -X POST $BASE/api/instances/default/backups/config_overrides_20260930_120000.
 %C% -X POST %BASE%/api/instances/default/backups/config_overrides_20260930_120000.json/restore -H %H%
 ```
 
+### Copy settings from another instance
+
+`copy-preview` returns the settings whose values differ from the source (`source`) as `changes` (a key whose `new` is `null` is reset
+to the default), the settings that are not copied (`skipped`), and the target's `mtime`. `copy` applies them (list `[section, key]`
+pairs in `keys` to copy only those; omit it to copy all `changes`). Pass the `mtime` from `copy-preview` as `base_mtime` (409 if
+another session saved first). `[paths] common_data_dir` and settings that do not apply to the target keep the target's values.
+The previous content is backed up, and the change is recorded in the change history as `config_copy`.
+
+```bash
+$C -X POST $BASE/api/instances/test2/config/copy-preview -H "$J" -d '{"source":"default"}'
+$C -X POST $BASE/api/instances/test2/config/copy -H "$H" -H "$J" -d '{"source":"default","keys":[["llm","temperature"]],"base_mtime":1759200000.0}'
+```
+
+```bat
+%C% -X POST %BASE%/api/instances/test2/config/copy-preview -H %J% -d "{\"source\":\"default\"}"
+%C% -X POST %BASE%/api/instances/test2/config/copy -H %H% -H %J% -d "{\"source\":\"default\",\"keys\":[[\"llm\",\"temperature\"]],\"base_mtime\":1759200000.0}"
+```
+
 ## Login users (Locohane itself)
 
 Operates `AUTH_USERS` in `instances/<name>/.env`.

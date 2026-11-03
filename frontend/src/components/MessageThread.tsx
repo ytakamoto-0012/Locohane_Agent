@@ -77,7 +77,11 @@ function MessageBubble({ step }: { step: IStep }) {
   const category = messageCategory(step);
   const isUser = category === 'user';
   return (
-    <div className={`message-row ${isUser ? 'message-row--user' : 'message-row--assistant'}`}>
+    <div
+      className={`message-row ${isUser ? 'message-row--user' : 'message-row--assistant'}`}
+      // MessagePane が、スクロールで上に隠れたユーザー指示を上端に固定表示するための目印。
+      data-user-message-id={isUser ? step.id : undefined}
+    >
       {!isUser ? <div className={`avatar avatar--${category}`}>{AVATAR_LABEL[category]}</div> : null}
       <div className={`message-bubble ${isUser ? 'message-bubble--user' : `message-bubble--${category}`}`}>
         <div className="message-bubble-content">

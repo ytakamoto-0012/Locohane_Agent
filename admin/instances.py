@@ -98,6 +98,44 @@ def overrides_to_copy(kind: str, data: dict) -> tuple[dict, list[str]]:
     return result, skipped
 
 
+def _copy_target_key(kind: str, section: str, key: str) -> bool:
+    """既存のインスタンスへの設定のコピーで、コピー元の値に揃えるキーか（それ以外はコピー先の値を残す）。"""
+    return config_key_applies(kind, section, key) and (section, key) != ("paths", "common_data_dir")
+
+
+def overrides_after_copy(kind: str, source_data: dict, target_data: dict) -> tuple[dict, list[str]]:
+    """既存のインスタンス（種類 kind）へ別のインスタンスの設定を写した後の config_overrides.json の内容を求める（書き込まない）。
+
+    コピー先で効く設定は、コピー元と同じ状態にする（コピー元に無いキーはコピー先からも消して既定値に戻す）。
+    次はコピー先の値をそのまま残す。
+    - [paths] common_data_dir: 変えるとコピー先の会話履歴・メモリー等の保存先が変わってしまうため。
+    - コピー先で効かない設定（インスタンス別の上書きが効かない・その種類のインスタンスで使わない）。
+
+    Returns:
+        (写した後の内容, コピー元にあるが写さなかった設定の説明（管理者に見せる文言）のリスト)。
+    """
+    src = {section: dict(kv) for section, kv in source_data.items() if isinstance(kv, dict)}
+    skipped: list[str] = []
+    data_dir = src.get("paths", {}).pop("common_data_dir", None)
+    if data_dir is not None:
+        skipped.append(
+            _t("[paths] common_data_dir = {0}（コピー先の会話履歴・メモリー等の保存先が変わってしまうため。コピー先の値をそのまま使います）", data_dir)
+        )
+    copied, more = overrides_to_copy(kind, src)
+    skipped += more
+
+    result: dict = {}
+    for section, kv in target_data.items():
+        if not isinstance(kv, dict):
+            continue
+        kept = {k: v for k, v in kv.items() if not _copy_target_key(kind, section, k)}
+        if kept:
+            result[section] = kept
+    for section, kv in copied.items():
+        result.setdefault(section, {}).update(kv)
+    return result, skipped
+
+
 class InstanceError(Exception):
     """instances.py の操作失敗。"""
 
