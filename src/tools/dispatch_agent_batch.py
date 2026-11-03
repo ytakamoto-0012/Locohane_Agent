@@ -157,14 +157,17 @@ def _list_target_files(base: Path, pattern: str) -> list[Path]:
     return files
 
 
-def _resolve_listed_files(raw_files: list[str]) -> tuple[list[Path], str | None]:
+def _resolve_listed_files(raw_files: list[str]) -> tuple[list[Path], list[str]]:
     """files 引数（`@N`・絶対パス・作業ディレクトリ基準の相対パス）を実在するファイルの絶対パスへ解決する。
 
     前段の explore が検索で見つけたファイルは複数フォルダに散らばるため、
-    pattern では指定できない。並び順は渡された順のまま（重複は除く）にし、
-    1件でも解決できなければ起動前にエラーを返す（推測で補わせない）。
+    pattern では指定できない。並び順は渡された順のまま（重複は除く）にする。
+    解決できないもの・実在しないものは飛ばして、理由付きで2つ目の戻り値に返す
+    （ナレッジの索引は実ファイルより古いことがあり、取り込み後に消えたファイル1件で
+    全体を起動せずに返すと、メインが1往復余計に使っていた。本番ログ 2026-11-03）。
     """
     files: list[Path] = []
+    skipped: list[str] = []
     seen: set[Path] = set()
     for raw in raw_files:
         raw = (raw or "").strip()
@@ -172,14 +175,16 @@ def _resolve_listed_files(raw_files: list[str]) -> tuple[list[Path], str | None]
             continue
         p, error = _resolve_file_tools_path(raw)
         if error:
-            return [], f"{raw}: {error}"
+            skipped.append(f"{raw}: {error}")
+            continue
         if not p.is_file():
-            return [], f"file not found: {raw} ({p})"
+            skipped.append(f"{raw}: file not found ({p})")
+            continue
         resolved = p.resolve()
         if resolved not in seen:
             seen.add(resolved)
             files.append(resolved)
-    return files, None
+    return files, skipped
 
 
 def _common_base(files: list[Path]) -> Path:
@@ -516,10 +521,15 @@ async def dispatch_agent_batch(
     if raw_files and pattern:
         return "Error: pass either pattern (all matching files in a folder) or files (a list of `@N`/absolute paths), not both."
     lookup = bool(raw_files)
+    skipped: list[str] = []
     if lookup:
-        target_files, error = _resolve_listed_files(raw_files)
-        if error:
-            return f"Error: {error} (copy the `@N`/paths exactly as the earlier result showed them; no jobs were started)"
+        target_files, skipped = _resolve_listed_files(raw_files)
+        if not target_files:
+            return (
+                "Error: none of the listed files could be opened (no jobs were started):\n"
+                + "\n".join(f"- {s}" for s in skipped)
+                + "\nCopy the `@N`/paths exactly as the earlier result showed them."
+            )
         base = _common_base(target_files)
         source = f"the {len(target_files)} listed files"
     else:
@@ -663,6 +673,12 @@ async def dispatch_agent_batch(
         f"delegated them in parallel to {agent_type} ({count_text})."
     )
     tail: list[str] = []
+    if skipped:
+        tail.append(
+            "These listed files could not be opened and were not assigned (they may have been moved or deleted "
+            "after the knowledge was ingested; mention them as not found instead of guessing their content):\n"
+            + "\n".join(f"- {s}" for s in skipped)
+        )
     if set(counts) - {"done", "running"}:
         tail.append(
             "For groups marked \"error\", \"truncated\", \"killed\" or \"not started\", put the shown list of assigned files "

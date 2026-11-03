@@ -621,14 +621,28 @@ async def test_batch_files_accepts_relative_paths_and_drops_duplicates(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_batch_files_missing_file_returns_error_without_jobs(monkeypatch, tmp_path) -> None:
+async def test_batch_files_skips_missing_file_and_reports_it(monkeypatch, tmp_path) -> None:
+    """ナレッジの索引は実ファイルより古いことがあるため、消えたファイルは飛ばして残りを割り振る（本番ログ 2026-11-03）。"""
     _setup(monkeypatch, tmp_path, [])
     paths = _make_scattered_files(tmp_path)
     captured = _capture_tasks(monkeypatch)
 
     result = await _invoke(task="t", agent_type="worker", files=[str(paths[0]), str(tmp_path / "nope.md")])
 
-    assert result.startswith("Error: file not found")
+    assert len(captured) == 1
+    assert str(paths[0].resolve()) in captured[0]
+    assert "nope.md" not in captured[0]
+    assert "could not be opened and were not assigned" in result and "nope.md" in result
+
+
+@pytest.mark.asyncio
+async def test_batch_files_all_missing_returns_error_without_jobs(monkeypatch, tmp_path) -> None:
+    _setup(monkeypatch, tmp_path, [])
+    captured = _capture_tasks(monkeypatch)
+
+    result = await _invoke(task="t", agent_type="worker", files=[str(tmp_path / "nope.md")])
+
+    assert result.startswith("Error: none of the listed files could be opened")
     assert captured == []
     assert tools._dispatch_agent_job._DISPATCH_AGENT_JOBS == {}
 

@@ -82,6 +82,12 @@ if it differs from the table, it takes precedence).
    (`@N` of `path_memory`) of a JSON file with the whole body written out. Search keywords with `Grep`
    to identify the `line` of the relevant part, and read the surroundings (paragraphs, rows) with `Read`
    to understand the content.
+   For Excel, read every sheet of a small workbook (all sheets 200 rows or less) in one call with
+   `read_excel.py <file> --all-sheets`, adding `--query-json '[{"op": "list_images"}, {"op": "list_charts"}]'`
+   when you need to know whether there are images or charts (do not read one sheet per turn, and do not use
+   other skills to look inside the xlsx). To read the contents, Read the returned `text_path` (one line per row);
+   use the JSON `result_path` only for what the text does not carry (formatting, empty cells, value types and
+   number formats, checking every cell against a rule; see "Which one to read" in excel-read).
    Only when you need to extract by condition or aggregate from all items, get exact values with
    `json_query` (`file_path="@N"`, JMESPath query; the syntax differs from `jq`) (for details see the
    section "Detecting anomalies in tabular data" below).
@@ -115,6 +121,8 @@ Append one line per item in the following form.
 
 In your final answer, state whether there is visual information and the topic name `Visual information locations`
 (do not stop at a summary; always say that you recorded it).
+This applies to files you opened. When you return a list of files to open without opening them (see "Finding
+information" in the common notes), do not record anything; the sub-agents that open them do.
 
 ---
 

@@ -50,6 +50,7 @@ from excel_common import (  # noqa: E402
     setup_utf8_stdio,
     summarize_result,
     write_json_result,
+    write_text_result,
 )
 from openpyxl.drawing.spreadsheet_drawing import AbsoluteAnchor
 from openpyxl.utils.units import EMU_to_cm
@@ -440,6 +441,83 @@ def _read_xls(
     }
 
 
+def _read_all_sheets(
+    path: Path,
+    ext: str,
+    offset: int,
+    limit: int,
+    data_only: bool,
+    queries: list[dict] | None,
+    no_style: bool,
+) -> dict:
+    """--all-sheets: 全シートのセルデータを1回で読む（各シートは --sheet 指定時と同じ形）。
+
+    シート一覧 → シートごとに1回ずつ、と呼ぶと小さいブックでも呼び出しがシート数+1回になり、
+    サブエージェントの反復がその分増えていた（本番ログ 2026-11-03: 7シートのブックを
+    1回に1シートずつ読み、ブック2つで約20回の反復）。
+    """
+    if ext == ".xls":
+        names = [s["name"] for s in _read_xls(path, None, 0, 0)["sheets"]]
+        sheets = [_read_xls(path, name, offset, limit) for name in names]
+    else:
+        names = [s["name"] for s in _read_xlsx(path, None, 0, 0, data_only)["sheets"]]
+        sheets = [_read_xlsx(path, name, offset, limit, data_only, queries, no_style=no_style) for name in names]
+    for sheet in sheets:
+        sheet.pop("path", None)
+        sheet.pop("mode", None)
+    return {"path": str(path), "mode": "all_sheets", "sheets": sheets}
+
+
+def _sheet_text(sheet: dict) -> str:
+    """1シート分の rows を「1行1行・空セルは省略」のテキストにする（write_text_result 参照）。
+
+    xlsx/xlsm のセルは {"ref", "value", ...}、xls のセルは値そのもの（列は columns、行は start_row から）。
+    """
+    total = sheet.get("total_rows") or 0
+    start, end = sheet.get("start_row"), sheet.get("end_row")
+    head = f"## {sheet['sheet']} (rows {start}-{end} of {total})" if start else f"## {sheet['sheet']} (no rows read; {total} rows)"
+    lines = [head]
+    if sheet.get("merged_cells"):
+        lines.append("merged: " + ", ".join(sheet["merged_cells"]))
+    columns = sheet.get("columns") or []
+    for i, row in enumerate(sheet.get("rows") or []):
+        parts = []
+        for j, cell in enumerate(row):
+            if isinstance(cell, dict):
+                ref, value = cell.get("ref"), cell.get("value")
+            else:
+                ref, value = f"{columns[j]}{start + i}", cell
+            if value is None or value == "":
+                continue
+            parts.append(f"{ref}={str(value).replace(chr(13), '').replace(chr(10), ' / ')}")
+        if parts:
+            lines.append(" | ".join(parts))
+    if end and end < total:
+        lines.append(f"(rows {end + 1}-{total} not read; read them with --sheet \"{sheet['sheet']}\" --offset {end})")
+    for q in sheet.get("query_results") or []:
+        lines.append(f"query {q.get('op')}: {json.dumps(q.get('items', q), ensure_ascii=False)}")
+    return "\n".join(lines)
+
+
+def _all_sheets_summary(result: dict) -> dict:
+    """--all-sheets の stdout 用の要約（本文は result_path 側）。続きを読むべきシートが分かるようにする。"""
+    return {
+        "path": result["path"],
+        "mode": "all_sheets",
+        "sheets": [
+            {
+                "sheet": s["sheet"],
+                "total_rows": s["total_rows"],
+                "total_columns": s["total_columns"],
+                "end_row": s["end_row"],
+                "truncated": bool(s["total_rows"]) and (s["end_row"] or 0) < s["total_rows"],
+                **({"query_results_count": len(s["query_results"])} if "query_results" in s else {}),
+            }
+            for s in result["sheets"]
+        ],
+    }
+
+
 def main() -> int:
     setup_utf8_stdio()
     parser = argparse.ArgumentParser(allow_abbrev=False)
@@ -480,6 +558,14 @@ def main() -> int:
             "The columns key of the result holds the array of column letters that each element of rows corresponds to."
         ),
     )
+    parser.add_argument(
+        "--all-sheets",
+        action="store_true",
+        help=(
+            "read the cell data of every sheet in one call (each sheet up to --limit rows from --offset; "
+            "--query-json is applied to each sheet). Cannot be combined with --sheet/--columns."
+        ),
+    )
     args = parser.parse_args()
 
     path = Path(args.file_path)
@@ -510,7 +596,18 @@ def main() -> int:
             print("Specify --query-json as a JSON array", file=sys.stderr)
             return 1
 
+    if args.all_sheets and (args.sheet is not None or args.columns):
+        print("--all-sheets cannot be combined with --sheet/--columns", file=sys.stderr)
+        return 1
+
     try:
+        if args.all_sheets and ext in (".xlsx", ".xlsm", ".xls"):
+            result = _read_all_sheets(path, ext, offset, limit, args.data_only, queries, no_style=not args.style)
+            text = "\n\n".join(_sheet_text(sheet) for sheet in result["sheets"])
+            summary = {**_all_sheets_summary(result), **write_json_result(result, "excel_read", path)}
+            summary.update(write_text_result(text, "excel_read", path))
+            print(json.dumps(summary, ensure_ascii=False))
+            return 0
         if ext in (".xlsx", ".xlsm"):
             result = _read_xlsx(
                 path, args.sheet, offset, limit, args.data_only, queries,
@@ -533,6 +630,8 @@ def main() -> int:
 
     summary = summarize_result(result, ["rows", "sheets"])
     summary.update(write_json_result(result, "excel_read", path))
+    if result.get("mode") == "rows":
+        summary.update(write_text_result(_sheet_text(result), "excel_read", path))
     print(json.dumps(summary, ensure_ascii=False))
     return 0
 

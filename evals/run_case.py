@@ -533,6 +533,14 @@ async def _run(
         patch_ask_relay(get_all_tools())
 
         thread_id = str(uuid.uuid4())
+        # 本番の app.py と同じく、セッションにも thread_id を持たせる。未設定だと
+        # スレッド用の一時フォルダ（_tmp_<時刻>_<短縮ID>、thread note・scratch note・
+        # 読み取り結果JSONの置き場）が "_no_session" 由来の固定名になり、すべての eval
+        # 実行で同じフォルダが使い回されていた（前回の実行の thread note を読んで
+        # 委譲を省いた実例: 2026-11-03 の system_prompt_scale/011 の再実行）。
+        import chainlit as cl
+
+        cl.user_session.set("thread_id", thread_id)
         # recursion_limit を明示指定する。省略すると LangGraph のデフォルト（25）が
         # 使われてしまい、本番 app.py（config.ini [graph].recursion_limit、既定50）
         # より低い上限で GraphRecursionError が発生する eval 固有の誤検知を生んでいた。

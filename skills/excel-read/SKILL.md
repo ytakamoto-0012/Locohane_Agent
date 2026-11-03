@@ -20,6 +20,9 @@ Always pass `file_path` as the first positional argument (the order of flags is 
 # Get only the sheet list (omit --sheet; run this first)
 python read_excel.py "C:\Users\me\book.xlsx"
 
+# Read every sheet in one call (each sheet up to --limit rows), and list the images/charts of each sheet at the same time
+python read_excel.py "C:\Users\me\book.xlsx" --all-sheets --query-json '[{"op": "list_images"}, {"op": "list_charts"}]'
+
 # Read the cell data of the specified sheet, 200 rows from the top (default offset/limit)
 python read_excel.py "C:\Users\me\book.xlsx" --sheet Sheet1
 
@@ -53,6 +56,7 @@ python read_excel.py "C:\Users\me\book.xlsx" --sheet MonthlySchedule --query-jso
 | `--data-only` | Optional, flag without a value | - | Not given = return formula strings | Return formula cells as the cached values Excel last calculated instead of formula strings. Effective only for `.xlsx`/`.xlsm` (`.xls` always gives values only, so it does not matter) |
 | `--style` | Optional, flag without a value | - | Not given = lightweight mode | `.xlsx`/`.xlsm` only. When given, also returns full style information such as bold, background color and borders, plus `column_widths`/`row_heights`/`warnings`. By default (not given) cells return only `value` and (if set) `style.number_format`, and `column_widths`/`row_heights`/`warnings` are not even calculated (`merged_cells`/`tables` are returned even by default). Give it only when you want to verify formatting details (bold, background color, etc.). An error with `.xls` (it never gets styles) |
 | `--query-json` | Optional | String (a JSON array on one line) | None | Structured queries (details in the "Structured queries" section below). Only `.xlsx`/`.xlsm` are supported and `--sheet` is required (`.xls` or omitting `--sheet` is an error) |
+| `--all-sheets` | Optional, flag without a value | - | Not given | Read the cell data of every sheet in one call. `--offset`/`--limit`/`--data-only`/`--style`/`--query-json` apply to each sheet. Cannot be combined with `--sheet`/`--columns` |
 | `--columns` | Optional | String (comma-separated) | Omitted = all columns | The columns to read, as column letters (`"A"`) or 1-based column numbers (`"3"` = column C), comma-separated (e.g. `"A,C,E"`). `--sheet` required. Supported for all of `.xlsx`/`.xlsm`/`.xls`. An error if a specified column exceeds the total number of columns |
 
 If `--sheet` is omitted, only the sheet list is returned (the default behavior to avoid reading everything of a large file by mistake). All other arguments can be omitted.
@@ -61,12 +65,25 @@ If `--sheet` is omitted, only the sheet list is returned (the default behavior t
 
 Success = exit code 0 + one line of JSON on stdout. Failure = non-zero exit code + an error message on stderr. Pass the error text to the user as is. A missing library gives `ImportError` with exit code 1 (cause: `openpyxl`/`xlrd`) -> prompt the user to run `pip install <package name>`.
 
-This script does not print the body (sheet list/rows) to stdout; it writes it to a temporary JSON file and returns `result_path`. Read `result_path` (it can be read in parts).
+This script does not print the body (sheet list/rows) to stdout; it writes it to a temporary JSON file and returns `result_path`. When cells are read (`--sheet` or `--all-sheets`), it also returns `text_path`: a text file with one line per row (`A1=value | B1=value`, empty cells left out, merged ranges and query results listed per sheet).
+
+**Which one to read** — `text_path` does not contain formatting (`number_format`, and the bold/colors/borders/column widths/row heights/`warnings` of `--style`), value types (every value is text, so the number `40000` and the string `"40000"` look the same), empty cells (they are left out), or `tables`. Decide by what you need:
+
+| Purpose | Read |
+|---|---|
+| Understand or summarize the contents, find the value that answers a question | **`text_path`** (the default; a small workbook fits in one Read; find where a value is with Grep) |
+| Check formatting (verifying after an edit, "check whether anything is wrong") | **`result_path`**, read with `--style` (look at `style` and `warnings`) |
+| Check every row/cell against a rule, including finding empty cells | **`result_path`** with `json_query` (e.g. cells whose `value` is `null`) |
+| The answer depends on the type or display format (dates, amounts, number vs text) | **`result_path`** (`value` and `style.number_format`) |
+| Extract by condition or aggregate | **`result_path`** with `json_query` |
+
+When in doubt, read `text_path`; use `result_path` only for the last four rows of the table.
 
 ## Procedure
 
 1. First run without `--sheet` and check the sheet names and the numbers of rows and columns.
-2. Specify a sheet name (or a 0-based index in the sheet list) in `--sheet` to get the cell data.
+2. **If every sheet is small (`max_row` 200 or less), read them all in one call with `--all-sheets`** instead of one call per sheet (to check images and charts too, add `--query-json '[{"op": "list_images"}, {"op": "list_charts"}]'`; no other skill is needed). Otherwise specify a sheet name (or a 0-based index in the sheet list) in `--sheet` to get the cell data; when you need several sheets, issue those calls together in the same turn (each call gets its own `result_path`).
+   - When two workbooks have sheets with the same names (e.g. a copy of past records), read one of them fully and, for the other, only check whether it differs (compare `max_row`/`max_column`, or Grep a few key values in its `result_path`); do not extract every cell again.
 3. When there are many rows or columns, use the arguments appropriately:
    - `--offset`/`--limit`: use them to read cell values in order from the top. Each call returns `--limit` rows in `rows`. Look at `total_rows` to decide whether you need more, and pass the previous `end_row` as the next `--offset` to read on.
    - `--columns`: use it when you know which columns you want to see (you want to check the values of specific columns only, you do not want to read all columns of a wide table at once, etc.). For tables where `total_columns` exceeds about 20, first understand the content of the columns from the list without `--sheet` or by reading just the one header row, then read only the columns you need; that is safer than reading all columns at once with a large `--limit` (reading a lot at once leads to overlooking content).
@@ -77,6 +94,8 @@ This script does not print the body (sheet list/rows) to stdout; it writes it to
 ## Output
 
 The top-level keys of `result_path` (a JSON file) include `path` (the file read) and `mode` (`"sheets"` or `"rows"`) in both modes. The rest depends on whether `--sheet` is given, the extension (`.xlsx`/`.xlsm` or `.xls`) and `--query-json`.
+
+**All-sheets mode** (`--all-sheets`): `mode` is `"all_sheets"` and `sheets` is a list with one element per sheet, each with the same keys as cell data mode below (without `path`/`mode`). The stdout summary lists, per sheet, `sheet`/`total_rows`/`total_columns`/`end_row` and `truncated` (`true` if rows remain after `end_row`; read the rest with `--sheet <name> --offset <end_row>`).
 
 **Sheet list mode** (`--sheet` omitted): only `sheets` = a list of elements `{"name","max_row","max_column","print_area"}`. `print_area` is the print area set on each sheet (e.g. `"'Sheet1'!$A$1:$B$20"`; for sheets with several ranges, a comma-joined string), `null` if not set. Values are filled only for `.xlsx`/`.xlsm`; for `.xls` the `print_area` key itself does not exist (xlrd cannot get print areas, so it is not supported).
 

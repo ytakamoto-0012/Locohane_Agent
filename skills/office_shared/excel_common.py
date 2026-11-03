@@ -12,6 +12,7 @@ run_script からは直接実行されない。
 from __future__ import annotations
 
 import hashlib
+import uuid
 import json
 import locale
 import os
@@ -366,12 +367,37 @@ def write_json_result(result: dict, category: str, source_path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha1(str(Path(source_path).resolve()).encode("utf-8")).hexdigest()[:8]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    out_path = out_dir / f"{digest}_{timestamp}.json"
+    # Windows の datetime.now() は分解能が粗く（数ms〜15ms）、同じファイルを並列に読むと
+    # マイクロ秒まで同じ名前になって後の結果が先の結果を上書きしていた（本番ログ 2026-11-03:
+    # 同じブックの4シートを並列に読み、2シートの結果が同じ result_path になった）。乱数で区別する。
+    out_path = out_dir / f"{digest}_{timestamp}_{uuid.uuid4().hex[:8]}.json"
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     info: dict = {"result_path": str(out_path)}
     pm = register_output_path(out_path, description=f"full JSON of the {category} read result")
     if pm:
         info["path_memory"] = pm
+    return info
+
+
+def write_text_result(text: str, category: str, source_path) -> dict:
+    """読み取り結果の本文を読みやすいテキストで書き出し、要約に足す {"text_path", "text_path_memory"} を返す。
+
+    result_path の JSON はインデント付きで1セルが数行になり、小さいブックでも千行を超えて、
+    AI が Read を何回にも分けて読んでいた（本番ログ 2026-11-03）。中身を読むだけならこちらを使う。
+    置き場所・命名は write_json_result と同じ規約。
+    """
+    thread_id = os.environ.get("AGENT_EXEC_TMP_NAME") or os.environ.get("AGENT_THREAD_ID") or "_no_session"
+    base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp")
+    out_dir = base_dir / f"_tmp_{thread_id}" / category
+    out_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha1(str(Path(source_path).resolve()).encode("utf-8")).hexdigest()[:8]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    out_path = out_dir / f"{digest}_{timestamp}_{uuid.uuid4().hex[:8]}.txt"
+    out_path.write_text(text, encoding="utf-8")
+    info: dict = {"text_path": str(out_path)}
+    pm = register_output_path(out_path, description=f"text of the {category} read result (one line per row)")
+    if pm:
+        info["text_path_memory"] = pm
     return info
 
 

@@ -7,6 +7,7 @@ scripts/ 配下の各スクリプトが同一ディレクトリから import し
 from __future__ import annotations
 
 import hashlib
+import uuid
 import json
 import locale
 import os
@@ -83,7 +84,10 @@ def write_json_result(result: dict, category: str, source_path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha1(str(Path(source_path).resolve()).encode("utf-8")).hexdigest()[:8]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    out_path = out_dir / f"{digest}_{timestamp}.json"
+    # Windows の datetime.now() は分解能が粗く（数ms〜15ms）、同じファイルを並列に読むと
+    # マイクロ秒まで同じ名前になって後の結果が先の結果を上書きしていた（本番ログ 2026-11-03:
+    # 同じブックの4シートを並列に読み、2シートの結果が同じ result_path になった）。乱数で区別する。
+    out_path = out_dir / f"{digest}_{timestamp}_{uuid.uuid4().hex[:8]}.json"
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     info: dict = {"result_path": str(out_path)}
     pm = register_output_path(out_path, description=f"full JSON of the {category} read result")
