@@ -452,6 +452,13 @@ $C -X POST $BASE/api/instances/default/memories/translate -H "$H" -H "$J" -H "X-
 # not saved; the response has text/language/llm_instance)
 $C -X POST $BASE/api/instances/default/memories/polish-criteria -H "$H" -H "$J" -H "X-Locohane-Lang: en" \
   -d '{"kind":"private","text":"(a rough note of what should be private)"}'
+# Candidate users to create a draft skill for (owners, default (anonymous), draft_dir, other_users_drafts)
+$C $BASE/api/instances/default/memories/draft-skill-owners
+# Create a draft skill from selected memories (the LLM drafts SKILL.md, saved in [skill_creator] draft_dir/<owner>/<skill_name>/;
+# owner defaults to anonymous, and the LLM chooses skill_name if omitted; up to 20 memories; written in the language of
+# X-Locohane-Lang; the response has owner/skill_name/description/path/content/private_memories_of_others/llm_instance)
+$C -X POST $BASE/api/instances/default/memories/draft-skill -H "$H" -H "$J" -H "X-Locohane-Lang: en" \
+  -d '{"items":[{"name":"my-note","owner":"alice"},{"name":"old-note"}],"owner":"alice","skill_name":"monthly-check","request":"(what kind of skill you want)"}'
 ```
 
 cmd:
@@ -574,6 +581,9 @@ Creating a theme and its details (`lab` is the Skill Lab worker in charge; can b
 ```bash
 $C -X POST $BASE/api/instances/default/skill-lab/themes -H "$H" -H "$J" -d '{"title": "Quote check", "lab": "lab1"}'
 $C $BASE/api/instances/default/skill-lab/themes/<theme ID>
+# Delete a theme (the whole folder; cannot be undone; 409 while running, waiting to start or processing AI requests;
+# for a theme that is not finished, the mark on the source drafts is removed)
+$C -X DELETE $BASE/api/instances/default/skill-lab/themes/<theme ID> -H "$H"
 ```
 
 Adding research targets (skills and sub-agents) (`mode`: `draft` = import a draft (the draft's folder in `origin`) / `official` = copy an official one /

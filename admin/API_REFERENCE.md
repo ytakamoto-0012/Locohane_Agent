@@ -449,6 +449,13 @@ $C -X POST $BASE/api/instances/default/memories/translate -H "$H" -H "$J" -H "X-
 # 保存はしない。応答は text/language/llm_instance）
 $C -X POST $BASE/api/instances/default/memories/polish-criteria -H "$H" -H "$J" \
   -d '{"kind":"private","text":"本人・家族のこと"}'
+# ドラフトスキルの作成先ユーザーの候補（owners・default（anonymous）・draft_dir・other_users_drafts）
+$C $BASE/api/instances/default/memories/draft-skill-owners
+# 選んだメモリーからドラフトスキルを作成（LLM が SKILL.md を下書きし、[skill_creator] draft_dir/<owner>/<skill_name>/ へ保存。
+# owner を省くと anonymous、skill_name を省くと LLM が決める。最大20件。X-Locohane-Lang の言語で書く。
+# 応答は owner/skill_name/description/path/content/private_memories_of_others/llm_instance）
+$C -X POST $BASE/api/instances/default/memories/draft-skill -H "$H" -H "$J" \
+  -d '{"items":[{"name":"my-note","owner":"alice"},{"name":"old-note"}],"owner":"alice","skill_name":"monthly-check","request":"月次の確認用"}'
 ```
 
 cmd:
@@ -571,6 +578,9 @@ $C $BASE/api/instances/default/skill-lab/themes
 ```bash
 $C -X POST $BASE/api/instances/default/skill-lab/themes -H "$H" -H "$J" -d '{"title": "見積書チェック", "lab": "lab1"}'
 $C $BASE/api/instances/default/skill-lab/themes/<テーマID>
+# テーマの削除（フォルダごと。元に戻せない。実行中・開始待ち・AI への依頼の処理中は 409。
+# 終わっていないテーマなら取り込み元のドラフトの印を外す）
+$C -X DELETE $BASE/api/instances/default/skill-lab/themes/<テーマID> -H "$H"
 ```
 
 研究対象（スキル・サブエージェント）の追加（`mode`: `draft`＝ドラフトの取り込み（`origin` にドラフトのフォルダ）／`official`＝正式なものの複製／

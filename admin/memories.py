@@ -18,15 +18,23 @@ X-Locohane-Lang）へ訳させて返すだけで、保存はしない（管理�
 
 設定画面の [memory] shared_criteria / private_criteria の「AIで清書」も同じ LLM で、管理者の下書きを
 ダッシュボードの表示言語の箇条書きへ整えて返すだけ（保存は設定画面の「保存」で行う）。
+
+一覧で選んだメモリー（複数可）から、同じ LLM にドラフトスキル（SKILL.md）を下書きさせ、指定したユーザーの
+ドラフト置き場 [skill_creator] draft_dir/<ユーザー>/<スキル名>/ へ保存することもできる（既定のユーザーは
+anonymous。skill-creator の scaffold_skill.py と同じ構成・_draft_meta.json で作る）。作ったドラフトは
+そのユーザーの次のメッセージから使え、昇格はほかのドラフトと同じくスキル研究室で行う。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -113,6 +121,42 @@ class MemoryEditBody(BaseModel):
     visibility: str | None = None
 
 
+class DraftSkillBody(BaseModel):
+    items: list[MemoryRef]
+    # 作成先のユーザー（ドラフト置き場のユーザーフォルダ名へ整える）。空なら anonymous。
+    owner: str | None = None
+    # スキル名（空なら LLM に決めさせる）。
+    skill_name: str | None = None
+    # LLM への補足（どんなスキルにしたいか等。任意）。
+    request: str | None = None
+
+
+# 1回に選べるメモリーの数と、LLM へ渡すメモリー本文の合計文字数の上限（ローカル LLM の文脈長に収めるため）。
+DRAFT_SKILL_MAX_MEMORIES = 20
+DRAFT_SKILL_MAX_CHARS = 30000
+
+_DRAFT_SKILL_SYSTEM = """You turn memory notes of a business AI assistant into a skill (SKILL.md) for that assistant.
+The memories record facts, corrections and confirmed procedures learned in past conversations. Combine them into one
+reusable skill that tells the assistant how to do that kind of work from the start.
+A SKILL.md starts with frontmatter (name, description) and the body describes the procedure.
+- name: {name_rule}
+- description: the only trigger clue. Write concretely "what it does" and "for what kind of instructions it is used",
+  on one line, 1024 characters or fewer.
+- The body is 500 lines or fewer: purpose, procedure (numbered steps), and notes (what to avoid, how to handle exceptions).
+  Keep every concrete fact, value, rule and reason in the memories that the procedure needs; do not invent features,
+  commands, file paths or values that are not in the memories. Do not write tool names (run_script, etc.) in the body.
+- Do not copy personal information (e-mail addresses, phone numbers, passwords, account numbers) into the skill.
+- Write the description and the body in {language}.
+Output only the full text of SKILL.md starting with the "---" line (no preamble, no code fences)."""
+
+# スキル名（src/skills.py の _NAME_RE と同じ規則。文字数・区切りの連続は _validate で確かめる）。
+_SKILL_NAME_RULE_GIVEN = "use exactly {name!r}."
+_SKILL_NAME_RULE_FREE = (
+    "choose a short name in English: lowercase letters, digits and single hyphens only (e.g. monthly-report-check), "
+    "64 characters or fewer."
+)
+
+
 def _dashboard_editor(user: str) -> str:
     """設定ダッシュボードで作成・編集した人として frontmatter（author / updated_by）に残す名前。
 
@@ -149,6 +193,71 @@ def _owner_scope(owner: str | None) -> str | None:
     return skill_drafts.draft_owner_name(owner.strip())
 
 
+def _draft_owner(owner: str | None) -> str:
+    """ドラフトの作成先ユーザーを、ドラフト置き場のユーザーフォルダ名へ整える（空なら anonymous）。"""
+    return skill_drafts.draft_owner_name((owner or "").strip() or None)
+
+
+def _strip_fence(text: str) -> str:
+    """LLM が付けがちな前後のコードフェンスを外す。"""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    return text.strip()
+
+
+def _official_skill_dir(cfg: Any, skill_name: str) -> Path | None:
+    """そのインスタンスが走査する正式スキルに同じ名前があればそのフォルダ（同梱・共有・専用の置き場）。"""
+    skills_dir = getattr(cfg, "skills_dir", None)
+    roots = ([skills_dir] if skills_dir is not None else []) + list(getattr(cfg, "locohane_skills_dirs", None) or [])
+    for root in roots:
+        if (Path(root) / skill_name / "SKILL.md").is_file():
+            return Path(root) / skill_name
+    return None
+
+
+def _memories_material(memories: list[mem_store.Memory]) -> str:
+    """LLM へ渡すメモリーの一覧（所有者・種類・名前・説明・本文）。"""
+    blocks = []
+    for m in memories:
+        blocks.append(
+            f"## Memory: {m.name}\n- owner: {m.owner or 'common'}\n- type: {m.memory_type}\n"
+            f"- description: {m.description}\n\n{m.content.strip()}"
+        )
+    return "\n\n".join(blocks)
+
+
+def _build_skill_md(text: str, skill_name: str | None) -> tuple[str, str, str]:
+    """LLM の出力から SKILL.md を組み立て直す。(名前, 説明, 全文) を返す。
+
+    frontmatter は name / description だけにして書き直す（LLM の YAML の崩れ・余計なキーを残さない）。
+    skill_name を指定していればその名前に揃える。形式に合わなければ ValueError。
+    """
+    from src.skills import _parse_frontmatter, strip_frontmatter
+
+    text = _strip_fence(text)
+    # 前置きの文（とその後のコードフェンス）が付いていたら、最初の "---" 行から使い、閉じのフェンスも外す。
+    start = text.find("---")
+    if start > 0:
+        text = text[start:].rstrip()
+        if text.endswith("```"):
+            text = text[:-3]
+    fm = _parse_frontmatter(text)
+    if fm is None:
+        raise ValueError("the response has no frontmatter (--- block at the top)")
+    name = skill_name or str(fm.get("name") or "").strip()
+    description = " ".join(str(fm.get("description") or "").split())
+    body = strip_frontmatter(text)
+    if not body:
+        raise ValueError("the response has no body")
+    frontmatter = yaml.safe_dump(
+        {"name": name, "description": description}, allow_unicode=True, sort_keys=False, width=100000
+    )
+    return name, description, f"---\n{frontmatter}---\n\n{body}\n"
+
+
 def _summary(m: mem_store.Memory) -> dict:
     return {
         "name": m.name,
@@ -172,12 +281,14 @@ def build_router(
     backup_keep: int,
     llm_instance: Callable[[str], str] = lambda name: name,
     model_factory: Callable[[Config], Any] | None = None,
+    user_candidates: Callable[[str], list[str]] = lambda name: [],
 ) -> APIRouter:
     """メモリーの API の router を作る。
 
     Args:
         llm_instance: 対象インスタンス名 → 翻訳に使う LLM のインスタンス名（翻訳のたびに呼ぶ）。
         model_factory: 設定 → チャットモデル（awaitable 可。テスト用の差し替え口。既定は src.llm.build_model）。
+        user_candidates: 対象インスタンス名 → ログインユーザー名の一覧（ドラフトスキルの作成先の候補）。
     """
     router = APIRouter()
 
@@ -202,16 +313,32 @@ def build_router(
         think = ThinkFilter()
         return (think.feed(str(content or "")) + think.flush()).strip()
 
-    def _memory_root(name: str) -> Path:
+    def _config(name: str) -> Config:
         try:
             inst.validate_name(name)
             inst.read_instance(instances_root, name)
         except inst.InstanceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         try:
-            return config_loader(name).memory_dir
+            return config_loader(name)
         except Exception as exc:  # noqa: BLE001 - 設定の誤りは画面に出す
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def _memory_root(name: str) -> Path:
+        return _config(name).memory_dir
+
+    def _draft_dir(cfg: Config) -> Path:
+        draft_dir = getattr(cfg, "skill_draft_dir", None)
+        if draft_dir is None:
+            raise HTTPException(status_code=400, detail=_t("このインスタンスにはドラフトスキルの置き場（[skill_creator] draft_dir）がありません。"))
+        return Path(draft_dir)
+
+    def _llm_error(llm_name: str, exc: Exception) -> HTTPException:
+        return HTTPException(
+            status_code=502,
+            detail=_t("LLM（インスタンス {0!r} の [llm] 接続先）から応答を得られませんでした: {1}", llm_name, exc)
+            + _t("（「管理者設定」の「回答に使う LLM」で、LLM に接続できるインスタンスを選べます）"),
+        )
 
     def _find(root: Path, memory_name: str, owner: str | None) -> mem_store.Memory:
         _validate_name(memory_name)
@@ -249,6 +376,137 @@ def build_router(
             "visibilities": list(mem_store.VISIBILITIES),
             "owners": mem_store.list_owners(root),
             "memories": [_summary(m) for m in mem_store.all_memories(root)],
+        }
+
+    # /memories/{memory_name} より前に登録する（同じ形のパスとして取られないように）。
+    @router.get("/api/instances/{name}/memories/draft-skill-owners")
+    def draft_skill_owners(name: str, user: str = Depends(require_login)):
+        """ドラフトスキルの作成先ユーザーの候補（anonymous・ログインユーザー・既存のドラフト／メモリーの所有者）。"""
+        cfg = _config(name)
+        draft_dir = _draft_dir(cfg)
+        default = _draft_owner(None)
+        owners: list[str] = [default]
+        try:
+            owners += [_draft_owner(u) for u in user_candidates(name)]
+        except Exception as exc:  # noqa: BLE001 - .env が読めなくても既存の所有者からは選べるようにする
+            logger.warning("Failed to list the users of %s: %s", name, exc)
+        if draft_dir.is_dir():
+            owners += sorted(p.name for p in draft_dir.iterdir() if p.is_dir() and not p.name.startswith("_"))
+        owners += mem_store.list_owners(cfg.memory_dir)
+        return {
+            "owners": list(dict.fromkeys(owners)),
+            "default": default,
+            "draft_dir": str(draft_dir),
+            "other_users_drafts": getattr(cfg, "skill_other_users_drafts", None),
+        }
+
+    @router.post("/api/instances/{name}/memories/draft-skill")
+    async def create_draft_skill(
+        name: str,
+        body: DraftSkillBody,
+        request: Request,
+        user: str = Depends(require_login),
+        _csrf: None = Depends(require_csrf),
+    ):
+        """選んだメモリーから LLM にドラフトスキルを下書きさせ、指定ユーザーのドラフト置き場へ保存する。"""
+        from src.skills import _validate as validate_skill
+
+        cfg = _config(name)
+        root = cfg.memory_dir
+        draft_dir = _draft_dir(cfg)
+        targets = list(dict.fromkeys((item.name, _owner_scope(item.owner)) for item in body.items))
+        if not targets:
+            raise HTTPException(status_code=400, detail=_t("ドラフトスキルにするメモリーを選択してください。"))
+        if len(targets) > DRAFT_SKILL_MAX_MEMORIES:
+            raise HTTPException(
+                status_code=400, detail=_t("一度に選べるメモリーは {0} 件までです（{1} 件選択されています）。", DRAFT_SKILL_MAX_MEMORIES, len(targets))
+            )
+        found = [_find(root, memory_name, owner) for memory_name, owner in targets]
+        owner = _draft_owner(body.owner)
+        skill_name = (body.skill_name or "").strip() or None
+
+        def _check_name(candidate: str) -> Path:
+            error = validate_skill(candidate, "-", candidate)
+            if error:
+                raise HTTPException(status_code=400, detail=_t("スキル名が不正です（{0}）: {1!r}", error, candidate))
+            if _official_skill_dir(cfg, candidate) is not None:
+                raise HTTPException(
+                    status_code=409, detail=_t("正式スキルと同じ名前は使えません: {0}（別の名前を指定してください）", candidate)
+                )
+            target = draft_dir / owner / candidate
+            if target.exists():
+                raise HTTPException(status_code=409, detail=_t("同じ名前のドラフトスキルが既にあります: {0}/{1}", owner, candidate))
+            return target
+
+        if skill_name:
+            _check_name(skill_name)  # LLM を呼ぶ前に分かる誤りは先に返す
+        material = _memories_material(found)
+        if len(material) > DRAFT_SKILL_MAX_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=_t("選択したメモリーの本文が長すぎます（{0} 文字。上限 {1} 文字）。選ぶメモリーを減らしてください。", len(material), DRAFT_SKILL_MAX_CHARS),
+            )
+        system = _DRAFT_SKILL_SYSTEM.format(
+            name_rule=_SKILL_NAME_RULE_GIVEN.format(name=skill_name) if skill_name else _SKILL_NAME_RULE_FREE,
+            language=TRANSLATE_LANGUAGES[current_lang()],
+        )
+        prompt = f"# Memories\n\n{material}"
+        if (body.request or "").strip():
+            prompt += f"\n\n# Note from the administrator\n{body.request.strip()}"
+        llm_name = llm_instance(name) or name
+        try:
+            text = await _complete(config_loader(llm_name), system, prompt)
+        except Exception as exc:  # noqa: BLE001 - 接続失敗等は画面に出す
+            logger.warning("Draft skill generation failed (llm=%s): %s", llm_name, exc)
+            raise _llm_error(llm_name, exc) from exc
+        try:
+            final_name, description, skill_md = _build_skill_md(text, skill_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=502, detail=_t("LLM の応答を SKILL.md として読めませんでした: {0}", exc)) from exc
+        target = _check_name(final_name)
+        error = validate_skill(final_name, description, final_name)
+        if error:
+            raise HTTPException(status_code=502, detail=_t("LLM の応答を SKILL.md として読めませんでした: {0}", error))
+        target.mkdir(parents=True)
+        (target / "SKILL.md").write_text(skill_md, encoding="utf-8")
+        (target / "references").mkdir()
+        (target / "evals").mkdir()
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        editor = _dashboard_editor(user)
+        meta = {
+            "kind": "new",
+            "author": editor,
+            "last_editor": editor,
+            "thread_id": None,
+            "created_at": now,
+            "updated_at": now,
+            "status": "draft",
+            "tryouts": [],
+            "source_memories": [{"name": m.name, "owner": m.owner} for m in found],
+        }
+        (target / skill_drafts.DRAFT_META_FILENAME).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        audit.append(
+            audit_log_path,
+            {
+                "instance": name,
+                "actor": user,
+                "remote_addr": client_ip(request),
+                "action": "memory_draft_skill",
+                "draft": f"{owner}/{final_name}",
+                "memories": [f"{m.owner or _COMMON_BACKUP_DIRNAME}/{m.name}" for m in found],
+            },
+        )
+        # 作成先ユーザーが見られない個人用のメモリー（他のユーザーの private）を材料にしたか。
+        private_others = [f"{m.owner}/{m.name}" for m in found if m.owner and m.owner != owner and m.visibility == "private"]
+        return {
+            "success": True,
+            "owner": owner,
+            "skill_name": final_name,
+            "description": description,
+            "path": str(target),
+            "content": skill_md,
+            "private_memories_of_others": private_others,
+            "llm_instance": llm_name,
         }
 
     @router.get("/api/instances/{name}/memories/{memory_name}")

@@ -579,7 +579,7 @@ and WAL cannot be used). Use "Data backup" (in the settings dashboard section) t
 | `data/plans/` | Detailed plan Markdown when `create_plan` is passed the `detail_markdown` argument (`[paths] plans_dir`) | When old plans are no longer needed | Delete the folder contents |
 | `data/skill_drafts/<username>/` | Per-user draft skills created by skill-creator (`<skill name>/`) and their evaluation results (`_workspace/`). `[skill_creator] draft_dir`. Rejected drafts also remain as records (not shown in the list) | When there are unneeded drafts | Delete the draft folder (the creator can also delete it with `delete_draft.py` of skill-creator). Not deleted automatically |
 | `data/<instance name>/skill_drafts_archive/<username>/<skill name>_<date time>/` | Where promoted drafts are moved (together with `_workspace/`; `[skill_creator] archive_dir`) | When the records are no longer needed | Delete the folder |
-| `data/skill_lab/themes/<theme ID>/` | Research themes of the Skill Lab (spec, assets under development, cases, input files, records of evaluation and AI fixes `runs/`). Separated per target instance | When the theme is over and the records are no longer needed | Delete the theme folder (it must not be running) |
+| `data/skill_lab/themes/<theme ID>/` | Research themes of the Skill Lab (spec, assets under development, cases, input files, records of evaluation and AI fixes `runs/`). Separated per target instance | When the theme is over and the records are no longer needed | "Delete" in the Skill Lab theme list or theme details (see "Skill Lab" below). To delete by hand, delete the theme folder (it must not be running) |
 | `data/temp/_tmp_<creation time>_<short ID>/` | Intermediate output of `execute_python_code`/`run_script`, and the destination of `write_scratch_note`/`write_thread_note`. Files uploaded in the chat (`uploads/<send time>/`; here even if a working folder is specified). Only for the session itself (see `[default_workdir]`). The creation time at the start of the folder name (`YYMMDDHHMMSS`) is for sorting in creation order in a file manager. The short ID is the first 10 hex digits of the SHA-1 of the thread_id (thread_id is not used as is, to avoid exceeding the 260-character path length limit; folders in the old form `_tmp_<creation time>_<thread_id>` are also used as is when resuming) | When no longer needed after the session ends | Delete the folder contents (also deleted automatically by `[default_workdir] retention_days`/`cleanup_interval_hours`) |
 | `data/elements/<thread_id>/` | Where attachments (`provide_download`, `analyze_image` with `show_in_chat=True`, etc.) and images embedded in answer text are persisted. The actual files are copied here so they can be shown after resuming a thread or restarting the process (see `[elements]`, `src/thread_store.py`) | When attachments are no longer needed | Delete the folder contents |
 | `instances/_assistant_index/` | Cache of embeddings of paragraphs of config.ini, README_DETAIL.md and the API reference, used for search by the admin tool's "Ask AI" (one file per embedding endpoint/model; not under `data/`) | Any time (rebuilt on the next question; the first time takes tens of seconds) | Delete the folder |
@@ -1135,7 +1135,16 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   visibility (`admin/memories.py`; edits go through `edit_memory` in `src/memory.py`, which keeps `created` and `sources`
   and rebuilds the index; the visibility rules are the same as above). They can be filtered by owner, and the shown
   memories can be selected with checkboxes and deleted together (nothing is deleted if any of them is not found;
-  changing the filter clears the selection). "Translate with AI"
+  changing the filter clears the selection). The selected memories (up to 20) can also be turned into a **draft skill**
+  ("Create a draft skill from selected memories"; `draft-skill` in `admin/memories.py`): the LLM (the same endpoint as
+  "Translate with AI" below) combines their content into one SKILL.md and saves it in the chosen user's draft location
+  `[skill_creator] draft_dir/<user>/<skill name>/` with the same layout as skill-creator's `scaffold_skill.py`
+  (`references/`, `evals/`, `_draft_meta.json`; the source memories are recorded in `source_memories`). The user defaults
+  to `anonymous` and can be chosen from the login users and the owners of existing drafts and memories. If the skill name
+  is left empty, the LLM chooses it (names of official skills and existing drafts are rejected). The user can use the
+  draft in conversations from their next message, and it is made official in the Skill Lab like other drafts. If you
+  select another user's private memories, their content goes into the chosen user's draft (their names are shown after
+  creation). It is recorded in the change history as `memory_draft_skill`. "Translate with AI"
   in the edit form has the LLM translate the description and content into the dashboard's display language (Japanese /
   English) and only fills the fields, without saving (check, then press "Save"). Like "Ask AI", it uses
   the `[llm]` endpoints of the "LLM used for answers" in "Admin settings" (or the instance itself if empty). The content
@@ -2453,6 +2462,12 @@ Starting decides the skill tuning worker in charge (even with one worker and "au
 "Change worker / name" in the theme details (stop it first while running or waiting to start). It cannot be started while requests to the AI for drafting remain
 (so that the spec and cases are not rewritten in the middle of the loop). Cases without a way to decide passing (an expect condition or judge), or whose `work_dir`
 input folder does not exist, make the start condition (③) unmet. One draft can be imported only into one theme that is not finished.
+A theme can be deleted with its whole folder by "Delete" in the theme list or the theme details (cannot be undone; `delete_theme`
+in `admin/skill_lab/api.py`). It cannot be deleted while its loop or tryout is running or waiting to start, or while AI requests
+(drafts, single trials) are being processed (stop it first). Deleting a theme that is not finished leaves the source drafts with
+their users and only removes the lab mark (they can be imported into another theme). Deleting a promoted theme keeps the promoted
+skills and sub-agents and the cases in `instances/<name>/evals/<theme ID>/`. A theme whose theme.json is broken can also be deleted.
+It is recorded in the change history as `skill_lab_theme_delete`.
 The research targets themselves (skill folders, SKILL.md, agent definitions) cannot be removed by deleting files; remove them with "Remove" (the mark of an imported draft is removed too).
 
 Changing even one place in the research targets, cases, settings patch or input files invalidates the tryouts so far (from 0 runs).

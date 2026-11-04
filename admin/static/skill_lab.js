@@ -131,8 +131,11 @@ async function renderSkillLabPanel(container, name) {
     _t(`{0} 件`, t.cases),
     t.last ? _t(`{0} {1}（反復 {2}）`, t.last.phase === "tryout" ? _t("トライアウト") : _t("評価"), t.last.verdict === "pass" ? _t("合格") : _t("不合格"), t.iterations) : "-",
     fmtTime(t.updated_at),
+    LAB_ACTIVE.includes(t.status)
+      ? ""
+      : el("button", { class: "btn-danger", text: _t("削除"), onclick: () => deleteTheme(name, t, () => renderSkillLabPanel(container, name)) }),
   ]);
-  container.append(dataTable([_t("テーマ"), _t("状態"), _t("研究対象"), _t("ケース"), _t("最新の結果"), _t("更新")], rows, _t("まだテーマはありません。")));
+  container.append(dataTable([_t("テーマ"), _t("状態"), _t("研究対象"), _t("ケース"), _t("最新の結果"), _t("更新"), ""], rows, _t("まだテーマはありません。")));
 
   container.append(el("h3", { text: _t("利用者のドラフト（このインスタンス）") }));
   const draftRows = src.drafts.map((d) => [
@@ -260,6 +263,9 @@ function renderThemeHeader(state, header, container) {
       }),
     );
   }
+  if (!LAB_ACTIVE.includes(d.status)) {
+    buttons.push(el("button", { class: "btn-danger", text: _t("削除"), onclick: () => deleteTheme(state.name, d, () => renderSkillLabPanel(container, state.name)) }));
+  }
   if (LAB_ACTIVE.includes(d.status)) {
     buttons.push(el("button", { text: _t("停止"), onclick: async () => { await labAction(() => api(themePath(state.name, state.id, "/stop"), { method: "POST" })); await state.reload(); } }));
   }
@@ -293,6 +299,15 @@ function renderThemeHeader(state, header, container) {
     ...notes,
     el("div", { class: "theme-actions" }, buttons),
   );
+}
+
+// テーマをフォルダごと削除する（元に戻せない。admin/skill_lab/api.py の delete_theme）。theme: {id, title, status}
+async function deleteTheme(name, theme, onDone) {
+  let message = _t("テーマ「{0}」を削除します。研究対象・仕様・ケース・入力ファイル・実行の記録はすべて消え、元に戻せません。よろしいですか？", theme.title);
+  if (theme.status === "promoted") message += "\n" + _t("（昇格したスキル・サブエージェントと、インスタンスに残したケースは消えません）");
+  else if (!LAB_CLOSED.includes(theme.status)) message += "\n" + _t("（取り込んだドラフトは利用者のもとに残り、取り込みの印だけが外れます）");
+  if (!confirm(message)) return;
+  if (await labAction(() => api(themePath(name, theme.id), { method: "DELETE" }))) onDone();
 }
 
 function openThemeSettingsModal(state) {

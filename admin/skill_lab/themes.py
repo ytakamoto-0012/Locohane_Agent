@@ -106,6 +106,27 @@ def list_theme_dirs(root: Path) -> list[Path]:
     return sorted(p for p in root.iterdir() if p.is_dir() and _THEME_ID_RE.match(p.name) and (p / THEME_FILENAME).is_file())
 
 
+# 削除中のテーマの一時的な名前の接頭辞（テーマ ID の形式に合わないため、一覧・ワーカーからは見えない）。
+_DELETING_PREFIX = "_deleting_"
+
+
+def delete_theme(directory: Path) -> None:
+    """テーマのフォルダを削除する。
+
+    先に別名へ変えてから消す。ワーカー等がテーマのファイルを開いている間は Windows では名前を変えられず
+    ThemeError になる（消しかけで中身が半分残ることを防ぐ）。別名にした後の削除に失敗しても、
+    一覧には出ない（次の削除で片付ける）。
+    """
+    for leftover in directory.parent.glob(f"{_DELETING_PREFIX}*"):
+        shutil.rmtree(leftover, ignore_errors=True)
+    staging = directory.parent / f"{_DELETING_PREFIX}{directory.name}_{secrets.token_hex(2)}"
+    try:
+        directory.rename(staging)
+    except OSError as exc:
+        raise ThemeError(_t("テーマのファイルが使用中のため削除できません（少し待ってからやり直してください）: {0}", exc)) from exc
+    shutil.rmtree(staging, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # theme.json の排他つき読み書き
 # ---------------------------------------------------------------------------

@@ -924,3 +924,39 @@ def test_promote_keeps_promotion_when_archiving_fails(lab_env, monkeypatch):
     record = _promote(lab_env, directory)
     assert record["archive_errors"] and draft.is_dir()
     assert themes.read(directory)["status"] == themes.STATUS_PROMOTED
+
+
+def test_api_delete_theme_removes_folder_and_unmarks_draft(client, lab_env):
+    draft = _draft(lab_env)
+    theme = client.post("/api/instances/org_a/skill-lab/themes", json={"title": "A", "lab": "lab1"}).json()
+    base = f"/api/instances/org_a/skill-lab/themes/{theme['id']}"
+    res = client.post(f"{base}/assets", json={"mode": "draft", "asset_type": "skills", "name": "my-skill", "origin": str(draft)})
+    assert res.status_code == 200
+    assert "lab" in json.loads((draft / "_draft_meta.json").read_text(encoding="utf-8"))
+    # 他のインスタンスの下からは消せない
+    assert client.delete(f"/api/instances/org_b/skill-lab/themes/{theme['id']}").status_code == 404
+    assert client.delete(base).status_code == 200
+    root = themes.themes_root(_cfg(lab_env, "org_a").common_data_dir)
+    assert themes.list_theme_dirs(root) == [] and list(root.iterdir()) == []
+    # ドラフトは残り、研究室の印だけが外れて、また取り込める
+    assert (draft / "SKILL.md").is_file()
+    assert "lab" not in json.loads((draft / "_draft_meta.json").read_text(encoding="utf-8"))
+    assert [d["imported_theme"] for d in client.get("/api/instances/org_a/skill-lab/sources").json()["drafts"]] == [None]
+    assert client.delete(base).status_code == 404
+    actions = [json.loads(line)["action"] for line in (lab_env["tmp"] / "audit.log").read_text(encoding="utf-8").splitlines()]
+    assert actions[-1] == "skill_lab_theme_delete"
+
+
+def test_api_delete_theme_refuses_active_or_busy_and_allows_broken(client, lab_env):
+    directory = _theme(lab_env)
+    url = f"/api/instances/org_a/skill-lab/themes/{directory.name}"
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_RUNNING}))
+    assert client.delete(url).status_code == 409
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_STOPPED, "tasks": [{"id": "t1", "type": "draft_spec", "status": "running"}]}))
+    assert client.delete(url).status_code == 409
+    assert directory.is_dir()
+    # theme.json が壊れて開けないテーマも消せる
+    (directory / themes.THEME_FILENAME).write_text("{broken", encoding="utf-8")
+    assert client.get(url).status_code == 409
+    assert client.delete(url).status_code == 200
+    assert not directory.exists()

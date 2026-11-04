@@ -236,7 +236,8 @@ The admin tool started by `admin.bat` lets you do the following in the browser.
   (research themes are separate for each instance and do not mix with other departments' or roles' instances)
 - **Memory**: check, fix, delete or translate with AI (into the dashboard's display language) the persistent memory the AI saved (such as what you asked it to
   remember), per user (memory is per user; only "shared" ones such as tips for tasks are also used in other users'
-  searches. Personal or confidential matters are never used for anyone but the owner)
+  searches. Personal or confidential matters are never used for anyone but the owner). You can also have the AI draft a
+  draft skill from selected memories (the user it is created for defaults to anonymous and can be chosen from a list)
 - **Knowledge**: register folders of internal documents as collections and ingest them so the AI can search them
   (when documents are added or updated, only the differences are re-ingested. Ingested collections can also be copied to another instance
   without re-ingesting, or referenced from another instance without copying. For settings, see

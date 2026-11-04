@@ -747,17 +747,19 @@ def apply_config_copy(
 # ---------------------------------------------------------------------------
 
 
+def _instance_usernames(name: str) -> tuple[list[str], bool]:
+    """インスタンスのログインユーザー名の一覧と、プロジェクト直下 .env から継承しているか。"""
+    own_env_path = inst.env_path(INSTANCES_ROOT, name)
+    if env_files.AUTH_USERS_KEY in env_files.read_values(own_env_path):
+        return sorted(env_files.read_users(own_env_path).keys()), False
+    return sorted(env_files.read_users(PROJECT_ENV_PATH).keys()), True
+
+
 @app.get("/api/instances/{name}/users")
 def list_users(name: str, user: str = Depends(require_login)):
     _require_instance(name)
     own_env_path = inst.env_path(INSTANCES_ROOT, name)
-    own_values = env_files.read_values(own_env_path)
-    if env_files.AUTH_USERS_KEY in own_values:
-        usernames = sorted(env_files.read_users(own_env_path).keys())
-        inherited = False
-    else:
-        usernames = sorted(env_files.read_users(PROJECT_ENV_PATH).keys())
-        inherited = True
+    usernames, inherited = _instance_usernames(name)
     ranks, default_rank, rank_error = _user_ranks_view(name, usernames)
     return {
         "usernames": usernames,
@@ -1441,6 +1443,8 @@ app.include_router(
         backup_keep=_cfg.admin_backup_keep,
         # 翻訳に使う LLM は管理アシスタントと同じ選び方（「管理者設定」の「回答に使う LLM」。空なら対象インスタンス）。
         llm_instance=lambda name: admin_settings_api.current_admin_config(CONFIG_INI_PATH).admin_assistant_llm_instance or name,
+        # ドラフトスキルの作成先の候補（「ユーザー」画面と同じ一覧）。
+        user_candidates=lambda name: _instance_usernames(name)[0],
     )
 )
 

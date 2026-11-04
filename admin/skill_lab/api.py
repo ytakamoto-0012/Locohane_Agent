@@ -320,6 +320,39 @@ def build_router(
         _audit(request, user, name, "skill_lab_theme_update", theme=theme_id)
         return _summary(directory)
 
+    @router.delete("/api/instances/{name}/skill-lab/themes/{theme_id}")
+    def delete_theme(name: str, theme_id: str, request: Request, user: str = Depends(require_login), _c=Depends(require_csrf)):
+        """テーマをフォルダごと削除する（元に戻せない）。実行中・開始待ち・AI への依頼の処理中は拒否する。
+
+        theme.json が壊れて開けないテーマも消せる（_theme() は通さず、このインスタンスの置き場の中だけで解決する）。
+        終わっていないテーマなら、取り込み元のドラフトから研究室の印を外してから消す（「外す」と同じ）。
+        昇格済みのテーマを消しても、昇格したスキルと instances/<名前>/evals/<テーマID>/ のケースは残る。
+        """
+        _app_instance(name)
+        try:
+            directory = themes.theme_dir(_root(name), theme_id)
+        except themes.ThemeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        data = themes.read_or_none(directory)
+        if data is not None:
+            if data.get("instance") != name:
+                raise HTTPException(status_code=404, detail=_t("このインスタンスのテーマではありません。"))
+            if data.get("status") in themes.ACTIVE_STATUSES:
+                raise HTTPException(status_code=409, detail=_t("ループ・トライアウトの実行中・開始待ちのテーマは削除できません。先に停止してください。"))
+            if any(t.get("status") in ("queued", "running") for t in data.get("tasks") or []):
+                raise HTTPException(status_code=409, detail=_t("AI への依頼を処理中のテーマは削除できません。終わってから削除してください。"))
+            if data.get("status") not in themes.CLOSED_STATUSES:
+                try:
+                    promotion.unmark_imported(directory)
+                except (OSError, ValueError) as exc:
+                    raise HTTPException(status_code=409, detail=_t("取り込み元のドラフトから研究室の印を外せませんでした: {0}", exc)) from exc
+        try:
+            themes.delete_theme(directory)
+        except themes.ThemeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _audit(request, user, name, "skill_lab_theme_delete", theme=theme_id, title=(data or {}).get("title"))
+        return {"success": True}
+
     # --- 資産 ---------------------------------------------------------------
 
     @router.post("/api/instances/{name}/skill-lab/themes/{theme_id}/assets")

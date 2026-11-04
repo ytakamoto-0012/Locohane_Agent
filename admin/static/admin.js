@@ -2711,9 +2711,11 @@ async function renderMemories(container, open) {
   const selectAll = $("#memories-select-all", root);
   const deleteBtn = $("#delete-memories-btn", root);
   let checkboxes = []; // [{cb, m}]
+  const draftBtn = $("#draft-skill-from-memories-btn", root);
   const syncSelection = () => {
     const checked = checkboxes.filter((c) => c.cb.checked).length;
     deleteBtn.disabled = checked === 0;
+    draftBtn.disabled = checked === 0;
     selectAll.checked = checkboxes.length > 0 && checked === checkboxes.length;
     selectAll.indeterminate = checked > 0 && checked < checkboxes.length;
   };
@@ -2736,6 +2738,67 @@ async function renderMemories(container, open) {
       return;
     }
     await reload();
+  });
+
+  // 選んだメモリーからドラフトスキルを作る（admin/memories.py の draft-skill）。
+  const draftForm = $("#draft-skill-form", root);
+  let draftTargets = [];
+  draftBtn.addEventListener("click", async () => {
+    draftTargets = checkboxes.filter((c) => c.cb.checked).map((c) => c.m);
+    if (draftTargets.length === 0) return;
+    $("#draft-skill-error", root).textContent = "";
+    $("#draft-skill-status", root).textContent = "";
+    let owners;
+    try {
+      owners = await api(memoriesPath("/draft-skill-owners"));
+    } catch (e) {
+      $("#memories-error", root).textContent = e.message;
+      return;
+    }
+    $("#draft-skill-dir", root).textContent = owners.draft_dir;
+    const select = draftForm.elements.owner;
+    select.innerHTML = "";
+    for (const owner of owners.owners) select.appendChild(el("option", { value: owner, text: owner }));
+    select.value = owners.default;
+    const list = $("#draft-skill-memories", root);
+    list.innerHTML = "";
+    list.appendChild(el("div", { text: _t("元にするメモリー（{0} 件）:", draftTargets.length) }));
+    for (const m of draftTargets) list.appendChild(el("div", { text: `${memoryOwnerLabel(m.owner)} / ${m.name}: ${m.description}` }));
+    form.classList.add("hidden");
+    draftForm.classList.remove("hidden");
+    draftForm.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  $("#draft-skill-cancel-btn", root).addEventListener("click", () => draftForm.classList.add("hidden"));
+  draftForm.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const submit = draftForm.querySelector("button[type=submit]");
+    const status = $("#draft-skill-status", root);
+    $("#draft-skill-error", root).textContent = "";
+    submit.disabled = true;
+    status.textContent = _t("AI がスキルを下書きしています…（数分かかることがあります）");
+    try {
+      const result = await api(memoriesPath("/draft-skill"), {
+        method: "POST",
+        body: {
+          items: draftTargets.map((m) => ({ name: m.name, owner: m.owner })),
+          owner: draftForm.elements.owner.value,
+          skill_name: draftForm.elements.skill_name.value.trim() || null,
+          request: draftForm.elements.request.value.trim() || null,
+        },
+      });
+      status.textContent = "";
+      draftForm.classList.add("hidden");
+      let message = _t("ドラフトスキル {0}/{1} を作成しました（{2}）。そのユーザーの次のメッセージから使えます。", result.owner, result.skill_name, result.path);
+      if (result.private_memories_of_others.length) {
+        message += "\n" + _t("他のユーザーの個人用のメモリーを含みます: {0}", result.private_memories_of_others.join(", "));
+      }
+      alert(message);
+    } catch (e) {
+      status.textContent = "";
+      $("#draft-skill-error", root).textContent = e.message;
+    } finally {
+      submit.disabled = false;
+    }
   });
 
   const renderList = () => {
@@ -3086,6 +3149,7 @@ function summarizeAuditEntry(entry) {
   if (entry.action === "conversation_view") return _t(`会話閲覧: {0} / {1}`, entry.thread_owner || "", entry.thread_id || "");
   if (entry.target_user) return _t(`対象: {0}`, entry.target_user);
   if (entry.memory) return _t(`メモリー: {0} / {1}`, entry.memory_owner || _t("（共通）"), entry.memory);
+  if (entry.action === "memory_draft_skill") return _t(`ドラフトスキル: {0}（元のメモリー: {1}）`, entry.draft || "", (entry.memories || []).join(", "));
   if (entry.file) return _t(`ファイル: {0}`, entry.file);
   if (entry.key) return _t(`キー: {0}`, entry.key);
   return "";

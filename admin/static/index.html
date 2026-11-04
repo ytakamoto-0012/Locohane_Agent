@@ -312,9 +312,26 @@
       <tbody id="memories-tbody"></tbody>
     </table>
     <div class="inline-actions">
+      <button type="button" id="draft-skill-from-memories-btn" disabled title="選んだメモリーの内容をもとに、AI にスキル（SKILL.md）を下書きさせ、指定したユーザーのドラフトスキルとして保存します">選択したメモリーからドラフトスキルを作成</button>
       <button type="button" id="delete-memories-btn" class="btn-danger" disabled>選択したメモリーを削除</button>
     </div>
     <div class="error" id="memories-error"></div>
+    <form id="draft-skill-form" class="memory-form hidden">
+      <h3>メモリーからドラフトスキルを作成</h3>
+      <p class="hint">選んだメモリーをもとに AI がスキル（SKILL.md）を下書きし、作成先ユーザーのドラフト置き場へ保存します。ドラフトはそのユーザーの次のメッセージから会話で使え、正式化はスキル研究室で行います。AI は「管理者設定」の「回答に使う LLM」の接続先を使います。</p>
+      <p class="hint">保存先: <code id="draft-skill-dir"></code></p>
+      <div class="hint" id="draft-skill-memories"></div>
+      <label>作成先ユーザー<select name="owner"></select></label>
+      <label>スキル名（半角小文字英数字・-・_。空欄なら AI が決めます）<input type="text" name="skill_name" maxlength="64" /></label>
+      <label>AI への補足（どんなスキルにしたいか等。任意）<textarea name="request" rows="3"></textarea></label>
+      <p class="hint">他のユーザーの「個人用」のメモリーを選ぶと、その内容が作成先ユーザーのドラフトに入ります。</p>
+      <div class="hint" id="draft-skill-status"></div>
+      <div class="error" id="draft-skill-error"></div>
+      <div class="modal-actions">
+        <button type="button" id="draft-skill-cancel-btn" class="btn-cancel">閉じる</button>
+        <button type="submit" class="primary">作成</button>
+      </div>
+    </form>
     <form id="memory-form" class="memory-form hidden">
       <h3 id="memory-form-title"></h3>
       <label>所有者（ログインユーザー名。空欄なら共通）<input type="text" name="owner" list="memory-owner-list" /></label>
