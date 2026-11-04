@@ -186,12 +186,10 @@ def _register_path_memory(paths: list[str], description: str | None = None) -> d
     if _state._PATH_MEMORY_DIR is None:
         return {}
     thread_id = cl.user_session.get("thread_id") or "_no_session"
-    result: dict[str, str] = {}
-    for path in paths:
-        index = path_memory.register(thread_id, path, _state._PATH_MEMORY_DIR, _state._PATH_MEMORY_MAX_ENTRIES, description=description)
-        if index is not None:
-            result[f"@{index}"] = path
-    return result
+    indexes = path_memory.register_many(
+        thread_id, paths, _state._PATH_MEMORY_DIR, _state._PATH_MEMORY_MAX_ENTRIES, description=description
+    )
+    return {f"@{index}": path for path, index in zip(paths, indexes) if index is not None}
 
 
 def _dedupe_paths_with_path_memory(result: dict, path_memory_map: dict[str, str]) -> None:
