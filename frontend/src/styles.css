@@ -180,6 +180,14 @@
   white-space: nowrap;
 }
 
+.theme-picker-note {
+  margin-top: 6px;
+  max-width: 240px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
 .scheme-option--active {
   border-color: var(--accent);
   background: var(--accent-soft);

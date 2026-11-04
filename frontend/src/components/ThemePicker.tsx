@@ -8,7 +8,12 @@ import {
   type ColorScheme
 } from '../theme';
 import { LANGUAGE_OPTIONS, useI18n, type MessageKey } from '../i18n';
+import { desktopNotifySupported, getNotifyEnabled, requestNotifyPermission, setNotifyEnabled } from '../notify';
 import { Icon } from './Icon';
+
+function currentPermission(): NotificationPermission | 'unsupported' {
+  return desktopNotifySupported() ? Notification.permission : 'unsupported';
+}
 
 const SCHEME_OPTIONS: { id: ColorScheme; label: MessageKey; icon: 'sun' | 'moon' | 'monitor' }[] = [
   { id: 'light', label: 'theme.light', icon: 'sun' },
@@ -21,6 +26,8 @@ export function ThemePicker() {
   const [open, setOpen] = useState(false);
   const [accent, setAccent] = useState(getStoredAccentId());
   const [scheme, setScheme] = useState<ColorScheme>(getStoredScheme());
+  const [notifyOn, setNotifyOn] = useState(getNotifyEnabled());
+  const [permission, setPermission] = useState(currentPermission());
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -56,6 +63,21 @@ export function ThemePicker() {
     setScheme(id);
     applyScheme(id);
   };
+
+  // 許可ダイアログはユーザー操作の中でしか出せないため、オンにしたクリックで求める
+  const selectNotify = (enabled: boolean) => {
+    setNotifyOn(enabled);
+    setNotifyEnabled(enabled);
+    if (enabled) requestNotifyPermission().then(setPermission);
+  };
+
+  const notifyNote: MessageKey | null = !notifyOn
+    ? null
+    : permission === 'unsupported'
+      ? 'theme.notifyTitleOnly'
+      : permission === 'denied'
+        ? 'theme.notifyDenied'
+        : null;
 
   return (
     <div className="theme-picker" ref={ref}>
@@ -114,6 +136,23 @@ export function ThemePicker() {
                 </button>
               ))}
             </div>
+          </div>
+          <div className="theme-picker-section">
+            <div className="theme-picker-section-title">{t('theme.notify')}</div>
+            <div className="scheme-options">
+              {[true, false].map((value) => (
+                <button
+                  key={String(value)}
+                  type="button"
+                  className={`scheme-option ${value === notifyOn ? 'scheme-option--active' : ''}`}
+                  onClick={() => selectNotify(value)}
+                >
+                  <Icon name={value ? 'bell' : 'bell-off'} size={14} />
+                  {t(value ? 'theme.notifyOn' : 'theme.notifyOff')}
+                </button>
+              ))}
+            </div>
+            <div className="theme-picker-note">{t(notifyNote ?? 'theme.notifyNote')}</div>
           </div>
         </div>
       ) : null}

@@ -16,6 +16,7 @@ import {
 } from '@chainlit/react-client';
 import { BACKEND_URL } from './chainlitClient';
 import { useI18n } from './i18n';
+import { useBrowserNotify } from './notify';
 import { fetchThreadSnapshot, threadStepsToMessages, splitThreadElements } from './threadSnapshot';
 import { Header } from './components/Header';
 import { LoginForm } from './components/LoginForm';
@@ -65,6 +66,10 @@ function App() {
   const sessionId = useRecoilValue(sessionIdState);
   const client = useContext(ChainlitContext);
   const { lang, ready: langReady } = useI18n();
+  // 完了・質問待ち・Plan 承認待ちのブラウザ通知（表示設定で ON のときだけ。notify.ts 参照）
+  const { notifyRemoteComplete } = useBrowserNotify();
+  const notifyRemoteCompleteRef = useRef(notifyRemoteComplete);
+  notifyRemoteCompleteRef.current = notifyRemoteComplete;
 
   // スマホ幅では左右のパネルを引き出し式にし、同時に開くのは片方だけにする
   // （PC 幅では各パネルが自分の折りたたみ状態を持つため使わない）。
@@ -275,6 +280,7 @@ function App() {
                 if (cancelled) return;
                 wasRemoteGeneratingRef.current = false;
                 setRemoteGenerating(false);
+                notifyRemoteCompleteRef.current();
               })
               .catch(() => {});
             return;
