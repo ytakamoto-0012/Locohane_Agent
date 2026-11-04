@@ -161,7 +161,10 @@ def _guard_unknown_tool_args(input, tools_by_name: dict[str, BaseTool]):  # noqa
     }
 
 
-_ALLOWED_WHILE_AWAITING_APPROVAL = {"approve_plan", "get_plan_status", "lock_plan_mode"}
+# create_plan も通す: 承認前に自分の計画の誤り（推測で書いた日付等）に気付いて作り直すのは
+# 正当な自己修正。止めると同じ create_plan を繰り返すか、誤った計画のまま承認へ進むしかなくなる
+# （2026-11-04 evals 001 で、誤った基準日を直そうとした create_plan が2回続けて差し戻された）。
+_ALLOWED_WHILE_AWAITING_APPROVAL = {"approve_plan", "create_plan", "get_plan_status", "lock_plan_mode"}
 # このうち呼ばれたらガードのフラグ自体を解除するもの（それ以外
 # （get_plan_status）は読み取り専用の確認だけなので、フラグは維持したまま
 # 通過させる）。
@@ -169,7 +172,7 @@ _CLEARS_AWAITING_APPROVAL = {"approve_plan", "lock_plan_mode"}
 
 
 def _guard_awaiting_approve_plan(input):  # noqa: A002
-    """create_plan 直後、approve_plan/get_plan_status/lock_plan_mode 以外の
+    """create_plan 直後、approve_plan/create_plan/get_plan_status/lock_plan_mode 以外の
     tool_calls を実行させず、合成 ToolMessage に差し替える。
 
     本番ログ・evalで、create_plan の直後に規定の approve_plan ではなく
@@ -205,7 +208,10 @@ def _guard_awaiting_approve_plan(input):  # noqa: A002
     return {
         "messages": [
             ToolMessage(
-                content=("Error: call approve_plan right after create_plan" " (the other tools were not run)."),
+                content=(
+                    "Error: call approve_plan right after create_plan (the other tools were not run). "
+                    "To correct the plan before approval, call create_plan again with the corrected plan."
+                ),
                 name=name,
                 tool_call_id=call.get("id"),
                 status="error",
