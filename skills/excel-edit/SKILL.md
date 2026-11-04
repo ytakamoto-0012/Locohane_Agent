@@ -125,7 +125,7 @@ the series colors of charts (only here does the behavior differ from other theme
 
 **Write sheet names, headers and cell text in the user's language** (the sheet names and values in the examples of this file are in English only for illustration; do not copy them).
 
-**For tabular data (reports, lists, schedules, etc.), just add `header_style` to `set_range`** (even an empty `{}` works as the signal "row 1 is the header"). Header colors, borders, banding, freezing the header row and column width adjustment are applied automatically. Avoid building `fill_color`/`font_color`/`border` cell by cell yourself (more calls and an inconsistent look). Override with the options of `format_table` (`header_fill`, etc.) only when colors are specified explicitly.
+**For tabular data (reports, lists, schedules, etc.), just add `header_style` to `set_range`** (even an empty `{}` works as the signal "row 1 is the header"). Header colors, borders, banding, freezing the header row and column width adjustment are applied automatically. Avoid building `fill_color`/`font_color`/`border` cell by cell yourself (more calls and an inconsistent look). Override with the options of `format_table` (`header_fill`, etc.) only when colors are specified explicitly. To color rows by category, pass `row_styles` with `fill_color`: banding is applied only to rows without a fill, so it never overwrites those colors.
 
 ```json
 [{"op": "set_range", "sheet": "Sheet1", "start_cell": "A1",

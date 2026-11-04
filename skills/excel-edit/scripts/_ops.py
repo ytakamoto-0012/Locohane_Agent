@@ -339,12 +339,17 @@ def _format_table_range(ws, min_row: int, max_row: int, min_col: int, max_col: i
             apply_style(ws.cell(row=min_row, column=col), header_style)
         body_start = min_row + 1
 
+    # 縞模様は塗りの無いセルにだけ付ける。row_styles 等で明示した塗り（種別の
+    # 色分け等）を奇数行だけ灰色で上書きしていた（2026-11-04 evals 001 で
+    # 色分け57行が崩れ、修正往復の原因になった）。
     for row_idx, row in enumerate(range(body_start, max_row + 1)):
-        body_style = {"border": border_style}
-        if banded and row_idx % 2 == 1:
-            body_style["fill_color"] = band_fill
+        band_this_row = banded and row_idx % 2 == 1
         for col in range(min_col, max_col + 1):
-            apply_style(ws.cell(row=row, column=col), body_style)
+            cell = ws.cell(row=row, column=col)
+            body_style = {"border": border_style}
+            if band_this_row and cell.fill.fill_type in (None, "none"):
+                body_style["fill_color"] = band_fill
+            apply_style(cell, body_style)
 
     if opts.get("freeze_header", True):
         ws.freeze_panes = ws.cell(row=body_start, column=min_col).coordinate

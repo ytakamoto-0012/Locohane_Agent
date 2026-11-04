@@ -153,3 +153,21 @@ def test_set_active_sheet_updates_workbook_active_index():
     apply_op(wb, {"op": "set_active_sheet", "sheet": "Sheet2"})
 
     assert wb.active.title == "Sheet2"
+
+
+def test_set_range_banding_keeps_explicit_row_styles_fill():
+    """header_style の自動縞模様が row_styles で明示した塗りを上書きしない
+    （2026-11-04 evals 001: 種別の色分けが奇数行だけ灰色になった）。
+    明示の無い行には従来どおり縞模様が付く。"""
+    wb = openpyxl.Workbook()
+    wb.active.title = "Sheet1"
+    rows = [["種別", "内容"], ["準備", "a"], ["行事", "b"], ["片付け", "c"], ["-", "d"]]
+    row_styles = [None, {"fill_color": "FFF2CC"}, {"fill_color": "DAEEF3"}, {"fill_color": "E2EFDA"}, None]
+    apply_op(wb, {"op": "set_range", "sheet": "Sheet1", "start_cell": "A1", "rows": rows, "header_style": {}, "row_styles": row_styles})
+    ws = wb["Sheet1"]
+    assert ws["A2"].fill.fgColor.rgb == "00FFF2CC"
+    assert ws["A3"].fill.fgColor.rgb == "00DAEEF3"
+    assert ws["B3"].fill.fgColor.rgb == "00DAEEF3"
+    assert ws["A4"].fill.fgColor.rgb == "00E2EFDA"
+    # 明示の無い行（5行目, 本体の4行目=奇数インデックス）は縞模様
+    assert ws["A5"].fill.fgColor.rgb == "00F2F2F2"

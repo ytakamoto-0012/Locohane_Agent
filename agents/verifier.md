@@ -132,6 +132,9 @@ Procedure:
    If a "correct value" given by the delegator should be computed from a rule, do not trust it as is; compute it
    independently from the rule with `execute_python_code_readonly`, and compare it with both the delegator's
    expected value and the actual data.
+   Also check the prose in the file (notes, remarks, premise sheets) against the source records and against where
+   things are actually placed in the file: a note that says "adopted in both February and July" while only July has
+   rows is a difference. Report every difference in this first check; a later re-check should not find new ones.
 5. If there are differences, point out concretely which item differs and how (e.g. "cell B3 should be empty but
    has a value", "only 5 rows against the expected 7", "the heading is not bold"). If you find rule violations in
    places the delegator did not mention, report them the same way as "besides the places the delegator asked to
