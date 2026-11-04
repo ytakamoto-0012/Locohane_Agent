@@ -447,6 +447,22 @@ DESCRIPTIONS: dict[str, str] = {
         'Maximum number of characters of stdout/stderr/progress notes when the progress display above, and check_script_job/stop_script_job/read_thread_note, show only the end ("running", "at the time of forced termination", etc.). Showing everything would squeeze the context, so it is truncated.\n'
         'The progress display of dispatch_agent (under [subagent]) shares the same value.'
     ),
+    'file_tools_limits.search_time_limit_seconds': (
+        'Limits that keep the Read/Glob/Grep tools from getting stuck on large folders or huge files. The tools run in a separate thread and cannot be stopped from outside, so the tools themselves stop at these limits and return the partial result with a note that it was cut short.\n'
+        'Maximum processing time (seconds) of one Glob or Grep call. When exceeded, the scan is stopped (for Glob: listing the entries directly under the folder, counting the lines of files and counting the contents of folders; for Grep: walking the folder and searching the files).'
+    ),
+    'file_tools_limits.grep_max_files': (
+        'Maximum number of files whose contents one Grep call examines. When exceeded, the scan is stopped.'
+    ),
+    'file_tools_limits.grep_max_file_mb': (
+        'Maximum size (MB) of one file whose contents Grep examines. Larger files are skipped without reading, and the number of skipped files and some examples are put in the result (Read with offset/limit can still read them).'
+    ),
+    'file_tools_limits.regex_timeout_seconds': (
+        'Maximum time (seconds) the Grep regular expression may spend searching one line. When exceeded, the search of that file is abandoned and the file is skipped (so that patterns with explosive backtracking do not hang).'
+    ),
+    'file_tools_limits.full_read_max_mb': (
+        'Maximum size (MB) of a file that Read loads whole and whose lines Glob counts. For larger files, Read reads sequentially from the start only up to the lines needed (the total number of lines is not counted), and Glob does not count the lines.'
+    ),
     'file_tools_duplicate_guard.enabled': (
         'Settings of the guard that prevents calling the Read/Glob/Grep/json_query/read_skill/read_skill_file/get_tool_source tools repeatedly with the same arguments. These are read-only, which guarantees that rerunning them with the same arguments does not change the result (a countermeasure for cases where small local models sporadically repeat the same call throughout the conversation without progress. For read_skill/read_skill_file it also counters thrashing, where the same large SKILL.md etc. is reread again and again after context compaction removed the earlier result from the message history.\n'
         'See _check_file_tools_duplicate / _record_and_check_duplicate in src/tools.py).'

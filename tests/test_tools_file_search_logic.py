@@ -100,7 +100,8 @@ class TestGlobSearch:
 
         assert result["total_matches"] == 2
         detail = next(d for d in result["file_details"] if d["path"] == str((tmp_path / "bad.py").resolve()))
-        assert detail == {"path": str((tmp_path / "bad.py").resolve()), "binary": False, "total_lines": None}
+        assert detail["binary"] is False
+        assert detail["total_lines"] == "not counted: could not decode the text"
 
     def test_base_not_a_directory_raises(self, tmp_path) -> None:
         f = tmp_path / "a.txt"
