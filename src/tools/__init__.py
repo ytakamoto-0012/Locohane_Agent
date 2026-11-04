@@ -97,6 +97,7 @@ from .registry import (  # noqa: F401
     delete_memory,
     dispatch_agent,
     dispatch_agent_batch,
+    edit_tool,
     execute_python_code,
     execute_python_code_background,
     execute_python_code_readonly,
@@ -128,6 +129,7 @@ from .registry import (  # noqa: F401
     update_task_progress,
     write_scratch_note,
     write_thread_note,
+    write_tool,
 )
 
 __all__ = [

@@ -271,6 +271,7 @@ LLM は `read_skill`/`read_skill_file`/`run_script` という**ビルトイン�
 | `get_tool_source` | `run_script` がエラーになった際、原因調査用にスクリプトの絶対パスを返す（中身は返さない） |
 | `check_work_dir_status` | 現在の作業ディレクトリの実際のアクセス状況を確認する |
 | `Read` / `Glob` / `Grep` | ローカルファイルシステム上の任意の絶対パスに対する読込・ファイル名検索・全文検索（ClaudeCode の同名ツールに合わせた名前。読み取り専用のため計画未承認でも常に呼べる。ロジックは `src/tools/read_tool.py`/`glob_tool.py`/`grep_tool.py`、共通処理は `_file_tools_common.py`） |
+| `Write` / `Edit` | テキストファイルの作成・部分置換（ClaudeCode の同名ツールに合わせた名前）。サブエージェント（`worker`）専用で、メインエージェントには渡さない。計画承認が必要で、書き込めるのは作業ディレクトリとそのセッションの `_tmp_` フォルダだけ（`execute_python_code` と同じ範囲）。相対パスは `execute_python_code` の cwd（`_tmp_`）基準。長いスクリプトを一度ファイルに置き、修正は該当箇所だけ置き換えることで、修正のたびに全文を出し直す時間とコンテキストを省く。Write は既存ファイルを `overwrite` なしでは上書きせず、Edit は一意に一致した箇所だけを置き換え、文字コードと改行を保って変更箇所を行番号付きで返す（`src/tools/file_edit_tools.py`） |
 | `json_query` | JSON/dict に対する JMESPath クエリ（読み取り専用） |
 | `search_path_memory` | 現在の会話のパスメモリー（`@N`）から、ファイル名等に似たパスを類似検索する（文字bigram＋コサイン類似度、読み取り専用）。パスを受け取る各ツールは `@N` 単体に加え、フォルダの `@N` に子パスを続けた `@N/ファイル名` も解決する |
 | `provide_download` | 既存のファイルをチャット画面にダウンロードボタンとして提示する |

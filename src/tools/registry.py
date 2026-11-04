@@ -13,6 +13,7 @@ from .write_scratch_note import write_scratch_note
 from .analyze_image import analyze_image
 from .run_script import run_script
 from .read_tool import read_tool
+from .file_edit_tools import edit_tool, write_tool
 from .glob_tool import glob_tool
 from .grep_tool import grep_tool
 from .json_query import json_query
@@ -55,6 +56,8 @@ _SUBAGENT_TOOLS: list = [
     check_work_dir_status,
     analyze_image,
     read_tool,
+    write_tool,
+    edit_tool,
     glob_tool,
     grep_tool,
     json_query,
