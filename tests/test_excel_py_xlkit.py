@@ -88,3 +88,16 @@ def test_save_rejects_new_xlsm_and_empty_workbook(tmp_path):
     wb.create_sheet("S")
     with pytest.raises(ValueError, match="xlsm"):
         save(wb, tmp_path / "m.xlsm", new=True)
+
+
+def test_write_note_merges_wraps_and_sets_height():
+    from xlkit import write_note
+
+    ws = new_workbook().create_sheet("S")
+    t = write_table(ws, [["月", "内容", "備考"], ["4月", "a", "b"]])
+    long_text = "前提: 準備・段取り・片付け・打ち合わせの時期は過去記録に無いため、一般的な基準による仮定です。" * 2
+    write_note(ws, t.last_row + 2, long_text, last_col=t.last_col)
+    row = t.last_row + 2
+    assert f"A{row}:C{row}" in {str(r) for r in ws.merged_cells.ranges}
+    assert ws.cell(row=row, column=1).alignment.wrap_text
+    assert ws.row_dimensions[row].height > 15

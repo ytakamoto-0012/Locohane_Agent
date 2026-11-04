@@ -16,7 +16,7 @@ Create and edit Excel files by writing openpyxl code with `execute_python_code`.
 ```python
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.environ["AGENT_SRC_DIR"]), "skills", "excel-py", "scripts"))
-from xlkit import new_workbook, open_workbook, write_table, merge_same, save, fill
+from xlkit import new_workbook, open_workbook, write_table, write_note, merge_same, save, fill
 ```
 
 ## xlkit
@@ -27,6 +27,7 @@ from xlkit import new_workbook, open_workbook, write_table, merge_same, save, fi
 | `open_workbook(path)` | Open an existing file. `.xlsm` keeps its macros. |
 | `write_table(ws, rows, "A1", title=None, header=True, theme=None, banded=True, row_fills=None, number_formats=None, freeze=True)` | Write a table: `rows[0]` is the header (bold, white on dark blue, centered), every cell gets a thin border, column widths fit the text (full-width characters count as 2, at most 60), long text wraps, the header row is frozen. `title` puts a merged bold line above the table. `row_fills` is one color (`"RRGGBB"`) or `None` per body row (header not counted); banding (light gray every other row) is only added to rows without a color. `number_formats={3: "#,##0"}` formats the 4th column. `theme` is one of `charcoal`, `navy`, `forest`, `coral`, `terracotta`, `ocean`, `teal`, `berry`. Returns a `Table` with `title_row`, `header_row`, `first_row`, `last_row`, `first_col`, `last_col`. |
 | `merge_same(ws, "A", first_row, last_row)` | Merge the runs of the same value in one column (month, category) and center them vertically. Call it after writing the table instead of counting merge ranges yourself. |
+| `write_note(ws, row, text, first_col=1, last_col=None)` | One line of text outside a table (premise, note, legend): merged across the table width (`last_col`, e.g. `t.last_col`), wrapped, and the row made tall enough to show it all. Use it for every such line instead of writing a single cell. |
 | `fill("RRGGBB")` | A solid fill for `cell.fill`. |
 | `save(wb, path, new=True/False)` | Save and print one line of JSON: path, `@N` reference, per-sheet summary (size, merged cells, column widths) and `warnings` (text cut off, mixed number formats, unmerged runs in a group column). `new=True` refuses to overwrite an existing file. `new=False` copies the old file to `<name>.bak_<date-time>` first. |
 
@@ -34,15 +35,18 @@ Anything else (fonts, single cells, charts, conditional formatting, data validat
 
 ## How to write the code
 
-1. Compute everything from the data in the code: dates, week numbers, groups, averages, counts, which rows exist. Build `rows` (and `row_fills`) as lists in the code, then write each table with one `write_table`. Do not type computed values into the code by hand.
-2. Save to the absolute path in the working directory with `save(...)`.
-3. Check in the same code: open the saved file again with `openpyxl.load_workbook` and print one check per requirement of the task (e.g. every month has rows for weeks 1–5, every row of a kind has its color, the notes the task asks for are present). Fix and run again until every check passes. Printing only row counts is not a check.
-4. Fix every item in `warnings` before reporting.
+1. Write the whole build script once to a file with `Write` (e.g. `build_xlsx.py`; a relative name goes to the cwd of `execute_python_code`), then run it with `execute_python_code`: `import runpy; runpy.run_path("build_xlsx.py")`. When something fails or a check is wrong, fix only those lines with `Edit` and run the same one-line `execute_python_code` again. Do not resend the whole script.
+2. Compute everything from the data in the script: dates, week numbers, groups, averages, counts, which rows exist. Build `rows` (and `row_fills`) as lists in the script, then write each table with one `write_table`. Do not type computed values into the script by hand.
+3. Save to the absolute path in the working directory with `save(...)`.
+4. Check at the end of the same script: open the saved file again with `openpyxl.load_workbook` and print one check per requirement of the task (e.g. every month has rows for weeks 1–5, every row of a kind has its color, the notes the task asks for are present). Fix and run again until every check passes. Printing only row counts is not a check.
+5. Fix every item in `warnings` before reporting.
+
+Example content of `build_xlsx.py`:
 
 ```python
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.environ["AGENT_SRC_DIR"]), "skills", "excel-py", "scripts"))
-from xlkit import new_workbook, write_table, merge_same, save
+from xlkit import new_workbook, write_table, write_note, merge_same, save
 import openpyxl
 
 out = r"C:\work\schedule.xlsx"
@@ -54,6 +58,7 @@ ws = wb.create_sheet("Weekly")
 rows = [["Month", "Week", "Item", "Kind"]] + [list(r) for r in records]
 t = write_table(ws, rows, "A1", title="2026 weekly schedule", row_fills=[colors[r[3]] for r in records])
 merge_same(ws, "A", t.first_row, t.last_row)
+write_note(ws, t.last_row + 2, "Note: meetings are planned two weeks before each event.", last_col=t.last_col)
 save(wb, out, new=True)
 
 # check

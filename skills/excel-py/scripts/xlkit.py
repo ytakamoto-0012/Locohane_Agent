@@ -10,7 +10,7 @@ JSON の op を組み立てて edit_excel.py へ渡す方式（excel-edit）で�
 
     import os, sys
     sys.path.insert(0, os.path.join(os.path.dirname(os.environ["AGENT_SRC_DIR"]), "skills", "excel-py", "scripts"))
-    from xlkit import new_workbook, open_workbook, write_table, merge_same, save
+    from xlkit import new_workbook, open_workbook, write_table, write_note, merge_same, save
 
 保存時の点検（lint）と状態要約は excel-edit の _lint.py を、配色テーマは
 office_shared/office_theme.py を共有する（同じ基準で警告を出すため）。
@@ -35,7 +35,7 @@ for _p in (_SKILLS_DIR / "office_shared", _SKILLS_DIR / "excel-edit" / "scripts"
 from excel_common import _display_width, backup_before_overwrite, exceeds_column_width, register_output_path  # noqa: E402
 from office_theme import THEMES, resolve_theme  # noqa: E402
 
-__all__ = ["THEMES", "Table", "fill", "merge_same", "new_workbook", "open_workbook", "save", "write_table"]
+__all__ = ["THEMES", "Table", "fill", "merge_same", "new_workbook", "open_workbook", "save", "write_note", "write_table"]
 
 _THIN = Side(style="thin")
 BORDER = Border(top=_THIN, bottom=_THIN, left=_THIN, right=_THIN)
@@ -163,6 +163,23 @@ def write_table(
     if freeze and header_row is not None:
         ws.freeze_panes = ws.cell(row=first_row, column=first_col).coordinate
     return Table(title_row, header_row, first_row, last_row, first_col, last_col)
+
+
+def write_note(ws, row: int, text: str, first_col: int = 1, last_col: int | None = None, *, bold: bool = False) -> None:
+    """表の外に置く1行の文（前提・注記・凡例）を書く。
+
+    表の幅（first_col〜last_col）で結合し、折り返して、全文が見える行の高さにする。
+    1セルに書くだけだと、列幅を超えた部分が切れて見えなかった
+    （2026-11-04 evals 001: 前提・注記の行が A 列だけに入り、表示が切れて検証NG）。
+    """
+    last_col = last_col or first_col
+    cell = ws.cell(row=row, column=first_col, value=text)
+    cell.alignment = Alignment(vertical="top", wrap_text=True)
+    if bold:
+        cell.font = Font(bold=True)
+    if last_col > first_col:
+        ws.merge_cells(start_row=row, start_column=first_col, end_row=row, end_column=last_col)
+    _fit_title_height(ws, row, first_col, last_col, text)
 
 
 def merge_same(ws, column: str | int, first_row: int, last_row: int) -> list[str]:
