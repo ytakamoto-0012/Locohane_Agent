@@ -127,6 +127,8 @@ the series colors of charts (only here does the behavior differ from other theme
 
 **For tabular data (reports, lists, schedules, etc.), just add `header_style` to `set_range`** (even an empty `{}` works as the signal "row 1 is the header"). Header colors, borders, banding, freezing the header row and column width adjustment are applied automatically. Avoid building `fill_color`/`font_color`/`border` cell by cell yourself (more calls and an inconsistent look). Override with the options of `format_table` (`header_fill`, etc.) only when colors are specified explicitly. To color rows by category, pass `row_styles` with `fill_color`: banding is applied only to rows without a fill, so it never overwrites those colors.
 
+**Fonts and row heights are set automatically when saving** (no ops needed): a new workbook with Japanese text uses `Yu Gothic` for every written cell (otherwise cells keep the sheet's font), and each row without an explicit height that has wrapped text gets a height that fits its lines. Use `set_row_height` only to override.
+
 ```json
 [{"op": "set_range", "sheet": "Sheet1", "start_cell": "A1",
   "rows": [["Month","Event","Owner"], ["April","Entrance ceremony","Tanaka"], ["May","Excursion","Sato"]],

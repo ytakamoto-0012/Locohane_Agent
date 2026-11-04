@@ -118,6 +118,111 @@ def _wrap_overflowing(ws, min_row: int, max_row: int, min_col: int, max_col: int
                 apply_style(cell, {"wrap_text": True})
 
 
+_CJK_FONT = "Yu Gothic"
+_DEFAULT_LATIN_FONTS = {None, "Calibri"}
+
+
+def _has_cjk(text: str) -> bool:
+    return any("぀" <= ch <= "ヿ" or "㐀" <= ch <= "鿿" or "＀" <= ch <= "￯" for ch in text)
+
+
+def finalize_sheets(wb, sheets, new_workbook: bool) -> None:
+    """保存直前に、編集したシートのフォント名と折り返し行の高さを確定させる。
+
+    ops ではフォント名を指定できず（build_font は名前なしの Font を作る）、行の高さも
+    自動では付かない。名前なしのフォントや高さ未設定の行は開くアプリによって見え方が
+    変わり（日本語が Calibri で表示される、レンダリングで折り返しが切れる）、verifier が
+    NG にして修正の往復が1回増えていた（2026-11-05 evals 001 で、内容は全項目 OK
+    なのに行の高さとフォントだけで worker＋verifier の2周目に約17分）。
+    """
+    fonts_name = _CJK_FONT if new_workbook and _sheets_have_cjk(sheets) else None
+    for ws in sheets:
+        _finalize_fonts(ws, fonts_name)
+        _fit_wrapped_row_heights(ws)
+
+
+def _sheets_have_cjk(sheets) -> bool:
+    for ws in sheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and _has_cjk(cell.value):
+                    return True
+    return False
+
+
+def _finalize_fonts(ws, cjk_font: str | None) -> None:
+    """名前の無いフォントに名前を付ける。新規ブックで日本語があれば既定の Calibri も cjk_font に揃える。
+
+    既存ブックの編集では、元のフォント（名前付き）には触れず、ops が作った名前なしの
+    フォントだけを、そのシートで使われている名前（無ければ Calibri）に揃える。
+    """
+    from copy import copy
+
+    if cjk_font:
+        target = cjk_font
+        replace = _DEFAULT_LATIN_FONTS
+    else:
+        names = [c.font.name for row in ws.iter_rows() for c in row if c.font is not None and c.font.name]
+        target = max(set(names), key=names.count) if names else "Calibri"
+        replace = {None}
+    for row in ws.iter_rows():
+        for cell in row:
+            font = cell.font
+            if font is None or font.name not in replace or font.name == target:
+                continue
+            if cell.value is None and not cell.has_style:
+                continue
+            new_font = copy(font)
+            new_font.name = target
+            if new_font.size is None:
+                new_font.size = 11
+            cell.font = new_font
+
+
+def _fit_wrapped_row_heights(ws) -> None:
+    """高さ未設定の行のうち、折り返すセルがある行に、収まる行数分の高さを付ける（明示した高さは変えない）。"""
+    import math
+
+    from openpyxl.utils import get_column_letter
+
+    merged_width: dict[tuple[int, int], int] = {}
+    covered: set[tuple[int, int]] = set()
+    for rng in ws.merged_cells.ranges:
+        if rng.min_row != rng.max_row:
+            # 縦に結合したセルは複数行に広がるので、1行の高さを決める材料にしない
+            for r in range(rng.min_row, rng.max_row + 1):
+                for c in range(rng.min_col, rng.max_col + 1):
+                    covered.add((r, c))
+            continue
+        merged_width[(rng.min_row, rng.min_col)] = rng.max_col
+        for c in range(rng.min_col + 1, rng.max_col + 1):
+            covered.add((rng.min_row, c))
+
+    def col_width(col: int) -> float:
+        return ws.column_dimensions[get_column_letter(col)].width or 8.43
+
+    for row in ws.iter_rows():
+        if not row:
+            continue
+        r = row[0].row
+        if ws.row_dimensions[r].height is not None:
+            continue
+        lines_needed = 1
+        size = 11.0
+        for cell in row:
+            if (r, cell.column) in covered or not isinstance(cell.value, str) or not cell.alignment.wrap_text:
+                continue
+            end_col = merged_width.get((r, cell.column), cell.column)
+            width = sum(col_width(c) for c in range(cell.column, end_col + 1))
+            usable = max(width - 1, 1)
+            lines = sum(max(1, math.ceil(_display_width(part) / usable)) for part in cell.value.split("\n"))
+            if lines > lines_needed:
+                lines_needed = lines
+                size = float(cell.font.size or 11) if cell.font is not None else 11.0
+        if lines_needed > 1:
+            ws.row_dimensions[r].height = min(round(lines_needed * size * 1.35 + 3, 1), 409)
+
+
 def op_add_sheet(wb, op: dict) -> None:
     name = str(op["name"])[:31]
     if name in wb.sheetnames:

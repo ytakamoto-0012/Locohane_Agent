@@ -36,7 +36,7 @@ from excel_common import (  # noqa: E402
     setup_utf8_stdio,
 )
 from _lint import lint_sheet, sheet_summary  # noqa: E402
-from _ops import apply_op, pop_op_warnings  # noqa: E402
+from _ops import apply_op, finalize_sheets, pop_op_warnings  # noqa: E402
 
 
 def _touched_sheet(wb, op: dict, after: bool):
@@ -145,6 +145,8 @@ def main() -> int:
     if not wb.sheetnames:
         print("In the end there are no sheets at all (include add_sheet or review --new)", file=sys.stderr)
         return 1
+
+    finalize_sheets(wb, [ws for ws in wb.worksheets if any(ws is t for t in touched)], new_workbook=args.new)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     backup_path = backup_before_overwrite(output_path)
