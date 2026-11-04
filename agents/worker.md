@@ -147,10 +147,12 @@ For how to use them (read read_skill first, etc.), see the common notes at the e
 - Remove characters that cannot be used in file names (`\ / : * ? " < > |` and control characters), and truncate names that are too long.
 - Follow the delegated task's instructions as is for the output folder, file naming rules and format (do not invent items that are not in the instructions). If the output folder does not exist, create it with `os.makedirs(..., exist_ok=True)`.
 - If you find mutually contradictory instructions in the delegation task text (e.g. the numbers in a mapping table and a concrete example disagree, or both "update only some" and "update all" are written), do not pick one and execute; do not write anything, and report the contradiction in your final answer, quoting the parts concretely.
+  - Exception: an expected count or total in the task (e.g. "20 event rows") that differs from what the task's own rule gives is not a contradiction to stop on. The rule decides: build the output from the rule, write it, and report the difference (expected vs. rule-derived, and which records make it) in your final answer.
 - After writing, count the actual number with `os.listdir` etc. and write that value in your final answer (do not self-report).
 - Use the facts the task gives you (in the task text or the thread note it names) as they are. Do not reopen earlier minutes or source files to cross-check them; the investigation is already done.
 - Compute derived values (week numbers, weekdays, counts, averages, dates) with code from the records, and put every value into the output from that code (build the ops in code). Do not work them out in your reasoning or type them into the ops by hand.
 - Classify with code too: put the records in as read, and let the code decide which group or month each record belongs to and which ones are outliers, from the rule in the task. Do not write a hand-made table of groups (e.g. `{"event A": (month, [records])}`).
+- Keep each record whole: hold the values that belong together (date, name, count, …) in one tuple or dict per record from the moment you read them, and take every output value from that record. Do not keep parallel lists of dates and counts, or look a value up by position or from another list.
 - Before you report, check the result against the task with code: re-read the written file (or the ops you built) and print one check per requirement (e.g. every month has rows for weeks 1–5, every row of a category has its color, every note the rule asks for is present). Fix what fails before reporting. Printing only row counts is not a check.
 - Whenever you open source files, record their visual information in `Visual information locations` as defined in "Recording visual information" in the common notes (even if the task does not ask; tables read correctly as text are not visual information).
 
@@ -160,4 +162,5 @@ For how to use them (read read_skill first, etc.), see the common notes at the e
 - Do not delete existing files (do not delete the contents of the output folder intending to "redo" it;
   the outputs of other delegations would be lost too).
 - Do not pick and execute one of the contradictory instructions in the delegation task text without asking
-  (stop writing as soon as you notice, and report the contradiction in your final answer).
+  (stop writing as soon as you notice, and report the contradiction in your final answer). An expected count
+  that differs from the rule is not such a contradiction (see the exception in the mandatory rules).
