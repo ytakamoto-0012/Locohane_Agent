@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-05
+
 ### 追加
 
 - 表示設定に「通知」のオン/オフを追加しました（既定はオフ）。オンにすると、タブを見ていない間にタスクが完了したとき・
@@ -103,6 +105,12 @@
   その場合はランクの欄に理由を表示し、保存を受け付けないようにしました。
 - eval（セッションの無い実行）で、自分のメモリーのフォルダを `Read`・`Grep` で開けなかった不具合と、メモリーの本文に
   `${` があると起動時に失敗していた不具合を直しました。
+
+### 移行時の注意
+
+- 依存に `regex`（`Grep` の正規表現の時間制限）と、開発用の `pytest-xdist` を追加しました。更新後に
+  `pip install -r requirements.txt` を実行してください。
+- `config.ini` に `[file_tools_limits]` セクションを追加しました（既定値のままで動きます。既存のキーの移動・改名はありません）。
 
 ## [0.5.0] - 2026-11-04
 
@@ -960,7 +968,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.4.7...v0.4.8
