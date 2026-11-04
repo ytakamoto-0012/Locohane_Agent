@@ -285,20 +285,28 @@ export function useBrowserNotify(): { notifyRemoteComplete: () => void } {
     };
   }, []);
 
-  // 質問・Plan 承認待ち（askUser が新しく出たとき）
-  const prevAskRef = useRef(askUser);
+  // 質問・Plan 承認待ち（askUser が新しく出たとき、1つの askUser につき1回）
+  // 初回描画時に既に出ている askUser は通知しない（以前の動作と同じ）
+  const notifiedAskRef = useRef(askUser);
   useEffect(() => {
-    const prev = prevAskRef.current;
-    prevAskRef.current = askUser;
-    if (!askUser || askUser === prev) return;
-    // ask_user_choice（1つ選ぶ質問）も計画承認と同じ spec.type === 'action' で届くため、
-    // 承認ボタン（approve_plan の name="approve"）があるときだけ「承認待ち」とする
-    const isPlanApproval =
-      askUser.spec.type === 'action' &&
-      actions.some((a) => a.forId === askUser.spec.step_id && askUser.spec.keys?.includes(a.id) && a.name === 'approve');
+    if (!askUser) {
+      notifiedAskRef.current = undefined;
+      return;
+    }
+    if (askUser === notifiedAskRef.current) return;
+    let isPlanApproval = false;
+    if (askUser.spec.type === 'action') {
+      // ask_user_choice（1つ選ぶ質問）も計画承認と同じ spec.type === 'action' で届くため、
+      // 承認ボタン（approve_plan の name="approve"）があるときだけ「承認待ち」とする。
+      // ボタンの一覧が askUser より後に届くことがあるので、届くまで待つ（actions の更新でもう一度判定）。
+      const relevant = actions.filter((a) => a.forId === askUser.spec.step_id && askUser.spec.keys?.includes(a.id));
+      if (relevant.length === 0 && (askUser.spec.keys?.length ?? 0) > 0) return;
+      isPlanApproval = relevant.some((a) => a.name === 'approve');
+    }
+    notifiedAskRef.current = askUser;
     send(isPlanApproval ? 'approval' : 'question');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [askUser]);
+  }, [askUser, actions]);
 
   // 完了（loading が true→false になり、少し待っても ask が来ない）
   const wasLoadingRef = useRef(loading);

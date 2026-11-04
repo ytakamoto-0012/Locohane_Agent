@@ -37,6 +37,8 @@ markdown-it-py==4.2.0                # admin/api_docs.py: APIリファレンス�
 #     on_message は経由しない。純粋関数レベルの検証はpytestで別途行う） ---
 pytest==9.1.1
 pytest-asyncio==1.4.0
+# 全テストの並列実行（python -m pytest -n auto）。MIT License
+pytest-xdist==3.8.0
 
 # --- SKILL.md frontmatter のパース（環境に導入済みだが依存として明記） ---
 PyYAML==6.0.3

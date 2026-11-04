@@ -13,6 +13,7 @@ import codecs
 import difflib
 import locale
 import os
+import re
 import stat
 from collections.abc import Iterator
 from pathlib import Path
@@ -24,6 +25,8 @@ _STREAM_ENCODING_PROBE_BYTES = 1024 * 1024
 # 文字コードの見本を探す範囲と、集める「ASCII 以外を含む塊」の数（detect_stream_encoding）。
 _STREAM_ENCODING_MAX_SCAN_BYTES = 64 * 1024 * 1024
 _STREAM_ENCODING_NON_ASCII_SAMPLES = 4
+# 見本 1MB あたりに許す不正なバイト列の数（detect_stream_encoding）。
+_STREAM_ENCODING_TOLERATED_ERRORS = 3
 
 
 def _candidate_encodings() -> tuple[str, ...]:
@@ -39,6 +42,52 @@ def format_size(size_bytes: int) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} TB"
+
+
+def normalize_glob(pattern: str) -> str:
+    """glob を `/` 区切りにそろえ、`.` と空の区切り（`./a`・`a/./b`・`a//b`）を除く。
+
+    pathlib の glob はこれらを読み飛ばすため、LLM が書きがちな `./*/ocr_md/*.md` でも一致した。
+    相対パスの正規表現で比べるとき（glob_regex）に、同じ一致にそろえる。
+    """
+    parts = [p for p in pattern.replace("\\", "/").split("/") if p not in ("", ".")]
+    return "/".join(parts)
+
+
+def glob_regex(pattern: str) -> re.Pattern[str]:
+    """`/` 区切りの glob（`**` は0個以上のフォルダ）を、基準フォルダからの相対パス（`/` 区切り）に当てる正規表現にする。
+
+    `**/tests/*.py` は `tests/a.py` にも `pkg/tests/a.py` にも一致する。Windows では大文字小文字を区別しない
+    （pathlib の glob と同じ判定）。pattern は normalize_glob 済みであること。
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:[^/]*/)*")
+            i += 3
+            continue
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+            continue
+        c = pattern[i]
+        if c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "[" and pattern.find("]", i + 1) != -1:
+            j = pattern.find("]", i + 1)
+            inner = pattern[i + 1 : j]
+            if inner.startswith("!"):
+                inner = "^" + inner[1:]
+            out.append("[" + inner.replace("\\", "\\\\") + "]")
+            i = j + 1
+            continue
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("".join(out) + r"\Z", re.IGNORECASE if os.name == "nt" else 0)
 
 
 def split_text_lines(text: str) -> list[str]:
@@ -58,24 +107,31 @@ def split_text_lines(text: str) -> list[str]:
     return lines
 
 
-def _decodes_cleanly(encoding: str, data: bytes) -> bool:
-    """data を encoding でデコードできるか。途中から切り出した塊でも判定できるよう、先頭の数バイトずらしも試す。"""
+def _decode_errors(encoding: str, data: bytes) -> int:
+    """data を encoding でデコードしたときの不正なバイト列の数。
+
+    途中から切り出した塊でも判定できるよう、先頭の数バイトずらしも試して最も少ない数を返す。
+    """
+    best: int | None = None
     for skip in range(4):
-        try:
-            codecs.getincrementaldecoder(encoding)().decode(data[skip:], final=False)
-            return True
-        except UnicodeDecodeError:
-            continue
-    return False
+        text = codecs.getincrementaldecoder(encoding)(errors="replace").decode(data[skip:], final=False)
+        errors = text.count("�")
+        best = errors if best is None else min(best, errors)
+        if best == 0:
+            break
+    return best or 0
 
 
 def detect_stream_encoding(path: Path) -> str | None:
     """巨大ファイルを逐次読みするときのエンコーディングを、全体を読まずに決める。
 
-    read_text_with_fallback と同じ候補・順序で、見本をエラーなくデコードできた最初の
+    read_text_with_fallback と同じ候補・順序で、見本をほぼ正しくデコードできた最初の
     ものを返す。見本は先頭 1MB に加え、ASCII 以外を含む 1MB の塊を、合計
     _STREAM_ENCODING_MAX_SCAN_BYTES まで先頭から探して集める（先頭が ASCII だけの
     Shift-JIS の CSV やログを UTF-8 と誤認し、後半の日本語を置換文字にしていたため）。
+    不正なバイトが見本 1MB あたり _STREAM_ENCODING_TOLERATED_ERRORS 個までなら許す
+    （UTF-8 のログに壊れたバイトが1つ混ざっただけで、ファイル全体を読めなくしないため。
+    別の文字コードの文書を UTF-8 として読むと、不正なバイトは桁違いに多く出る）。
     どれでも読めなければ None。
     """
     samples: list[bytes] = []
@@ -100,7 +156,9 @@ def detect_stream_encoding(path: Path) -> str | None:
             codecs.lookup(encoding)
         except LookupError:
             continue
-        if all(_decodes_cleanly(encoding, sample) for sample in samples):
+        sampled_mb = sum(len(sample) for sample in samples) / (1024 * 1024)
+        tolerated = max(1, round(_STREAM_ENCODING_TOLERATED_ERRORS * sampled_mb))
+        if sum(_decode_errors(encoding, sample) for sample in samples) <= tolerated:
             return encoding
     return None
 

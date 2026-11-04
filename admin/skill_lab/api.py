@@ -346,20 +346,24 @@ def build_router(
                 raise HTTPException(status_code=409, detail=_t("AI への依頼を処理中のテーマは削除できません。終わってから削除してください。"))
         # 先にフォルダを別名へ変えて（＝使用中でなく消せると確かめて）から、取り込み元のドラフトの印を外す。
         # 逆の順だと、使用中で消せなかったときにテーマは残るのに印だけが外れていた。
-        try:
-            staging = themes.stage_theme_for_delete(directory)
-        except themes.ThemeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if data is not None and data.get("status") not in themes.CLOSED_STATUSES:
+        # 印を外せなかったときは、理由を問わず（theme.json の中身の崩れ等も含め）フォルダを元の名前に戻す。
+        with themes.DELETE_LOCK:
             try:
-                promotion.unmark_imported(staging)
-            except (OSError, ValueError) as exc:
+                staging = themes.stage_theme_for_delete(directory)
+            except themes.ThemeError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if data is not None and data.get("status") not in themes.CLOSED_STATUSES:
                 try:
-                    themes.restore_staged_theme(staging, directory)
-                except OSError:
-                    logger.exception("Could not restore the theme folder after a failed delete: %s", staging)
-                raise HTTPException(status_code=409, detail=_t("取り込み元のドラフトから研究室の印を外せませんでした: {0}", exc)) from exc
-        themes.remove_staged_theme(staging)
+                    promotion.unmark_imported(staging)
+                except Exception as exc:  # noqa: BLE001 - どの失敗でもテーマを残す
+                    try:
+                        themes.restore_staged_theme(staging, directory)
+                    except OSError:
+                        logger.exception("Could not restore the theme folder after a failed delete: %s", staging)
+                    raise HTTPException(
+                        status_code=409, detail=_t("取り込み元のドラフトから研究室の印を外せませんでした: {0}", exc)
+                    ) from exc
+            themes.remove_staged_theme(staging)
         _audit(request, user, name, "skill_lab_theme_delete", theme=theme_id, title=(data or {}).get("title"))
         return {"success": True}
 

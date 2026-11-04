@@ -128,9 +128,16 @@ def _read_file_streaming(path: Path, offset: int, limit: int, size: int, full_re
         "end_line": offset + len(selected) if selected else None,
         "content": "\n".join(f"{i + offset + 1}\t{line}" for i, line in enumerate(selected)),
     }
-    if stopped:
+    if stopped and selected:
         next_offset = offset + len(selected)
         result["stopped"] = f"{stopped}; read the rest with offset={next_offset} and a smaller limit"
+    elif stopped:
+        # offset の手前で時間切れ。読み飛ばしに時間を使っているので、limit を減らしても同じ結果になる。
+        result["stopped"] = (
+            f"{stopped}, before reaching offset {offset}: the file is too large to skip to that line. "
+            "Do not retry the same offset; find the lines you need with Grep (its line numbers can be used as offset) "
+            "or ask the user for a smaller file"
+        )
     return result
 
 

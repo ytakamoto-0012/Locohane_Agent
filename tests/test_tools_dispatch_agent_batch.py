@@ -782,3 +782,19 @@ def test_list_target_files_stops_at_time_limit(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(batch, "current_limits", lambda: FileToolsLimits(search_time_limit_seconds=0))
     with pytest.raises(ValueError, match="longer than"):
         batch._list_target_files(tmp_path, "**/*.jpg")
+
+
+@pytest.mark.parametrize("pattern", ["./a/*.md", "a//*.md", "a/./*.md", "./*/*.md"])
+def test_list_target_files_normalizes_dot_and_empty_segments(tmp_path, monkeypatch, pattern) -> None:
+    """pathlib の glob と同じく、`./`・`a/./`・`//` を読み飛ばす（LLM が書きがちな形で0件にしない）。"""
+    import sys
+
+    from src import skill_drafts
+
+    monkeypatch.setattr(skill_drafts, "current_draft_user", lambda: None)
+    monkeypatch.setattr(tools.cl, "user_session", _FakeUserSession())
+    monkeypatch.setattr(tools._state, "_DEFAULT_WORKDIR", tmp_path)
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "x.md").write_text("x", encoding="utf-8")
+    files = sys.modules["src.tools.dispatch_agent_batch"]._list_target_files(tmp_path, pattern)
+    assert [p.name for p in files] == ["x.md"]

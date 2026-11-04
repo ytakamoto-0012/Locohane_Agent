@@ -45,3 +45,9 @@ def test_errors_start_with_error_prefix(skills_root) -> None:
         skill_tools.run_skill_script("missing", "hello.py"),
     ):
         assert result.startswith("Error: ") and not _JAPANESE.search(result), result
+
+
+def test_parse_frontmatter_keeps_triple_dash_in_description() -> None:
+    """MCP サーバー側も、行全体が --- の行だけを区切りにする（本体の src/skills.py と同じ）。"""
+    text = "---\nname: monthly-check\ndescription: Monthly check --- use when closing\n---\n\n# Body\n"
+    assert skill_tools._parse_frontmatter(text) == {"name": "monthly-check", "description": "Monthly check --- use when closing"}

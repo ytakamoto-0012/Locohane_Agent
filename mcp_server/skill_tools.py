@@ -21,6 +21,7 @@ Resources方式（外部への配布）専用であり、ここでの実行はMC
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -29,20 +30,22 @@ import yaml
 from .config import SCRIPT_PYTHON, SCRIPT_TIMEOUT_SECONDS, SKILLS_SRC, WORKDIR
 
 
+# src/skills.py の _FRONTMATTER_RE と同じ（行全体が --- の行で囲まれた部分）。
+_FRONTMATTER_RE = re.compile(r"---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|$)", re.DOTALL | re.MULTILINE)
+
+
 def _parse_frontmatter(text: str) -> dict | None:
     """SKILL.md 先頭の `---` で囲まれた YAML frontmatter を dict で返す。
 
     `src/skills.py` の `_parse_frontmatter()` と同じロジック（依存を持たせず
     ここに直接複製。standalone プロセスのため Locohane 本体の `src/` は
-    importしない）。
+    importしない）。区切りは行全体が `---` の行だけ（description に "---" を含んでも切れない）。
     """
-    if not text.lstrip().startswith("---"):
-        return None
-    parts = text.lstrip().split("---", 2)
-    if len(parts) < 3:
+    match = _FRONTMATTER_RE.match(text.lstrip())
+    if match is None:
         return None
     try:
-        data = yaml.safe_load(parts[1])
+        data = yaml.safe_load(match.group(1))
     except yaml.YAMLError:
         return None
     return data if isinstance(data, dict) else None

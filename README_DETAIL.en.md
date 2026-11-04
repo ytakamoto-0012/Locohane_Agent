@@ -2560,7 +2560,7 @@ Do it on the `main` branch, from a state where the working tree is clean and tes
    Also add/update the comparison links at the end (`[Unreleased]`, `[X.Y.Z]`).
 2. Rewrite `VERSION` to `X.Y.Z`.
 3. If the frontend changed, run `npm run build` in `frontend/` and update `public/build/`.
-4. Run `pytest` and confirm that everything passes.
+4. Run `python -m pytest -n auto` and confirm that everything passes (`-n auto` runs the tests in parallel on all CPU cores with pytest-xdist).
 5. Put it all in one commit "Release vX.Y.Z", add an annotated tag and push.
 
    ```bash

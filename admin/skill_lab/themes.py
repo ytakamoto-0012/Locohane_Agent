@@ -27,6 +27,7 @@ import os
 import re
 import secrets
 import shutil
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -108,14 +109,18 @@ def list_theme_dirs(root: Path) -> list[Path]:
 
 # 削除中のテーマの一時的な名前の接頭辞（テーマ ID の形式に合わないため、一覧・ワーカーからは見えない）。
 _DELETING_PREFIX = "_deleting_"
+# テーマの削除（別名へ変える→後始末→消す）を1件ずつにする。並行して削除が走ると、片方が残骸の掃除で
+# もう片方の作業中の別名フォルダを消し、後始末も元に戻すこともできなくなるため（API はスレッドプールで動く）。
+DELETE_LOCK = threading.Lock()
 
 
 def stage_theme_for_delete(directory: Path) -> Path:
-    """削除のため、テーマのフォルダを一覧に出ない別名へ変え、その新しいパスを返す。
+    """削除のため、テーマのフォルダを一覧に出ない別名へ変え、その新しいパスを返す。DELETE_LOCK を持って呼ぶこと。
 
     ワーカー等がテーマのファイルを開いている間は Windows では名前を変えられず ThemeError になる
     （消しかけで中身が半分残ることを防ぐ）。取り込み元のドラフトの印を外す等の後始末は、
     この後（名前を変えられた＝削除できると分かってから）行い、失敗したら restore_staged_theme で戻す。
+    前回までに消し損ねた別名フォルダ（残骸）はここで片付ける（DELETE_LOCK の下なので作業中のものは無い）。
     """
     for leftover in directory.parent.glob(f"{_DELETING_PREFIX}*"):
         shutil.rmtree(leftover, ignore_errors=True)
@@ -135,11 +140,6 @@ def restore_staged_theme(staging: Path, directory: Path) -> None:
 def remove_staged_theme(staging: Path) -> None:
     """別名にしたテーマのフォルダを消す。失敗しても一覧には出ない（次の削除で片付ける）。"""
     shutil.rmtree(staging, ignore_errors=True)
-
-
-def delete_theme(directory: Path) -> None:
-    """テーマのフォルダを削除する（別名へ変えてから消す。stage_theme_for_delete 参照）。"""
-    remove_staged_theme(stage_theme_for_delete(directory))
 
 
 # ---------------------------------------------------------------------------

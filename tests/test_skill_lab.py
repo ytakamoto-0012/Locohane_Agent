@@ -976,3 +976,16 @@ def test_api_delete_theme_refuses_active_or_busy_and_allows_broken(client, lab_e
     assert client.get(url).status_code == 409
     assert client.delete(url).status_code == 200
     assert not directory.exists()
+
+
+def test_api_delete_theme_restores_folder_on_any_unmark_error(client, lab_env, monkeypatch):
+    # 印を外す処理がどんな例外で失敗しても、テーマのフォルダを元の名前に戻す（消えたことにしない）
+    directory = _theme(lab_env)
+    url = f"/api/instances/org_a/skill-lab/themes/{directory.name}"
+
+    def broken(staging):
+        raise KeyError("id")
+
+    monkeypatch.setattr(promotion, "unmark_imported", broken)
+    assert client.delete(url).status_code == 409
+    assert directory.is_dir()

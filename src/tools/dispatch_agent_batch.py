@@ -12,7 +12,6 @@ import asyncio
 import chainlit as cl
 import logging
 import os
-import re
 import time
 import uuid
 
@@ -24,7 +23,7 @@ from . import _state
 from ._dispatch_agent_job import _SUBAGENT_MESSAGE_AUTHOR, _DispatchAgentJob, _finalize_dispatch_agent_job_result
 from ._dispatch_agent_job import _format_activity, _purge_stale_dispatch_agent_jobs, _run_dispatch_agent_job
 from ._dispatch_agent_job import _wait_next_progress_push
-from ._file_tools_common import is_link_dir
+from ._file_tools_common import glob_regex, is_link_dir, normalize_glob
 from ._file_tools_limits import Deadline, current_limits
 from ._path_memory_helpers import _resolve_path_memory_tokens_in_text
 from ._safe_path import _resolve_file_tools_path
@@ -112,39 +111,6 @@ def _relative_display(p: Path, base: Path) -> str:
         return p.name
 
 
-def _glob_regex(pattern: str) -> re.Pattern[str]:
-    """`/` 区切りの glob（`**` は0個以上のフォルダ）を、base からの相対パスに当てる正規表現にする。"""
-    out: list[str] = []
-    i = 0
-    while i < len(pattern):
-        if pattern.startswith("**/", i):
-            out.append("(?:[^/]*/)*")
-            i += 3
-            continue
-        if pattern.startswith("**", i):
-            out.append(".*")
-            i += 2
-            continue
-        c = pattern[i]
-        if c == "*":
-            out.append("[^/]*")
-        elif c == "?":
-            out.append("[^/]")
-        elif c == "[" and pattern.find("]", i + 1) != -1:
-            j = pattern.find("]", i + 1)
-            inner = pattern[i + 1 : j]
-            if inner.startswith("!"):
-                inner = "^" + inner[1:]
-            out.append("[" + inner.replace("\\", "\\\\") + "]")
-            i = j + 1
-            continue
-        else:
-            out.append(re.escape(c))
-        i += 1
-    # Windows のファイル名は大文字小文字を区別しない（pathlib の glob と同じ判定にする）。
-    return re.compile("".join(out) + r"\Z", re.IGNORECASE if os.name == "nt" else 0)
-
-
 def _walk_matching(base: Path, pattern: str, exclude_names: set[str] | frozenset[str], exclude_dirs: list[Path], deadline: Deadline) -> Iterator[Path]:
     """base 配下を再帰的にたどり、相対パスが pattern に一致するファイルを返す（サブフォルダを含むパターン用）。
 
@@ -153,7 +119,7 @@ def _walk_matching(base: Path, pattern: str, exclude_names: set[str] | frozenset
     ジャンクションのフォルダに入らず、除外するフォルダには最初から入らず、処理時間の上限を超えたら
     ValueError で止める（途中までの一覧で黙って配ると、残りのファイルが処理されないため）。
     """
-    regex = _glob_regex(pattern)
+    regex = glob_regex(normalize_glob(pattern))
     excluded = {os.path.normcase(str(d)) for d in exclude_dirs}
     stack = [str(base)]
     while stack:

@@ -2626,7 +2626,7 @@ md を編集すれば管理ツールを再起動せずに反映される）。�
    末尾の比較リンク（`[Unreleased]`・`[X.Y.Z]`）も追加・更新する。
 2. `VERSION` を `X.Y.Z` に書き換える。
 3. フロントエンドを変更していれば `frontend/` で `npm run build` し、`public/build/` を更新する。
-4. `pytest` を実行して全件成功を確認する。
+4. `python -m pytest -n auto` を実行して全件成功を確認する（`-n auto` は pytest-xdist による CPU コア数での並列実行）。
 5. 「Release vX.Y.Z」の 1 コミットにまとめ、注釈付きタグを付けて push する。
 
    ```bash
