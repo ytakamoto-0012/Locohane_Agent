@@ -1,0 +1,90 @@
+"""excel-py スキルの補助モジュール xlkit のテスト。"""
+
+import json
+import sys
+from pathlib import Path
+
+import openpyxl
+import pytest
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "skills" / "excel-py" / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from xlkit import merge_same, new_workbook, open_workbook, save, write_table  # noqa: E402
+
+
+def _rgb(cell) -> str | None:
+    if cell.fill.fill_type != "solid":
+        return None
+    return str(cell.fill.fgColor.rgb)[-6:]
+
+
+def test_write_table_title_header_body_and_row_fills(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("AGENT_SRC_DIR", raising=False)
+    wb = new_workbook()
+    assert wb.sheetnames == []
+    ws = wb.create_sheet("週間")
+    body = [["4月", "第1週", "打ち合わせ"], ["4月", "第2週", "行事"], ["4月", "第3週", "片付け"], ["5月", "第1週", "-"]]
+    t = write_table(ws, [["月", "週", "種別"]] + body, "A1", title="2026年 予定", row_fills=["E1D5E7", "DAEEF3", "E2EFDA", None])
+    assert (t.title_row, t.header_row, t.first_row, t.last_row) == (1, 2, 3, 6)
+    assert "A1:C1" in {str(r) for r in ws.merged_cells.ranges}
+    assert ws["A2"].font.bold and _rgb(ws["A2"]) == "1F4E78"
+    # 明示した色は縞模様で上書きされない
+    assert [_rgb(ws.cell(row=r, column=1)) for r in range(3, 7)] == ["E1D5E7", "DAEEF3", "E2EFDA", "F2F2F2"]
+    assert ws["B4"].border.top.style == "thin"
+    assert ws.freeze_panes == "A3"
+    # 全角は2文字として列幅を取る
+    assert ws.column_dimensions["C"].width >= 12
+
+    merged = merge_same(ws, "A", t.first_row, t.last_row)
+    assert merged == ["A3:A5"]
+    assert ws["A3"].alignment.vertical == "center"
+    assert ws["A6"].alignment.vertical == "center"  # 1行だけのグループも縦中央
+
+    out = tmp_path / "s.xlsx"
+    result = save(wb, out, new=True)
+    printed = json.loads(capsys.readouterr().out.strip())
+    assert printed["path"] == str(out.resolve()) == result["path"]
+    assert "backup" not in result
+    assert openpyxl.load_workbook(out)["週間"]["C3"].value == "打ち合わせ"
+
+
+def test_row_fills_length_mismatch_raises():
+    ws = new_workbook().create_sheet("S")
+    with pytest.raises(ValueError, match="row_fills"):
+        write_table(ws, [["a"], [1], [2]], row_fills=["FFFFFF"])
+
+
+def test_save_new_refuses_existing_and_edit_makes_backup(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("AGENT_SRC_DIR", raising=False)
+    out = tmp_path / "b.xlsx"
+    wb = new_workbook()
+    wb.create_sheet("S")["A1"] = 1
+    save(wb, out, new=True)
+    with pytest.raises(FileExistsError):
+        save(wb, out, new=True)
+    wb2 = open_workbook(out)
+    wb2["S"]["A1"] = 2
+    result = save(wb2, out)
+    assert Path(result["backup"]).exists()
+    assert openpyxl.load_workbook(out)["S"]["A1"].value == 2
+
+
+def test_save_warns_about_unmerged_runs_in_group_column(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("AGENT_SRC_DIR", raising=False)
+    wb = new_workbook()
+    ws = wb.create_sheet("S")
+    t = write_table(ws, [["月", "x"], ["4月", 1], ["4月", 2], ["5月", 3], ["5月", 4]])
+    ws.merge_cells(f"A{t.first_row}:A{t.first_row + 1}")
+    result = save(wb, tmp_path / "w.xlsx", new=True)
+    assert any("not merged" in w for w in result.get("warnings", []))
+
+
+def test_save_rejects_new_xlsm_and_empty_workbook(tmp_path):
+    wb = new_workbook()
+    with pytest.raises(ValueError, match="no sheets"):
+        save(wb, tmp_path / "e.xlsx", new=True)
+    wb.create_sheet("S")
+    with pytest.raises(ValueError, match="xlsm"):
+        save(wb, tmp_path / "m.xlsm", new=True)

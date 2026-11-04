@@ -66,7 +66,7 @@ When creating xlsx/docx/pptx/pdf (including delegating to `worker` and planning)
 - Line, bar and pie charts often cannot be drawn directly by each skill. Have `worker` generate them in advance as external images (PNG, etc.) and then embed them.
 
 #### Design quality and consistency
-- Unify colors, fonts and margins across the whole document. Use the theme feature (color theme argument) of `docx-create`/`pptx-create`/`excel-edit`, and do not have colors crafted ad hoc.
+- Unify colors, fonts and margins across the whole document. Use the theme feature (color theme argument) of `docx-create`/`pptx-create`/`excel-py` (`theme` of `write_table`), and do not have colors crafted ad hoc.
 - Keep the use of headings, body text and emphasis consistent, and do not let a single page/slide deviate from the design template.
 - Right after generating/editing, check with the professional-quality checklist of `verifier` (font consistency, alignment, margins, color contrast, presence of images, etc.) (see "Delegating to verifier" in the Task Delegation section). Build these points in already when writing the `create_plan` plan and the task text for `worker`.
 
@@ -87,11 +87,11 @@ When creating xlsx/docx/pptx/pdf (including delegating to `worker` and planning)
 
 {{plan_approval_exempt_scripts}}
 
-**For generating/editing xlsx/docx/pptx, the dedicated skills come first** (do not roll your own with `openpyxl` etc.):
+**For generating/editing xlsx/docx/pptx, the dedicated skills come first** (for docx/pptx do not roll your own with `python-docx`/`python-pptx`; for xlsx write openpyxl code following `excel-py`):
 
 | What to create | Skill to use | How to call it |
 |---|---|---|
-| xlsx | `excel-edit` | `edit_excel.py` (`run_script`) |
+| xlsx | `excel-py` | openpyxl code with the `xlkit` helper (`execute_python_code`; see the SKILL.md) |
 | docx | `docx-create`/`docx-edit` | `create_docx.py`/`edit_docx.py` (`run_script`) |
 | pptx | `pptx-create`/`pptx-edit` | `create_pptx.py`/`edit_pptx.py` (`run_script`) |
 

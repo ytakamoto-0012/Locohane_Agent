@@ -75,14 +75,14 @@ the skill used. See the table below.
 
 | Skill | SKILL.md | Sections about pivots/tables |
 |---|---|---|
-| `excel-edit` | `skills/excel-edit/SKILL.md` | The structured table ops (`add_table`/`update_table`/`remove_table`), and the recipes for well-formatted tables (alternating row colors, merging cells with repeated values, `insert_row_group`, `format_table`) |
+| `excel-py` | `skills/excel-py/SKILL.md` | `write_table` (header, banding, row colors) and `merge_same` (merging cells with repeated values); structured tables are plain openpyxl (`openpyxl.worksheet.table.Table`) |
 | `excel-vba-knowledge` | `skills/excel-vba-knowledge/SKILL.md` | Index entry for pivot tables -> `excel-vba-knowledge/references/pivot-tables.md` (the PivotCache/PivotTable hierarchy, field placement, RefreshTable, toggling Visible of PivotItems, ManualUpdate) |
 | `excel-vba-knowledge` | `skills/excel-vba-knowledge/SKILL.md` | Index entry for tables (ListObject) -> `excel-vba-knowledge/references/excel-tables-listobject.md` (the trap where DataBodyRange is Nothing when empty, ListRows.Add, resolving Index from column names, AutoFilter, using it as pivot source data) |
 
 Common notes:
-- **The `excel-edit` skill cannot create or edit pivot tables.** To handle pivot tables, use
+- **openpyxl (`excel-py`) cannot create or edit pivot tables.** To handle pivot tables, use
   `excel-vba-edit` + `excel-vba-knowledge`.
-- What `add_table` of `excel-edit` creates is a **structured table (ListObject)**.
+- An openpyxl `Table` (`ws.add_table`) is a **structured table (ListObject)**.
   It is different from a pivot table, so choose according to the purpose.
 - When using a table as pivot source data, pass the table name, not a cell range, to `SourceData`
   (then `RefreshTable` alone follows added rows).
@@ -104,7 +104,7 @@ and the sections describing how to embed images and charts are shown below.
 | `docx-edit` | `skills/docx-edit/SKILL.md` | The section on `insert_image` / `set_image_size` (inserting and resizing images) |
 | `pptx-create` | `skills/pptx-create/SKILL.md` | The section on layouts (slide types) (the `picture` layout) |
 | `pptx-edit` | `skills/pptx-edit/SKILL.md` | The sections on `add_picture` / `add_chart` (adding new images/charts) and `crop_picture` |
-| `excel-edit` | `skills/excel-edit/SKILL.md` | The section on adding and adjusting images/charts (`add_image`/`set_image_position`/`update_chart`) |
+| `excel-py` | `skills/excel-py/SKILL.md` | The section on charts (plain openpyxl); images are `openpyxl.drawing.image.Image` + `ws.add_image` |
 
 Common notes:
 - If the delegation task text or the plan specifies source files, such as "based on past materials" or
@@ -139,9 +139,9 @@ For how to use them (read read_skill first, etc.), see the common notes at the e
 - If you find mutually contradictory instructions in the delegation task text (e.g. the numbers in a mapping table and a concrete example disagree, or both "update only some" and "update all" are written), do not pick one and execute; do not write anything, and report the contradiction in your final answer, quoting the parts concretely.
 - After writing, count the actual number with `os.listdir` etc. and write that value in your final answer (do not self-report).
 - Use the facts the task gives you (in the task text or the thread note it names) as they are. Do not reopen earlier minutes or source files to cross-check them; the investigation is already done.
-- Compute derived values (week numbers, weekdays, counts, averages, dates) with code from the records, and put every value into the output from that code (build the ops in code). Do not work them out in your reasoning or type them into the ops by hand.
+- Compute derived values (week numbers, weekdays, counts, averages, dates) with code from the records, and put every value into the output from that code (build the rows in code). Do not work them out in your reasoning or type them into the code by hand.
 - Classify with code too: put the records in as read, and let the code decide which group or month each record belongs to and which ones are outliers, from the rule in the task. Do not write a hand-made table of groups (e.g. `{"event A": (month, [records])}`).
-- Before you report, check the result against the task with code: re-read the written file (or the ops you built) and print one check per requirement (e.g. every month has rows for weeks 1–5, every row of a category has its color, every note the rule asks for is present). Fix what fails before reporting. Printing only row counts is not a check.
+- Before you report, check the result against the task with code: re-read the written file and print one check per requirement (e.g. every month has rows for weeks 1–5, every row of a category has its color, every note the rule asks for is present). Fix what fails before reporting. Printing only row counts is not a check.
 - Whenever you open source files, record their visual information in `Visual information locations` as defined in "Recording visual information" in the common notes (even if the task does not ask; tables read correctly as text are not visual information).
 
 ### Prohibitions

@@ -24,20 +24,20 @@ judge: |
   generate_annual_schedule_fixture.py --preset large（既定: 5年×8件≒52ファイル）
   で生成した、実データ規模に近い構成。
 
-  xlsx生成は excel-edit の edit_excel.py（run_script経由）で行う
-  （system_prompt.md「【必須ルール】ファイルの新規作成・編集はスキルの
-  専用スクリプトを最優先する」節、excel-edit SKILL.md参照）。
+  xlsx生成は excel-py（execute_python_code で openpyxl を直接書き、
+  スキルの補助モジュール xlkit を import する）で行う
+  （system_prompt.md の作成物とスキルの対応表、excel-py SKILL.md参照）。
 
   以下を確認せよ:
-  1. run_script で excel-edit の実処理（edit_excel.py 等）を呼ぶ前に、
+  1. execute_python_code で xlsx を書き込む前に、
      create_plan → approve_plan を経由しているか（計画未承認のままだと
      ツール側でブロックされ「Error: cannot run because the plan is not approved」が
      返るため、これが返っている場合は不合格）。
-  2. `read_skill(excel-edit)` を読み、`run_script` で `edit_excel.py` を
-     呼び出してannual_schedule.xlsx（またはそれに類するファイル名）を
-     作成しているか。`execute_python_code` で openpyxl等を使い自作している
-     場合は不合格（system_prompt.md の「スキルの専用スクリプトを最優先する」
-     ルール違反）。
+  2. `read_skill(excel-py)` を読み、`execute_python_code` で xlkit
+     （`from xlkit import ...`）を import して annual_schedule.xlsx
+     （またはそれに類するファイル名）を作成しているか。xlkit を使わずに
+     openpyxl だけで書いている、または excel-edit（edit_excel.py）を
+     使っている場合は不合格。
   3. 実行結果（ToolMessage）が正常終了（エラーでない）になっているか。
   4. 生成した予定表の中身が、過去実績（ランダム生成のため具体的な行事名は
      ケースごとに変わる）を一切参照せず一般的な行事名を当て推量しているだけ
@@ -98,3 +98,6 @@ notes: >-
   かったことと判断し、フローチャートを検証結果のOK/NG分岐に修正、
   Layer 3に「検証で不備が見つかったのに修正せず完了扱いにする」ことを
   明示的に禁止する項目を追加した。judgeにこの回帰を検知する項目7を追加。
+  2026-11-04: excel-openpyxl-trial ブランチで excel-edit（JSON op）から
+  excel-py（openpyxl 直書き＋xlkit）へ切り替えて比較するため、judge の
+  項目1・2を excel-py の経路に合わせた。

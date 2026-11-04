@@ -484,6 +484,7 @@ Locohane/
 │   ├── docx-edit/           # editing existing docx (find/replace, Track Changes, adding/deleting paragraphs)
 │   ├── docx-render/         # rendering Word document pages as images
 │   ├── excel-read/          # xlsx/xls/xlsm read-only (sheet list, cell data)
+│   ├── excel-py/            # creating/editing xlsx/xlsm (openpyxl code + the xlkit helper; on trial)
 │   ├── excel-edit/          # creating/editing xlsx/xlsm (cells/formatting/rows and columns/charts, etc.)
 │   ├── excel-recalc/        # recalculating formulas of xlsx/xlsm/xls, detecting error cells
 │   ├── excel-vba-read/      # reading VBA macro code of xlsm/xls only
@@ -867,6 +868,7 @@ The SKILL.md files, references and script messages of the bundled skills are wri
 | `docx-edit` | `skills/` | Runs scripts | Editing existing docx (find/replace, inserting and resizing images, adding/accepting/rejecting Track Changes. Cropping images is not supported). |
 | `docx-render` | `skills/` | Runs scripts | Rendering Word document pages as images (visually grasping layout, tables, image placement and emphasis). |
 | `excel-read` | `skills/` | Runs scripts | xlsx/xls/xlsm read-only (sheet list, cell data, whether there are images). |
+| `excel-py` | `skills/` | Runs code | Creating/editing xlsx/xlsm by writing openpyxl code with `execute_python_code` and importing the helper `xlkit` (header, borders, banding, column widths, wrapping, merging group columns; backup and checks on save). On trial for comparison with excel-edit (JSON ops) |
 | `excel-edit` | `skills/` | Runs scripts | Creating/editing xlsx/xlsm (cells/formatting/rows and columns/charts, adding and positioning images, conditional formatting, data validation. Cropping images is not supported). |
 | `excel-recalc` | `skills/` | Runs scripts | Recalculating formulas of xlsx/xlsm/xls, detecting error cells. |
 | `excel-vba-read` | `skills/` | Runs scripts | Reading VBA macro code of xlsm/xls only. |

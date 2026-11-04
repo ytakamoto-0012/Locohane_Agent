@@ -489,6 +489,7 @@ Locohane/
 │   ├── docx-edit/           # 既存docxの編集（検索置換・Track Changes・段落追加削除）
 │   ├── docx-render/         # Word文書ページの画像化
 │   ├── excel-read/          # xlsx/xls/xlsm読込専用（シート一覧・セルデータ）
+│   ├── excel-py/            # xlsx/xlsm新規作成・編集（openpyxl直書き＋補助モジュールxlkit。試行中）
 │   ├── excel-edit/          # xlsx/xlsm新規作成・編集（セル/書式/行列/グラフ等）
 │   ├── excel-recalc/        # xlsx/xlsm/xls数式再計算・エラーセル検出
 │   ├── excel-vba-read/      # xlsm/xls VBAマクロコード読込専用
@@ -876,6 +877,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 ^
 | `docx-edit` | `skills/` | スクリプト実行を伴う | 既存docxの編集（検索置換、画像挿入・サイズ変更、Track Changes/変更履歴の付与・確定・却下を含む。画像トリミングは非対応）。 |
 | `docx-render` | `skills/` | スクリプト実行を伴う | Word文書ページの画像化（レイアウト・表・画像配置・強調表現の視覚把握）。 |
 | `excel-read` | `skills/` | スクリプト実行を伴う | xlsx/xls/xlsmの読込専用（シート一覧・セルデータ・画像有無）。 |
+| `excel-py` | `skills/` | コード実行を伴う | xlsx/xlsmの新規作成・編集。`execute_python_code` で openpyxl を直接書き、補助モジュール `xlkit`（見出し・罫線・縞模様・列幅・折り返し・グループ列の結合、保存時のバックアップと点検）を import する。excel-edit（JSON op）との比較のため試行中 |
 | `excel-edit` | `skills/` | スクリプト実行を伴う | xlsx/xlsmの新規作成・編集（セル/書式/行列/グラフ・画像追加と位置調整・条件付き書式・データ検証を含む。画像トリミングは非対応）。 |
 | `excel-recalc` | `skills/` | スクリプト実行を伴う | xlsx/xlsm/xlsの数式再計算・エラーセル検出。 |
 | `excel-vba-read` | `skills/` | スクリプト実行を伴う | xlsm/xlsのVBAマクロコードの読み込み専用。 |
