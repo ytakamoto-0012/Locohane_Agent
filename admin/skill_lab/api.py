@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import difflib
 import json
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,6 +23,8 @@ from .. import audit
 from .. import instances as inst
 from . import promotion, sources, themes
 from admin.i18n import current_lang, t as _t
+
+logger = logging.getLogger(__name__)
 
 # アップロードできる入力ファイル1つの上限（バイト）。
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -341,15 +344,22 @@ def build_router(
                 raise HTTPException(status_code=409, detail=_t("ループ・トライアウトの実行中・開始待ちのテーマは削除できません。先に停止してください。"))
             if any(t.get("status") in ("queued", "running") for t in data.get("tasks") or []):
                 raise HTTPException(status_code=409, detail=_t("AI への依頼を処理中のテーマは削除できません。終わってから削除してください。"))
-            if data.get("status") not in themes.CLOSED_STATUSES:
-                try:
-                    promotion.unmark_imported(directory)
-                except (OSError, ValueError) as exc:
-                    raise HTTPException(status_code=409, detail=_t("取り込み元のドラフトから研究室の印を外せませんでした: {0}", exc)) from exc
+        # 先にフォルダを別名へ変えて（＝使用中でなく消せると確かめて）から、取り込み元のドラフトの印を外す。
+        # 逆の順だと、使用中で消せなかったときにテーマは残るのに印だけが外れていた。
         try:
-            themes.delete_theme(directory)
+            staging = themes.stage_theme_for_delete(directory)
         except themes.ThemeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if data is not None and data.get("status") not in themes.CLOSED_STATUSES:
+            try:
+                promotion.unmark_imported(staging)
+            except (OSError, ValueError) as exc:
+                try:
+                    themes.restore_staged_theme(staging, directory)
+                except OSError:
+                    logger.exception("Could not restore the theme folder after a failed delete: %s", staging)
+                raise HTTPException(status_code=409, detail=_t("取り込み元のドラフトから研究室の印を外せませんでした: {0}", exc)) from exc
+        themes.remove_staged_theme(staging)
         _audit(request, user, name, "skill_lab_theme_delete", theme=theme_id, title=(data or {}).get("title"))
         return {"success": True}
 

@@ -11,7 +11,7 @@ import os
 import re
 
 from ._duplicate_guard import _check_file_tools_duplicate
-from ._file_tools_common import format_size, looks_binary, read_text_with_fallback, suggest_similar_dir
+from ._file_tools_common import format_size, looks_binary, read_text_with_fallback, split_text_lines, suggest_similar_dir
 from ._file_tools_limits import Deadline, FileToolsLimits, current_limits
 from ._path_memory_helpers import _dedupe_paths_with_path_memory, _register_path_memory, suggest_from_path_memory
 from ._safe_path import _resolve_file_tools_path
@@ -59,7 +59,7 @@ def _count_contents(path: Path, exclude_names: frozenset[str] = frozenset(), dea
 def _file_detail(path: Path, size: int, full_read_max_bytes: int, deadline: Deadline | None = None) -> dict:
     """head-limit適用後の1ファイルについてバイナリ判定・サイズ・総行数を調べる。
 
-    total_lines は read_file() の total_lines 算出（splitlines の長さ）と
+    total_lines は read_file() の total_lines 算出（split_text_lines の長さ）と
     完全に揃え、モデルがそのまま limit の値を決められるようにする。
     数えなかったとき（大きすぎる・デコードできない・時間切れ）は、null だと
     「読めなかった」と誤解されるため、理由を文字列で入れる（バイナリは
@@ -80,7 +80,7 @@ def _file_detail(path: Path, size: int, full_read_max_bytes: int, deadline: Dead
         text = read_text_with_fallback(path)
     except (OSError, UnicodeDecodeError):
         return {"path": resolved, "binary": False, "size_bytes": size, "total_lines": "not counted: could not decode the text"}
-    return {"path": resolved, "binary": False, "size_bytes": size, "total_lines": len(text.splitlines())}
+    return {"path": resolved, "binary": False, "size_bytes": size, "total_lines": len(split_text_lines(text))}
 
 
 _BRACE_GROUP_RE = re.compile(r"\{([^{}]+)\}")

@@ -110,12 +110,12 @@ def list_theme_dirs(root: Path) -> list[Path]:
 _DELETING_PREFIX = "_deleting_"
 
 
-def delete_theme(directory: Path) -> None:
-    """テーマのフォルダを削除する。
+def stage_theme_for_delete(directory: Path) -> Path:
+    """削除のため、テーマのフォルダを一覧に出ない別名へ変え、その新しいパスを返す。
 
-    先に別名へ変えてから消す。ワーカー等がテーマのファイルを開いている間は Windows では名前を変えられず
-    ThemeError になる（消しかけで中身が半分残ることを防ぐ）。別名にした後の削除に失敗しても、
-    一覧には出ない（次の削除で片付ける）。
+    ワーカー等がテーマのファイルを開いている間は Windows では名前を変えられず ThemeError になる
+    （消しかけで中身が半分残ることを防ぐ）。取り込み元のドラフトの印を外す等の後始末は、
+    この後（名前を変えられた＝削除できると分かってから）行い、失敗したら restore_staged_theme で戻す。
     """
     for leftover in directory.parent.glob(f"{_DELETING_PREFIX}*"):
         shutil.rmtree(leftover, ignore_errors=True)
@@ -124,7 +124,22 @@ def delete_theme(directory: Path) -> None:
         directory.rename(staging)
     except OSError as exc:
         raise ThemeError(_t("テーマのファイルが使用中のため削除できません（少し待ってからやり直してください）: {0}", exc)) from exc
+    return staging
+
+
+def restore_staged_theme(staging: Path, directory: Path) -> None:
+    """stage_theme_for_delete で別名にしたフォルダを元の名前へ戻す。"""
+    staging.rename(directory)
+
+
+def remove_staged_theme(staging: Path) -> None:
+    """別名にしたテーマのフォルダを消す。失敗しても一覧には出ない（次の削除で片付ける）。"""
     shutil.rmtree(staging, ignore_errors=True)
+
+
+def delete_theme(directory: Path) -> None:
+    """テーマのフォルダを削除する（別名へ変えてから消す。stage_theme_for_delete 参照）。"""
+    remove_staged_theme(stage_theme_for_delete(directory))
 
 
 # ---------------------------------------------------------------------------

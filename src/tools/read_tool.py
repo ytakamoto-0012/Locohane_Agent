@@ -8,15 +8,25 @@ import json
 import logging
 
 from ._duplicate_guard import _check_file_tools_duplicate
-from ._file_tools_common import detect_stream_encoding, format_size, iter_text_lines, looks_binary, read_text_with_fallback
-from ._file_tools_limits import FileToolsLimits, current_limits
+from ._file_tools_common import detect_stream_encoding, format_size, iter_text_lines, looks_binary, read_text_with_fallback, split_text_lines
+from ._file_tools_limits import Deadline, FileToolsLimits, current_limits
 from ._path_memory_helpers import _register_path_memory, suggest_from_path_memory
 from ._safe_path import _resolve_file_tools_path
 
 logger = logging.getLogger(__name__)
 
+# 逐次読みで1回に返す本文の上限（文字数）。limit に巨大な値を渡されても、
+# GB 級のファイルを丸ごと集めてメモリとコンテキストを使い切らないため。
+_STREAM_CONTENT_MAX_CHARS = 1_000_000
 
-def read_file(path: Path, offset: int = 0, limit: int = 10, full_read_max_bytes: int = FileToolsLimits().full_read_max_bytes) -> dict:
+
+def read_file(
+    path: Path,
+    offset: int = 0,
+    limit: int = 10,
+    full_read_max_bytes: int = FileToolsLimits().full_read_max_bytes,
+    time_limit_seconds: float = FileToolsLimits().search_time_limit_seconds,
+) -> dict:
     """行番号付きでテキストファイルを読み込む。
 
     full_read_max_bytes 以下のファイルは全体を読み込んで総行数を数える。超える
@@ -30,6 +40,7 @@ def read_file(path: Path, offset: int = 0, limit: int = 10, full_read_max_bytes:
         offset: 読み飛ばす先頭行数（0始まり）。
         limit: 読み込む最大行数。
         full_read_max_bytes: 全体を読み込むファイルサイズの上限（バイト）。
+        time_limit_seconds: 逐次読みの処理時間の上限（秒）。
 
     Returns:
         {"path", "total_lines", "start_line", "end_line", "content"}
@@ -50,14 +61,14 @@ def read_file(path: Path, offset: int = 0, limit: int = 10, full_read_max_bytes:
     try:
         size = path.stat().st_size
         if size > full_read_max_bytes:
-            return _read_file_streaming(path, offset, limit, size, full_read_max_bytes)
+            return _read_file_streaming(path, offset, limit, size, full_read_max_bytes, time_limit_seconds)
         text = read_text_with_fallback(path)
     except PermissionError as e:
         raise ValueError(f"No permission to access the file: {path}") from e
     except (OSError, UnicodeDecodeError) as e:
         raise ValueError(f"Failed to read the file: {e}") from e
 
-    lines = text.splitlines()
+    lines = split_text_lines(text)
     total_lines = len(lines)
     selected = lines[offset : offset + limit]
 
@@ -70,19 +81,36 @@ def read_file(path: Path, offset: int = 0, limit: int = 10, full_read_max_bytes:
     }
 
 
-def _read_file_streaming(path: Path, offset: int, limit: int, size: int, full_read_max_bytes: int) -> dict:
-    """巨大ファイルを先頭から offset+limit 行目まで逐次読みする（read_file の一部）。"""
+def _read_file_streaming(path: Path, offset: int, limit: int, size: int, full_read_max_bytes: int, time_limit_seconds: float) -> dict:
+    """巨大ファイルを先頭から offset+limit 行目まで逐次読みする（read_file の一部）。
+
+    集める本文が _STREAM_CONTENT_MAX_CHARS 文字を超えるか、処理時間が time_limit_seconds を
+    超えたら、そこまでで打ち切って `stopped` に理由と続きの読み方を書く
+    （limit に巨大な値を渡されると、GB 級のファイルを丸ごと集めて止まるため）。
+    """
     encoding = detect_stream_encoding(path)
     if encoding is None:
         raise UnicodeDecodeError("utf-8", b"", 0, 1, "the start of the file could not be decoded")
+    deadline = Deadline(time_limit_seconds)
     selected: list[str] = []
+    collected_chars = 0
     line_count = 0
     reached_end = True
+    stopped: str | None = None
     for line in iter_text_lines(path, encoding):
         if line_count >= offset + limit:
             reached_end = False
             break
+        if line_count % 1000 == 0 and deadline.expired():
+            reached_end = False
+            stopped = f"time limit ({time_limit_seconds:g} s) reached at line {line_count + 1}"
+            break
         if line_count >= offset:
+            collected_chars += len(line) + 1
+            if collected_chars > _STREAM_CONTENT_MAX_CHARS and selected:
+                reached_end = False
+                stopped = f"content limit ({_STREAM_CONTENT_MAX_CHARS:,} characters) reached"
+                break
             selected.append(line)
         line_count += 1
     if reached_end:
@@ -92,7 +120,7 @@ def _read_file_streaming(path: Path, offset: int, limit: int, size: int, full_re
             f"not counted: file too large ({format_size(size)} > {format_size(full_read_max_bytes)} limit); "
             "keep reading with offset/limit"
         )
-    return {
+    result = {
         "path": str(path),
         "total_lines": total_lines,
         "size_bytes": size,
@@ -100,6 +128,10 @@ def _read_file_streaming(path: Path, offset: int, limit: int, size: int, full_re
         "end_line": offset + len(selected) if selected else None,
         "content": "\n".join(f"{i + offset + 1}\t{line}" for i, line in enumerate(selected)),
     }
+    if stopped:
+        next_offset = offset + len(selected)
+        result["stopped"] = f"{stopped}; read the rest with offset={next_offset} and a smaller limit"
+    return result
 
 
 @tool("Read")
@@ -135,7 +167,14 @@ def read_tool(file_path: str, offset: int = 0, limit: int = 10) -> str:
     if dup_error:
         return dup_error
     try:
-        result = read_file(path, offset=offset, limit=limit, full_read_max_bytes=current_limits().full_read_max_bytes)
+        limits = current_limits()
+        result = read_file(
+            path,
+            offset=offset,
+            limit=limit,
+            full_read_max_bytes=limits.full_read_max_bytes,
+            time_limit_seconds=limits.search_time_limit_seconds,
+        )
     except ValueError as e:
         hint = suggest_from_path_memory(str(path)) if not path.exists() else ""
         return f"Error: {e}{hint}"

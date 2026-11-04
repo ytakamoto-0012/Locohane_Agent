@@ -947,6 +947,22 @@ def test_api_delete_theme_removes_folder_and_unmarks_draft(client, lab_env):
     assert actions[-1] == "skill_lab_theme_delete"
 
 
+def test_api_delete_theme_in_use_keeps_draft_mark(client, lab_env, monkeypatch):
+    # フォルダが使用中で消せないときは、取り込み元のドラフトの印を外さない（テーマが残るのに印だけ外れない）
+    draft = _draft(lab_env)
+    theme = client.post("/api/instances/org_a/skill-lab/themes", json={"title": "A", "lab": "lab1"}).json()
+    base = f"/api/instances/org_a/skill-lab/themes/{theme['id']}"
+    asset = {"mode": "draft", "asset_type": "skills", "name": "my-skill", "origin": str(draft)}
+    assert client.post(f"{base}/assets", json=asset).status_code == 200
+
+    def in_use(directory):
+        raise themes.ThemeError("in use")
+
+    monkeypatch.setattr(themes, "stage_theme_for_delete", in_use)
+    assert client.delete(base).status_code == 409
+    assert "lab" in json.loads((draft / "_draft_meta.json").read_text(encoding="utf-8"))
+
+
 def test_api_delete_theme_refuses_active_or_busy_and_allows_broken(client, lab_env):
     directory = _theme(lab_env)
     url = f"/api/instances/org_a/skill-lab/themes/{directory.name}"

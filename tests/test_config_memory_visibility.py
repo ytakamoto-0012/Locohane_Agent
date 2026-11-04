@@ -116,3 +116,12 @@ def test_ranks_are_registered(tmp_path):
     cfg = load_config(overrides_path=ov)
     policy = memory.policy_for(cfg.memory_dir)
     assert (policy.rank_of("boss"), policy.rank_of("staff"), policy.rank_of(None)) == (5, 2, 2)
+
+
+def test_empty_rank_env_is_treated_as_unset(tmp_path, monkeypatch):
+    # .env の "MEMORY_USER_RANKS=" のような空の環境変数で、ini・ダッシュボードのランクを無視しない
+    monkeypatch.setenv("MEMORY_USER_RANKS", "")
+    ov = tmp_path / "overrides.json"
+    ov.write_text(json.dumps({"memory": {"user_ranks": '{"Boss": 5}'}}), encoding="utf-8")
+    cfg = load_config(overrides_path=ov)
+    assert cfg.memory_user_ranks == {"boss": 5}

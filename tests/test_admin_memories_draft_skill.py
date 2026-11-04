@@ -152,12 +152,23 @@ def test_rejects_bad_requests_before_calling_llm(env):
     assert _FakeModel.calls == []
 
 
-def test_llm_chosen_name_conflict_is_rejected(env):
+def test_llm_chosen_name_is_normalized_and_made_unique(env):
+    # 名前を LLM に任せたときは、形式の崩れ・正式スキルや既存ドラフトとの重複で生成結果を捨てない
     mem_store.create_memory(env["memory_dir"], "m", "d", "feedback", "c")
     _FakeModel.reply_name = "official-one"
     res = env["client"].post("/api/instances/default/memories/draft-skill", json={"items": [{"name": "m"}]})
-    assert res.status_code == 409
+    assert res.status_code == 200
     assert not (env["draft_dir"] / "anonymous" / "official-one").exists()
+    made = env["draft_dir"] / "anonymous" / "official-one-2" / "SKILL.md"
+    assert made.is_file() and "name: official-one-2" in made.read_text(encoding="utf-8")
     _FakeModel.reply_name = "Not Valid"
     res = env["client"].post("/api/instances/default/memories/draft-skill", json={"items": [{"name": "m"}]})
-    assert res.status_code == 400
+    assert res.status_code == 200
+    assert (env["draft_dir"] / "anonymous" / "not-valid" / "SKILL.md").is_file()
+
+
+def test_description_with_triple_dash_is_kept_whole():
+    text = "---\nname: monthly-check\ndescription: Monthly check --- use when closing the month\n---\n\n# Body\n"
+    name, description, skill_md = memories._build_skill_md(text, None)
+    assert description == "Monthly check --- use when closing the month"
+    assert skill_md.split("\n---\n", 1)[1].strip() == "# Body"

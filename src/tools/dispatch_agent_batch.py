@@ -7,11 +7,12 @@ from datetime import datetime
 from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import InjectedToolCallId, tool
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Iterator
 import asyncio
 import chainlit as cl
 import logging
 import os
+import re
 import time
 import uuid
 
@@ -23,6 +24,8 @@ from . import _state
 from ._dispatch_agent_job import _SUBAGENT_MESSAGE_AUTHOR, _DispatchAgentJob, _finalize_dispatch_agent_job_result
 from ._dispatch_agent_job import _format_activity, _purge_stale_dispatch_agent_jobs, _run_dispatch_agent_job
 from ._dispatch_agent_job import _wait_next_progress_push
+from ._file_tools_common import is_link_dir
+from ._file_tools_limits import Deadline, current_limits
 from ._path_memory_helpers import _resolve_path_memory_tokens_in_text
 from ._safe_path import _resolve_file_tools_path
 from ._workdir import _search_excluded_tmp_dir_names, _resolve_workdir
@@ -109,6 +112,76 @@ def _relative_display(p: Path, base: Path) -> str:
         return p.name
 
 
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    """`/` 区切りの glob（`**` は0個以上のフォルダ）を、base からの相対パスに当てる正規表現にする。"""
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:[^/]*/)*")
+            i += 3
+            continue
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+            continue
+        c = pattern[i]
+        if c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "[" and pattern.find("]", i + 1) != -1:
+            j = pattern.find("]", i + 1)
+            inner = pattern[i + 1 : j]
+            if inner.startswith("!"):
+                inner = "^" + inner[1:]
+            out.append("[" + inner.replace("\\", "\\\\") + "]")
+            i = j + 1
+            continue
+        else:
+            out.append(re.escape(c))
+        i += 1
+    # Windows のファイル名は大文字小文字を区別しない（pathlib の glob と同じ判定にする）。
+    return re.compile("".join(out) + r"\Z", re.IGNORECASE if os.name == "nt" else 0)
+
+
+def _walk_matching(base: Path, pattern: str, exclude_names: set[str] | frozenset[str], exclude_dirs: list[Path], deadline: Deadline) -> Iterator[Path]:
+    """base 配下を再帰的にたどり、相対パスが pattern に一致するファイルを返す（サブフォルダを含むパターン用）。
+
+    pathlib の glob("**/...") は Python 3.11 ではジャンクションをたどり（循環すると延々と潜る）、
+    時間の上限も無かった（Glob・Grep で直した止まり方と同じ）。ここではシンボリックリンク・
+    ジャンクションのフォルダに入らず、除外するフォルダには最初から入らず、処理時間の上限を超えたら
+    ValueError で止める（途中までの一覧で黙って配ると、残りのファイルが処理されないため）。
+    """
+    regex = _glob_regex(pattern)
+    excluded = {os.path.normcase(str(d)) for d in exclude_dirs}
+    stack = [str(base)]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            if deadline.expired():
+                raise ValueError(
+                    f"listing the files took longer than {deadline.seconds:g} seconds; "
+                    "narrow path or pattern (e.g. a folder level instead of **)"
+                )
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                continue
+            if is_dir:
+                if is_link_dir(entry) or entry.name in exclude_names or os.path.normcase(entry.path) in excluded:
+                    continue
+                stack.append(entry.path)
+                continue
+            relative = os.path.relpath(entry.path, base).replace("\\", "/")
+            if regex.match(relative):
+                yield Path(entry.path)
+
+
 def _list_target_files(base: Path, pattern: str) -> list[Path]:
     """base 配下で pattern に一致するファイルを、base からの相対パス順で返す。
 
@@ -138,9 +211,17 @@ def _list_target_files(base: Path, pattern: str) -> list[Path]:
     resolved_base = base.resolve()
     seen: set[Path] = set()
     files: list[Path] = []
+    deadline = Deadline(current_limits().search_time_limit_seconds)
     for expanded in _expand_braces(pattern.replace("\\", "/")):
         subfolders = _is_subfolder_pattern(expanded)
-        for p in base.glob(expanded):
+        if Path(expanded).is_absolute() or Path(expanded).drive:
+            # pathlib の glob と同じエラー（呼び出し側が「パターンにはファイル名だけを書く」ヒントを付ける）
+            raise NotImplementedError("Non-relative patterns are unsupported")
+        if subfolders:
+            candidates = _walk_matching(resolved_base, expanded, exclude_names, exclude_dirs, deadline)
+        else:
+            candidates = base.glob(expanded)
+        for p in candidates:
             if not p.is_file():
                 continue
             if not subfolders and p.parent.resolve() != resolved_base:

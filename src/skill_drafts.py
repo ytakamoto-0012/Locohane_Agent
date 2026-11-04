@@ -191,7 +191,12 @@ def _memory_owner_of(path: Path, config: "Config | None") -> str | None:
 
 
 def _other_memory_dirs(config: "Config | None", user: str | None) -> list[Path]:
-    """user 以外のユーザーのメモリーフォルダ（解決済み）の一覧。"""
+    """user 以外のユーザーのメモリーフォルダ（解決済み）の一覧。
+
+    user が None（セッションが無い eval 等）は、access_error と同じく匿名ユーザー（draft_owner_name(None)）
+    として扱う。そうしないと Grep・dispatch_agent_batch・Python の書き込みガードが、access_error では
+    読める自分のフォルダ（users/anonymous/）を他人のものとして除外し、ツール間で判断が食い違う。
+    """
     users_dir = _memory_users_dir(config)
     if users_dir is None:
         return []
@@ -199,7 +204,8 @@ def _other_memory_dirs(config: "Config | None", user: str | None) -> list[Path]:
         entries = list(users_dir.iterdir())
     except OSError:
         return []
-    return [e.resolve() for e in entries if e.is_dir() and e.name != user]
+    memory_user = user if user is not None else draft_owner_name(None)
+    return [e.resolve() for e in entries if e.is_dir() and e.name != memory_user]
 
 
 def _other_owner_dirs(config: "Config | None", user: str | None, op: DraftOp) -> list[Path]:

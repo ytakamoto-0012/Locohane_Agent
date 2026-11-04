@@ -79,6 +79,9 @@ function getAudioContext(): AudioContext | null {
 // ページを一度でも操作していれば AudioContext を再開できる（自動再生ポリシー対策）
 if (typeof window !== 'undefined') {
   const unlock = () => {
+    // 通知がオフ（既定）の利用者には AudioContext を作らない（音声出力を確保し続けるため）。
+    // 通知をオンにしたとき・テストしたときは requestNotifyPermission/playChime が作る。
+    if (!audioCtx && !getNotifyEnabled()) return;
     const ctx = getAudioContext();
     if (ctx && ctx.state === 'suspended') void ctx.resume();
   };
@@ -235,10 +238,18 @@ export async function sendTestNotify(title: string, body: string): Promise<TestN
   playChime('question');
   // Edge の「静かな通知リクエスト」等では確認がアドレスバーの小さなアイコンに格下げされ、
   // 応答するまで Promise が解決しないため、待ち切れなければ未許可として結果を返す
+  // Notification が無い環境（Firefox・iOS の http 等）では参照するだけで ReferenceError になるため、
+  // タイマー側も存在を確かめ、決着したらタイマーを止める
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const permission = await Promise.race([
     requestNotifyPermission(),
-    new Promise<NotificationPermission>((resolve) => setTimeout(() => resolve(Notification.permission), 5000))
-  ]);
+    new Promise<NotificationPermission | 'unsupported'>((resolve) => {
+      timer = setTimeout(
+        () => resolve(typeof Notification === 'undefined' ? 'unsupported' : Notification.permission),
+        5000
+      );
+    })
+  ]).finally(() => clearTimeout(timer));
   if (permission === 'unsupported') return 'unsupported';
   if (permission !== 'granted') return permission;
   return showDesktopNotification('complete', title, body) ? 'shown' : 'failed';
@@ -249,7 +260,7 @@ export async function sendTestNotify(title: string, body: string): Promise<TestN
  * 他セッションで動いていたターンの完了は App.tsx のポーリングから notifyRemoteComplete を呼ぶ。
  */
 export function useBrowserNotify(): { notifyRemoteComplete: () => void } {
-  const { loading, askUser } = useChatData();
+  const { loading, askUser, actions } = useChatData();
   const { t } = useI18n();
   const tRef = useRef(t);
   tRef.current = t;
@@ -280,7 +291,12 @@ export function useBrowserNotify(): { notifyRemoteComplete: () => void } {
     const prev = prevAskRef.current;
     prevAskRef.current = askUser;
     if (!askUser || askUser === prev) return;
-    send(askUser.spec.type === 'action' ? 'approval' : 'question');
+    // ask_user_choice（1つ選ぶ質問）も計画承認と同じ spec.type === 'action' で届くため、
+    // 承認ボタン（approve_plan の name="approve"）があるときだけ「承認待ち」とする
+    const isPlanApproval =
+      askUser.spec.type === 'action' &&
+      actions.some((a) => a.forId === askUser.spec.step_id && askUser.spec.keys?.includes(a.id) && a.name === 'approve');
+    send(isPlanApproval ? 'approval' : 'question');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [askUser]);
 

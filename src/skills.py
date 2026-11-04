@@ -67,6 +67,22 @@ class Skill:
     has_scripts: bool = False  # scripts/配下に*.pyが1つ以上あるか（run_script実行対象の有無）
 
 
+# frontmatter の区切り。開始・終了とも「行全体が ---」の行だけを区切りとみなす
+# （src/memory.py の _FRONTMATTER_RE と同じ）。以前は文字列の中の最初の "---" で
+# 切っていたため、description に "---" を含むと説明が途中で切れ、本文の先頭に
+# frontmatter の残りが混ざった。
+_FRONTMATTER_RE = re.compile(r"---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|$)", re.DOTALL | re.MULTILINE)
+
+
+def _split_frontmatter_text(text: str) -> tuple[str, str] | None:
+    """(frontmatter の YAML 文字列, 本文) を返す。frontmatter が無い・閉じていなければ None。"""
+    stripped = text.lstrip()
+    match = _FRONTMATTER_RE.match(stripped)
+    if match is None:
+        return None
+    return match.group(1), stripped[match.end():]
+
+
 def _parse_frontmatter(text: str) -> dict | None:
     """SKILL.md 先頭の `---` で囲まれた YAML frontmatter を dict で返す。
 
@@ -77,22 +93,16 @@ def _parse_frontmatter(text: str) -> dict | None:
 
     Returns:
         frontmatter を YAML パースした dict。以下の場合は None を返す:
-        - 先頭が "---" で始まっていない（frontmatter が無い）
-        - "---" が2回以上出現しない（frontmatter が閉じられていない）
+        - 先頭が "---" の行で始まっていない（frontmatter が無い）
+        - 閉じの "---" の行が無い（frontmatter が閉じられていない）
         - YAML の構文が不正
         - パース結果が dict でない（例: リストやスカラー値）
     """
-    # 仕様上 SKILL.md は「YAML frontmatter + Markdown 本文」。先頭が --- で始まる。
-    if not text.lstrip().startswith("---"):
-        return None
-    # 先頭の --- 以降、次の --- までを切り出す。
-    stripped = text.lstrip()
-    parts = stripped.split("---", 2)
-    # parts = ["", "<yaml>", "<body>"] を期待する。
-    if len(parts) < 3:
+    split = _split_frontmatter_text(text)
+    if split is None:
         return None
     try:
-        data = yaml.safe_load(parts[1])
+        data = yaml.safe_load(split[0])
     except yaml.YAMLError as e:
         logger.warning("Failed to parse frontmatter YAML: %s", e)
         return None
@@ -123,7 +133,7 @@ def strip_frontmatter(text: str) -> str:
 
     read_skill が LLM へ返す本文から、Discovery 段階で既に提示済みの
     name/description を含む frontmatter を除いてトークンを節約するために使う。
-    区切り方は _parse_frontmatter() と同じ（先頭の `---` から次の `---` まで）。
+    区切り方は _parse_frontmatter() と同じ（行全体が `---` の行で囲まれた部分）。
 
     Args:
         text: SKILL.md ファイルの全文。
@@ -132,13 +142,10 @@ def strip_frontmatter(text: str) -> str:
         frontmatter を除き前後の空白を落とした本文。frontmatter が無い・
         閉じられていない場合は text をそのまま返す。
     """
-    stripped = text.lstrip()
-    if not stripped.startswith("---"):
+    split = _split_frontmatter_text(text)
+    if split is None:
         return text
-    parts = stripped.split("---", 2)
-    if len(parts) < 3:
-        return text
-    return parts[2].strip()
+    return split[1].strip()
 
 
 def _validate(name: object, description: object, dir_name: str) -> str | None:

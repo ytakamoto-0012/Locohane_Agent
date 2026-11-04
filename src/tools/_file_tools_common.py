@@ -21,6 +21,9 @@ from pathlib import Path
 # GB 級のファイルで1行をまるごとメモリへ載せないため）。
 STREAM_MAX_LINE_CHARS = 10000
 _STREAM_ENCODING_PROBE_BYTES = 1024 * 1024
+# 文字コードの見本を探す範囲と、集める「ASCII 以外を含む塊」の数（detect_stream_encoding）。
+_STREAM_ENCODING_MAX_SCAN_BYTES = 64 * 1024 * 1024
+_STREAM_ENCODING_NON_ASCII_SAMPLES = 4
 
 
 def _candidate_encodings() -> tuple[str, ...]:
@@ -38,23 +41,67 @@ def format_size(size_bytes: int) -> str:
     return f"{size:.1f} TB"
 
 
-def detect_stream_encoding(path: Path) -> str | None:
-    """巨大ファイルを逐次読みするときのエンコーディングを、先頭部分だけで決める。
+def split_text_lines(text: str) -> list[str]:
+    """改行を \\n にそろえた本文を行に分ける（\\r\\n・\\r・\\n だけを区切りとする）。
 
-    read_text_with_fallback と同じ候補・順序で、先頭 1MB をエラーなく
-    デコードできた最初のものを返す（末尾で切れたマルチバイト文字はエラーに
-    しない）。どれでも読めなければ None。
+    Read の全体読み・逐次読み（iter_text_lines）・Glob の total_lines・Grep の行番号を
+    同じ数え方にそろえるための共通実装。str.splitlines() はフォームフィード（\\x0c）や
+    U+2028 等でも区切るため、逐次読みと行番号がずれ、Grep の行番号で offset を指定すると
+    別の行を読んでいた。
     """
-    with open(path, "rb") as f:
-        head = f.read(_STREAM_ENCODING_PROBE_BYTES)
-    for encoding in _candidate_encodings():
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if not text:
+        return []
+    lines = text.split("\n")
+    if text.endswith("\n"):
+        lines.pop()
+    return lines
+
+
+def _decodes_cleanly(encoding: str, data: bytes) -> bool:
+    """data を encoding でデコードできるか。途中から切り出した塊でも判定できるよう、先頭の数バイトずらしも試す。"""
+    for skip in range(4):
         try:
-            codecs.getincrementaldecoder(encoding)().decode(head, final=False)
-            return encoding
+            codecs.getincrementaldecoder(encoding)().decode(data[skip:], final=False)
+            return True
         except UnicodeDecodeError:
             continue
+    return False
+
+
+def detect_stream_encoding(path: Path) -> str | None:
+    """巨大ファイルを逐次読みするときのエンコーディングを、全体を読まずに決める。
+
+    read_text_with_fallback と同じ候補・順序で、見本をエラーなくデコードできた最初の
+    ものを返す。見本は先頭 1MB に加え、ASCII 以外を含む 1MB の塊を、合計
+    _STREAM_ENCODING_MAX_SCAN_BYTES まで先頭から探して集める（先頭が ASCII だけの
+    Shift-JIS の CSV やログを UTF-8 と誤認し、後半の日本語を置換文字にしていたため）。
+    どれでも読めなければ None。
+    """
+    samples: list[bytes] = []
+    non_ascii_found = 0
+    scanned = 0
+    with open(path, "rb") as f:
+        while scanned < _STREAM_ENCODING_MAX_SCAN_BYTES:
+            chunk = f.read(_STREAM_ENCODING_PROBE_BYTES)
+            if not chunk:
+                break
+            scanned += len(chunk)
+            if not samples:
+                samples.append(chunk)
+            elif not chunk.isascii():
+                samples.append(chunk)
+            if not chunk.isascii():
+                non_ascii_found += 1
+                if non_ascii_found >= _STREAM_ENCODING_NON_ASCII_SAMPLES:
+                    break
+    for encoding in _candidate_encodings():
+        try:
+            codecs.lookup(encoding)
         except LookupError:
             continue
+        if all(_decodes_cleanly(encoding, sample) for sample in samples):
+            return encoding
     return None
 
 

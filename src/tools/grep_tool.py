@@ -13,7 +13,7 @@ import os
 import regex
 
 from ._duplicate_guard import _check_file_tools_duplicate
-from ._file_tools_common import format_size, is_link_dir, looks_binary, read_text_with_fallback, suggest_similar_dir
+from ._file_tools_common import format_size, is_link_dir, looks_binary, read_text_with_fallback, split_text_lines, suggest_similar_dir
 from ._file_tools_limits import Deadline, FileToolsLimits, current_limits
 from ._path_memory_helpers import _register_path_memory, suggest_from_path_memory
 from ._safe_path import _resolve_file_tools_path
@@ -83,7 +83,14 @@ class _Walk:
         deadline: Deadline,
     ) -> None:
         self.base = base
-        self.glob = glob
+        # Grep は配下全体を探すので、LLM が書きがちな先頭の `**/` は取り除く（`**/*.py` は `*.py` と同じ。
+        # 取り除かないとファイル名と比べて何にも一致せず、「一致なし」と誤って結論させていた）。
+        # `/` が残るパターン（`src/*.py` 等）は、base からの相対パスと比べる。
+        normalized = glob.replace("\\", "/")
+        while normalized.startswith("**/"):
+            normalized = normalized[3:]
+        self.glob = normalized
+        self.glob_has_dir = "/" in normalized
         self.exclude_names = exclude_names
         self.exclude_paths = exclude_paths
         self.deadline = deadline
@@ -114,8 +121,13 @@ class _Walk:
                             continue
                         subdirs.append(entry.path)
                         continue
-                    if self.glob and not fnmatch.fnmatch(entry.name, self.glob):
-                        continue
+                    if self.glob:
+                        if self.glob_has_dir:
+                            target = os.path.relpath(entry.path, self.base).replace("\\", "/")
+                        else:
+                            target = entry.name
+                        if not fnmatch.fnmatch(target, self.glob):
+                            continue
                     try:
                         if not entry.is_file():
                             continue
@@ -227,20 +239,22 @@ def grep_search(
         if scanned >= limits.grep_max_files:
             stop_reason = "files"
             break
+        # バイナリ（動画・ZIP・PDF 等）は大きさに関係なく検索対象外。大きいバイナリを「大きくて飛ばした」と
+        # 数えると、LLM が中に一致が隠れていると考えて Read で開き、毎回バイナリのエラーで手番を無駄にする。
+        if looks_binary(file_path):
+            continue
         if size > limits.grep_max_file_bytes:
             large_count += 1
             if len(large_examples) < _SKIPPED_EXAMPLES:
                 large_examples.append(str(file_path))
             continue
         scanned += 1
-        if looks_binary(file_path):
-            continue
         try:
             text = read_text_with_fallback(file_path)
         except (OSError, UnicodeDecodeError):
             continue
 
-        lines = text.splitlines()
+        lines = split_text_lines(text)
         match_line_indexes: list[int] = []
         try:
             for i, line in enumerate(lines):
@@ -361,8 +375,10 @@ def grep_tool(
         path: The absolute path to search (a file or directory, `@N` allowed).
             Defaults to searching under the working directory.
         glob: A glob pattern to narrow the target files by name before searching (optional,
-            e.g. "*.py"). Only effective when searching a directory. A pre-filter that does not
-            appear in the results.
+            e.g. "*.py"). Only effective when searching a directory, which is searched with all
+            its subfolders, so "*.py" and "**/*.py" are the same; a pattern with a folder
+            ("sub/*.py") is matched against the path relative to `path`. A pre-filter that does
+            not appear in the results.
         case_insensitive: If True, ignore case.
         context: How many lines before and after a match to include (default 0).
         head_limit: The maximum number of matches to return (default 50).

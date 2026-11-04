@@ -734,3 +734,51 @@ async def test_batch_files_leaves_out_identical_copies_but_not_empty_files(monke
     assert "copy_of_a.png" not in captured[0].split("[Assigned files", 1)[1]
     assert "empty1.png" in captured[0] and "empty2.png" in captured[0]
     assert "1 identical copies left out" in result
+
+
+def test_list_target_files_pattern_forms_and_junction_loop(tmp_path, monkeypatch) -> None:
+    """サブフォルダを含むパターンは、ジャンクションの循環に入らず、pathlib の glob と同じ一致になる。"""
+    import os
+    import subprocess
+    import sys
+
+    from src import skill_drafts
+
+    monkeypatch.setattr(skill_drafts, "current_draft_user", lambda: None)
+    monkeypatch.setattr(tools.cl, "user_session", _FakeUserSession())
+    monkeypatch.setattr(tools._state, "_DEFAULT_WORKDIR", tmp_path)
+    _list_target_files = sys.modules["src.tools.dispatch_agent_batch"]._list_target_files
+
+    (tmp_path / "2021" / "ocr_md").mkdir(parents=True)
+    (tmp_path / "2021" / "ocr_md" / "a.md").write_text("a", encoding="utf-8")
+    (tmp_path / "2021" / "b.jpg").write_text("b", encoding="utf-8")
+    (tmp_path / "top.jpg").write_text("t", encoding="utf-8")
+    loop = tmp_path / "2021" / "loop"
+    if sys.platform == "win32":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(loop), str(tmp_path)], check=True, capture_output=True)
+    try:
+        names = lambda pattern: [p.relative_to(tmp_path.resolve()).as_posix() for p in _list_target_files(tmp_path, pattern)]  # noqa: E731
+        assert names("**/*.jpg") == ["2021/b.jpg", "top.jpg"]
+        assert names("*/ocr_md/*.md") == ["2021/ocr_md/a.md"]
+        assert names("**/ocr_md/*.MD") == ["2021/ocr_md/a.md"] if os.name == "nt" else True
+    finally:
+        if loop.exists():
+            os.rmdir(loop)
+
+
+def test_list_target_files_stops_at_time_limit(tmp_path, monkeypatch) -> None:
+    import sys
+
+    from src import skill_drafts
+    from src.tools._file_tools_limits import FileToolsLimits
+
+    batch = sys.modules["src.tools.dispatch_agent_batch"]
+    monkeypatch.setattr(skill_drafts, "current_draft_user", lambda: None)
+    monkeypatch.setattr(tools.cl, "user_session", _FakeUserSession())
+    monkeypatch.setattr(tools._state, "_DEFAULT_WORKDIR", tmp_path)
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "a.jpg").write_text("a", encoding="utf-8")
+    monkeypatch.setattr(batch, "current_limits", lambda: FileToolsLimits(search_time_limit_seconds=0))
+    with pytest.raises(ValueError, match="longer than"):
+        batch._list_target_files(tmp_path, "**/*.jpg")
