@@ -19,6 +19,8 @@ from pathlib import Path
 
 import yaml
 
+from .skills import _split_frontmatter_text
+
 logger = logging.getLogger(__name__)
 
 # skills.py の Skill.name と同じ検証ルールを踏襲する。
@@ -55,29 +57,25 @@ class AgentType:
 def _parse_frontmatter(text: str) -> dict | None:
     """ファイル先頭の `---` で囲まれた YAML frontmatter を dict で返す。
 
-    skills.py の _parse_frontmatter と同一ロジック（意図的な複製、
-    このプロジェクトでは frontmatter パーサーをモジュールごとに複製する
-    のが既存パターン）。
+    区切りは skills.py と共通（行全体が `---` の行だけを区切りとみなす。
+    description に "---" を含んでも途中で切れない）。
 
     Args:
         text: エージェント定義ファイルの全文（UTF-8 でデコード済み）。
 
     Returns:
-        frontmatter を YAML パースした dict。frontmatter が無い/壊れて
+        (frontmatter を YAML パースした dict, 本文)。frontmatter が無い/壊れて
         いる/dict でない場合は None。
     """
-    if not text.lstrip().startswith("---"):
-        return None
-    stripped = text.lstrip()
-    parts = stripped.split("---", 2)
-    if len(parts) < 3:
+    split = _split_frontmatter_text(text)
+    if split is None:
         return None
     try:
-        data = yaml.safe_load(parts[1])
+        data = yaml.safe_load(split[0])
     except yaml.YAMLError as e:
         logger.warning("Failed to parse frontmatter YAML: %s", e)
         return None
-    return (data, parts[2]) if isinstance(data, dict) else None
+    return (data, split[1]) if isinstance(data, dict) else None
 
 
 def _parse_tools_field(raw: object) -> list[str] | None:

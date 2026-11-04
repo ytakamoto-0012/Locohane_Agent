@@ -449,7 +449,8 @@ DESCRIPTIONS: dict[str, str] = {
     ),
     'file_tools_limits.search_time_limit_seconds': (
         'Limits that keep the Read/Glob/Grep tools from getting stuck on large folders or huge files. The tools run in a separate thread and cannot be stopped from outside, so the tools themselves stop at these limits and return the partial result with a note that it was cut short.\n'
-        'Maximum processing time (seconds) of one Glob or Grep call. When exceeded, the scan is stopped (for Glob: listing the entries directly under the folder, counting the lines of files and counting the contents of folders; for Grep: walking the folder and searching the files).'
+        'Maximum processing time (seconds) of one Glob or Grep call. When exceeded, the scan is stopped (for Glob: listing the entries directly under the folder, counting the lines of files and counting the contents of folders; for Grep: walking the folder and searching the files). '
+        'The same limit applies to Read reading a large file sequentially and to listing the files for a dispatch_agent_batch pattern.'
     ),
     'file_tools_limits.grep_max_files': (
         'Maximum number of files whose contents one Grep call examines. When exceeded, the scan is stopped.'

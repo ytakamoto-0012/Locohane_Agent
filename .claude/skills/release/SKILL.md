@@ -54,7 +54,7 @@ MAJOR・MINOR・PATCH のどれを上げるべきかを判断する。特に次�
 - `VERSION` を `X.Y.Z` の 1 行に書き換える。
 - 前回タグ以降に `frontend/src/` の変更があれば、`frontend/` で `npm run build` を実行し、
   `public/build/` の更新を含める（Node.js は `python_env.bat` の `NODE_DIR`。`call python_env.bat` 後なら PATH に入っている）。
-- `python_env.bat` の `PYTHON_DIR` の Python（`<PYTHON_DIR>\Scripts\python.exe`）で `-m pytest -q` を実行し、全件成功を確認する。
+- `python_env.bat` の `PYTHON_DIR` の Python（`<PYTHON_DIR>\Scripts\python.exe`）で `-m pytest -q -n auto` を実行し（pytest-xdist で並列実行）、全件成功を確認する。
 
 ## 手順5: コミットとタグ（ローカル）
 

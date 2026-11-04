@@ -1735,11 +1735,11 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[scripts]` | `background_inline_wait_max_seconds` | `run_script_background`/`execute_python_code_background` がジョブ完了をLLMを介さずコード側で待つ上限秒数。超過時のみ `job_id` を返してLLMへ制御を戻す | `SCRIPT_BACKGROUND_INLINE_WAIT_MAX_SECONDS` |
 | `[scripts]` | `background_progress_push_interval_seconds` | 待機中、人間向けに経過秒数・標準出力/標準エラー末尾をチャットへ直接送る間隔（秒） | `SCRIPT_BACKGROUND_PROGRESS_PUSH_INTERVAL_SECONDS` |
 | `[scripts]` | `background_job_output_tail_chars` | 進捗表示・`check_script_job`/`stop_script_job`/`read_thread_note`が末尾のみ表示する際の標準出力/標準エラー/進捗メモの最大文字数（`[subagent]`配下の同種表示も共有） | `SCRIPT_BACKGROUND_JOB_OUTPUT_TAIL_CHARS` |
-| `[file_tools_limits]` | `search_time_limit_seconds` | Glob・Grep 1回あたりの処理時間の上限（秒）。超えたら走査を打ち切り、途中までの結果に「打ち切った」旨（`scan_stopped`）を添えて返す（既定120） | `FILE_TOOLS_SEARCH_TIME_LIMIT_SECONDS` |
+| `[file_tools_limits]` | `search_time_limit_seconds` | Glob・Grep・Read（大きなファイルの逐次読み）・dispatch_agent_batch の pattern でのファイル一覧作成、1回あたりの処理時間の上限（秒）。超えたら走査を打ち切り、途中までの結果に「打ち切った」旨（`scan_stopped`）を添えて返す（既定120） | `FILE_TOOLS_SEARCH_TIME_LIMIT_SECONDS` |
 | `[file_tools_limits]` | `grep_max_files` | Grep 1回あたりに中身を調べるファイル数の上限（既定20000） | `FILE_TOOLS_GREP_MAX_FILES` |
 | `[file_tools_limits]` | `grep_max_file_mb` | Grep が中身を調べる1ファイルのサイズ上限（MB）。超えるファイルは飛ばし、件数と例を結果に載せる（既定10） | `FILE_TOOLS_GREP_MAX_FILE_MB` |
 | `[file_tools_limits]` | `regex_timeout_seconds` | Grep の正規表現が1行の検索にかけてよい時間の上限（秒）。超えたらそのファイルを飛ばす（既定2） | `FILE_TOOLS_REGEX_TIMEOUT_SECONDS` |
-| `[file_tools_limits]` | `full_read_max_mb` | Read が全体を読み込み、Glob が行数を数えるファイルのサイズ上限（MB）。超えると Read は必要な行まで逐次読み、Glob は行数を数えない（既定20） | `FILE_TOOLS_FULL_READ_MAX_MB` |
+| `[file_tools_limits]` | `full_read_max_mb` | Read が全体を読み込み、Glob が行数を数えるファイルのサイズ上限（MB）。超えると Read は必要な行まで逐次読み（1回に返す本文は100万文字まで、処理時間は search_time_limit_seconds まで）、Glob は行数を数えない（既定20） | `FILE_TOOLS_FULL_READ_MAX_MB` |
 | `[file_tools_duplicate_guard]` | `enabled` | Read/Glob/Grep/json_query ツールの同一引数繰り返し呼び出しを防止するガードの有効/無効 | `FILE_TOOLS_DUPLICATE_GUARD_ENABLED` |
 | `[file_tools_duplicate_guard]` | `max_calls` | 同一シグネチャの呼び出しを許可する回数（既定1回） | `FILE_TOOLS_DUPLICATE_GUARD_MAX_CALLS` |
 | `[file_tools_duplicate_guard]` | `carry_over_to_main` | サブエージェント内の呼び出し履歴をメイン判定へ持ち越すかどうか | `FILE_TOOLS_DUPLICATE_GUARD_CARRY_OVER` |
@@ -2629,7 +2629,7 @@ md を編集すれば管理ツールを再起動せずに反映される）。�
    末尾の比較リンク（`[Unreleased]`・`[X.Y.Z]`）も追加・更新する。
 2. `VERSION` を `X.Y.Z` に書き換える。
 3. フロントエンドを変更していれば `frontend/` で `npm run build` し、`public/build/` を更新する。
-4. `pytest` を実行して全件成功を確認する。
+4. `python -m pytest -n auto` を実行して全件成功を確認する（`-n auto` は pytest-xdist による CPU コア数での並列実行）。
 5. 「Release vX.Y.Z」の 1 コミットにまとめ、注釈付きタグを付けて push する。
 
    ```bash

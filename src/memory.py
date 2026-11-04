@@ -40,6 +40,8 @@ from pathlib import Path
 
 import yaml
 
+from .skills import _split_frontmatter_text
+
 logger = logging.getLogger(__name__)
 
 # 4種類のメモリータイプ（サブディレクトリ名でもある）。
@@ -329,16 +331,13 @@ def _safe_memory_path(memory_root: Path, memory_type: str, name: str, owner: str
     return candidate
 
 
-# 先頭の "---" 行から、次の "---" だけの行までを frontmatter とみなす（_split_frontmatter）。
-_FRONTMATTER_RE = re.compile(r"---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|$)", re.DOTALL | re.MULTILINE)
-
-
 def _split_frontmatter(text: str) -> tuple[dict | None, str]:
     """先頭 `---` で囲まれた YAML frontmatter を (dict, 本文) で返す。
 
-    skills._parse_frontmatter と同じ手法（先頭 "---" の有無 → "---" で
-    3分割）だが、本文（本体テキスト）も呼び出し元へ返す点が異なる
-    （メモリーは content の読み書きが必須のため）。
+    区切りは skills._parse_frontmatter と同じ（行全体が `---` の行。src/skills.py の
+    _split_frontmatter_text を共用）だが、本文（本体テキスト）も呼び出し元へ返す点が異なる
+    （メモリーは content の読み書きが必須のため）。単純に "---" で3分割すると、説明文や値に
+    "---" が含まれたとき（ダッシュボードの「AIで翻訳」で混入しうる）そこで切れ、メモリーが読めなくなる。
 
     Args:
         text: メモリーファイルの全文（UTF-8 でデコード済み）。
@@ -347,15 +346,10 @@ def _split_frontmatter(text: str) -> tuple[dict | None, str]:
         (frontmatter の dict, frontmatter を除いた本文) のタプル。
         frontmatter が無い/壊れている/dict でない場合は (None, text)。
     """
-    if not text.lstrip().startswith("---"):
+    split = _split_frontmatter_text(text)
+    if split is None:
         return None, text
-    stripped = text.lstrip()
-    # 区切りは「--- だけの行」で探す。単純に "---" で3分割すると、説明文や値に "---" が
-    # 含まれたとき（ダッシュボードの「AIで翻訳」で混入しうる）そこで切れ、メモリーが読めなくなる。
-    match = _FRONTMATTER_RE.match(stripped)
-    if match is None:
-        return None, text
-    parts = ["", match.group(1), stripped[match.end():]]
+    parts = ["", split[0], split[1]]
     try:
         data = yaml.safe_load(parts[1])
     except yaml.YAMLError as e:

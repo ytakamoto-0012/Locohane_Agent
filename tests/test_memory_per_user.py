@@ -312,6 +312,9 @@ def test_guard_treats_no_session_as_anonymous_owner(tmp_path):
     config = types.SimpleNamespace(memory_dir=root, skill_draft_dir=None)
     assert skill_drafts.access_error(root / "users" / anonymous / "feedback" / "a.md", "read", config, None) is None
     assert skill_drafts.access_error(root / "users" / "bob" / "feedback" / "b.md", "read", config, None) is not None
+    # Grep・書き込みガードが使う除外一覧も同じ判断（自分のフォルダは除外しない）
+    assert skill_drafts.unreadable_dirs(config, None) == [(root / "users" / "bob").resolve()]
+    assert skill_drafts.unwritable_dirs(config, None) == [(root / "users" / "bob").resolve()]
 
 
 def test_read_memory_accepts_mine_as_owner(as_user):

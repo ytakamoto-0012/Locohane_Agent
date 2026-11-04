@@ -13,7 +13,16 @@ import os
 import regex
 
 from ._duplicate_guard import _check_file_tools_duplicate
-from ._file_tools_common import format_size, is_link_dir, looks_binary, read_text_with_fallback, suggest_similar_dir
+from ._file_tools_common import (
+    format_size,
+    glob_regex,
+    is_link_dir,
+    looks_binary,
+    normalize_glob,
+    read_text_with_fallback,
+    split_text_lines,
+    suggest_similar_dir,
+)
 from ._file_tools_limits import Deadline, FileToolsLimits, current_limits
 from ._path_memory_helpers import _register_path_memory, suggest_from_path_memory
 from ._safe_path import _resolve_file_tools_path
@@ -58,6 +67,16 @@ def _cap_result_size(result: dict) -> None:
 
 # 結果に載せる「飛ばしたファイル」の例の件数。
 _SKIPPED_EXAMPLES = 5
+# 大きすぎて飛ばしても報告しない、拡張子で明らかなバイナリ（Grep で中身を探す意味が無いもの）。
+_BINARY_SUFFIXES = frozenset(
+    {
+        ".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v", ".webm", ".mp3", ".wav", ".m4a", ".flac", ".aac",
+        ".zip", ".7z", ".rar", ".gz", ".tgz", ".bz2", ".xz", ".lzh", ".cab", ".iso", ".img", ".vhd", ".vhdx",
+        ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".webp", ".psd",
+        ".xlsx", ".xlsm", ".xls", ".docx", ".doc", ".pptx", ".ppt", ".exe", ".dll", ".msi", ".bin", ".dat",
+        ".db", ".sqlite", ".pst", ".ost", ".pyc", ".class", ".jar", ".gguf", ".safetensors", ".pt", ".onnx",
+    }
+)
 # 1ファイル内で処理時間の上限を確かめる間隔（行数）。
 _DEADLINE_CHECK_LINES = 2000
 
@@ -83,7 +102,14 @@ class _Walk:
         deadline: Deadline,
     ) -> None:
         self.base = base
-        self.glob = glob
+        # `/` を含まないパターン（`*.py`）はどの階層でもファイル名と比べる。`/` を含むパターンは base からの
+        # 相対パスと比べ、`**/` は0個以上のフォルダとして扱う（`**/*.py` はどの階層の .py にも、`**/tests/*.py` は
+        # どの階層の tests の中にも一致する）。以前は `**/*.py` をファイル名と比べて何にも一致せず、
+        # 「一致なし」と誤って結論させていた。
+        normalized = normalize_glob(glob)
+        self.glob = normalized
+        self.glob_has_dir = "/" in normalized
+        self.glob_re = glob_regex(normalized) if self.glob_has_dir else None
         self.exclude_names = exclude_names
         self.exclude_paths = exclude_paths
         self.deadline = deadline
@@ -114,8 +140,13 @@ class _Walk:
                             continue
                         subdirs.append(entry.path)
                         continue
-                    if self.glob and not fnmatch.fnmatch(entry.name, self.glob):
-                        continue
+                    if self.glob:
+                        if self.glob_re is not None:
+                            relative = os.path.relpath(entry.path, self.base).replace("\\", "/")
+                            if not self.glob_re.match(relative):
+                                continue
+                        elif not fnmatch.fnmatch(entry.name, self.glob):
+                            continue
                     try:
                         if not entry.is_file():
                             continue
@@ -228,6 +259,11 @@ def grep_search(
             stop_reason = "files"
             break
         if size > limits.grep_max_file_bytes:
+            # 大きいファイルは開かずに飛ばす（OneDrive のオンデマンドの動画等を開くとダウンロードが始まる）。
+            # 拡張子で明らかなバイナリ（動画・ZIP・PDF 等）は「大きくて飛ばした」と報告しない。報告すると LLM が
+            # 中に一致が隠れていると考えて Read で開き、毎回バイナリのエラーで手番を無駄にする。
+            if file_path.suffix.lower() in _BINARY_SUFFIXES:
+                continue
             large_count += 1
             if len(large_examples) < _SKIPPED_EXAMPLES:
                 large_examples.append(str(file_path))
@@ -240,7 +276,7 @@ def grep_search(
         except (OSError, UnicodeDecodeError):
             continue
 
-        lines = text.splitlines()
+        lines = split_text_lines(text)
         match_line_indexes: list[int] = []
         try:
             for i, line in enumerate(lines):
@@ -361,8 +397,11 @@ def grep_tool(
         path: The absolute path to search (a file or directory, `@N` allowed).
             Defaults to searching under the working directory.
         glob: A glob pattern to narrow the target files by name before searching (optional,
-            e.g. "*.py"). Only effective when searching a directory. A pre-filter that does not
-            appear in the results.
+            e.g. "*.py"). Only effective when searching a directory, which is searched with all
+            its subfolders, so "*.py" and "**/*.py" are the same; a pattern with a folder
+            is matched against the path relative to `path` ("sub/*.py" only in `path`/sub,
+            "**/tests/*.py" in a tests folder at any level). A pre-filter that does not appear in
+            the results.
         case_insensitive: If True, ignore case.
         context: How many lines before and after a match to include (default 0).
         head_limit: The maximum number of matches to return (default 50).

@@ -199,23 +199,17 @@ def _draft_owner(owner: str | None) -> str:
 
 
 def _strip_fence(text: str) -> str:
-    """LLM が付けがちな前後のコードフェンスを外す。"""
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else ""
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[:-3]
-    return text.strip()
+    """LLM が付けがちな前後のコードフェンスを外す（スキル研究室の下書きと同じ処理）。"""
+    from admin.skill_lab.drafting import _strip_fence as strip_fence
+
+    return strip_fence(text).strip()
 
 
 def _official_skill_dir(cfg: Any, skill_name: str) -> Path | None:
-    """そのインスタンスが走査する正式スキルに同じ名前があればそのフォルダ（同梱・共有・専用の置き場）。"""
-    skills_dir = getattr(cfg, "skills_dir", None)
-    roots = ([skills_dir] if skills_dir is not None else []) + list(getattr(cfg, "locohane_skills_dirs", None) or [])
-    for root in roots:
-        if (Path(root) / skill_name / "SKILL.md").is_file():
-            return Path(root) / skill_name
-    return None
+    """そのインスタンスが走査する正式スキルに同じ名前があればそのフォルダ（スキル研究室と同じ探し方）。"""
+    from admin.skill_lab.sources import find_official_skill_dir
+
+    return find_official_skill_dir(cfg, skill_name)
 
 
 def _memories_material(memories: list[mem_store.Memory]) -> str:
@@ -239,7 +233,8 @@ def _build_skill_md(text: str, skill_name: str | None) -> tuple[str, str, str]:
 
     text = _strip_fence(text)
     # 前置きの文（とその後のコードフェンス）が付いていたら、最初の "---" 行から使い、閉じのフェンスも外す。
-    start = text.find("---")
+    first_rule = re.search(r"^---[ \t]*$", text, re.MULTILINE)
+    start = first_rule.start() if first_rule else -1
     if start > 0:
         text = text[start:].rstrip()
         if text.endswith("```"):
@@ -256,6 +251,33 @@ def _build_skill_md(text: str, skill_name: str | None) -> tuple[str, str, str]:
         {"name": name, "description": description}, allow_unicode=True, sort_keys=False, width=100000
     )
     return name, description, f"---\n{frontmatter}---\n\n{body}\n"
+
+
+def _normalize_skill_name(raw: str) -> str:
+    """LLM が付けた名前を、スキル名の規則（小文字英数字と区切り1文字、最大64文字）に整える。整えられなければ空文字。"""
+    name = re.sub(r"[^a-z0-9_-]+", "-", raw.strip().lower())
+    name = re.sub(r"[-_]{2,}", "-", name).strip("-_")
+    return name[:64].rstrip("-_")
+
+
+def _unused_skill_name(name: str, taken: Callable[[str], bool]) -> str:
+    """name が使われていれば -2, -3, ... を付けて空いている名前を返す（64文字に収める）。"""
+    if not taken(name):
+        return name
+    for n in range(2, 1000):
+        suffix = f"-{n}"
+        candidate = name[: 64 - len(suffix)].rstrip("-_") + suffix
+        if not taken(candidate):
+            return candidate
+    return name
+
+
+def _replace_frontmatter_name(skill_md: str, name: str, description: str) -> str:
+    """_build_skill_md が組み立てた SKILL.md の frontmatter を、name を差し替えて書き直す。"""
+    from src.skills import strip_frontmatter
+
+    frontmatter = yaml.safe_dump({"name": name, "description": description}, allow_unicode=True, sort_keys=False, width=100000)
+    return f"---\n{frontmatter}---\n\n{strip_frontmatter(skill_md)}\n"
 
 
 def _summary(m: mem_store.Memory) -> dict:
@@ -463,6 +485,14 @@ def build_router(
             final_name, description, skill_md = _build_skill_md(text, skill_name)
         except ValueError as exc:
             raise HTTPException(status_code=502, detail=_t("LLM の応答を SKILL.md として読めませんでした: {0}", exc)) from exc
+        if not skill_name:
+            # 名前を LLM に任せたときは、形式の崩れ・既存との重複で下書きを捨てない（管理者が入力していない
+            # 欄のエラーで、数分かけた生成結果を失わせないため）。整えて、重複すれば番号を付ける。
+            chosen = _normalize_skill_name(final_name)
+            if not chosen:
+                raise HTTPException(status_code=502, detail=_t("LLM の応答を SKILL.md として読めませんでした: {0}", f"name {final_name!r}"))
+            final_name = _unused_skill_name(chosen, lambda n: _official_skill_dir(cfg, n) is not None or (draft_dir / owner / n).exists())
+            skill_md = _replace_frontmatter_name(skill_md, final_name, description)
         target = _check_name(final_name)
         error = validate_skill(final_name, description, final_name)
         if error:

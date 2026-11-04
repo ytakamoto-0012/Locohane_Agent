@@ -21,6 +21,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
+from typing import Any
 
 from . import memory
 
@@ -3501,7 +3502,11 @@ def load_config(
         memory_force_private_checks=_parse_memory_force_private_checks(
             os.getenv("MEMORY_FORCE_PRIVATE_CHECKS", memory_section.get("force_private_checks", None))
         ),
-        memory_user_ranks=_parse_memory_user_ranks(os.getenv("MEMORY_USER_RANKS", memory_section.get("user_ranks", ""))),
+        # 空の MEMORY_USER_RANKS（.env の "MEMORY_USER_RANKS=" 等）は未設定とみなす。空を採用すると ini・ダッシュボードの
+        # ランクが黙って無視されるうえ、ダッシュボード側（admin/server.py の _ranks_env_override_error）の判定と食い違う。
+        memory_user_ranks=_parse_memory_user_ranks(
+            (os.getenv("MEMORY_USER_RANKS") or "").strip() or memory_section.get("user_ranks", "")
+        ),
         memory_default_rank=_as_memory_rank(
             os.getenv("MEMORY_DEFAULT_RANK", memory_section.get("default_rank", memory.DEFAULT_RANK)), "[memory].default_rank"
         ),

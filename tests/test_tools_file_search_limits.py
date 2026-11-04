@@ -122,6 +122,35 @@ class TestGrepLimits:
         assert result["skipped_large_files"]["count"] == 1
         assert result["skipped_large_files"]["examples"] == [str((tmp_path / "big.txt").resolve())]
 
+    def test_large_binary_files_are_not_reported_as_skipped(self, tmp_path) -> None:
+        (tmp_path / "movie.mp4").write_bytes(b"\x00\x01" * 100)
+        (tmp_path / "a.txt").write_text("TODO\n", encoding="utf-8")
+
+        result = grep_search(tmp_path, "TODO", limits=FileToolsLimits(grep_max_file_bytes=50))
+
+        assert "skipped_large_files" not in result
+        assert result["total_matches"] == 1
+
+    @pytest.mark.parametrize("glob", ["**/tests/*.py", "./pkg/tests/*.py", "pkg//tests/*.py", "**/*.py"])
+    def test_glob_folder_patterns_match_at_any_depth(self, tmp_path, glob) -> None:
+        (tmp_path / "pkg" / "tests").mkdir(parents=True)
+        (tmp_path / "pkg" / "tests" / "t.py").write_text("hello\n", encoding="utf-8")
+        (tmp_path / "pkg" / "a.txt").write_text("hello\n", encoding="utf-8")
+
+        result = grep_search(tmp_path, "hello", glob=glob)
+
+        assert [m["path"] for m in result["matches"]] == [str((tmp_path / "pkg" / "tests" / "t.py").resolve())]
+
+    @pytest.mark.parametrize("glob", ["**/*.py", "*.py", "sub/*.py", "**/sub/*.py"])
+    def test_glob_forms_llms_write(self, tmp_path, glob) -> None:
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "a.py").write_text("TODO\n", encoding="utf-8")
+        (tmp_path / "b.txt").write_text("TODO\n", encoding="utf-8")
+
+        result = grep_search(tmp_path, "TODO", glob=glob)
+
+        assert [m["path"] for m in result["matches"]] == [str((tmp_path / "sub" / "a.py").resolve())]
+
     def test_file_count_limit_reports_partial_even_without_matches(self, tmp_path) -> None:
         for i in range(5):
             (tmp_path / f"f{i}.txt").write_text("nothing\n", encoding="utf-8")
@@ -207,6 +236,67 @@ class TestReadLargeFile:
 
         assert result["total_lines"] == 50
         assert result["end_line"] == 50
+
+    def test_streaming_stops_at_content_limit(self, tmp_path, monkeypatch) -> None:
+        # limit に巨大な値を渡されても、本文を上限までで打ち切り、続きの読み方を返す
+        monkeypatch.setattr(sys.modules["src.tools.read_tool"], "_STREAM_CONTENT_MAX_CHARS", 50)
+        big = tmp_path / "big.log"
+        big.write_text("".join(f"line{i:03d}\n" for i in range(1, 1001)), encoding="utf-8")
+
+        result = read_file(big, offset=0, limit=1_000_000, full_read_max_bytes=100)
+
+        assert result["end_line"] == 6
+        assert "content limit" in result["stopped"] and "offset=6" in result["stopped"]
+        assert result["total_lines"].startswith("not counted")
+
+    def test_streaming_stops_at_time_limit(self, tmp_path) -> None:
+        big = tmp_path / "big.log"
+        big.write_text("".join(f"line{i}\n" for i in range(1, 5001)), encoding="utf-8")
+
+        result = read_file(big, offset=4000, limit=10, full_read_max_bytes=100, time_limit_seconds=0)
+
+        assert result["content"] == ""
+        assert result["stopped"].startswith("time limit")
+        # offset の手前で止まったときは、同じ offset のやり直しではなく Grep を案内する
+        assert "Do not retry the same offset" in result["stopped"] and "Grep" in result["stopped"]
+
+    def test_streaming_detects_cp932_after_long_ascii_head(self, tmp_path, monkeypatch) -> None:
+        # 先頭が ASCII だけの Shift-JIS ファイルを UTF-8 と誤認しない
+        from src.tools import _file_tools_common as common
+
+        monkeypatch.setattr(common, "_STREAM_ENCODING_PROBE_BYTES", 64)
+        f = tmp_path / "sjis.csv"
+        f.write_bytes(("header,value\n" * 20 + "東京,1\n大阪,2\n").encode("cp932"))
+
+        assert common.detect_stream_encoding(f) == "cp932"
+        result = read_file(f, offset=20, limit=2, full_read_max_bytes=10)
+        assert result["content"] == "21\t東京,1\n22\t大阪,2"
+
+    def test_streaming_tolerates_a_stray_invalid_byte_in_utf8(self, tmp_path, monkeypatch) -> None:
+        # UTF-8 のログに壊れたバイトが1つ混ざっても、ファイル全体を読めなくしない
+        from src.tools import _file_tools_common as common
+
+        monkeypatch.setattr(common, "_STREAM_ENCODING_PROBE_BYTES", 4096)
+        body = ("日本語のログ行です\n" * 400).encode("utf-8")
+        f = tmp_path / "log.txt"
+        f.write_bytes(body[:3000] + b"\x80" + body[3000:])
+
+        assert common.detect_stream_encoding(f) == "utf-8"
+        result = read_file(f, offset=0, limit=1, full_read_max_bytes=10)
+        assert result["content"] == "1\t日本語のログ行です"
+
+    def test_form_feed_does_not_split_lines_in_any_mode(self, tmp_path) -> None:
+        # 全体読み・逐次読み・Grep の行番号がそろう（\x0c や U+2028 では区切らない）
+        f = tmp_path / "report.txt"
+        f.write_text("page1\x0cstill1\nline2 same2\nTODO\n", encoding="utf-8")
+
+        full = read_file(f, offset=0, limit=10)
+        streamed = read_file(f, offset=0, limit=10, full_read_max_bytes=1)
+        grep = grep_search(f, "TODO")
+
+        assert full["total_lines"] == streamed["total_lines"] == 3
+        assert full["content"] == streamed["content"]
+        assert grep["matches"][0]["line"] == 3
 
     def test_streaming_matches_full_read_numbering(self, tmp_path) -> None:
         f = tmp_path / "mixed.txt"
