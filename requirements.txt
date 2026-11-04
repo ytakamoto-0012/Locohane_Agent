@@ -44,6 +44,10 @@ PyYAML==6.0.3
 # --- json_query ツール（JMESPath クエリ、src/file_tools.py） ---
 jmespath==1.1.0
 
+# --- Grep ツールの正規表現（src/tools/grep_tool.py）。標準の re には時間制限が無く、バックトラックが
+#     爆発するパターンで止まるため、timeout 引数のある regex を使う。tiktoken の依存として導入済みだが、直接importするため明記 ---
+regex==2026.7.10
+
 # --- ベクターDB（社内文書の意味検索、src/vector_db/）。Qdrant は httpx で REST を直接呼ぶため依存を足さない。
 #     文書の読み取りは下記の pypdf / python-docx / openpyxl / python-pptx を共用する ---
 python-calamine==0.9.0               # xlsx/xlsm のセルの値の読み取り（Rust 実装で openpyxl より大幅に速い。読めない・大きすぎるブックは openpyxl で読む。src/vector_db/extract.py）

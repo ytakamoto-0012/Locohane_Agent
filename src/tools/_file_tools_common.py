@@ -9,9 +9,100 @@ src/memory.py と同じ契約: Chainlit・パスメモリー・作業ディレ�
 
 from __future__ import annotations
 
+import codecs
 import difflib
 import locale
+import os
+import stat
+from collections.abc import Iterator
 from pathlib import Path
+
+# 巨大ファイルの逐次読みで、1行がこれより長ければ残りを読み捨てる（改行の無い
+# GB 級のファイルで1行をまるごとメモリへ載せないため）。
+STREAM_MAX_LINE_CHARS = 10000
+_STREAM_ENCODING_PROBE_BYTES = 1024 * 1024
+
+
+def _candidate_encodings() -> tuple[str, ...]:
+    """read_text_with_fallback と同じ順序のエンコーディング候補。"""
+    return tuple(dict.fromkeys(("utf-8", locale.getencoding(), "cp932")))
+
+
+def format_size(size_bytes: int) -> str:
+    """バイト数を "1.2 GB" のような短い表記にする（ツール結果の文言用）。"""
+    size = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def detect_stream_encoding(path: Path) -> str | None:
+    """巨大ファイルを逐次読みするときのエンコーディングを、先頭部分だけで決める。
+
+    read_text_with_fallback と同じ候補・順序で、先頭 1MB をエラーなく
+    デコードできた最初のものを返す（末尾で切れたマルチバイト文字はエラーに
+    しない）。どれでも読めなければ None。
+    """
+    with open(path, "rb") as f:
+        head = f.read(_STREAM_ENCODING_PROBE_BYTES)
+    for encoding in _candidate_encodings():
+        try:
+            codecs.getincrementaldecoder(encoding)().decode(head, final=False)
+            return encoding
+        except UnicodeDecodeError:
+            continue
+        except LookupError:
+            continue
+    return None
+
+
+def iter_text_lines(path: Path, encoding: str, max_line_chars: int = STREAM_MAX_LINE_CHARS) -> Iterator[str]:
+    """テキストファイルを1行ずつ逐次読みする（改行は含めない）。
+
+    改行の扱いは read_text_with_fallback と同じく \\r\\n・\\r・\\n を行区切りとする。
+    先頭部分で決めたエンコーディングで後半が読めない場合に止まらないよう、
+    デコードできないバイトは置換文字にする。max_line_chars を超える行は
+    そこで切り、末尾に "…" を付けて残りを読み捨てる。
+    """
+    with open(path, encoding=encoding, errors="replace", newline=None) as f:
+        while True:
+            line = f.readline(max_line_chars)
+            if not line:
+                return
+            if line.endswith("\n"):
+                yield line[:-1]
+                continue
+            # 行が長すぎて途中で切れた（またはファイル末尾で改行が無い）。
+            rest = f.readline(max_line_chars)
+            if not rest:
+                yield line
+                return
+            while rest and not rest.endswith("\n"):
+                rest = f.readline(max_line_chars)
+            yield line + "…"
+
+
+_LINK_REPARSE_TAGS = frozenset(
+    {getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C), getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)}
+)
+
+
+def is_link_dir(entry: os.DirEntry) -> bool:
+    """ディレクトリのエントリがシンボリックリンクかジャンクションか。
+
+    Python 3.11 の os.walk・pathlib の "**" はジャンクションを普通のフォルダとして
+    たどるため、循環するジャンクションがあると延々と潜り続ける。再帰走査では
+    これらに入らない。OneDrive のオンデマンドフォルダ等もリパースポイントだが、
+    中身は実体のあるフォルダなので、タグで見分けてリンクだけを除く。
+    """
+    try:
+        if entry.is_symlink():
+            return True
+        return getattr(entry.stat(follow_symlinks=False), "st_reparse_tag", 0) in _LINK_REPARSE_TAGS
+    except OSError:
+        return True
 
 
 def read_text_with_fallback(path: Path) -> str:

@@ -163,6 +163,52 @@ def register(
         return len(entries)
 
 
+def register_many(
+    thread_id: str,
+    paths: list[str],
+    path_memory_dir: Path,
+    max_entries: int,
+    description: str | None = None,
+) -> list[int | None]:
+    """複数のパスを1回のロック・読み込み・書き込みでまとめて登録する。
+
+    各パスの扱いは register() と同じ（登録済みなら再利用して valid・説明を更新、
+    未登録なら上限まで追加）。register() を1件ずつ呼ぶと、パスごとにレジストリ
+    全体（最大 max_entries 件）の読み込みと書き込みが起き、Glob/Grep の結果
+    数百件の登録だけで数十秒かかるため、こちらを使う。
+
+    Returns:
+        paths と同じ順・同じ件数のインデックス（1始まり）の一覧。上限に達して
+        登録できなかったパスは None。ロック取得がタイムアウトしたら全て None。
+    """
+    if not paths:
+        return []
+    registry_path = _registry_path(thread_id, path_memory_dir)
+    lock_path = registry_path.parent / f"{registry_path.name}.lock"
+    with _locked(lock_path) as acquired:
+        if not acquired:
+            return [None] * len(paths)
+        entries = _load(registry_path)
+        index_by_path = {entry.get("path"): i for i, entry in enumerate(entries)}
+        indexes: list[int | None] = []
+        for path in paths:
+            i = index_by_path.get(path)
+            if i is not None:
+                entries[i]["valid"] = Path(path).exists()
+                if description is not None:
+                    entries[i]["description"] = description
+                indexes.append(i + 1)
+                continue
+            if len(entries) >= max_entries:
+                indexes.append(None)
+                continue
+            entries.append({"path": path, "valid": Path(path).exists(), "description": description})
+            index_by_path[path] = len(entries) - 1
+            indexes.append(len(entries))
+        _save(registry_path, entries)
+        return indexes
+
+
 def resolve(thread_id: str, token: str, path_memory_dir: Path) -> str | None:
     """`@N` 形式のトークンを実パスへ解決する。
 

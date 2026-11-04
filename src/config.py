@@ -735,6 +735,16 @@ class Config:
             （dispatch_agent）内での呼び出し履歴を、メインエージェントの重複
             判定へ持ち越すかどうか。True なら両者で呼び出し集合を共有し、
             False なら別々に管理する（src/tools.py の _IN_SUBAGENT 参照）。
+        file_tools_search_time_limit_seconds: Glob・Grep 1回あたりの処理時間の
+            上限（秒）。超えたら走査を打ち切り、途中までの結果を返す。
+        file_tools_grep_max_files: Grep 1回あたりに中身を調べるファイル数の上限。
+        file_tools_grep_max_file_mb: Grep が中身を調べる1ファイルのサイズ上限（MB）。
+            超えるファイルは読まずに飛ばす。
+        file_tools_regex_timeout_seconds: Grep の正規表現が1行の検索にかけてよい
+            時間の上限（秒）。超えたらそのファイルを飛ばす。
+        file_tools_full_read_max_mb: Read が全体を読み込み、Glob が行数を数える
+            ファイルのサイズ上限（MB）。超えると Read は必要な行まで逐次読み、
+            Glob は行数を数えない（src/tools/_file_tools_limits.py 参照）。
         main_agent_tool_guard_mode: メインエージェント自身が呼び出せるツールを
             main_agent_tool_guard_allow_entries の許可リストへ限定するガード
             機能のモード（"false"/"tools_skills_only"/"all"、
@@ -1314,6 +1324,13 @@ class Config:
     file_tools_duplicate_guard_enabled: bool
     file_tools_duplicate_guard_max_calls: int
     file_tools_duplicate_guard_carry_over_to_main: bool
+
+    # --- Read/Glob/Grep の処理上限（src/tools/_file_tools_limits.py） ---
+    file_tools_search_time_limit_seconds: float
+    file_tools_grep_max_files: int
+    file_tools_grep_max_file_mb: float
+    file_tools_regex_timeout_seconds: float
+    file_tools_full_read_max_mb: float
 
     # --- メインエージェント自身の任意ツール直接呼び出し回数ガード（ビルトインツール名・
     #     run_script配下のスキルスクリプトの両方を、エントリごとの max_calls 付きで
@@ -3121,6 +3138,8 @@ def load_config(
       CODE_EXECUTION_ENABLED / CODE_EXECUTION_REQUIRE_APPROVAL
       FILE_TOOLS_DUPLICATE_GUARD_ENABLED / FILE_TOOLS_DUPLICATE_GUARD_MAX_CALLS /
       FILE_TOOLS_DUPLICATE_GUARD_CARRY_OVER_TO_MAIN
+      FILE_TOOLS_SEARCH_TIME_LIMIT_SECONDS / FILE_TOOLS_GREP_MAX_FILES / FILE_TOOLS_GREP_MAX_FILE_MB /
+      FILE_TOOLS_REGEX_TIMEOUT_SECONDS / FILE_TOOLS_FULL_READ_MAX_MB
       GRAPH_IMPL / GRAPH_RECURSION_LIMIT
       SUBAGENT_MAX_ITERATIONS / SUBAGENT_SYSTEM_PROMPT_PATH / SUBAGENT_MAX_PARALLEL
       SUBAGENT_TOKEN_GUARD_ENABLED / SUBAGENT_TOKEN_GUARD_SOFT_THRESHOLD /
@@ -3211,6 +3230,7 @@ def load_config(
     chat_starters = parser["chat_starters"] if parser.has_section("chat_starters") else {}
     scripts = parser["scripts"] if parser.has_section("scripts") else {}
     file_tools_duplicate_guard = parser["file_tools_duplicate_guard"] if parser.has_section("file_tools_duplicate_guard") else {}
+    file_tools_limits = parser["file_tools_limits"] if parser.has_section("file_tools_limits") else {}
     main_agent_tool_guard = parser["main_agent_tool_guard"] if parser.has_section("main_agent_tool_guard") else {}
     graph = parser["graph"] if parser.has_section("graph") else {}
     subagent = parser["subagent"] if parser.has_section("subagent") else {}
@@ -3795,6 +3815,26 @@ def load_config(
                 "FILE_TOOLS_DUPLICATE_GUARD_CARRY_OVER_TO_MAIN",
                 file_tools_duplicate_guard.get("carry_over_to_main", True),
             )
+        ),
+        file_tools_search_time_limit_seconds=_positive_float(
+            os.getenv("FILE_TOOLS_SEARCH_TIME_LIMIT_SECONDS", file_tools_limits.get("search_time_limit_seconds", 120)),
+            "[file_tools_limits].search_time_limit_seconds",
+        ),
+        file_tools_grep_max_files=_positive_int(
+            os.getenv("FILE_TOOLS_GREP_MAX_FILES", file_tools_limits.get("grep_max_files", 20000)),
+            "[file_tools_limits].grep_max_files",
+        ),
+        file_tools_grep_max_file_mb=_positive_float(
+            os.getenv("FILE_TOOLS_GREP_MAX_FILE_MB", file_tools_limits.get("grep_max_file_mb", 10)),
+            "[file_tools_limits].grep_max_file_mb",
+        ),
+        file_tools_regex_timeout_seconds=_positive_float(
+            os.getenv("FILE_TOOLS_REGEX_TIMEOUT_SECONDS", file_tools_limits.get("regex_timeout_seconds", 2)),
+            "[file_tools_limits].regex_timeout_seconds",
+        ),
+        file_tools_full_read_max_mb=_positive_float(
+            os.getenv("FILE_TOOLS_FULL_READ_MAX_MB", file_tools_limits.get("full_read_max_mb", 20)),
+            "[file_tools_limits].full_read_max_mb",
         ),
         main_agent_tool_guard_mode=_as_main_agent_tool_guard_mode(
             os.getenv(
