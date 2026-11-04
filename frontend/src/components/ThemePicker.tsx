@@ -8,12 +8,24 @@ import {
   type ColorScheme
 } from '../theme';
 import { LANGUAGE_OPTIONS, useI18n, type MessageKey } from '../i18n';
-import { desktopNotifySupported, getNotifyEnabled, requestNotifyPermission, setNotifyEnabled } from '../notify';
+import {
+  currentNotifyPermission,
+  getNotifyEnabled,
+  requestNotifyPermission,
+  sendTestNotify,
+  setNotifyEnabled,
+  type TestNotifyResult
+} from '../notify';
 import { Icon } from './Icon';
 
-function currentPermission(): NotificationPermission | 'unsupported' {
-  return desktopNotifySupported() ? Notification.permission : 'unsupported';
-}
+const TEST_RESULT_NOTE: Record<TestNotifyResult | 'pending', MessageKey> = {
+  pending: 'theme.notifyTestPending',
+  shown: 'theme.notifyTestShown',
+  unsupported: 'theme.notifyTitleOnly',
+  denied: 'theme.notifyDenied',
+  default: 'theme.notifyDefault',
+  failed: 'theme.notifyTestFailed'
+};
 
 const SCHEME_OPTIONS: { id: ColorScheme; label: MessageKey; icon: 'sun' | 'moon' | 'monitor' }[] = [
   { id: 'light', label: 'theme.light', icon: 'sun' },
@@ -27,7 +39,8 @@ export function ThemePicker() {
   const [accent, setAccent] = useState(getStoredAccentId());
   const [scheme, setScheme] = useState<ColorScheme>(getStoredScheme());
   const [notifyOn, setNotifyOn] = useState(getNotifyEnabled());
-  const [permission, setPermission] = useState(currentPermission());
+  const [permission, setPermission] = useState(currentNotifyPermission());
+  const [testResult, setTestResult] = useState<TestNotifyResult | 'pending' | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -68,16 +81,29 @@ export function ThemePicker() {
   const selectNotify = (enabled: boolean) => {
     setNotifyOn(enabled);
     setNotifyEnabled(enabled);
+    setTestResult(null);
     if (enabled) requestNotifyPermission().then(setPermission);
   };
 
-  const notifyNote: MessageKey | null = !notifyOn
-    ? null
-    : permission === 'unsupported'
-      ? 'theme.notifyTitleOnly'
-      : permission === 'denied'
-        ? 'theme.notifyDenied'
-        : null;
+  const runTest = () => {
+    setTestResult('pending');
+    sendTestNotify(t('notify.testTitle'), t('notify.testBody')).then((result) => {
+      setTestResult(result);
+      setPermission(currentNotifyPermission());
+    });
+  };
+
+  const notifyNote: MessageKey | null = testResult
+    ? TEST_RESULT_NOTE[testResult]
+    : !notifyOn
+      ? null
+      : permission === 'unsupported'
+        ? 'theme.notifyTitleOnly'
+        : permission === 'denied'
+          ? 'theme.notifyDenied'
+          : permission === 'default'
+            ? 'theme.notifyDefault'
+            : null;
 
   return (
     <div className="theme-picker" ref={ref}>
@@ -151,6 +177,9 @@ export function ThemePicker() {
                   {t(value ? 'theme.notifyOn' : 'theme.notifyOff')}
                 </button>
               ))}
+              <button type="button" className="scheme-option" onClick={runTest}>
+                {t('theme.notifyTest')}
+              </button>
             </div>
             <div className="theme-picker-note">{t(notifyNote ?? 'theme.notifyNote')}</div>
           </div>
