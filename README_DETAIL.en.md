@@ -324,6 +324,7 @@ Locohane/
 │   ├── audit.py              # change history log (JSON Lines)
 │   ├── monitor.py            # read processing for the monitor screen (running status, conversations, token trends, logs, LLM endpoints)
 │   ├── knowledge.py          # HTTP API of the knowledge screen (vector DB collection management, ingestion jobs)
+│   ├── ingest_worker.py      # child process that runs ingestion and copying (ingest worker) and its client in the admin tool
 │   ├── memories.py           # HTTP API of the memory screen (viewing and editing the instance's persistent memory)
 │   ├── assistant.py          # HTTP API of the admin assistant ("Ask AI" at the top right; only reads settings and advises)
 │   ├── assistant_index.py    # search for the admin assistant (simple RAG over config.ini, README_DETAIL.md and the API reference)
@@ -1430,10 +1431,17 @@ Operate it from the "Knowledge" button on the instance card (or the "Knowledge" 
    `*.pdf` for an extension). They apply to files only (a folder name containing one makes the files inside match; folders are still
    traversed). Files that also match an exclusion keyword are not ingested (exclusion wins). Already ingested files that are no longer
    targeted are also removed at the next ingestion.
-2. Pressing "Ingest (differential)" starts ingestion inside the admin tool's process, and the progress (number of files processed, file being processed) and
+2. Pressing "Ingest (differential)" starts ingestion in the ingest worker (see below), and the progress (number of files processed, file being processed) and
    results (counts of added, updated, unchanged, deleted and failed, with failure reasons) appear in the table. During ingestion it can be interrupted with "Stop"
    (unprocessed files are processed in the next ingestion and are not treated as deleted). During ingestion, the instance list card also shows
    the collection name, the number of files processed and a progress bar (click it to open the Knowledge screen).
+   Ingestion and copying run, for all instances and collections together, in a child process (the ingest worker, `admin/ingest_worker.py`,
+   `python -m admin.ingest_worker`) that the admin tool starts at the first ingestion. Ingestion runs many CPU-bound threads, so in the
+   admin tool's own process they would compete with the dashboard for Python's GIL and delay its responses by seconds (when many
+   collections are ingested at once). The admin tool process keeps only the job records, the queueing, the scheduled ingestion and deletion,
+   and exchanges progress, stop requests, slot status and logs with the ingest worker over a named pipe (with a per-start authentication key;
+   the worker's logs appear in the admin tool log with the thread name `ingest-worker/…`). If the ingest worker crashes, the running jobs
+   become errors (the admin tool stays up) and it is restarted at the next ingestion. Exiting the admin tool also ends the ingest worker.
 3. After adding or updating documents, press "Ingest (differential)" again, or set up the automatic ingestion below. When you change the embedding model or `document_prefix`, "Rebuild".
 
 #### Scheduled automatic ingestion
@@ -1466,7 +1474,7 @@ Ingestion proceeds in `_Pipeline` of `src/vector_db/ingest.py` through scan -> p
   only make progress on one at a time, so it gets faster when there are many PDFs, Excel files, etc. and CPU cores to spare; starting child processes takes a few seconds).
   When a child process crashes (PDFium fell over on a broken PDF, etc.), the files being prepared at that time are prepared again one by one in new child processes,
   and files that crash even alone are listed in the failure list and ingestion continues (when preparing in threads = `ingest_processes = 0`,
-  the whole admin tool goes down, so for sources with many files of unknown origin, 1 or more is safer).
+  the whole ingest worker goes down and every running ingestion fails, so for sources with many files of unknown origin, 1 or more is safer).
   Files with the same size and modification time as last time are not read, and changed files are read once and used both to compute SHA-256 and to extract text.
   When `ingest_workers` or `ingest_processes` is 2 or more, larger files are started first. PDF text and page rendering use pypdfium2,
   one at a time within the same process (PDFium cannot be called from several threads at the same time). For Office files with `image_input = true`,
@@ -1557,7 +1565,7 @@ To use the same documents in another instance without re-ingesting them, use one
     same as the source collection's. Otherwise only the definition (description, source folder, whether to include subfolders) is copied, and
     you run "Ingest (diff)" in the destination (the dialog shows the reason).
   - The scheduled ingestion settings are not copied by default (so that two instances do not ingest the same folder automatically; selectable in the dialog).
-  - The copy runs as a job of the destination collection inside the admin tool process, and the progress is shown in the destination's
+  - The copy runs as a job of the destination collection in the ingest worker, and the progress is shown in the destination's
     Knowledge screen. While copying, the source collection cannot be ingested (manually or on schedule) or deleted. "Stop" ends it keeping
     the files copied so far (the rest is filled in by "Ingest (diff)" in the destination). It is recorded in the change history as `knowledge_collection_copy`.
 - **Reference** ("Reference knowledge of other instances" at the bottom of the Knowledge screen): adds a collection of another instance to the

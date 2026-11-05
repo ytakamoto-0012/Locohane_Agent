@@ -45,6 +45,7 @@ from src.vector_db.store import StoreError, open_store, path_collection_name, st
 
 from . import audit
 from . import instances as inst
+from .ingest_worker import IngestWorkerClient, WorkerError
 from admin.i18n import t as _t
 
 CONFIG_INI_PATH = Path(__file__).resolve().parent.parent / "config.ini"
@@ -311,11 +312,14 @@ def _log_job_end(instance: str, job: IngestJob, started: datetime) -> None:
         logger.info("Knowledge: %s %s/%s finished (%s) in %.1fs.", job.kind, instance, job.collection, job.state, seconds)
 
 
-def run_ingest_job(cfg: Config, job: IngestJob, *, jobs: _JobRegistry | None = None, instance: str = "", **kwargs) -> None:
+def run_ingest_job(
+    cfg: Config, job: IngestJob, *, jobs: _JobRegistry | None = None, instance: str = "", ingest_fn: Callable = ingest_collection, **kwargs
+) -> None:
     """job の取り込みを実行し、結果・エラーを job に書き込む（スレッドの本体）。
 
     jobs を渡したら、同じインスタンスの削除が終わるまで待ってから始め（_JobRegistry.wait_turn）、終わったら知らせる。
-    kwargs は ingest_collection() へ渡す（slots 等）。
+    ingest_fn は取り込みを行う関数（既定はこのプロセスで動かす ingest_collection。取り込みワーカーの子プロセスで
+    動かすときは IngestWorkerClient.ingest_collection）。kwargs は ingest_fn へ渡す（slots 等）。
     """
 
     def _progress(done: int, total: int, path: str) -> None:
@@ -331,13 +335,13 @@ def run_ingest_job(cfg: Config, job: IngestJob, *, jobs: _JobRegistry | None = N
         "Knowledge: ingest %s/%s started (rebuild=%s, trigger=%s, actor=%s).", instance, job.collection, job.rebuild, job.trigger, job.actor
     )
     try:
-        result = ingest_collection(
+        result = ingest_fn(
             cfg, job.collection, rebuild=job.rebuild, progress=_progress, should_stop=lambda: job.stop_requested,
             instance=instance, progress_bytes=job.add_bytes, **kwargs,
         )
         job.result = result.to_dict()
         job.state = "stopped" if job.stop_requested else "done"
-    except (IngestError, EmbeddingError, StoreError, vcat.CatalogError, OSError) as exc:
+    except (IngestError, EmbeddingError, StoreError, vcat.CatalogError, OSError, WorkerError) as exc:
         logger.warning("Knowledge: ingest %s/%s error: %s", instance, job.collection, exc, exc_info=True)
         job.error = str(exc)
         job.state = "error"
@@ -414,10 +418,13 @@ def run_copy_job(
     include_schedule: bool,
     store_transport=None,
     dst_instance: str = "",
+    copy_fn: Callable = copy_collection,
 ) -> None:
     """コピーを実行し、結果・エラーを job に書き込む（スレッドの本体）。終わったらコピー元の取り込みを再び許す。
 
     コピー先のインスタンス dst_instance の削除が終わるまで待ってから始める（_JobRegistry.wait_turn）。
+    copy_fn はコピーを行う関数（既定はこのプロセスで動かす copy_collection。取り込みワーカーの子プロセスで
+    動かすときは IngestWorkerClient.copy_collection）。
     """
 
     def _progress(done: int, total: int, path: str) -> None:
@@ -432,7 +439,7 @@ def run_copy_job(
         "Knowledge: copy %s -> %s/%s started (with_vectors=%s, actor=%s).", job.source, dst_instance, job.collection, with_vectors, job.actor
     )
     try:
-        job.result = copy_collection(
+        job.result = copy_fn(
             src_cfg,
             src_name,
             dst_cfg,
@@ -445,7 +452,7 @@ def run_copy_job(
             dst_store_transport=store_transport,
         )
         job.state = "stopped" if job.result.get("stopped") else "done"
-    except (CopyError, StoreError, vcat.CatalogError, OSError) as exc:
+    except (CopyError, StoreError, vcat.CatalogError, OSError, WorkerError) as exc:
         logger.warning("Knowledge: copy %s -> %s/%s error: %s", job.source, dst_instance, job.collection, exc, exc_info=True)
         job.error = str(exc)
         job.state = "error"
@@ -654,6 +661,7 @@ def build_router(
     config_loader: Callable[[str], Config] | None = None,
     ingest_kwargs: dict | None = None,
     ingest_limits: Callable[[], tuple[int, int, int]] | None = None,
+    ingest_in_worker_process: bool = False,
 ) -> APIRouter:
     """ナレッジ API の router を作る。
 
@@ -663,16 +671,29 @@ def build_router(
         ingest_kwargs: ingest_collection() へ追加で渡す引数（テスト用の httpx トランスポート等）。
         ingest_limits: 全体の並列数 (ingest_workers, ingest_processes, ingest_embed_requests) を返す関数（テスト用の差し替え口。
             既定は config.ini（インスタンス別の上書きを重ねない）の [vector_db] の値。取り込みを始めるたびに読む）。
+        ingest_in_worker_process: True なら取り込み・コピーを取り込みワーカーの子プロセス（admin/ingest_worker.py）で
+            動かす（admin/server.py が使う。取り込みの CPU の使用がダッシュボードの応答を遅らせないようにするため）。
+            False ならこのプロセスのスレッドで動かす（テスト用。ingest_kwargs のトランスポートはプロセスをまたげない）。
 
     返す router の ingest_scheduler 属性が時間指定の自動取り込みの IngestScheduler
     （手動の取り込みとジョブの記録を共有する）。start()・stop() は呼び出し側（admin/server.py の lifespan）で行う。
-    ingest_jobs 属性はジョブの記録（_JobRegistry）、ingest_slots 属性は全体で共有する並列数の枠（IngestSlots）。
+    ingest_jobs 属性はジョブの記録（_JobRegistry）、ingest_slots 属性は全体で共有する並列数の枠（IngestSlots。
+    子プロセスで動かすときはその写しの WorkerSlots）、ingest_worker 属性は IngestWorkerClient（子プロセスで動かさなければ
+    None。管理ツールの終了時に close() する）。
     """
     router = APIRouter()
     jobs = _JobRegistry()
     extra_ingest_kwargs = dict(ingest_kwargs or {})
     limits = ingest_limits or (lambda: shared_ingest_limits(CONFIG_INI_PATH))
-    slots = IngestSlots(*limits())
+    worker = IngestWorkerClient(*limits()) if ingest_in_worker_process else None
+    slots = worker.slots if worker is not None else IngestSlots(*limits())
+    # 取り込み・コピーの実行（子プロセスで動かすときは IngestWorkerClient。テスト用のトランスポートは渡さない）。
+    if worker is not None:
+        run_kwargs: dict = {"ingest_fn": worker.ingest_collection}
+        copy_kwargs: dict = {"copy_fn": worker.copy_collection}
+    else:
+        run_kwargs = {"slots": slots, **extra_ingest_kwargs}
+        copy_kwargs = {"store_transport": extra_ingest_kwargs.get("store_transport")}
 
     def _audit(request: Request, user: str, instance: str, action: str, **extra) -> None:
         audit.append(audit_log_path, {"instance": instance, "actor": user, "remote_addr": client_ip(request), "action": action, **extra})
@@ -700,7 +721,7 @@ def build_router(
         threading.Thread(
             target=run_ingest_job,
             args=(cfg, job),
-            kwargs={"jobs": jobs, "instance": instance, "slots": slots, **extra_ingest_kwargs},
+            kwargs={"jobs": jobs, "instance": instance, **run_kwargs},
             name=f"knowledge-ingest-{instance}-{job.collection}",
             daemon=True,
         ).start()
@@ -709,6 +730,7 @@ def build_router(
     # インスタンス一覧のカード（admin/server.py の /api/monitor/overview）が取り込み中のジョブ・枠の状態を読む口
     router.ingest_jobs = jobs
     router.ingest_slots = slots
+    router.ingest_worker = worker
     router.ingest_scheduler = IngestScheduler(
         instances_root=instances_root, jobs=jobs, loader=loader, audit_log_path=audit_log_path, launch=_launch_ingest
     )
@@ -1087,8 +1109,8 @@ def build_router(
             kwargs={
                 "with_vectors": body.with_vectors,
                 "include_schedule": body.include_schedule,
-                "store_transport": extra_ingest_kwargs.get("store_transport"),
                 "dst_instance": body.dest_instance,
+                **copy_kwargs,
             },
             name=f"knowledge-copy-{name}-{collection}",
             daemon=True,
