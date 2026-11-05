@@ -824,6 +824,39 @@
   color: #e5484d;
 }
 
+/* 生成中に送った追加指示（会話へ入るまでの送信待ち） */
+.composer-queued {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 720px;
+  margin: 0 auto 8px;
+}
+
+.composer-queued-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  font-size: 12px;
+}
+
+.composer-queued-label {
+  flex: none;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.composer-queued-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
 .composer-char-counter {
   font-size: 12px;
   color: var(--text-muted);

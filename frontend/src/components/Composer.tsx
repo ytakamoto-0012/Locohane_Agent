@@ -1,13 +1,15 @@
-import { useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
+import { useRecoilValue } from 'recoil';
 import { v4 as uuidv4 } from 'uuid';
-import { useChatData, useChatInteract } from '@chainlit/react-client';
+import { currentThreadIdState, useChatData, useChatInteract, useChatMessages } from '@chainlit/react-client';
 import type { IFileRef, IStep } from '@chainlit/react-client';
+import { BACKEND_URL } from '../chainlitClient';
 import { useI18n } from '../i18n';
 import { WorkDirButton } from './WorkDirButton';
 import { ReasoningEffortButton, getStoredReasoningEffort } from './ReasoningEffortButton';
 import { PlanModeBadge } from './PlanModeBadge';
 import { Icon } from './Icon';
-import type { InputLimits } from '../utils/messageTree';
+import { selectAppliedInjectionIds, type InputLimits } from '../utils/messageTree';
 
 export interface PendingAttachment {
   name: string;
@@ -23,6 +25,22 @@ export interface PendingAttachment {
 const PASTED_PREVIEW_CHARS = 200;
 // 文字数カウンターを表示し始める、最大入力文字数に対する割合。
 const CHAR_COUNTER_SHOW_RATIO = 0.8;
+// ターンが終わった（loading が false になった）と判断するまで待つ時間。承認待ち等の "ask" の
+// 前後で loading が一瞬 false になるため、すぐには「終わった」とみなさない。
+const TURN_END_SETTLE_MS = 1500;
+
+/**
+ * 生成中に送った追加指示（app.py の /locohane/threads/{id}/inject、src/user_injection.py）。
+ * - sending: 送信中
+ * - queued: バックエンドが受け付けた（次にモデルを呼ぶ前に会話へ入る）
+ * - deferred: ターンが終わりかけで受け付けられなかった（ターンの終了後に通常のメッセージとして送る）
+ */
+interface QueuedInstruction {
+  localId: string;
+  text: string;
+  status: 'sending' | 'queued' | 'deferred';
+  serverId?: string;
+}
 
 function countLines(text: string): number {
   let lines = 1;
@@ -72,17 +90,96 @@ export function Composer({
   inputLimits,
   interrupted
 }: ComposerProps) {
-  const { askUser, disabled, loading } = useChatData();
+  const { askUser, connected, loading } = useChatData();
   const { sendMessage, replyMessage, stopTask } = useChatInteract();
+  const { messages } = useChatMessages();
+  const currentThreadId = useRecoilValue(currentThreadIdState);
   const { t } = useI18n();
   const [value, setValue] = useState('');
   const [pasteError, setPasteError] = useState<string | null>(null);
+  const [queued, setQueued] = useState<QueuedInstruction[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
 
   const isReplying = askUser?.spec.type === 'text';
+  // このセッション自身のターンが動いている間（承認ボタン等の応答待ちを含む）。送信は
+  // 追加指示（割り込み）として扱う。
+  const turnRunning = loading || askUser?.spec.type === 'action';
+  // useChatData().disabled は生成中（loading）も true になるが、生成中も追加指示を
+  // 入力できるよう、未接続とファイル・要素の応答待ちのときだけ止める。
   // 他セッションでこのスレッドが処理中、または同じ所有者の別スレッドが
   // 処理中の間は送信自体を止める。
-  const inputBlocked = disabled || Boolean(remoteGenerating) || Boolean(blockedByOtherThread);
+  const askBlocksInput = askUser?.spec.type === 'file' || askUser?.spec.type === 'element';
+  const inputBlocked = !connected || askBlocksInput || Boolean(remoteGenerating) || Boolean(blockedByOtherThread);
+  const inputBlockedRef = useRef(inputBlocked);
+  inputBlockedRef.current = inputBlocked;
+
+  // 会話へ入った（チャット欄にユーザー発言として届いた）追加指示は「送信待ち」から外す。
+  useEffect(() => {
+    if (!queued.some((q) => q.serverId)) return;
+    const applied = selectAppliedInjectionIds(messages);
+    if (queued.some((q) => q.serverId && applied.has(q.serverId))) {
+      setQueued((prev) => prev.filter((q) => !(q.serverId && applied.has(q.serverId))));
+    }
+  }, [messages, queued]);
+
+  // ターンが終わったら、受け付けられなかった指示（deferred）は通常のメッセージとして送り、
+  // 受け付けたのに反映されないまま終わった指示（停止・エラーで中断した場合）は入力欄へ戻す。
+  useEffect(() => {
+    if (turnRunning || queued.length === 0 || queued.some((q) => q.status === 'sending')) return;
+    const timer = setTimeout(() => {
+      const applied = selectAppliedInjectionIds(messagesRef.current);
+      const pending = queued.filter((q) => !(q.serverId && applied.has(q.serverId)));
+      setQueued([]);
+      const deferred = pending.filter((q) => q.status === 'deferred');
+      const restore = pending.filter((q) => q.status !== 'deferred' || inputBlockedRef.current);
+      if (deferred.length > 0 && !inputBlockedRef.current) {
+        sendMessage(buildUserMessage(deferred.map((q) => q.text).join('\n\n')), []);
+      }
+      if (restore.length > 0) {
+        setValue((v) => [...restore.map((q) => q.text), v].filter((s) => s).join('\n'));
+        setPasteError(t('composer.injectNotApplied'));
+      }
+    }, TURN_END_SETTLE_MS);
+    return () => clearTimeout(timer);
+    // buildUserMessage・sendMessage・t は毎回作り直されるが、判定には使わない
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turnRunning, queued]);
+
+  const updateQueued = (localId: string, patch: Partial<QueuedInstruction>) =>
+    setQueued((prev) => prev.map((q) => (q.localId === localId ? { ...q, ...patch } : q)));
+
+  // 生成中の送信: 入力欄の本文だけを追加指示としてバックエンドへ積む（添付は次の通常送信まで残す）。
+  const submitInstruction = () => {
+    const text = value.trim();
+    if (!text) return;
+    const localId = uuidv4();
+    setQueued((prev) => [...prev, { localId, text, status: currentThreadId ? 'sending' : 'deferred' }]);
+    setValue('');
+    setPasteError(null);
+    if (!currentThreadId) return;
+    fetch(`${BACKEND_URL}/locohane/threads/${currentThreadId}/inject`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    })
+      .then(async (res) => {
+        if (res.ok) {
+          const data: { id: string } = await res.json();
+          updateQueued(localId, { status: 'queued', serverId: data.id });
+        } else if (res.status === 409) {
+          updateQueued(localId, { status: 'deferred' });
+        } else {
+          // 長すぎる等で拒否された。入力欄へ戻して知らせる。
+          setQueued((prev) => prev.filter((q) => q.localId !== localId));
+          setValue((v) => [text, v].filter((s) => s).join('\n'));
+          setPasteError(t('composer.injectFailed'));
+        }
+      })
+      .catch(() => updateQueued(localId, { status: 'deferred' }));
+  };
 
   // 最大入力文字数の判定対象は、入力欄の本文＋貼り付けテキストの合計
   // （app.py の _check_input_length と同じ数え方）。
@@ -149,6 +246,10 @@ export function Composer({
   };
 
   const submit = () => {
+    if (turnRunning && !isReplying) {
+      if (!inputBlocked && !overLimit) submitInstruction();
+      return;
+    }
     if (inputBlocked || overLimit || uploading || (!value.trim() && attachments.length === 0)) return;
 
     const message = buildUserMessage(value);
@@ -233,6 +334,18 @@ export function Composer({
           )}
         </div>
       ) : null}
+      {queued.length > 0 ? (
+        <div className="composer-queued">
+          {queued.map((q) => (
+            <div key={q.localId} className="composer-queued-item">
+              <span className="composer-queued-label">
+                {q.status === 'deferred' ? t('composer.queuedNextTurn') : t('composer.queuedNextStep')}
+              </span>
+              <span className="composer-queued-text">{q.text}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {pasteError ? <div className="composer-paste-error">{pasteError}</div> : null}
       {attachments.some((a) => a.pastedText === undefined) ? (
         <div className="composer-attachments">
@@ -265,7 +378,9 @@ export function Composer({
                 ? t('composer.placeholderOtherBusy')
                 : isReplying
                   ? t('composer.placeholderReply')
-                  : t('composer.placeholder')
+                  : turnRunning
+                    ? t('composer.placeholderInject')
+                    : t('composer.placeholder')
           }
           disabled={inputBlocked}
           onChange={(e) => setValue(e.target.value)}
@@ -304,6 +419,18 @@ export function Composer({
               </span>
             ) : null}
             <PlanModeBadge step={plan} />
+            {/* 生成中は停止ボタンと並べて出す（承認待ち等で loading=false の間は下の送信ボタンが同じ働きをする） */}
+            {loading && !isReplying && value.trim() ? (
+              <button
+                type="button"
+                className="composer-submit-button"
+                onClick={submit}
+                disabled={inputBlocked || overLimit}
+                title={t('composer.injectTitle')}
+              >
+                {t('composer.inject')}
+              </button>
+            ) : null}
             {loading ? (
               <button type="button" className="composer-stop-button" onClick={stopTask}>
                 {t('common.stop')}

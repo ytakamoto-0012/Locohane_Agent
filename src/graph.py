@@ -24,15 +24,18 @@ from __future__ import annotations
 import logging
 import uuid
 
+from langchain_core.callbacks.manager import adispatch_custom_event
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
     RemoveMessage,
     SystemMessage,
 )
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import create_react_agent
 
+from . import user_injection
 from .config import Config
 from .context_compaction import maybe_append_precompact_note_nudge
 from .context_trim import is_trigger_reached, trim_old_ai_messages, trim_old_tool_messages
@@ -57,6 +60,27 @@ EMPTY_RESPONSE_NUDGE = (
     "write your final answer to the user as text now, based on the work so far. "
     "If the work is not finished, continue with the next tool call.)"
 )
+
+
+async def _take_user_injections(config: RunnableConfig | None) -> list[HumanMessage]:
+    """生成中に届いたユーザーの追加指示を取り出し、HumanMessage にして返す（src/user_injection.py）。
+
+    モデル呼び出しの直前（直前のツール呼び出しの結果がすべて揃った区切り）に呼ぶ。
+    取り出した分は custom event で app.py へ知らせ、チャット画面へユーザー発言として出させる。
+    thread_id の無い実行（evals/ 等）や、キューが空のときは何もしない。
+    """
+    thread_id = ((config or {}).get("configurable") or {}).get("thread_id")
+    injections = user_injection.drain(thread_id)
+    if not injections:
+        return []
+    logger.info("Applying %d additional user instruction(s) sent during the turn thread_id=%s", len(injections), thread_id)
+    try:
+        await adispatch_custom_event(
+            user_injection.INJECTION_APPLIED_EVENT, user_injection.event_payload(injections), config=config
+        )
+    except Exception:  # noqa: BLE001 - 画面表示の通知に失敗しても指示自体は LLM へ渡す
+        logger.debug("Failed to dispatch the user injection event", exc_info=True)
+    return [user_injection.to_human_message(i) for i in injections]
 
 
 async def _build_handwritten_graph(config: Config, system_prompt: str, checkpointer, *, wait_when_busy: bool = True):
@@ -159,13 +183,24 @@ async def _build_handwritten_graph(config: Config, system_prompt: str, checkpoin
             return "tools"
         return END
 
-    # --- 2 手書きノードを明示配線（ここがループ本体） ---
+    async def inject_user_messages(state: MessagesState, config: RunnableConfig) -> dict:
+        """inject ノード: 生成中に届いたユーザーの追加指示を履歴へ足す（無ければ何もしない）。
+
+        agent ノードとは別ノードにして、モデル呼び出しより前にチェックポイントへ
+        確定させる。同じノード内で足すと、直後のモデル呼び出しが失敗した場合
+        （ループ検知・通信エラーでのリトライ）に指示ごと失われるため。
+        """
+        return {"messages": await _take_user_injections(config)}
+
+    # --- 手書きノードを明示配線（ここがループ本体） ---
     graph = StateGraph(MessagesState)
+    graph.add_node("inject", inject_user_messages)
     graph.add_node("agent", call_model)
     graph.add_node("tools", ImageAwareToolNode(main_tools))
-    graph.add_edge(START, "agent")
+    graph.add_edge(START, "inject")
+    graph.add_edge("inject", "agent")
     graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
-    graph.add_edge("tools", "agent")  # ツール結果を持って再びモデルへ（ReAct）
+    graph.add_edge("tools", "inject")  # ツール結果を持って再びモデルへ（ReAct）。途中で届いた指示もここで足す
 
     return graph.compile(checkpointer=checkpointer)
 
@@ -193,14 +228,28 @@ async def _build_prebuilt_graph(config: Config, system_prompt: str, checkpointer
     model = enable_thinking_control(await build_model(config, role="main", wait_when_busy=wait_when_busy), config, "main")
     main_tools = filter_main_agent_tools(apply_session_tool_overrides(get_all_tools()), config)
 
-    def pre_model_hook(state: MessagesState) -> dict:
+    async def pre_model_hook(state: MessagesState, config: RunnableConfig) -> dict:
         """モデル呼び出し直前に、入力を絞り、必要なら引継ぎ促しを差し込む。
 
         create_react_agent 標準のフック。戻り値に "llm_input_messages" を
         含めると、今回のモデル呼び出しの入力だけが差し替わり、state 自体・
         checkpointer上の永続履歴はそのまま残る（src/context_trim.py 参照）。
+        生成中に届いたユーザーの追加指示は "messages" で state へ足す
+        （フックは agent とは別ノードなので、モデル呼び出しより前に確定する）。
+        引数名 config は LangGraph が RunnableConfig を渡す目印のため変えられない
+        （アプリ設定は外側の app_config を使う）。
         """
-        trimmed = list(state["messages"])
+        injected = await _take_user_injections(config)
+        update: dict = {"llm_input_messages": _prepare_llm_input([*state["messages"], *injected])}
+        if injected:
+            update["messages"] = injected
+        return update
+
+    app_config = config
+
+    def _prepare_llm_input(trimmed: list) -> list:
+        """pre_model_hook の本体（入力の切り詰め・ループ検知・ガード・ナッジ）。"""
+        config = app_config
         should_trim = config.context_trim_enabled and is_trigger_reached(
             trimmed, config.context_trim_trigger_total_tokens
         )
@@ -235,26 +284,15 @@ async def _build_prebuilt_graph(config: Config, system_prompt: str, checkpointer
             # 促す（src/context_compaction.py）。両方を同時に差し込むと
             # 「ツールを呼ぶな」と「write_thread_noteを呼べ」が矛盾するため。
             trimmed = maybe_append_precompact_note_nudge(trimmed, config)
-        return {"llm_input_messages": trimmed}
+        return trimmed
 
     return create_react_agent(
         model,
         ImageAwareToolNode(main_tools),
         prompt=system_prompt,
-        # トリミング・トークンガード・圧縮予告ナッジ・ツール呼び出しループ検知の
-        # いずれかが有効なら
-        # フックが必要（一部だけを見て None にすると、残りが黙って効かなく
-        # なる）。
-        pre_model_hook=(
-            pre_model_hook
-            if (
-                config.context_trim_enabled
-                or config.graph_token_guard_enabled
-                or (config.context_compaction_enabled and config.context_compaction_pre_note_threshold > 0)
-                or config.tool_loop_guard_enabled
-            )
-            else None
-        ),
+        # ユーザーの追加指示（割り込み）の取り込みに常に使うため、フックは常に付ける
+        # （トリミング・トークンガード等は、それぞれの設定が無効ならフック内で何もしない）。
+        pre_model_hook=pre_model_hook,
         checkpointer=checkpointer,
     )
 

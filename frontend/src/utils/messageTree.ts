@@ -93,6 +93,19 @@ export function selectMainThread(messages: IStep[]): IStep[] {
   );
 }
 
+/**
+ * 生成中に送った追加指示のうち、会話へ入った（チャット欄へユーザー発言として届いた）ものの ID。
+ * app.py の _show_user_injections が metadata.injection_id を付けて送る。
+ */
+export function selectAppliedInjectionIds(messages: IStep[]): Set<string> {
+  const ids = new Set<string>();
+  for (const s of flattenAll(messages)) {
+    const id = s.type === 'user_message' ? s.metadata?.injection_id : undefined;
+    if (typeof id === 'string') ids.add(id);
+  }
+  return ids;
+}
+
 /** 直近のターンが中断したまま（中断マーカーより後にユーザー発言が無い）かどうか。 */
 export function selectIsInterrupted(messages: IStep[]): boolean {
   const last = flattenAll(messages)

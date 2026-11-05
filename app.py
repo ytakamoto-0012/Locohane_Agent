@@ -162,6 +162,7 @@ from src.thread_store import ChatThreadDataLayer, _sanitize_filename_component
 from src.tool_labels import tool_label
 from src import i18n
 from src import thread_store
+from src import user_injection
 from src.tools import (
     WorkDirAccessStatus,
     cancel_background_script_jobs_for_thread,
@@ -772,6 +773,9 @@ if _config.thread_store_enabled:
     class _RenameThreadBody(BaseModel):
         name: str
 
+    class _InjectBody(BaseModel):
+        text: str
+
     async def _assert_owns_thread(thread_id: str, current_user) -> None:
         """指定スレッドの所有者が current_user（匿名モードでは None）と一致するか確認する。
 
@@ -961,6 +965,32 @@ if _config.thread_store_enabled:
         await _assert_owns_thread(thread_id, current_user)
         stopped = await _stop_thread_generating(thread_id)
         return {"stopped": stopped}
+
+    @_chainlit_asgi_app.post("/locohane/threads/{thread_id}/inject")
+    async def _locohane_inject_into_thread(
+        thread_id: str,
+        payload: _InjectBody,
+        current_user=Depends(_cl_get_current_user),
+    ):
+        """生成中のターンへユーザーの追加指示を割り込ませる（src/user_injection.py）。
+
+        Composer.tsx は生成中に送信された本文を通常の送信（on_message）ではなくここへ送る。
+        積んだ指示は、次にモデルを呼ぶ直前（ツール呼び出しの区切り）に会話へ入る。
+        ターンが動いていない・終わりかけで受付を閉じた後は 409 を返し、フロントエンドは
+        ターンの終了を待って通常のメッセージとして送り直す。添付ファイルは受け付けない。
+        """
+        await _assert_owns_thread(thread_id, current_user)
+        text = payload.text.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="The instruction is empty.")
+        limit = _config.ui_max_input_chars
+        if limit > 0 and len(text) > limit:
+            raise HTTPException(status_code=400, detail=f"The instruction is too long ({len(text)} > {limit} characters).")
+        injection = user_injection.enqueue(thread_id, text)
+        if injection is None:
+            raise HTTPException(status_code=409, detail="This conversation is not generating.")
+        logging.getLogger(__name__).info("Queued an additional user instruction thread_id=%s id=%s", thread_id, injection.id)
+        return {"queued": True, "id": injection.id}
 
     @_chainlit_asgi_app.get("/locohane/threads/generating")
     async def _locohane_owner_generating_thread(
@@ -1388,6 +1418,28 @@ async def _send_interrupted_marker(reason: str) -> None:
         await cl.Message(content=INTERRUPTED_PREFIX + reason).send()
     except Exception:  # noqa: BLE001 - 表示用マーカーの送信失敗で中断処理を止めない
         logging.getLogger(__name__).debug("Failed to send the interrupted marker", exc_info=True)
+
+
+# 割り込み指示（src/user_injection.py）をチャット欄へ出すユーザー発言の metadata キー。
+# frontend/src/components/Composer.tsx がこの ID で「送信待ち」の表示を消す。
+INJECTION_ID_METADATA_KEY = "injection_id"
+
+
+async def _show_user_injections(injections: list[dict]) -> None:
+    """会話へ入った割り込み指示を、チャット欄にユーザー発言として出す。
+
+    Args:
+        injections: {"id", "text"} の dict の列（user_injection.event_payload の "injections"）。
+    """
+    user = cl.user_session.get("user")
+    author = getattr(user, "identifier", None) or "User"
+    for injection in injections:
+        await cl.Message(
+            content=injection["text"],
+            author=author,
+            type="user_message",
+            metadata={INJECTION_ID_METADATA_KEY: injection["id"]},
+        ).send()
 
 # frontend/src/components/Composer.tsx が長文の貼り付けを添付化する際のファイル名
 # （pasted-text-<時刻>[-<連番>].txt）と一致させる。これに一致する添付は保存先パスでは
@@ -4115,6 +4167,8 @@ async def _on_message_impl(message: cl.Message) -> None:
     # 直近1回分のLLM呼び出しの usage_metadata。ターン終了後、コンテキスト
     # 圧縮（src/context_compaction.py）の単発リクエスト閾値判定に使う。
     last_usage: dict | None = None
+    # このターンの途中で会話へ入ったユーザーの追加指示（会話ログへ残すため）。
+    injected_texts: list[str] = []
 
     loop_exc: ThinkingLoopDetected | None = None
     turn_broken_exc: Exception | None = None
@@ -4539,6 +4593,15 @@ async def _on_message_impl(message: cl.Message) -> None:
                     # answer/steps/_finalize_orphaned_stepsには触れず、thinkingの
                     # クローズ&リセットのみ行う。
                     await _close_thinking(thinkings.pop(_stream_owner(event, owner_run_ids), None), stopped_reason="loop_detected")
+
+                elif kind == "on_custom_event" and event["name"] == user_injection.INJECTION_APPLIED_EVENT:
+                    # 生成中に届いたユーザーの追加指示が会話へ入った（src/graph.py の
+                    # _take_user_injections）。ここまでのメインの回答を区切ってから、ユーザー発言として出す
+                    # （バックグラウンドで動き続けるサブエージェントの出力には触れない）。
+                    await _close_owner_output(None, thinkings, answers)
+                    applied = (event.get("data") or {}).get("injections") or []
+                    injected_texts.extend(i["text"] for i in applied)
+                    await _show_user_injections(applied)
         except ThinkingLoopDetected as exc:
             # LLM応答（thinking/本文）が反復ループに陥り打ち切られた場合。
             # ここまでの思考/回答があれば確定送信してから、注意メッセージを
@@ -4893,6 +4956,20 @@ async def _on_message_impl(message: cl.Message) -> None:
                 inputs = {"messages": [HumanMessage(content=EMPTY_RESPONSE_NUDGE, id=nudge_id)]}
                 attempt += 1  # for range(total_retries + 1) の暗黙インクリメント相当
                 continue
+
+        # 最終回答の生成中に届いたユーザーの追加指示（次のモデル呼び出しが無いため
+        # グラフでは取り込まれない）は、そのまま次のユーザー発言としてグラフを続けて回す。
+        # 残りが無ければ受付を閉じる。drain と close_thread の間に await を挟まないため、
+        # 受け付けた指示がここで取りこぼされることは無い（閉じた後の送信は 409 になり、
+        # フロントエンドがターンの終了後に通常のメッセージとして送り直す）。
+        leftover = user_injection.drain(thread_id)
+        if leftover:
+            applied = user_injection.event_payload(leftover)["injections"]
+            injected_texts.extend(i["text"] for i in applied)
+            await _show_user_injections(applied)
+            inputs = {"messages": [user_injection.to_human_message(i) for i in leftover]}
+            continue
+        user_injection.close_thread(thread_id)
         break
 
     # ループ検知・無言終了いずれの注意メッセージ（機械的な注入）も、成功して
@@ -4918,7 +4995,7 @@ async def _on_message_impl(message: cl.Message) -> None:
         async with lock:
             append_turn(
                 chat_log_path,
-                message.content,
+                message.content + "".join(f"\n\n[additional instruction] {text}" for text in injected_texts),
                 ai_text,
                 token_usage_cumulative=cl.user_session.get("token_usage_cumulative"),
             )
@@ -5006,9 +5083,21 @@ async def on_message(message: cl.Message) -> None:
         _mark_thread_generating(thread_id, owner, session.id)
         _generating_thread_tasks[thread_id] = asyncio.current_task()
         session.emit = _make_relayed_emit(session, thread_id, original_emit)
+        # 生成中に送られたユーザーの追加指示（/locohane/threads/{id}/inject）の受付を始める。
+        # 正常に終わる場合は _on_message_impl がターンの最後に閉じる。
+        user_injection.open_thread(thread_id)
     try:
         await _on_message_impl(message)
     finally:
         if thread_id is not None and session is not None:
+            # 停止・エラーで中断した場合に残っていた指示は捨てる（フロントエンドは反映されなかった
+            # 指示を入力欄へ戻す）。
+            dropped = user_injection.close_thread(thread_id)
+            if dropped:
+                logging.getLogger(__name__).info(
+                    "Dropped %d additional user instruction(s) because the turn ended before applying them thread_id=%s",
+                    len(dropped),
+                    thread_id,
+                )
             session.emit = original_emit
             _unmark_thread_generating(thread_id, owner)

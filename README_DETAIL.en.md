@@ -464,6 +464,7 @@ Locohane/
 │   ├── plan_persist.py      # persisting plan/plan_approved changes to thread_store immediately without waiting for the turn to finish
 │   ├── ask_relay.py         # state that hands over waiting for responses to approve_plan/AskUserQuestion/ask_user_choice to another session after switching threads
 │   ├── ask_reconnect.py     # patch that resends pending questions (buttons, input box) to the new connection after a WebSocket reconnect of the same session
+│   ├── user_injection.py    # per-thread queue of additional user instructions sent while generating (interjection)
 │   ├── instance_lock.py     # process exclusive lock preventing multiple launches on the same data directory
 │   ├── cleanup.py           # automatic deletion of unneeded files
 │   ├── files.py             # file upload processing
@@ -2037,6 +2038,33 @@ override `[llm].reasoning_effort`.
 - **When it can be changed**: the icon is disabled while generating (including while waiting for an `askUser` answer).
   The turn is fixed to the value at the time of sending, so it never switches in the middle of a turn.
 - **Scope**: saved per browser; `config.ini` itself is not changed.
+
+---
+
+## Additional instructions during work (interjection)
+
+You can keep typing in the input box while the AI is working; sending passes the text on as an additional instruction
+without stopping the work (the same behavior as typing an instruction while ClaudeCode is processing). While generating,
+an "Add instruction" button appears next to the stop button instead of the send button (Enter also works).
+
+- **When it is passed on**: right before the main agent's model is called next (the point where the results of all running
+  tool calls are in). Running tools and `dispatch_agent` subagents are not interrupted; the instruction is passed on after they
+  finish (it does not reach subagents directly). An instruction sent while the final answer is being generated is processed
+  right after the answer as the next message. An instruction sent while waiting for plan approval (the `approve_plan` buttons)
+  is passed on at the step after approval or rejection.
+- **What you see**: after sending, "Will be passed at the next step" is shown above the input box, and once it enters the
+  conversation it appears in the chat as your message (it remains when the thread is resumed). An instruction that could not be
+  accepted because the turn was ending is shown as "Will be sent when the work ends" and is sent as a normal message after the
+  turn. If the turn is interrupted by the stop button or an error, instructions that were not passed on are put back in the input box.
+- **What can be sent**: text only (attachments cannot be sent and stay in the input box until the next normal send). The length
+  limit is `[ui] max_input_chars`. It cannot be sent from a viewer screen that opened a thread being processed by another session.
+- **How it works**: the frontend (`frontend/src/components/Composer.tsx`) posts to `POST /locohane/threads/{id}/inject`, and
+  `src/user_injection.py` puts it in a per-thread queue (accepting only while a turn runs; 409 when closed). Right before the
+  graph calls the model (the `inject` node before `agent` in the handwritten implementation, `pre_model_hook` in the prebuilt one),
+  the queue is drained and added to the conversation history as a `HumanMessage` (with a preface telling the LLM that it arrived
+  during the work), and the custom event `user_injection_applied` tells `app.py` to show it in the chat. Anything left after the
+  final answer is drained by `_on_message_impl` in `app.py` at the end of the turn. The chat log (`[chat_log]`) records it as
+  `[additional instruction]`.
 
 ---
 
