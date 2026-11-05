@@ -62,25 +62,27 @@ EMPTY_RESPONSE_NUDGE = (
 )
 
 
-async def _take_user_injections(config: RunnableConfig | None) -> list[HumanMessage]:
-    """生成中に届いたユーザーの追加指示を取り出し、HumanMessage にして返す（src/user_injection.py）。
+def _thread_id_of(config: RunnableConfig | None) -> str | None:
+    return ((config or {}).get("configurable") or {}).get("thread_id")
 
-    モデル呼び出しの直前（直前のツール呼び出しの結果がすべて揃った区切り）に呼ぶ。
-    取り出した分は custom event で app.py へ知らせ、チャット画面へユーザー発言として出させる。
-    thread_id の無い実行（evals/ 等）や、キューが空のときは何もしない。
+
+async def _notify_user_injections(config: RunnableConfig | None, injections: list) -> None:
+    """会話へ入れた追加指示を custom event で app.py へ知らせ、チャット欄へユーザー発言として出させる。
+
+    会話へ入れることが確定してから呼ぶ（先に知らせると、入れ損なった指示まで
+    「伝わった」と表示されてしまうため）。
     """
-    thread_id = ((config or {}).get("configurable") or {}).get("thread_id")
-    injections = user_injection.drain(thread_id)
-    if not injections:
-        return []
-    logger.info("Applying %d additional user instruction(s) sent during the turn thread_id=%s", len(injections), thread_id)
+    logger.info(
+        "Applying %d additional user instruction(s) sent during the turn thread_id=%s",
+        len(injections),
+        _thread_id_of(config),
+    )
     try:
         await adispatch_custom_event(
             user_injection.INJECTION_APPLIED_EVENT, user_injection.event_payload(injections), config=config
         )
     except Exception:  # noqa: BLE001 - 画面表示の通知に失敗しても指示自体は LLM へ渡す
         logger.debug("Failed to dispatch the user injection event", exc_info=True)
-    return [user_injection.to_human_message(i) for i in injections]
 
 
 async def _build_handwritten_graph(config: Config, system_prompt: str, checkpointer, *, wait_when_busy: bool = True):
@@ -189,8 +191,22 @@ async def _build_handwritten_graph(config: Config, system_prompt: str, checkpoin
         agent ノードとは別ノードにして、モデル呼び出しより前にチェックポイントへ
         確定させる。同じノード内で足すと、直後のモデル呼び出しが失敗した場合
         （ループ検知・通信エラーでのリトライ）に指示ごと失われるため。
+        指示が無いときは何も更新しない（空の更新でも messages チャネルが書き直され、
+        ステップごとに会話履歴全体がチェックポイントへ保存され直してしまうため）。
+        通知の await 中にキャンセルされた（停止・app.py がストリームを閉じた）場合は、
+        更新が確定しないため取り出した指示をキューへ戻す。
         """
-        return {"messages": await _take_user_injections(config)}
+        thread_id = _thread_id_of(config)
+        turn = user_injection.current_token(thread_id)
+        injections = user_injection.drain(thread_id)
+        if not injections:
+            return {}
+        try:
+            await _notify_user_injections(config, injections)
+        except BaseException:
+            user_injection.requeue(thread_id, injections)
+            raise
+        return {"messages": [user_injection.to_human_message(injections, turn)]}
 
     # --- 手書きノードを明示配線（ここがループ本体） ---
     graph = StateGraph(MessagesState)
@@ -236,11 +252,26 @@ async def _build_prebuilt_graph(config: Config, system_prompt: str, checkpointer
         checkpointer上の永続履歴はそのまま残る（src/context_trim.py 参照）。
         生成中に届いたユーザーの追加指示は "messages" で state へ足す
         （フックは agent とは別ノードなので、モデル呼び出しより前に確定する）。
+        指示を足した時点で末尾が HumanMessage になるため、ツール呼び出しのループ検知は
+        発火しない（連続が途切れたとみなされる）。それでも例外が出た場合は指示をキューへ戻す。
         引数名 config は LangGraph が RunnableConfig を渡す目印のため変えられない
         （アプリ設定は外側の app_config を使う）。
         """
-        injected = await _take_user_injections(config)
-        update: dict = {"llm_input_messages": _prepare_llm_input([*state["messages"], *injected])}
+        thread_id = _thread_id_of(config)
+        turn = user_injection.current_token(thread_id)
+        injections = user_injection.drain(thread_id)
+        injected = [user_injection.to_human_message(injections, turn)] if injections else []
+        try:
+            llm_input = _prepare_llm_input([*state["messages"], *injected])
+            if injected:
+                await _notify_user_injections(config, injections)
+        except BaseException:
+            # このノードの更新は確定しないため、取り出した指示はキューへ戻して次の機会に入れる
+            # （通知の await 中のキャンセルを含む）。
+            user_injection.requeue(thread_id, injections)
+            raise
+        # llm_input_messages は毎回必ず返す（返さないと前のステップの値が残り、古い入力でモデルを呼ぶ）。
+        update: dict = {"llm_input_messages": llm_input}
         if injected:
             update["messages"] = injected
         return update

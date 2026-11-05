@@ -396,6 +396,22 @@ def _make_relayed_emit(session, thread_id: str, original_emit):
     return relayed_emit
 
 
+def _close_user_injection_on_stop(thread_id: str) -> None:
+    """停止ボタンで、生成中に送られたユーザーの追加指示の受付をその場で閉じる。
+
+    タスクのキャンセルが実際に効くまで（後始末の await 中など）受付を開いたままにすると、
+    停止後に指示が会話へ入ってしまう。フロントエンドは停止の時点で、まだ会話へ入っていない
+    指示を入力欄へ戻すため、二重になる。
+    """
+    dropped = user_injection.close_thread(thread_id)
+    if dropped:
+        logging.getLogger(__name__).info(
+            "Dropped %d additional user instruction(s) because the turn was stopped thread_id=%s",
+            len(dropped),
+            thread_id,
+        )
+
+
 async def _stop_thread_generating(thread_id: str) -> bool:
     """他セッション（このスレッドを開いただけの閲覧側）から、生成中タスクを
     止める。@cl.on_stop の thread_id 指定版（app.py:1175 on_stop 参照）。
@@ -433,6 +449,8 @@ async def _stop_thread_generating(thread_id: str) -> bool:
     """
     task = _generating_thread_tasks.get(thread_id)
     task_was_running = task is not None and not task.done()
+    # キャンセルが実際に効くのを待たずに、追加指示の受付を閉じる（src/user_injection.py 冒頭参照）。
+    _close_user_injection_on_stop(thread_id)
     if task_was_running:
         task.cancel()
     # dispatch_agent/run_script_background系いずれかのジョブ強制終了で
@@ -775,6 +793,8 @@ if _config.thread_store_enabled:
 
     class _InjectBody(BaseModel):
         text: str
+        # フロントエンドが決めた ID（応答を受け取れなくても、チャット欄に届いた発言と突き合わせるため）。
+        id: str | None = None
 
     async def _assert_owns_thread(thread_id: str, current_user) -> None:
         """指定スレッドの所有者が current_user（匿名モードでは None）と一致するか確認する。
@@ -978,15 +998,25 @@ if _config.thread_store_enabled:
         積んだ指示は、次にモデルを呼ぶ直前（ツール呼び出しの区切り）に会話へ入る。
         ターンが動いていない・終わりかけで受付を閉じた後は 409 を返し、フロントエンドは
         ターンの終了を待って通常のメッセージとして送り直す。添付ファイルは受け付けない。
+
+        所有者の確認は _assert_owns_thread（thread_store の行）ではなく、「呼び出し元と同じ
+        所有者が、今このスレッドを生成中か」（_generating_owner_threads）で行う。thread_store が
+        無効な構成でも使えるようにするため（受け付けるのは生成中だけなので、これで足りる）。
+        他の所有者のスレッドでも、生成中でないスレッドと同じ 409 を返す（存在を漏らさない）。
         """
-        await _assert_owns_thread(thread_id, current_user)
+        owner = thread_store.resolve_owner(current_user)
         text = payload.text.strip()
         if not text:
             raise HTTPException(status_code=400, detail="The instruction is empty.")
         limit = _config.ui_max_input_chars
         if limit > 0 and len(text) > limit:
             raise HTTPException(status_code=400, detail=f"The instruction is too long ({len(text)} > {limit} characters).")
-        injection = user_injection.enqueue(thread_id, text)
+        injection_id = (payload.id or "").strip() or None
+        if injection_id is not None and (len(injection_id) > 64 or not re.fullmatch(r"[A-Za-z0-9-]+", injection_id)):
+            raise HTTPException(status_code=400, detail="Invalid instruction id.")
+        if _generating_owner_threads.get(owner) != thread_id:
+            raise HTTPException(status_code=409, detail="This conversation is not generating.")
+        injection = user_injection.enqueue(thread_id, text, injection_id)
         if injection is None:
             raise HTTPException(status_code=409, detail="This conversation is not generating.")
         logging.getLogger(__name__).info("Queued an additional user instruction thread_id=%s id=%s", thread_id, injection.id)
@@ -1425,21 +1455,106 @@ async def _send_interrupted_marker(reason: str) -> None:
 INJECTION_ID_METADATA_KEY = "injection_id"
 
 
-async def _show_user_injections(injections: list[dict]) -> None:
-    """会話へ入った割り込み指示を、チャット欄にユーザー発言として出す。
+class _TurnInjections:
+    """1ターンの間に会話へ入った割り込み指示（src/user_injection.py）と、その画面表示の対応。
 
-    Args:
-        injections: {"id", "text"} の dict の列（user_injection.event_payload の "injections"）。
+    「会話へ入った指示は必ず画面に出し、画面に出せないまま終わる指示は会話に残さない」ことを
+    保つ。通常はグラフの custom event（INJECTION_APPLIED_EVENT）で表示するが、app.py が
+    ストリームを途中で閉じる経路（ターン内のコンテキスト圧縮・計画の却下）では、閉じる間に
+    グラフが先へ進んで指示を取り込み、その通知が読まれずに捨てられることがある。その場合は
+    チェックポイントを見て表示し直す（sync_with_state）。チェックポイントへ確定する前の書き込み
+    （pending write）にだけある指示は、aupdate_state で作る新しいチェックポイントには引き継がれない
+    ため、書き換える前に回収する（pending_messages）。停止した場合は、画面に出ていない指示を
+    会話から取り除く（drop_undisplayed。フロントエンドはそれらを入力欄へ戻す）。
+
+    Attributes:
+        token: このターンの受付のトークン（user_injection.open_thread）。None なら何もしない。
+        displayed: 画面に出した指示の ID。
+        texts: 画面に出した指示の本文（会話ログ用）。
     """
-    user = cl.user_session.get("user")
-    author = getattr(user, "identifier", None) or "User"
-    for injection in injections:
-        await cl.Message(
-            content=injection["text"],
-            author=author,
-            type="user_message",
-            metadata={INJECTION_ID_METADATA_KEY: injection["id"]},
-        ).send()
+
+    def __init__(self, token: str | None) -> None:
+        self.token = token
+        self.displayed: set[str] = set()
+        self.texts: list[str] = []
+
+    async def show(self, items: list[dict]) -> None:
+        """まだ出していない指示を、チャット欄にユーザー発言として出す。
+
+        Args:
+            items: {"id", "text"} の dict の列（user_injection.event_payload の "injections" 等）。
+        """
+        user = cl.user_session.get("user")
+        author = getattr(user, "identifier", None) or "User"
+        for item in items:
+            if item["id"] in self.displayed:
+                continue
+            self.displayed.add(item["id"])
+            self.texts.append(item["text"])
+            # 表示の失敗（切断済み等）でターン自体を壊さない（指示は既に会話へ入っている）。
+            try:
+                await cl.Message(
+                    content=item["text"],
+                    author=author,
+                    type="user_message",
+                    metadata={INJECTION_ID_METADATA_KEY: item["id"]},
+                ).send()
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).warning("Failed to show an additional user instruction in the chat", exc_info=True)
+
+    def _messages_of_turn(self, messages) -> list:
+        if self.token is None:
+            return []
+        return [m for m in messages or [] if user_injection.injection_items(m, self.token)]
+
+    async def sync_with_state(self, graph, config) -> None:
+        """会話（チェックポイント）に入っているのに画面に出ていない、このターンの指示を出す（ベストエフォート）。"""
+        if self.token is None:
+            return
+        try:
+            state = await graph.aget_state(config)
+        except Exception:  # noqa: BLE001 - 表示の補正のためにターンの後始末を止めない
+            logging.getLogger(__name__).debug("Failed to read the state to sync user injections", exc_info=True)
+            return
+        for m in self._messages_of_turn(state.values.get("messages", []) if state else []):
+            await self.show(user_injection.injection_items(m, self.token))
+
+    def pending_messages(self, state) -> list:
+        """チェックポイントへ確定していない書き込みにだけある、このターンの指示の HumanMessage。"""
+        found: list = []
+        for task in getattr(state, "tasks", None) or ():
+            if getattr(task, "error", None) is not None:
+                continue
+            result = getattr(task, "result", None)
+            if not isinstance(result, dict):
+                continue
+            msgs = result.get("messages")
+            if msgs is None:
+                continue
+            found.extend(self._messages_of_turn(msgs if isinstance(msgs, list) else [msgs]))
+        return found
+
+    async def drop_undisplayed(self, graph, config) -> None:
+        """停止時: 画面に1件も出ていない、このターンの指示を会話から取り除く（ベストエフォート）。
+
+        確定前の書き込みにだけある指示は、次に新しい入力でグラフを始めるときに LangGraph が
+        捨てるため対象外（RemoveMessage は確定済みの ID にしか使えない）。
+        """
+        if self.token is None:
+            return
+        try:
+            state = await graph.aget_state(config)
+            pending_ids = {m.id for m in self.pending_messages(state)}
+            for m in self._messages_of_turn(state.values.get("messages", []) if state else []):
+                items = user_injection.injection_items(m, self.token)
+                if m.id in pending_ids or any(i["id"] in self.displayed for i in items):
+                    continue
+                await graph.aupdate_state(config, {"messages": [RemoveMessage(id=m.id)]}, as_node="tools")
+                logging.getLogger(__name__).info(
+                    "Removed %d additional user instruction(s) that were not shown before the turn was stopped", len(items)
+                )
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).debug("Failed to drop undisplayed user injections", exc_info=True)
 
 # frontend/src/components/Composer.tsx が長文の貼り付けを添付化する際のファイル名
 # （pasted-text-<時刻>[-<連番>].txt）と一致させる。これに一致する添付は保存先パスでは
@@ -2238,6 +2353,8 @@ async def on_stop() -> None:
         # 紐づくセッションのグラフがまだ無いため何もしない。
         logging.getLogger(__name__).warning("on_stop: thread_id is not set, doing nothing")
         return
+    # 最初の await より前に、追加指示の受付を閉じる（_close_user_injection_on_stop 参照）。
+    _close_user_injection_on_stop(thread_id)
     # aclose_active_llm_clients・cancel_dispatch_agent_jobs_for_thread内で
     # CancelledErrorが発生しても、後始末（グラフ再構築・ログ出力）は
     # 最後まで実行してから呼び出し元へ伝播する。2つを同じtryブロックに
@@ -4070,6 +4187,8 @@ async def _on_message_impl(message: cl.Message) -> None:
         None。副作用として cl.Message / cl.Step の送信・更新を行う。
     """
     thread_id = cl.user_session.get("thread_id")
+    # on_message が開いた追加指示の受付のトークン（await より前に取ること。on_message の同名コメント参照）。
+    injection_token = user_injection.current_token(thread_id)
     too_long_reason = _check_input_length(message)
     if too_long_reason is not None:
         await cl.Message(content=too_long_reason, type="system_message").send()
@@ -4167,8 +4286,8 @@ async def _on_message_impl(message: cl.Message) -> None:
     # 直近1回分のLLM呼び出しの usage_metadata。ターン終了後、コンテキスト
     # 圧縮（src/context_compaction.py）の単発リクエスト閾値判定に使う。
     last_usage: dict | None = None
-    # このターンの途中で会話へ入ったユーザーの追加指示（会話ログへ残すため）。
-    injected_texts: list[str] = []
+    # このターンの途中で会話へ入ったユーザーの追加指示と、その画面表示（_TurnInjections 参照）。
+    turn_injections = _TurnInjections(injection_token)
 
     loop_exc: ThinkingLoopDetected | None = None
     turn_broken_exc: Exception | None = None
@@ -4462,6 +4581,9 @@ async def _on_message_impl(message: cl.Message) -> None:
                     # 打ち切りを圧縮継続で握りつぶしてはならないため。
                     if event["name"] == "approve_plan" and cl.user_session.get("plan_denied_just_now"):
                         cl.user_session.set("plan_denied_just_now", False)
+                        # ここからストリームを閉じるまでの間に、先へ進んだグラフが追加指示を
+                        # 取り出さないよう保留する（_TurnInjections 参照。このターンはここで終わる）。
+                        user_injection.set_held(thread_id, True)
                         await _close_all_outputs(thinkings, answers)
                         await cl.Message(
                             content=i18n.t("notice.plan_denied"),
@@ -4500,6 +4622,9 @@ async def _on_message_impl(message: cl.Message) -> None:
                                     describe_current_task(),
                                 )
                                 if compact_due and not awaiting_approval:
+                                    # 圧縮が終わって再開するまで、追加指示の取り出しを保留する
+                                    # （_TurnInjections 参照。except _CompactionCheckpoint で解除）。
+                                    user_injection.set_held(thread_id, True)
                                     raise _CompactionCheckpoint(list(pending_main_tool_msgs))
 
                 elif kind == "on_chat_model_end":
@@ -4599,9 +4724,7 @@ async def _on_message_impl(message: cl.Message) -> None:
                     # _take_user_injections）。ここまでのメインの回答を区切ってから、ユーザー発言として出す
                     # （バックグラウンドで動き続けるサブエージェントの出力には触れない）。
                     await _close_owner_output(None, thinkings, answers)
-                    applied = (event.get("data") or {}).get("injections") or []
-                    injected_texts.extend(i["text"] for i in applied)
-                    await _show_user_injections(applied)
+                    await turn_injections.show((event.get("data") or {}).get("injections") or [])
         except ThinkingLoopDetected as exc:
             # LLM応答（thinking/本文）が反復ループに陥り打ち切られた場合。
             # ここまでの思考/回答があれば確定送信してから、注意メッセージを
@@ -4674,6 +4797,7 @@ async def _on_message_impl(message: cl.Message) -> None:
             ).send()
             await _send_interrupted_marker("recursion_limit")
             await _remove_message_ids_if_present(graph, config, loop_nudge_ids)
+            await turn_injections.sync_with_state(graph, config)
             return
         except _PlanDeniedInterrupt as e:
             # 却下メッセージの送信・thinking/answerの確定は on_tool_end 内で
@@ -4683,7 +4807,14 @@ async def _on_message_impl(message: cl.Message) -> None:
             # コミットする。これにより次回のグラフ実行時に「tool_calls に
             # 対応する ToolMessage が無い」という不整合を防ぐ。
             await _finalize_orphaned_steps(steps, "interrupted")
-            await graph.aupdate_state(config, {"messages": [e.tool_message]}, as_node="tools")
+            # 先にストリームを閉じてグラフを止めてから状態を書き換える（_CompactionCheckpoint の
+            # 経路と同じ理由。閉じる処理は冪等で、finally の呼び出しは何もしなくなる）。閉じる間に
+            # グラフが追加指示を取り込んでいて、それが確定前の書き込みにだけある場合は、ここで
+            # 一緒に確定させる（aupdate_state で作るチェックポイントには引き継がれないため）。
+            await _aclose_event_stream(event_stream)
+            pending_injections = turn_injections.pending_messages(await graph.aget_state(config))
+            await graph.aupdate_state(config, {"messages": [e.tool_message, *pending_injections]}, as_node="tools")
+            await turn_injections.sync_with_state(graph, config)
             return
         except _CompactionCheckpoint as exc:
             # ループ内の安全な区切り（直近のメインAIMessageのtool_callsに
@@ -4717,9 +4848,18 @@ async def _on_message_impl(message: cl.Message) -> None:
             # astream_events()を呼んでいたが、_CompactionCheckpointの経路だけ
             # aclose()より前にaupdate_stateを呼んでいたのが原因）。
             await _aclose_event_stream(event_stream)
-            if exc.tool_messages:
-                await graph.aupdate_state(config, {"messages": exc.tool_messages}, as_node="tools")
-            await _run_context_compaction_visible(graph, config, thread_id, last_usage)
+            # 閉じる間にグラフが追加指示を取り込んでいて、それが確定前の書き込みにだけある場合は、
+            # ToolMessage と一緒に確定させる（aupdate_state で作るチェックポイントには引き継がれず、
+            # 失われるため。_TurnInjections 参照）。
+            pending_injections = turn_injections.pending_messages(await graph.aget_state(config))
+            to_commit = [*exc.tool_messages, *pending_injections]
+            if to_commit:
+                await graph.aupdate_state(config, {"messages": to_commit}, as_node="tools")
+            try:
+                await _run_context_compaction_visible(graph, config, thread_id, last_usage)
+            finally:
+                # 再開（inputs=None で inject ノードから）の前に保留を解く。
+                user_injection.set_held(thread_id, False)
             # 圧縮後に新しいツール呼び出しが続く場合に備え、安全点検知用
             # 変数をリセットする。
             pending_main_tool_ids.clear()
@@ -4747,6 +4887,13 @@ async def _on_message_impl(message: cl.Message) -> None:
             try:
                 state = await graph.aget_state(config)
                 repair, orphaned_count, recovered_count = _orphan_repair_messages(state, "Because the user stopped it (or similar), ")
+                # 画面に出した追加指示は、確定前の書き込みにだけあっても会話に残す（画面と揃える）。
+                # 出していない指示は残さない（フロントエンドが入力欄へ戻すため。下の drop_undisplayed）。
+                repair += [
+                    m
+                    for m in turn_injections.pending_messages(state)
+                    if any(i["id"] in turn_injections.displayed for i in user_injection.injection_items(m))
+                ]
                 if repair:
                     await graph.aupdate_state(config, {"messages": repair}, as_node="tools")
                     logging.getLogger(__name__).warning(
@@ -4755,6 +4902,7 @@ async def _on_message_impl(message: cl.Message) -> None:
                         orphaned_count,
                         recovered_count,
                     )
+                await turn_injections.drop_undisplayed(graph, config)
             except _CheckpointerTimeout:
                 # checkpointerのロックが固着している可能性が高いが、
                 # この例外を伝播させるとCancelledErrorが消える。
@@ -4813,6 +4961,13 @@ async def _on_message_impl(message: cl.Message) -> None:
             # steps と同じ安全網パターンで必ず閉じる。
             for owner in list(thinkings):
                 await _close_thinking(thinkings.pop(owner), stopped_reason="interrupted")
+
+        # ストリームが途中で閉じた（圧縮・ループ検知・通信エラー等）場合に、会話へ入ったのに
+        # 通知が読まれず画面に出ていない追加指示があれば出す（_TurnInjections 参照）。
+        # checkpointer を作り直す必要がある（固着・接続切れの疑い）ときは、読みに行くと
+        # タイムアウトまで待たされるため飛ばす。
+        if not checkpointer_needs_rebuild:
+            await turn_injections.sync_with_state(graph, config)
 
         # P2: ThinkingLoopDetected のグラフ再構築・nudge注入を finally 後へ延期。
         # これにより「aclose→rebuild→新リクエスト」の順序が保証される。
@@ -4962,14 +5117,20 @@ async def _on_message_impl(message: cl.Message) -> None:
         # 残りが無ければ受付を閉じる。drain と close_thread の間に await を挟まないため、
         # 受け付けた指示がここで取りこぼされることは無い（閉じた後の送信は 409 になり、
         # フロントエンドがターンの終了後に通常のメッセージとして送り直す）。
-        leftover = user_injection.drain(thread_id)
+        # 停止で受付が閉じられた・別のターンの受付に替わった後は取り出さない（トークンで判定）。
+        leftover = (
+            user_injection.drain(thread_id)
+            if injection_token is not None and user_injection.current_token(thread_id) == injection_token
+            else []
+        )
         if leftover:
-            applied = user_injection.event_payload(leftover)["injections"]
-            injected_texts.extend(i["text"] for i in applied)
-            await _show_user_injections(applied)
-            inputs = {"messages": [user_injection.to_human_message(i) for i in leftover]}
+            await turn_injections.show(user_injection.event_payload(leftover)["injections"])
+            # 最終回答の後なので、ターン途中の割り込みと違い新しいユーザー発話として扱う
+            # （mark_user_turn: [llm].reasoning_preserve で前のターンの thinking を送り続けないため）。
+            inputs = {"messages": [mark_user_turn(user_injection.to_human_message(leftover, injection_token))]}
             continue
-        user_injection.close_thread(thread_id)
+        if injection_token is not None:
+            user_injection.close_thread(thread_id, injection_token)
         break
 
     # ループ検知・無言終了いずれの注意メッセージ（機械的な注入）も、成功して
@@ -4995,7 +5156,7 @@ async def _on_message_impl(message: cl.Message) -> None:
         async with lock:
             append_turn(
                 chat_log_path,
-                message.content + "".join(f"\n\n[additional instruction] {text}" for text in injected_texts),
+                message.content + "".join(f"\n\n[additional instruction] {text}" for text in turn_injections.texts),
                 ai_text,
                 token_usage_cumulative=cl.user_session.get("token_usage_cumulative"),
             )
@@ -5078,21 +5239,35 @@ async def on_message(message: cl.Message) -> None:
             ).send()
             return
 
+    if thread_id is not None and thread_id in _generating_thread_ids:
+        # 同じスレッドが既に生成中（停止ボタンの後始末がまだ終わっていない場合や、生成中の会話へ
+        # 戻ってきた直後で、フロントエンドが「他セッションで処理中」をまだ知らない間に送った場合）。
+        # 並行して2本目のターンを走らせると、同じチェックポイントを奪い合い、追加指示の受付
+        # （src/user_injection.py）も取り違える。生成中の追加指示は /locohane/threads/{id}/inject へ送る。
+        logging.getLogger(__name__).info(
+            "on_message: rejected this message without running it because the same thread (thread_id=%s) is still generating",
+            thread_id,
+        )
+        await cl.Message(content=i18n.t("notice.this_thread_busy"), type="system_message").send()
+        return
+
     original_emit = session.emit if session is not None else None
     if thread_id is not None and session is not None:
         _mark_thread_generating(thread_id, owner, session.id)
         _generating_thread_tasks[thread_id] = asyncio.current_task()
         session.emit = _make_relayed_emit(session, thread_id, original_emit)
         # 生成中に送られたユーザーの追加指示（/locohane/threads/{id}/inject）の受付を始める。
-        # 正常に終わる場合は _on_message_impl がターンの最後に閉じる。
-        user_injection.open_thread(thread_id)
+        # 正常に終わる場合は _on_message_impl がターンの最後に閉じる（user_injection.current_token
+        # でこのトークンを受け取る。open_thread からその呼び出しまで await を挟まないこと）。
+        injection_token = user_injection.open_thread(thread_id)
     try:
         await _on_message_impl(message)
     finally:
         if thread_id is not None and session is not None:
             # 停止・エラーで中断した場合に残っていた指示は捨てる（フロントエンドは反映されなかった
-            # 指示を入力欄へ戻す）。
-            dropped = user_injection.close_thread(thread_id)
+            # 指示を入力欄へ戻す）。トークン付きなので、停止後に同じスレッドで始まった次のターンの
+            # 受付は閉じない。
+            dropped = user_injection.close_thread(thread_id, injection_token)
             if dropped:
                 logging.getLogger(__name__).info(
                     "Dropped %d additional user instruction(s) because the turn ended before applying them thread_id=%s",

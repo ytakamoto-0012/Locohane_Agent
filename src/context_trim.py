@@ -346,13 +346,24 @@ def find_last_user_message_cut_index(messages: list[BaseMessage]) -> int | None:
     発話は区別できないため、ここでは区別しない。注入が末尾に来ている場合は
     保護範囲が狭まるだけで、壊れる方向には働かない。
 
+    ただし、ターンの途中で会話へ入れたユーザーの追加指示（src/user_injection.py）は
+    境界にしない。境界にすると保護の起点が追加指示へ移り、そのターンの依頼文そのものが
+    要約に飲まれてしまう（追加指示は依頼文より後ろにあるので、依頼文を境界にすれば
+    追加指示も原文のまま残る）。最終回答の後に残っていて新しいユーザー発話として入れた
+    もの（USER_TURN_KWARG の目印付き）は、通常のユーザー発話と同じく境界にする。
+
     Returns:
         末尾の HumanMessage の位置以下で最大の安全な切断点。HumanMessage が
         無い、または境界が0にしかならない場合は None。
     """
+    from .llm.dialect import USER_TURN_KWARG
+    from .user_injection import is_injection_message
+
     last_human_index = None
     for i, m in enumerate(messages):
         if isinstance(m, HumanMessage):
+            if is_injection_message(m) and not m.additional_kwargs.get(USER_TURN_KWARG):
+                continue
             last_human_index = i
     if last_human_index is None:
         return None

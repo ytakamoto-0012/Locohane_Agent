@@ -2057,7 +2057,20 @@ an "Add instruction" button appears next to the stop button instead of the send 
   accepted because the turn was ending is shown as "Will be sent when the work ends" and is sent as a normal message after the
   turn. If the turn is interrupted by the stop button or an error, instructions that were not passed on are put back in the input box.
 - **What can be sent**: text only (attachments cannot be sent and stay in the input box until the next normal send). The length
-  limit is `[ui] max_input_chars`. It cannot be sent from a viewer screen that opened a thread being processed by another session.
+  limit is `[ui] max_input_chars`. It can also be sent from a screen that moved to another conversation while generating and came
+  back (where the original session is the one generating). Several instructions arriving together are passed to the LLM as one
+  message (they are shown one by one on screen).
+- **Relation to subagents**: only the main agent's graph takes instructions; they never enter the subagent loop
+  (`src/subagent.py`). An instruction sent while `dispatch_agent` runs enters after its result has returned to the main agent.
+- **Stop and failures**: pressing the stop button (on your own screen or on a screen you came back to) closes the queue at once,
+  and instructions not yet in the conversation are discarded (put back in the input box on screen). Instructions that entered the
+  conversation without being shown are removed. Retries after loop detection or communication errors and in-turn context
+  compaction neither lose instructions that already entered nor duplicate them (`tests/test_user_injection_failures.py`).
+  If a normal message arrives while the same conversation is still generating (including while stopping), it is not processed
+  and a notice is returned (a second turn is never run in parallel).
+- **Relation to context compaction**: compaction protects "everything from the last user message on" from being summarized, but
+  a mid-turn additional instruction is not used as that starting point (otherwise the request itself would be summarized away;
+  `find_last_user_message_cut_index` in `src/context_trim.py`). The instruction comes after the request, so it stays verbatim.
 - **How it works**: the frontend (`frontend/src/components/Composer.tsx`) posts to `POST /locohane/threads/{id}/inject`, and
   `src/user_injection.py` puts it in a per-thread queue (accepting only while a turn runs; 409 when closed). Right before the
   graph calls the model (the `inject` node before `agent` in the handwritten implementation, `pre_model_hook` in the prebuilt one),

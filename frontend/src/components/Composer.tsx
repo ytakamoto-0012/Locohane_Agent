@@ -28,18 +28,22 @@ const CHAR_COUNTER_SHOW_RATIO = 0.8;
 // ターンが終わった（loading が false になった）と判断するまで待つ時間。承認待ち等の "ask" の
 // 前後で loading が一瞬 false になるため、すぐには「終わった」とみなさない。
 const TURN_END_SETTLE_MS = 1500;
+// 追加指示の送信がこれより長くかかったら打ち切る（応答待ちのまま、ターン終了後の処理が止まらないように）。
+const INJECT_TIMEOUT_MS = 10000;
 
 /**
  * 生成中に送った追加指示（app.py の /locohane/threads/{id}/inject、src/user_injection.py）。
+ * id はここで決めてバックエンドへ渡し、チャット欄に届いたユーザー発言（metadata.injection_id）と突き合わせる。
  * - sending: 送信中
  * - queued: バックエンドが受け付けた（次にモデルを呼ぶ前に会話へ入る）
  * - deferred: ターンが終わりかけで受け付けられなかった（ターンの終了後に通常のメッセージとして送る）
+ * - unknown: 通信エラー・タイムアウトで、受け付けられたか分からない（二重送信を避けるため、
+ *   会話へ入らないままターンが終わったら自動では送らず入力欄へ戻す）
  */
 interface QueuedInstruction {
-  localId: string;
+  id: string;
   text: string;
-  status: 'sending' | 'queued' | 'deferred';
-  serverId?: string;
+  status: 'sending' | 'queued' | 'deferred' | 'unknown';
 }
 
 function countLines(text: string): number {
@@ -103,24 +107,26 @@ export function Composer({
   messagesRef.current = messages;
 
   const isReplying = askUser?.spec.type === 'text';
-  // このセッション自身のターンが動いている間（承認ボタン等の応答待ちを含む）。送信は
-  // 追加指示（割り込み）として扱う。
-  const turnRunning = loading || askUser?.spec.type === 'action';
+  // この会話のターンが動いている間（承認ボタン等の応答待ちを含む）。送信は追加指示（割り込み）
+  // として扱う。生成中に別の会話へ移って戻ってきた画面（remoteGenerating。生成しているのは
+  // 別のセッション）も含める。そちらは loading が false のままなので、含めないと送った直後に
+  // 「ターンが終わった」とみなして、まだ伝わっていない指示を入力欄へ戻してしまう。
+  const turnRunning = loading || askUser?.spec.type === 'action' || Boolean(remoteGenerating);
   // useChatData().disabled は生成中（loading）も true になるが、生成中も追加指示を
   // 入力できるよう、未接続とファイル・要素の応答待ちのときだけ止める。
-  // 他セッションでこのスレッドが処理中、または同じ所有者の別スレッドが
-  // 処理中の間は送信自体を止める。
+  // 同じ所有者の別スレッドが処理中の間は送信自体を止める（この会話が他セッションで
+  // 処理中の間は、追加指示としてだけ送れる）。
   const askBlocksInput = askUser?.spec.type === 'file' || askUser?.spec.type === 'element';
-  const inputBlocked = !connected || askBlocksInput || Boolean(remoteGenerating) || Boolean(blockedByOtherThread);
+  const inputBlocked = !connected || askBlocksInput || Boolean(blockedByOtherThread);
   const inputBlockedRef = useRef(inputBlocked);
   inputBlockedRef.current = inputBlocked;
 
   // 会話へ入った（チャット欄にユーザー発言として届いた）追加指示は「送信待ち」から外す。
   useEffect(() => {
-    if (!queued.some((q) => q.serverId)) return;
+    if (queued.length === 0) return;
     const applied = selectAppliedInjectionIds(messages);
-    if (queued.some((q) => q.serverId && applied.has(q.serverId))) {
-      setQueued((prev) => prev.filter((q) => !(q.serverId && applied.has(q.serverId))));
+    if (queued.some((q) => applied.has(q.id))) {
+      setQueued((prev) => prev.filter((q) => !applied.has(q.id)));
     }
   }, [messages, queued]);
 
@@ -130,7 +136,7 @@ export function Composer({
     if (turnRunning || queued.length === 0 || queued.some((q) => q.status === 'sending')) return;
     const timer = setTimeout(() => {
       const applied = selectAppliedInjectionIds(messagesRef.current);
-      const pending = queued.filter((q) => !(q.serverId && applied.has(q.serverId)));
+      const pending = queued.filter((q) => !applied.has(q.id));
       setQueued([]);
       const deferred = pending.filter((q) => q.status === 'deferred');
       const restore = pending.filter((q) => q.status !== 'deferred' || inputBlockedRef.current);
@@ -147,38 +153,42 @@ export function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turnRunning, queued]);
 
-  const updateQueued = (localId: string, patch: Partial<QueuedInstruction>) =>
-    setQueued((prev) => prev.map((q) => (q.localId === localId ? { ...q, ...patch } : q)));
+  const setQueuedStatus = (id: string, status: QueuedInstruction['status']) =>
+    setQueued((prev) => prev.map((q) => (q.id === id ? { ...q, status } : q)));
 
   // 生成中の送信: 入力欄の本文だけを追加指示としてバックエンドへ積む（添付は次の通常送信まで残す）。
   const submitInstruction = () => {
     const text = value.trim();
     if (!text) return;
-    const localId = uuidv4();
-    setQueued((prev) => [...prev, { localId, text, status: currentThreadId ? 'sending' : 'deferred' }]);
+    const id = uuidv4();
+    setQueued((prev) => [...prev, { id, text, status: currentThreadId ? 'sending' : 'deferred' }]);
     setValue('');
     setPasteError(null);
     if (!currentThreadId) return;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), INJECT_TIMEOUT_MS);
     fetch(`${BACKEND_URL}/locohane/threads/${currentThreadId}/inject`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text })
+      body: JSON.stringify({ text, id }),
+      signal: controller.signal
     })
-      .then(async (res) => {
+      .then((res) => {
         if (res.ok) {
-          const data: { id: string } = await res.json();
-          updateQueued(localId, { status: 'queued', serverId: data.id });
+          setQueuedStatus(id, 'queued');
         } else if (res.status === 409) {
-          updateQueued(localId, { status: 'deferred' });
+          // 確実に積まれていない（受付が閉じていた）ので、ターンの終了後に通常のメッセージとして送る。
+          setQueuedStatus(id, 'deferred');
         } else {
           // 長すぎる等で拒否された。入力欄へ戻して知らせる。
-          setQueued((prev) => prev.filter((q) => q.localId !== localId));
+          setQueued((prev) => prev.filter((q) => q.id !== id));
           setValue((v) => [text, v].filter((s) => s).join('\n'));
           setPasteError(t('composer.injectFailed'));
         }
       })
-      .catch(() => updateQueued(localId, { status: 'deferred' }));
+      .catch(() => setQueuedStatus(id, 'unknown'))
+      .finally(() => clearTimeout(timeout));
   };
 
   // 最大入力文字数の判定対象は、入力欄の本文＋貼り付けテキストの合計
@@ -337,7 +347,7 @@ export function Composer({
       {queued.length > 0 ? (
         <div className="composer-queued">
           {queued.map((q) => (
-            <div key={q.localId} className="composer-queued-item">
+            <div key={q.id} className="composer-queued-item">
               <span className="composer-queued-label">
                 {q.status === 'deferred' ? t('composer.queuedNextTurn') : t('composer.queuedNextStep')}
               </span>
@@ -372,15 +382,13 @@ export function Composer({
           className="composer-textarea"
           value={value}
           placeholder={
-            remoteGenerating
-              ? t('composer.placeholderBusy')
-              : blockedByOtherThread
-                ? t('composer.placeholderOtherBusy')
-                : isReplying
-                  ? t('composer.placeholderReply')
-                  : turnRunning
-                    ? t('composer.placeholderInject')
-                    : t('composer.placeholder')
+            blockedByOtherThread
+              ? t('composer.placeholderOtherBusy')
+              : isReplying
+                ? t('composer.placeholderReply')
+                : turnRunning
+                  ? t('composer.placeholderInject')
+                  : t('composer.placeholder')
           }
           disabled={inputBlocked}
           onChange={(e) => setValue(e.target.value)}
@@ -420,7 +428,7 @@ export function Composer({
             ) : null}
             <PlanModeBadge step={plan} />
             {/* 生成中は停止ボタンと並べて出す（承認待ち等で loading=false の間は下の送信ボタンが同じ働きをする） */}
-            {loading && !isReplying && value.trim() ? (
+            {(loading || remoteGenerating) && !isReplying && value.trim() ? (
               <button
                 type="button"
                 className="composer-submit-button"
