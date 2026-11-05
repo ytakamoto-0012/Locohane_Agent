@@ -13,15 +13,15 @@ description: Locohane の evals/cases/<target>/*.yaml に新しい eval ケー�
 
 ## 前提条件の確認
 
-1. 必ず `AskUserQuestion` ツールを呼び、`instances/` 直下のディレクトリ名
-   （`admin_changes.log` 等のファイルは除く。`instances/` が無ければ
+1. 必ず `AskUserQuestion` ツールを呼び、`<instances_dir>`（`config.ini` の `[admin] instances_dir`。既定 `../Locohane_Agent-Settings/instances`。実際の場所はプロジェクトルートで `"<PYTHON_DIR>\Scripts\python.exe" -c "from src.config import resolve_instances_root; print(resolve_instances_root())"` で取得する） 直下のディレクトリ名
+   （`admin_changes.log` 等のファイルと `_` で始まるフォルダは除く。`<instances_dir>` が無ければ
    `default` のみ）を選択肢（`multiSelect: false`）にして、動作確認に使う
    インスタンスを1つ選ばせる。以降、`<instance>` はこのインスタンス名を指す。
 2. `evals/README.md` と `evals/case_schema.py` を読み、yaml のフィールド・
    `expect`/`judge` の役割分担を確認する。
 3. 選んだインスタンスの実効設定を次のコマンドで取得する（`python_env.bat` の `PYTHON_DIR` の
    Python（`<PYTHON_DIR>\Scripts\python.exe`）を使い、プロジェクトルートで実行する。`config.ini` を
-   直接読んでも `instances/<instance>/config_overrides.json` の上書き分が
+   直接読んでも `<instances_dir>/<instance>/config_overrides.json` の上書き分が
    反映されないため、必ずこのコマンドを使う）:
    ```
    "<PYTHON_DIR>\Scripts\python.exe" -m evals.instance <instance>
@@ -42,7 +42,7 @@ description: Locohane の evals/cases/<target>/*.yaml に新しい eval ケー�
 - 足りない情報（対象ファイル名、体裁の細部など）はあえて書かない。
   低パラメータモデルがそれをどう埋めるか（勝手に決め打ちするか、
   `ask_user_choice`で確認するか、探索して判断するか）自体が検証対象。
-- **例外**: 本番ログ（`data/<インスタンス名>/logs/app_*.log`）で実際に観測された失敗を
+- **例外**: 本番ログ（`../Locohane_Agent-Settings/data/<インスタンス名>/logs/app_*.log`）で実際に観測された失敗を
   再現する回帰ケースは、ログ中の実際のユーザー発話をそのまま引用する
   （言い換えて丁寧にしない。実際に本番ユーザーが書いた文なので、
   長くても「詳しく書きすぎ」には当たらない）。
@@ -231,7 +231,7 @@ expect:
   - 複数targetで共用するフィクスチャの生成スクリプトは、最初に作ったtarget側に
     置いたまま共用する（複製しない）。
 - `work_dir` を指定しないケースは、実行時インスタンスの `default_workdir`
-  （前提条件3で表示される値。既定 `data/<インスタンス名>/temp`）がそのまま
+  （前提条件3で表示される値。既定 `../Locohane_Agent-Settings/data/<インスタンス名>/temp`）がそのまま
   使われる点に注意する。
 
 ### 4. turnsを書く

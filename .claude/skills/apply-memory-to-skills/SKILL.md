@@ -1,6 +1,6 @@
 ---
 name: apply-memory-to-skills
-description: Locohane の指定インスタンスの永続メモリー（data/<インスタンス名>/memory/ の共通分と、ユーザー別 users/<ユーザー>/ のうち共有（visibility: shared）のもの）を読み、そのインスタンスで使用可能なスキルのうち関係するスキルの改善・効率化につながる内容があれば、そのスキルの SKILL.md に反映し、関係する evals/cases のケースで tune-prompt の評価ループを回す。「メモリーをスキルに反映して」「メモリーからSKILL.mdを改善して」「/apply-memory-to-skills」等で使う。ケースが無い場合の新規作成は create-eval-case、メモリー同士の重複統合は consolidate-memory の担当。
+description: Locohane の指定インスタンスの永続メモリー（../Locohane_Agent-Settings/data/<インスタンス名>/memory/ の共通分と、ユーザー別 users/<ユーザー>/ のうち共有（visibility: shared）のもの）を読み、そのインスタンスで使用可能なスキルのうち関係するスキルの改善・効率化につながる内容があれば、そのスキルの SKILL.md に反映し、関係する evals/cases のケースで tune-prompt の評価ループを回す。「メモリーをスキルに反映して」「メモリーからSKILL.mdを改善して」「/apply-memory-to-skills」等で使う。ケースが無い場合の新規作成は create-eval-case、メモリー同士の重複統合は consolidate-memory の担当。
 ---
 
 # apply-memory-to-skills: 永続メモリーのSKILL.mdへの反映とtune-prompt
@@ -27,8 +27,8 @@ Locohane のエージェントは、作業中に得た教訓（「excel-read は
 ## 手順0: インスタンスを選ぶ（毎回必須）
 
 **他の作業より先に行う。** 依頼文でインスタンスが指定されていれば、それを使う。
-指定が無ければ、`instances/` 直下のディレクトリ名（`admin_changes.log` 等のファイルは
-除く。`instances/` が無ければ `default` のみ）を選択肢（`multiSelect: false`）にして
+指定が無ければ、`<instances_dir>`（`config.ini` の `[admin] instances_dir`。既定 `../Locohane_Agent-Settings/instances`。実際の場所はプロジェクトルートで `"<PYTHON_DIR>\Scripts\python.exe" -c "from src.config import resolve_instances_root; print(resolve_instances_root())"` で取得する） 直下のディレクトリ名（`admin_changes.log` 等のファイルは
+除く。`<instances_dir>` が無ければ `default` のみ）を選択肢（`multiSelect: false`）にして
 `AskUserQuestion` で1つ選ばせる。以降 `<instance>` はこの名前を指す。
 
 ## 手順1: memory_dirと使用可能スキルを取得する

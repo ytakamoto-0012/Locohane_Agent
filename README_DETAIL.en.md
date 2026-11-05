@@ -560,7 +560,7 @@ Specification: <https://agentskills.io/specification>
 
 ## Where data is stored and how to delete it manually
 
-Everything is under `data/` (changeable with the `dir` keys of `[paths]`/`[elements]`/`[log]`/`[default_workdir]` etc. in `config.ini`). `data/` is .gitignored. To change the storage root all at once, instead of rewriting each key individually, change only `[paths] common_data_dir` (default `./data/${instance}`) (the values of the corresponding keys are written referring to `${common_data_dir}`). `${instance}` is replaced with the name of the running instance (`default` when started directly with `app.bat`), so by default data is separated per instance into `data/<instance name>/`. `data/` in the table below means `data/<instance name>/` (e.g. `data/default/`) with the default settings.
+Everything is under `data/` (changeable with the `dir` keys of `[paths]`/`[elements]`/`[log]`/`[default_workdir]` etc. in `config.ini`). By default, data is kept in `../Locohane_Agent-Settings/`, at the same level as the repository (outside the repository, so it survives re-cloning or deleting the working tree; `data/` and `instances/` are also .gitignored in case you keep them inside the repository). To change the storage root all at once, instead of rewriting each key individually, change only `[paths] common_data_dir` (default `../Locohane_Agent-Settings/data/${instance}`) (the values of the corresponding keys are written referring to `${common_data_dir}`). `${instance}` is replaced with the name of the running instance (`default` when started directly with `app.bat`), so by default data is separated per instance into `../Locohane_Agent-Settings/data/<instance name>/`. `data/` in the table below means `../Locohane_Agent-Settings/data/<instance name>/` (e.g. `../Locohane_Agent-Settings/data/default/`) with the default settings.
 
 **Not on a network:** `[admin] instances_dir`, `[paths] common_data_dir`, `checkpoint_db`, `[thread_store] db` and `[vector_db] dir`
 (where SQLite databases are kept) must be on a local disk. A UNC path (`\\server\share\…`) or a network drive (Z: etc.) is rejected at startup
@@ -568,6 +568,8 @@ and when saving on the settings dashboard (SQLite on a file share locks slowly a
 and WAL cannot be used). Use "Data backup" (in the settings dashboard section) to keep copies on a file share.
 
 **Migrating from old versions (that stored data directly under `data/`):** the default storage location changed from `./data` to `./data/${instance}`, so if you just start it, past threads, persistent memory, etc. become invisible (they are not deleted). While the app is stopped, moving the files and folders directly under `data/` (`checkpoints.sqlite`, `chat_threads.sqlite`, `memory/`, `logs/`, `elements/`, `plans/`, `path_memory/`, `logs_chat/`, `temp/`, `app.lock`, etc.) to `data/default/` carries them over. If you want to keep using the old location without moving, set `[paths] common_data_dir` of the default instance to `./data` on the admin tool's settings screen.
+
+**Migrating from old versions (that stored data in `data/` and `instances/` inside the repository):** the default storage locations changed from `./data/${instance}` and `./instances` to `../Locohane_Agent-Settings/data/${instance}` and `../Locohane_Agent-Settings/instances`. With the app and the admin tool stopped, move the `data/` and `instances/` folders at the repository root, as whole folders, under `../Locohane_Agent-Settings/` to carry them over (move `instances/` first, because the per-instance `config_overrides.json` is read from under `instances_dir`). To keep using the old locations without moving, set the environment variables `COMMON_DATA_DIR=./data/${instance}` and `INSTANCES_DIR=./instances`.
 
 | Path | Content | When it may be deleted | How to delete |
 |------|------|------------------------|----------|
@@ -1687,7 +1689,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[llm]` | `max_concurrent_requests` | Upper limit on concurrent requests to the inference server. 1 or more guards with Semaphore(N) (default 1 = fully serialized); 0 or less is unlimited. Counted across all sessions, occupying a slot only during one generation. Even if `max_parallel` of `[graph]`/`[subagent]` is larger than this value, the excess just waits right before calling the LLM, without errors (waiting time is not counted toward timeouts) | `LLM_MAX_CONCURRENT_REQUESTS` |
 | `[llm]` | `round_robin_slots_probe_timeout_seconds` | Timeout in seconds of the GET /slots query itself, sent before the `round_robin`/`priority_failover` strategies choose an endpoint with provider="llama_cpp" (default 3; fail-safe that considers it free if it cannot be checked) | `LLM_ROUND_ROBIN_SLOTS_PROBE_TIMEOUT_SECONDS` |
 | `[llm]` | `round_robin_busy_poll_interval_seconds` | Seconds to wait before rechecking when none of the candidate endpoints had free slots under the `round_robin`/`priority_failover` strategies (default 2) | `LLM_ROUND_ROBIN_BUSY_POLL_INTERVAL_SECONDS` |
-| `[paths]` | `common_data_dir` | Common base directory for the various data storage paths (default `./data/${instance}`). Writing `${common_data_dir}` in the values of `checkpoint_db`/`memory_dir`/`plans_dir` of this section and the `dir` keys of `[log]`/`[default_workdir]`/`[path_memory]`/`[chat_log]` replaces it with this value (not configparser's standard interpolation but config.py's own replacement). In `common_data_dir` itself and these keys, `${instance}` is replaced with the instance name (the environment variable `LOCOHANE_INSTANCE`, `default` if not set). Local disk only (no UNC paths or network drives) | `COMMON_DATA_DIR` |
+| `[paths]` | `common_data_dir` | Common base directory for the various data storage paths (default `../Locohane_Agent-Settings/data/${instance}`). Writing `${common_data_dir}` in the values of `checkpoint_db`/`memory_dir`/`plans_dir` of this section and the `dir` keys of `[log]`/`[default_workdir]`/`[path_memory]`/`[chat_log]` replaces it with this value (not configparser's standard interpolation but config.py's own replacement). In `common_data_dir` itself and these keys, `${instance}` is replaced with the instance name (the environment variable `LOCOHANE_INSTANCE`, `default` if not set). Local disk only (no UNC paths or network drives) | `COMMON_DATA_DIR` |
 | `[paths]` | `skills_dir` | Skills folder | `SKILLS_DIR` |
 | `[paths]` | `agents_dir` | Agent kind definitions folder (`agent_type` of `dispatch_agent`) | `AGENTS_DIR` |
 | `[paths]` | `project_locohane_dir` | Project-specific extension directories (equivalent to Claude Code's `.claude/`). Automatically detects `skills/` (merged into the scan of `skills_dir`, same names take precedence), `agents/` (merged into the scan of `agents_dir`, same names take precedence) and `LOCOHANE.md` (project-specific instructions; no error if missing) under it. Several directories can be specified in the same list form as `nudge_messages`. Writing an element as a dict `{"dir": ..., "python": ...}` starts only the `.py` scripts under that directory's `skills/` with a dedicated Python environment (takes precedence over `[scripts].python`) | `PROJECT_LOCOHANE_DIR` |
@@ -1904,7 +1906,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[admin]` | `assistant_use_embedding` | Whether to use embeddings (`[vector_db] embedding_url`) to choose the keys and paragraphs close to the question. If false, character 2-grams only | `ADMIN_ASSISTANT_USE_EMBEDDING` |
 | `[admin]` | `assistant_embedding_instance` | Name of the instance to take the embedding endpoints from. If empty, it is searched automatically | `ADMIN_ASSISTANT_EMBEDDING_INSTANCE` |
 | `[admin]` | `assistant_max_history_messages` | Maximum number of recent conversation messages passed to the AI | `ADMIN_ASSISTANT_MAX_HISTORY_MESSAGES` |
-| `[admin]` | `instances_dir` | Root of the per-instance directories (default `./instances`). Also used as the location the default instance's `.env` and `config_overrides.json` are read from when started directly with app.bat. When changed, move the existing contents by hand | `INSTANCES_DIR` |
+| `[admin]` | `instances_dir` | Root of the per-instance directories (default `../Locohane_Agent-Settings/instances`). Also used as the location the default instance's `.env` and `config_overrides.json` are read from when started directly with app.bat. When changed, move the existing contents by hand | `INSTANCES_DIR` |
 | `[data_backup]` | `enabled`, `dest_dir`, `times`, `weekdays`, `keep`, `exclude_workdir`, `exclude_logs`, `exclude` | Defaults of the data backup (see "Data backup"). Shared by all instances (cannot be overridden per instance). Values saved on the settings dashboard (`<instances_dir>/data_backup.json`) take precedence | - |
 | `[ui]` | `default_language` | Default display language (`auto` = the browser's language / `ja` / `en`). When a user chooses a language on screen, that takes precedence. The AI also answers in the chosen language (the "Language switching (Japanese / English)" section) | `UI_DEFAULT_LANGUAGE` |
 | `[ui]` | `max_display_messages` | Maximum number of messages drawn on the chat screen (display-only thinning; `0` is unlimited) | `UI_MAX_DISPLAY_MESSAGES` |
@@ -2169,8 +2171,7 @@ and values that fail are not saved. On every save, the content before the change
 
 ### Instances
 
-Under `instances/<instance name>/`, each instance has the following
-(.gitignored).
+Under `<instance name>/` of `[admin] instances_dir` (default `../Locohane_Agent-Settings/instances`; written as `instances/` below), each instance has the following.
 
 ```
 instances/
@@ -2191,7 +2192,7 @@ instances/
 
 The data itself (conversation history `checkpoints.sqlite`, thread list, persistent memory,
 uploads, logs, etc.; see "Where data is stored and how to delete it manually") is automatically separated into
-`data/<instance name>/` by config.ini's default `[paths] common_data_dir = ./data/${instance}`.
+`../Locohane_Agent-Settings/data/<instance name>/` by config.ini's default `[paths] common_data_dir = ../Locohane_Agent-Settings/data/${instance}`.
 The admin tool passes the environment variable `LOCOHANE_INSTANCE=<instance name>` when starting child processes, and
 it is `default` when started directly with `app.bat`. If you want to share only persistent memory across all instances,
 override `memory_dir` with a fixed path that does not contain `${instance}`.

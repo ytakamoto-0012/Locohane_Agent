@@ -565,7 +565,7 @@ Locohane/
 
 ## データの保存場所と手動削除の手順
 
-すべて `data/` 配下（`config.ini` の `[paths]`/`[elements]`/`[log]`/`[default_workdir]` 等の `dir` 系キーで変更可）。`data/` は `.gitignore` 済み。保存先ルートをまとめて変更したい場合は、各キーを個別に書き換える代わりに `[paths] common_data_dir`（既定 `./data/${instance}`）だけを変更すればよい（対応するキーの値は `${common_data_dir}` を参照する形で書かれている）。`${instance}` は起動中のインスタンス名（`app.bat` で直接起動した場合は `default`）に置換されるため、既定ではインスタンスごとに `data/<インスタンス名>/` へ分かれる。下表の `data/` は、既定設定では `data/<インスタンス名>/`（例: `data/default/`）を指す。
+すべて `data/` 配下（`config.ini` の `[paths]`/`[elements]`/`[log]`/`[default_workdir]` 等の `dir` 系キーで変更可）。既定では、データはリポジトリと同じ階層の `../Locohane_Agent-Settings/` に置く（リポジトリの外なので、clone し直したり作業ツリーを消したりしても残る。リポジトリ内に置く場合も `data/`・`instances/` は `.gitignore` 済み）。保存先ルートをまとめて変更したい場合は、各キーを個別に書き換える代わりに `[paths] common_data_dir`（既定 `../Locohane_Agent-Settings/data/${instance}`）だけを変更すればよい（対応するキーの値は `${common_data_dir}` を参照する形で書かれている）。`${instance}` は起動中のインスタンス名（`app.bat` で直接起動した場合は `default`）に置換されるため、既定ではインスタンスごとに `../Locohane_Agent-Settings/data/<インスタンス名>/` へ分かれる。下表の `data/` は、既定設定では `../Locohane_Agent-Settings/data/<インスタンス名>/`（例: `../Locohane_Agent-Settings/data/default/`）を指す。
 
 **ネットワーク上には置けない:** `[admin] instances_dir`・`[paths] common_data_dir`・`checkpoint_db`・`[thread_store] db`・`[vector_db] dir`
 （SQLite を置く場所）は、ローカルディスクに限る。UNC パス（`\\server\share\…`）・ネットワークドライブ（Z: 等）を指定すると、起動時と
@@ -573,6 +573,8 @@ Locohane/
 ファイル共有へは「データのバックアップ」（設定ダッシュボード節）で退避する。
 
 **旧バージョン（データを `data/` 直下に保存していた版）からの移行:** 既定の保存先が `./data` から `./data/${instance}` に変わったため、そのまま起動すると過去のスレッド・永続メモリー等が見えなくなる（消えてはいない）。アプリ停止中に、`data/` 直下のファイル・フォルダ（`checkpoints.sqlite`・`chat_threads.sqlite`・`memory/`・`logs/`・`elements/`・`plans/`・`path_memory/`・`logs_chat/`・`temp/`・`app.lock` 等）を `data/default/` へ移動すれば引き継げる。移動せず旧来の場所を使い続けたい場合は、管理ツールの設定画面で default インスタンスの `[paths] common_data_dir` を `./data` にする。
+
+**旧バージョン（データをリポジトリ内の `data/`・`instances/` に保存していた版）からの移行:** 既定の保存先が `./data/${instance}`・`./instances` から `../Locohane_Agent-Settings/data/${instance}`・`../Locohane_Agent-Settings/instances` に変わった。アプリと管理ツールを停止した状態で、リポジトリ直下の `data/` と `instances/` を、フォルダごと `../Locohane_Agent-Settings/` の下へ移動すれば引き継げる（`instances/` を先に移すこと。インスタンス別の `config_overrides.json` は `instances_dir` の下から読まれるため）。移動せず旧来の場所を使い続けたい場合は、環境変数 `COMMON_DATA_DIR=./data/${instance}`・`INSTANCES_DIR=./instances` を指定する。
 
 | パス | 中身 | 削除してよいタイミング | 削除方法 |
 |------|------|------------------------|----------|
@@ -1705,7 +1707,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[llm]` | `max_concurrent_requests` | 推論サーバーへの同時リクエスト数上限。1以上でSemaphore(N)ガード（既定1＝完全直列化）、0以下で無制限。全セッション合算で数え、生成1回の間だけ枠を占有する。`[graph]`/`[subagent]` の `max_parallel` がこの値より大きくても、超えた分はLLM呼び出しの直前で待つだけで、エラーにはならない（待ち時間はタイムアウトに数えない） | `LLM_MAX_CONCURRENT_REQUESTS` |
 | `[llm]` | `round_robin_slots_probe_timeout_seconds` | `round_robin`/`priority_failover`戦略がprovider="llama_cpp"の接続先を選ぶ前に送るGET /slots問い合わせ自体のタイムアウト秒数（既定3、確認できなければ空きありとみなすfail-safe） | `LLM_ROUND_ROBIN_SLOTS_PROBE_TIMEOUT_SECONDS` |
 | `[llm]` | `round_robin_busy_poll_interval_seconds` | `round_robin`/`priority_failover`戦略で候補の全接続先に空きスロットが無かった場合、再確認までに待機する秒数（既定2） | `LLM_ROUND_ROBIN_BUSY_POLL_INTERVAL_SECONDS` |
-| `[paths]` | `common_data_dir` | 各種データ保存先パスの共通ベースディレクトリ（既定 `./data/${instance}`）。本セクションの`checkpoint_db`/`memory_dir`/`plans_dir`、および`[log]`/`[default_workdir]`/`[path_memory]`/`[chat_log]`の`dir`系キーの値に`${common_data_dir}`と書くとここで指定した値に置換される（configparser標準の補間ではなくconfig.py側の独自置換）。`common_data_dir`自身とこれらのキーでは`${instance}`がインスタンス名（環境変数`LOCOHANE_INSTANCE`、未設定なら`default`）に置換される。ローカルディスクのみ（UNC パス・ネットワークドライブは不可） | `COMMON_DATA_DIR` |
+| `[paths]` | `common_data_dir` | 各種データ保存先パスの共通ベースディレクトリ（既定 `../Locohane_Agent-Settings/data/${instance}`）。本セクションの`checkpoint_db`/`memory_dir`/`plans_dir`、および`[log]`/`[default_workdir]`/`[path_memory]`/`[chat_log]`の`dir`系キーの値に`${common_data_dir}`と書くとここで指定した値に置換される（configparser標準の補間ではなくconfig.py側の独自置換）。`common_data_dir`自身とこれらのキーでは`${instance}`がインスタンス名（環境変数`LOCOHANE_INSTANCE`、未設定なら`default`）に置換される。ローカルディスクのみ（UNC パス・ネットワークドライブは不可） | `COMMON_DATA_DIR` |
 | `[paths]` | `skills_dir` | スキルフォルダ | `SKILLS_DIR` |
 | `[paths]` | `agents_dir` | エージェント種別定義フォルダ（`dispatch_agent` の `agent_type`） | `AGENTS_DIR` |
 | `[paths]` | `project_locohane_dir` | プロジェクト固有の拡張ディレクトリ（ClaudeCode の `.claude/` 相当）。配下の `skills/`（`skills_dir` にマージ走査、同名は優先）・`agents/`（`agents_dir` にマージ走査、同名は優先）・`LOCOHANE.md`（プロジェクト固有指示、存在しなくてもエラーにならない）を自動検知する。`nudge_messages` と同じリスト形式で複数ディレクトリ指定可。要素を `{"dir": ..., "python": ...}` の辞書で書くと、そのディレクトリの `skills/` 配下の `.py` スクリプトだけを専用のPython環境で起動する（`[scripts].python` より優先） | `PROJECT_LOCOHANE_DIR` |
@@ -1924,7 +1926,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[admin]` | `assistant_use_embedding` | 相談内容に近いキー・段落を選ぶのに埋め込み（`[vector_db] embedding_url`）を使うか。false なら文字2-gram だけ | `ADMIN_ASSISTANT_USE_EMBEDDING` |
 | `[admin]` | `assistant_embedding_instance` | 埋め込みの接続先を取るインスタンス名。空欄なら自動で探す | `ADMIN_ASSISTANT_EMBEDDING_INSTANCE` |
 | `[admin]` | `assistant_max_history_messages` | AI に渡す直近の会話の最大メッセージ数 | `ADMIN_ASSISTANT_MAX_HISTORY_MESSAGES` |
-| `[admin]` | `instances_dir` | インスタンス別ディレクトリのルート（既定 `./instances`）。app.bat直接起動時のdefaultインスタンスの`.env`・`config_overrides.json`の読み込み先にも使われる。変更時は既存の中身を手動で移動する | `INSTANCES_DIR` |
+| `[admin]` | `instances_dir` | インスタンス別ディレクトリのルート（既定 `../Locohane_Agent-Settings/instances`）。app.bat直接起動時のdefaultインスタンスの`.env`・`config_overrides.json`の読み込み先にも使われる。変更時は既存の中身を手動で移動する | `INSTANCES_DIR` |
 | `[data_backup]` | `enabled`・`dest_dir`・`times`・`weekdays`・`keep`・`exclude_workdir`・`exclude_logs`・`exclude` | データのバックアップ（「データバックアップ」節）の既定値。全インスタンス共通（インスタンス別に上書きできない）。設定ダッシュボードで保存した値（`<instances_dir>/data_backup.json`）が優先する | - |
 | `[ui]` | `default_language` | 表示言語の既定値（`auto`＝ブラウザの言語 / `ja` / `en`）。利用者が画面で言語を選ぶとそちらが優先される。AI も選んだ言語で回答する（「言語切り替え（日本語 / 英語）」節） | `UI_DEFAULT_LANGUAGE` |
 | `[ui]` | `max_display_messages` | チャット画面に描画するメッセージの最大件数（表示専用の間引き、`0`で無制限） | `UI_MAX_DISPLAY_MESSAGES` |
@@ -2224,8 +2226,8 @@ agent_type_run_script_allowlist`・`[main_agent_tool_guard] allow_entries`）は
 
 ### インスタンス
 
-`instances/<インスタンス名>/` 配下に、インスタンスごとの以下を持つ
-（`.gitignore` 済み）。
+`[admin] instances_dir`（既定 `../Locohane_Agent-Settings/instances`。以下 `instances/` と書く）の
+`<インスタンス名>/` 配下に、インスタンスごとの以下を持つ。
 
 ```
 instances/
@@ -2246,8 +2248,8 @@ instances/
 
 データ本体（会話履歴 `checkpoints.sqlite`・スレッド一覧・永続メモリー・
 アップロード・ログ等。「データの保存場所と手動削除の手順」参照）は、
-config.ini 既定の `[paths] common_data_dir = ./data/${instance}` により
-`data/<インスタンス名>/` へ自動的に分かれる。管理ツールは子プロセス起動時に
+config.ini 既定の `[paths] common_data_dir = ../Locohane_Agent-Settings/data/${instance}` により
+`../Locohane_Agent-Settings/data/<インスタンス名>/` へ自動的に分かれる。管理ツールは子プロセス起動時に
 環境変数 `LOCOHANE_INSTANCE=<インスタンス名>` を渡し、`app.bat` で直接
 起動した場合は `default` になる。永続メモリーだけ全インスタンスで共有したい
 場合は、`memory_dir` を `${instance}` を含まない固定パスに上書きすればよい。
