@@ -138,7 +138,49 @@ def finalize_sheets(wb, sheets, new_workbook: bool) -> None:
     fonts_name = _CJK_FONT if new_workbook and _sheets_have_cjk(sheets) else None
     for ws in sheets:
         _finalize_fonts(ws, fonts_name)
+        _align_single_rows_like_merged(ws)
         _fit_wrapped_row_heights(ws)
+
+
+def _align_single_rows_like_merged(ws) -> None:
+    """縦に結合したグループ列で、結合されていない1行だけのグループにも結合セルと同じ揃えを付ける。
+
+    月列などを同じ値ごとに結合して中央揃えにすると、1行しかない月は結合されず
+    揃えも付かないまま（左下）残り、verifier が見た目の不揃いとして NG にしていた
+    （2026-11-05 evals 001）。揃えを一度も指定していないセルだけを変える。
+    """
+    from copy import copy
+
+    by_col: dict[int, list] = {}
+    in_merge: set[tuple[int, int]] = set()
+    for rng in ws.merged_cells.ranges:
+        for r in range(rng.min_row, rng.max_row + 1):
+            for c in range(rng.min_col, rng.max_col + 1):
+                in_merge.add((r, c))
+        if rng.min_col == rng.max_col and rng.max_row > rng.min_row:
+            by_col.setdefault(rng.min_col, []).append(rng)
+    freeze_row = ws[ws.freeze_panes].row if ws.freeze_panes else None
+    for col, ranges in by_col.items():
+        tops = [ws.cell(row=r.min_row, column=col).alignment for r in ranges]
+        aligns = {(a.horizontal, a.vertical) for a in tops}
+        if len(aligns) != 1:
+            continue
+        horizontal, vertical = aligns.pop()
+        if horizontal is None and vertical is None:
+            continue
+        start = min(r.min_row for r in ranges)
+        if freeze_row is not None and freeze_row < start:
+            start = freeze_row
+        for row in range(start, (ws.max_row or 0) + 1):
+            cell = ws.cell(row=row, column=col)
+            if (row, col) in in_merge or cell.value is None:
+                continue
+            if cell.alignment.horizontal is not None or cell.alignment.vertical is not None:
+                continue
+            alignment = copy(cell.alignment)
+            alignment.horizontal = horizontal
+            alignment.vertical = vertical
+            cell.alignment = alignment
 
 
 def _sheets_have_cjk(sheets) -> bool:

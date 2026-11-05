@@ -81,6 +81,20 @@ def test_english_new_workbook_keeps_calibri(tmp_path):
     assert ws["A1"].font.name == "Calibri"
 
 
+def test_single_row_group_gets_alignment_of_merged_groups():
+    wb, ws = _wb()
+    rows = [["月", "行事"], ["1月", "a"], ["1月", "b"], ["2月", "c"], ["3月", "d"], ["3月", "e"]]
+    apply_op(wb, {"op": "set_range", "sheet": "Sheet1", "start_cell": "A1", "rows": rows, "header_style": {}})
+    for rng in ("A2:A3", "A5:A6"):
+        ws.merge_cells(rng)
+        apply_op(wb, {"op": "set_style", "sheet": "Sheet1", "range": rng.split(":")[0], "style": {"align": "center", "valign": "center"}})
+    ws["B4"].alignment = openpyxl.styles.Alignment(horizontal="left")
+    finalize_sheets(wb, [ws], new_workbook=False)
+    assert (ws["A4"].alignment.horizontal, ws["A4"].alignment.vertical) == ("center", "center")
+    assert ws["A1"].alignment.horizontal == "center"  # 見出しは format_table の揃えのまま
+    assert ws["B2"].alignment.horizontal is None and ws["B4"].alignment.horizontal == "left"
+
+
 def test_edit_excel_cli_applies_finalize(tmp_path):
     out = tmp_path / "a.xlsx"
     ops = [
