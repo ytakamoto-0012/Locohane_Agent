@@ -18,6 +18,10 @@ code that builds the ops for an xlsx), write it once to a `.py` file with `Write
 with `execute_python_code` as `import runpy; runpy.run_path("build_ops.py")`.
 - After that, change the file only with `Edit`, including fixes you notice before the first run. Do not
   `Write` the same file again, and do not send the whole code in `execute_python_code`.
+- Keep that one file for the whole task. Do not start another file with the same job (`gen2.py`,
+  `build_ops_v2.py`) to rewrite it from scratch: even when a part's logic is wrong (e.g. the week
+  calculation), replace that function with `Edit`. Rewriting the whole script costs minutes each time.
+- Run the file right after writing it. Let the run show the errors instead of reviewing the code first.
 - When a run fails, read the error and fix that mistake everywhere in the file before running again (the
   same typo, the same wrong name, the same full-width symbol): one `Edit` per place, all in the same
   response, or `replace_all`. Running once per single fix wastes a turn each time.
