@@ -2505,6 +2505,14 @@ values of keys whose names contain `api_key`/`password`/`secret`/`token`, and
 `[llm].main_url`/`sub_url` (which can contain `api_key` as nested JSON), are
 masked. It can be viewed on the "Change history" tab of the admin tool.
 
+### Admin tool log
+
+The admin tool's own log (knowledge ingestion/deletion, backups, failures to start or stop instances, etc.) is written to
+`<instances_dir>/_admin_logs/admin_*.log` (rotated by line count with `[log] max_lines`; not written with `[log] level = none`).
+The "Admin tool log" tab at the top shows up to 500 entries newest first, filtered by level and text (read-only).
+The `[ ]` part of each line is the Python thread name, not a conversation thread_id, so there is no thread_id filter.
+Each instance's app log (`app_*.log`) is shown on the "Logs" sub-tab of the instance details.
+
 ### API reference (direct operation with curl)
 
 All screen operations can also be done with the HTTP API (`/api/...`). How to call them with curl is

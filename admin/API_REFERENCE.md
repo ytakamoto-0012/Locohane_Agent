@@ -769,6 +769,19 @@ $C "$BASE/api/audit?limit=50&instance=default"
 %C% "%BASE%/api/audit?limit=50&instance=default"
 ```
 
+## 管理ツールログ
+
+管理ツール自身のログ（`<instances_dir>/_admin_logs/admin_*.log`）を、`level` 以上で新しい順に最大 `limit` 件
+（既定200、上限2000）。`q` でメッセージを絞り込める。各エントリの `thread_name` は Python のスレッド名。
+
+```bash
+$C "$BASE/api/admin-logs?level=WARNING&limit=200"
+```
+
+```bat
+%C% "%BASE%/api/admin-logs?level=WARNING&limit=200"
+```
+
 ## このリファレンス自体
 
 `X-Locohane-Lang: en` を付けると英訳（`admin/API_REFERENCE.en.md`）を返す。

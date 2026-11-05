@@ -12,6 +12,11 @@
 
 ## [Unreleased]
 
+### 追加
+
+- 設定ダッシュボードの上部に「管理ツールログ」タブを追加しました。管理ツール自身のログ（`<instances_dir>/_admin_logs/admin_*.log`。
+  ナレッジの取り込み・バックアップ等）を、レベル・文字列で絞り込んで新しい順に表示します。API は `GET /api/admin-logs`。
+
 ### 変更
 
 - データ（`[paths] common_data_dir`）とインスタンス別設定（`[admin] instances_dir`）の既定の置き場を、リポジトリ内の

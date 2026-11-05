@@ -1383,6 +1383,22 @@ def get_audit(instance: str | None = None, limit: int = 200, user: str = Depends
 
 
 # ---------------------------------------------------------------------------
+# 管理ツール自身のログ（ADMIN_LOG_DIR/admin_*.log）
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/admin-logs")
+def get_admin_logs(
+    level: str = "WARNING",
+    limit: int = 200,
+    q: str | None = None,
+    user: str = Depends(require_login),
+):
+    entries = monitor.tail_log(ADMIN_LOG_DIR, min_level=level, limit=min(max(limit, 1), 2000), query=q, admin=True)
+    return {"entries": entries, "log_dir": str(ADMIN_LOG_DIR)}
+
+
+# ---------------------------------------------------------------------------
 # APIリファレンス（admin/API_REFERENCE.md をリクエストごとに読み直して返す）
 # ---------------------------------------------------------------------------
 
