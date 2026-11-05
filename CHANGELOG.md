@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-06
+
 ### 追加
 
 - 設定ダッシュボードの上部に「管理ツールログ」タブを追加しました。管理ツール自身のログ（`<instances_dir>/_admin_logs/admin_*.log`。
@@ -1010,7 +1012,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.4.8...v0.4.9
