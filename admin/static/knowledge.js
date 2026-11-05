@@ -669,6 +669,7 @@ function buildCreateCollectionForm(container, name) {
   const f = collectionFields(null);
   f.recursive.checked = true;
   const error = el("div", { class: "error" });
+  const addBtn = el("button", { type: "submit", class: "primary", text: _t("追加") });
   const form = el("form", { class: "knowledge-form" }, [
     el("h3", { text: _t("コレクションを追加") }),
     el("label", {}, [_t("コレクション名"), nameInput]),
@@ -678,11 +679,15 @@ function buildCreateCollectionForm(container, name) {
     ...keywordFieldElements(f),
     ...scheduleFieldElements(f),
     error,
-    el("button", { type: "submit", class: "primary", text: _t("追加") }),
+    addBtn,
   ]);
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
+    // 取り込み中は書き込みの順番を待つため時間がかかることがある。待つ間に二重に追加されないよう止める。
+    if (addBtn.disabled) return;
     error.textContent = "";
+    addBtn.disabled = true;
+    addBtn.textContent = _t("追加中…");
     try {
       await api(knowledgePath(name, "/collections"), {
         method: "POST",
@@ -699,6 +704,8 @@ function buildCreateCollectionForm(container, name) {
       renderKnowledgePanel(container, name);
     } catch (e) {
       error.textContent = e.message;
+      addBtn.disabled = false;
+      addBtn.textContent = _t("追加");
     }
   });
   return form;
@@ -710,6 +717,9 @@ function openEditCollectionForm(container, name, c) {
   const error = el("div", { class: "error" });
   const backdrop = el("div", { class: "modal-backdrop" });
   const close = () => backdrop.remove();
+  const cancelBtn = el("button", { type: "button", text: _t("キャンセル"), onclick: close });
+  const saveBtn = el("button", { type: "submit", class: "primary", text: _t("保存") });
+  const status = el("p", { class: "hint" });
   const form = el("form", {}, [
     el("h3", { text: _t(`コレクション {0} を編集`, c.name) }),
     el("label", {}, [_t("説明"), f.description]),
@@ -719,12 +729,19 @@ function openEditCollectionForm(container, name, c) {
     ...keywordFieldElements(f),
     el("p", { class: "hint", text: _t("キーワードを変えて取り込み対象から外れた取り込み済みのファイルは、次の取り込みで削除されます。") }),
     ...scheduleFieldElements(f),
+    status,
     error,
-    el("div", { class: "modal-actions" }, [el("button", { type: "button", text: _t("キャンセル"), onclick: close }), el("button", { type: "submit", class: "primary", text: _t("保存") })]),
+    el("div", { class: "modal-actions" }, [cancelBtn, saveBtn]),
   ]);
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
+    // 取り込み中は、カタログへの書き込みが取り込みの書き込みの順番を待つため、保存に時間がかかることがある。
+    // 待っている間に何度も押されたり、保存されるのにキャンセルで閉じられたりしないよう、ボタンを止めて処理中と見せる。
+    if (saveBtn.disabled) return;
     error.textContent = "";
+    status.textContent = _t("取り込み中のコレクションがあると、書き込みの順番を待つため時間がかかることがあります。");
+    saveBtn.disabled = cancelBtn.disabled = true;
+    saveBtn.textContent = _t("保存中…");
     try {
       await api(knowledgePath(name, `/collections/${encodeURIComponent(c.name)}`), {
         method: "PUT",
@@ -741,6 +758,9 @@ function openEditCollectionForm(container, name, c) {
       renderKnowledgePanel(container, name);
     } catch (e) {
       error.textContent = e.message;
+      status.textContent = "";
+      saveBtn.disabled = cancelBtn.disabled = false;
+      saveBtn.textContent = _t("保存");
     }
   });
   backdrop.append(el("div", { class: "modal" }, form));

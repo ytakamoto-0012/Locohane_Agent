@@ -1354,6 +1354,9 @@ Image files (`.png`, `.jpg`/`.jpeg`, `.gif`, `.bmp`, `.webp`, `.tif`/`.tiff`, `.
   Excel exports each visible sheet with fit printing of 1 page wide x 1 page tall (changes to the print settings are not saved;
   hidden and empty sheets are excluded), and hidden PowerPoint slides are not included. Rendering Office files needs Windows and
   Microsoft Office; in environments where they cannot be used, those files are listed in the failure list.
+  Pages whose long side at `image_dpi` would exceed the long side of A4 rendered at `image_dpi` (1169px at 100 DPI), such as A0 drawings,
+  very wide pages, or large Excel sheets fitted to one page, are shrunk to that long side like image files
+  (otherwise one side reaches tens of thousands of px and the embedding server (llama-server) fails to decode the image and returns an error).
   Macros of the source files (`Workbook_Open` of `.xlsm`, etc.) are not run (`AutomationSecurity` is set to
   `msoAutomationSecurityForceDisable`, and Excel also stops events). Password-protected files are given a dummy password
   so they do not stop at the input screen and are listed in the failure list (PowerPoint may still stop). In case it stops at an invisible dialog (password input,

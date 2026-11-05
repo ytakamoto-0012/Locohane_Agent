@@ -15,7 +15,7 @@ from src.config import LLMEndpoint
 from src.vector_db import catalog as vcat
 from src.vector_db import embeddings, ingest, search
 from src.vector_db.chunking import split_text
-from src.vector_db.embeddings import EmbeddingError, EmbeddingStopped, embed_images, embed_texts, open_client, shared_client
+from src.vector_db.embeddings import EmbeddingError, EmbeddingRejected, EmbeddingStopped, embed_images, embed_texts, open_client, shared_client
 from src.vector_db.extract import ExtractError, NotTextError, extract_segments
 from src.vector_db.qdrant_store import QDRANT_PRESETS, QdrantStore
 from src.vector_db.sqlite_vec_store import SqliteVecStore
@@ -1382,6 +1382,49 @@ def test_ingest_in_parallel_stops_on_embedding_error(env):
     with pytest.raises(EmbeddingError):
         ingest.ingest_collection(cfg, "docs", **kwargs)
     assert search.list_collections(cfg)[0].file_count == 0
+
+
+def _rejecting_transport(server: FakeEmbeddingServer, marker: str) -> httpx.MockTransport:
+    """入力のどれかに marker を含むリクエストには HTTP 400 を返し、それ以外は server に任せるトランスポート。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if marker in request.content.decode("utf-8"):
+            return httpx.Response(400, text="failed to process the input")
+        return server.handler(request)
+
+    return httpx.MockTransport(handler)
+
+
+def test_embed_texts_raises_rejected_only_when_a_server_answered(tmp_path):
+    """全接続先で失敗したとき、HTTP のエラーが返っていれば EmbeddingRejected、接続できなかっただけなら EmbeddingError。"""
+    cfg = make_config(tmp_path)
+    rejecting = _rejecting_transport(FakeEmbeddingServer(), "x")
+    with pytest.raises(EmbeddingRejected, match="HTTP 400"):
+        embed_texts(cfg, ["x"], kind="document", transport=rejecting)
+    down = FakeEmbeddingServer(fail_hosts=("embed",))
+    with pytest.raises(EmbeddingError) as excinfo:
+        embed_texts(cfg, ["x"], kind="document", transport=down.transport)
+    assert not isinstance(excinfo.value, EmbeddingRejected)
+
+
+def test_ingest_skips_a_file_the_embedding_server_rejects(env):
+    """埋め込みサーバーが受け付けない入力のファイルは失敗一覧に載せ、取り込み全体は止めない。
+
+    複数のファイルをまとめたリクエストが失敗したら、ファイルごとに送り直して原因のファイルだけを失敗にする。
+    """
+    cfg, docs = env["cfg"], env["docs"]
+    (docs / "bad.md").write_text("REJECTED 展開できない入力", encoding="utf-8")
+    server = FakeEmbeddingServer()
+    kwargs = {**env["kwargs"], "embedding_transport": _rejecting_transport(server, "REJECTED")}
+    result = ingest.ingest_collection(cfg, "docs", **kwargs)
+    assert result.added == 2
+    assert [Path(p).name for p, _ in result.failed] == ["bad.md"]
+    assert "HTTP 400" in result.failed[0][1]
+    assert search.list_collections(cfg)[0].file_count == 2
+    # 失敗したファイルは記録しないため、次回の取り込みでもう一度試す。
+    (docs / "bad.md").write_text("直した入力", encoding="utf-8")
+    again = ingest.ingest_collection(cfg, "docs", **kwargs)
+    assert (again.added, again.unchanged, again.failed) == (1, 2, [])
 
 
 def test_ingest_stop_during_embedding_retry_keeps_file_for_next_run(env):

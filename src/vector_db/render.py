@@ -37,7 +37,7 @@ IMAGE_EXTENSIONS = PAGE_EXTENSIONS + IMAGE_FILE_EXTENSIONS
 
 # 複数ページを持てる画像形式（スキャンした文書の TIFF 等）。それ以外は先頭の1枚だけ使う。
 _MULTI_PAGE_IMAGE_EXTENSIONS = (".tif", ".tiff")
-# A4 の長辺（インチ）。画像ファイルは、A4 の文書を image_dpi で画像化したときの長辺まで縮小する。
+# A4 の長辺（インチ）。画像ファイル・PDF のページは、A4 の文書を image_dpi で画像化したときの長辺まで縮小する。
 _A4_LONG_SIDE_INCHES = 297 / 25.4
 
 # 画像の PNG の圧縮レベル（0〜9）。埋め込みサーバーで展開されるだけで画質は変わらないため、
@@ -135,6 +135,20 @@ def render_pages(
         raise ExtractError(f"Rendering failed: {type(e).__name__}: {e}") from e
 
 
+def _page_scale(width_pt: float, height_pt: float, dpi: int) -> float:
+    """PDF のページ（幅・高さはポイント）を dpi で画像にするときの倍率。
+
+    長辺が A4 を dpi で画像化したときの長辺を超えるページ（A0 の図面・横長のバナー・Excel の大きいシートを
+    1ページに収めたもの等）は、画像ファイルと同じくその長辺まで縮める。縮めないと 1辺が数万 px になり、
+    埋め込みサーバー（llama-server）が画像を展開できずにエラーを返す。
+    """
+    scale = dpi / 72
+    long_side_pt = max(width_pt, height_pt)
+    if long_side_pt <= 0:
+        return scale
+    return min(scale, round(_A4_LONG_SIDE_INCHES * dpi) / long_side_pt)
+
+
 def _render_pdf(pdf_path: Path, dpi: int, locate: Locate, write: _PageWriter) -> list[PageImage]:
     import pypdfium2 as pdfium
 
@@ -149,7 +163,7 @@ def _render_pdf(pdf_path: Path, dpi: int, locate: Locate, write: _PageWriter) ->
                 try:
                     text = page.get_textpage().get_text_bounded() or ""
                     buffer = io.BytesIO()
-                    page.render(scale=dpi / 72).to_pil().save(buffer, format="PNG", compress_level=_PNG_COMPRESS_LEVEL)
+                    page.render(scale=_page_scale(*page.get_size(), dpi)).to_pil().save(buffer, format="PNG", compress_level=_PNG_COMPRESS_LEVEL)
                 finally:
                     page.close()
                 png, png_path = write(buffer.getvalue())
