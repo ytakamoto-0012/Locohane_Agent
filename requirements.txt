@@ -62,7 +62,7 @@ sqlite-vec==0.1.9                    # [vector_db] backend=sqlite_vec（既定�
 #     経由でreportlab内蔵のCID内蔵フォントを使っていたが、xhtml2pdfが内部で
 #     フォークしているPragraph実装が登録済みTTFontを正しく参照できず日本語が
 #     tofu化けする不具合を確認したため、xhtml2pdf依存を廃した） ---
-pypdf==6.21.2
+pypdf==6.21.4
 pypdfium2==4.30.0
 reportlab==4.5.1
 
