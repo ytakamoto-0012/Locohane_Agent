@@ -50,6 +50,9 @@ _INTERNAL_TYPES = ("tool", "llm")
 MAX_FIELD_CHARS = 20000
 
 _LOG_LINE_RE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ \[thread=([^\]]*)\] (\w+) (\S+): (.*)$")
+# 管理ツール自身のログ（<instances_dir>/_admin_logs/admin_*.log。admin/server.py の
+# _setup_file_logging）。[ ] 内は会話の thread_id ではなく Python のスレッド名。
+_ADMIN_LOG_LINE_RE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ \[([^\]]*)\] (\w+) (\S+): (.*)$")
 # アプリログの書式（app.py・src/context_compaction.py）。v0.3 までの日本語の行も、
 # ローテーションで消えるまでは読めるよう両方を受け付ける。
 _TOKEN_USAGE_LABELS = ("token usage", "トークン使用量")
@@ -282,11 +285,11 @@ def thread_detail(db_path: Path, thread_id: str, *, include_internal: bool = Fal
 # ---------------------------------------------------------------------------
 
 
-def _log_files(log_dir: Path) -> list[Path]:
-    """app_<起動日時>.log を古い順に返す（ファイル名の日時順＝時系列順）。"""
+def _log_files(log_dir: Path, prefix: str = "app") -> list[Path]:
+    """<prefix>_<起動日時>.log を古い順に返す（ファイル名の日時順＝時系列順）。"""
     if not log_dir.is_dir():
         return []
-    return sorted(log_dir.glob("app_*.log"))
+    return sorted(log_dir.glob(f"{prefix}_*.log"))
 
 
 def _read_lines(path: Path):
@@ -468,36 +471,51 @@ def token_history(log_dir: Path, thread_id: str) -> list[dict]:
     return points
 
 
-def _parse_log_entries(path: Path) -> list[dict]:
-    """1ファイル分のログを、複数行のエントリ（トレースバック等）をまとめた形で返す。"""
+def _parse_log_entries(path: Path, *, admin: bool = False) -> list[dict]:
+    """1ファイル分のログを、複数行のエントリ（トレースバック等）をまとめた形で返す。
+
+    admin=True なら管理ツールのログの書式で読む（thread_id は常に None、
+    [ ] 内の Python のスレッド名を thread_name に入れる）。
+    """
     entries: list[dict] = []
+    line_re = _ADMIN_LOG_LINE_RE if admin else _LOG_LINE_RE
     for line in _read_lines(path):
         line = line.rstrip("\n")
-        m = _LOG_LINE_RE.match(line)
+        m = line_re.match(line)
         if m:
-            entries.append(
-                {
-                    "ts": m.group(1).replace(" ", "T"),
-                    "thread_id": None if m.group(2) == "-" else m.group(2),
-                    "level": m.group(3),
-                    "logger": m.group(4),
-                    "message": m.group(5),
-                    "file": path.name,
-                }
-            )
+            entry = {
+                "ts": m.group(1).replace(" ", "T"),
+                "thread_id": None if admin or m.group(2) == "-" else m.group(2),
+                "level": m.group(3),
+                "logger": m.group(4),
+                "message": m.group(5),
+                "file": path.name,
+            }
+            if admin:
+                entry["thread_name"] = m.group(2)
+            entries.append(entry)
         elif entries:
             entries[-1]["message"] += "\n" + line
     return entries
 
 
 def tail_log(
-    log_dir: Path, *, min_level: str = "WARNING", limit: int = 200, query: str | None = None, thread_id: str | None = None
+    log_dir: Path,
+    *,
+    min_level: str = "WARNING",
+    limit: int = 200,
+    query: str | None = None,
+    thread_id: str | None = None,
+    admin: bool = False,
 ) -> list[dict]:
-    """新しい順に、min_level 以上のログエントリを最大 limit 件返す。"""
+    """新しい順に、min_level 以上のログエントリを最大 limit 件返す。
+
+    admin=True なら管理ツール自身のログ（admin_*.log）を読む。
+    """
     threshold = LOG_LEVELS.index(min_level) if min_level in LOG_LEVELS else 0
     result: list[dict] = []
-    for path in reversed(_log_files(log_dir)):
-        for entry in reversed(_parse_log_entries(path)):
+    for path in reversed(_log_files(log_dir, "admin" if admin else "app")):
+        for entry in reversed(_parse_log_entries(path, admin=admin)):
             level = entry["level"]
             if level in LOG_LEVELS and LOG_LEVELS.index(level) < threshold:
                 continue

@@ -772,6 +772,19 @@ $C "$BASE/api/audit?limit=50&instance=default"
 %C% "%BASE%/api/audit?limit=50&instance=default"
 ```
 
+## Admin tool log
+
+The admin tool's own log (`<instances_dir>/_admin_logs/admin_*.log`), `level` and above, up to `limit` entries
+(default 200, max 2000), newest first. Filter messages with `q`. `thread_name` of each entry is the Python thread name.
+
+```bash
+$C "$BASE/api/admin-logs?level=WARNING&limit=200"
+```
+
+```bat
+%C% "%BASE%/api/admin-logs?level=WARNING&limit=200"
+```
+
 ## This reference itself
 
 Returns the English version with `X-Locohane-Lang: en`, the Japanese version otherwise.

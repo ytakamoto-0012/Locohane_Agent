@@ -165,6 +165,27 @@ def test_tail_log_filters_level_and_joins_multiline(tmp_path: Path):
     assert monitor.tail_log(log_dir, min_level="INFO", thread_id="abc")[0]["message"].startswith("boom")
 
 
+def test_tail_log_admin_reads_admin_log_format(tmp_path: Path):
+    log_dir = tmp_path / "_admin_logs"
+    log_dir.mkdir()
+    (log_dir / "app_20261001_000000.log").write_text(
+        "2026-10-01 00:00:01,1 [thread=-] ERROR x: app only\n", encoding="utf-8"
+    )
+    (log_dir / "admin_20261001_000000.log").write_text(
+        "2026-10-01 00:00:01,1 [MainThread] INFO admin.server: started\n"
+        "2026-10-01 00:00:02,1 [ThreadPoolExecutor-0_0] ERROR admin.knowledge: ingest failed\n"
+        "Traceback (most recent call last):\n"
+        "  OSError\n",
+        encoding="utf-8",
+    )
+    entries = monitor.tail_log(log_dir, min_level="INFO", admin=True)
+    assert [e["message"].splitlines()[0] for e in entries] == ["ingest failed", "started"]
+    assert entries[0]["thread_name"] == "ThreadPoolExecutor-0_0"
+    assert entries[0]["thread_id"] is None
+    assert "OSError" in entries[0]["message"]
+    assert monitor.tail_log(log_dir, min_level="ERROR", query="ingest", admin=True)[0]["logger"] == "admin.knowledge"
+
+
 @pytest.fixture
 def thread_db(tmp_path: Path) -> Path:
     db = tmp_path / "chat_threads.sqlite"
@@ -360,7 +381,7 @@ def test_log_readers_skip_file_deleted_after_listing(tmp_path: Path, monkeypatch
     )
     gone = log_dir / "app_20261002_000000.log"
     original = monitor._log_files
-    monkeypatch.setattr(monitor, "_log_files", lambda d: [*original(d), gone])
+    monkeypatch.setattr(monitor, "_log_files", lambda d, prefix="app": [*original(d, prefix), gone])
     assert [e["message"] for e in monitor.tail_log(log_dir)] == ["warn"]
     assert monitor.token_history(log_dir, "t1") == []
     assert monitor.recent_level_counts(log_dir, hours=24 * 365 * 100)["WARNING"] == 1

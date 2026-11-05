@@ -1057,6 +1057,8 @@ DESCRIPTIONS: dict[str, str] = {
         'Image vectors go into a collection separate from the text (<name>.image), and search merges the text and image results by rank (see image_min_score).\n'
         'Image files (.png .jpg .heic, etc.) are also ingested, each embedded as one chunk (multi-page TIFFs per page).\n'
         'Image files have their EXIF rotation applied and are shrunk so that the long side is at most the long side of A4 rendered at image_dpi (1169px at 100 DPI).\n'
+        'PDF pages (including those exported from Office) whose long side exceeds that, such as A0 drawings or very wide pages, are shrunk to the same long side\n'
+        '(otherwise one side reaches tens of thousands of px and the embedding server fails to decode the image and returns an error).\n'
         'embedding_url needs an embedding model that supports image input (e.g. Qwen3-VL-Embedding started on llama-server with --embedding --mmproj).\n'
         'Rendering Office files as images needs Windows and Microsoft Office (Word / PowerPoint / Excel) (files that cannot be rendered are listed in the failure list).\n'
         'Page images are written as PNG to a temporary folder only during ingestion (even a 400-page PDF does not keep all pages in memory)\n'

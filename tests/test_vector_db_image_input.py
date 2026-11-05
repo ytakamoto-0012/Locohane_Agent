@@ -43,6 +43,27 @@ def test_render_pages_renders_each_pdf_page_with_text(tmp_path):
     assert all(p.png.startswith(_PNG_SIGNATURE) for p in pages)
 
 
+def test_render_pages_shrinks_oversized_pdf_pages_to_the_a4_long_side(tmp_path):
+    """A0 や横長のページは、長辺を A4 を dpi で画像化したときの長辺まで縮める（A4 以下のページは dpi のまま）。"""
+    from PIL import Image
+    from reportlab.lib.pagesizes import A0, A5
+    from reportlab.pdfgen import canvas
+
+    c = canvas.Canvas(str(tmp_path / "sizes.pdf"))
+    for size in (A0, (20000, 400), A5):
+        c.setPageSize(size)
+        c.drawString(10, 10, "x")
+        c.showPage()
+    c.save()
+    a4_long = round(297 / 25.4 * 50)
+    sizes = [Image.open(io.BytesIO(p.png)).size for p in render_pages(tmp_path / "sizes.pdf", dpi=50)]
+    a0, wide, a5 = sizes
+    assert max(a0) == pytest.approx(a4_long, abs=1) and a0[0] < a0[1]
+    assert wide[0] == pytest.approx(a4_long, abs=1) and wide[1] < 20
+    # A5 は縮めない（595x420pt を 50 DPI で）
+    assert max(a5) == pytest.approx(595 * 50 / 72, abs=1)
+
+
 def test_render_pages_rejects_unsupported_and_broken_files(tmp_path):
     (tmp_path / "a.md").write_text("x", encoding="utf-8")
     with pytest.raises(ExtractError, match="Unsupported format"):
@@ -140,6 +161,28 @@ def test_ingest_embeds_text_and_page_images(env):
     # 変更が無ければ画像化し直さない
     assert ingest.ingest_collection(cfg, "docs", **kwargs).unchanged == 2
     assert len(env["rendered"]) == 1
+
+
+def test_ingest_skips_a_file_whose_page_image_the_embedding_server_rejects(env):
+    """ページ画像を埋め込みサーバーが受け付けない（巨大な画像を展開できない等で HTTP エラー）ときは、
+    そのファイルだけを失敗一覧に載せ、ほかのファイルの取り込みは続ける。"""
+    import httpx
+
+    cfg, kwargs, embed = env["cfg"], env["kwargs"], env["embed"]
+
+    def handler(request):
+        if b"image_url" in request.content:
+            return httpx.Response(400, text="failed to decode image bytes")
+        return embed.handler(request)
+
+    kwargs = {**kwargs, "embedding_transport": httpx.MockTransport(handler)}
+    result = ingest.ingest_collection(cfg, "docs", **kwargs)
+    assert result.added == 1
+    assert [Path(p).name for p, _ in result.failed] == ["manual.pdf"]
+    assert "HTTP 400" in result.failed[0][1]
+    assert _image_store_sources(cfg, kwargs) == []
+    with vcat.open_catalog(cfg.vector_db_dir) as catalog:
+        assert [Path(p).name for p in catalog.files("docs")] == ["note.md"]
 
 
 def test_page_matching_both_text_and_image_is_merged_and_ranked_first(env, monkeypatch):

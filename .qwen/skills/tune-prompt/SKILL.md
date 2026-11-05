@@ -35,8 +35,8 @@ description: Locohane の system_prompt.md・SKILL.md・tool docstring 等のプ
 1. `evals/cases/`直下のディレクトリ名を見る（`config_timeouts`は除く）。
 2. 必ず`AskUserQuestion`ツールを呼び、ディレクトリ名を選択肢
    （`multiSelect: true`）にして、評価に使うケース群を選ばせる。
-3. 必ず`AskUserQuestion`ツールを呼び、`instances/`直下のディレクトリ名
-   （`admin_changes.log`等のファイルは除く。`instances/`が無ければ
+3. 必ず`AskUserQuestion`ツールを呼び、`<instances_dir>`（`config.ini` の `[admin] instances_dir`。既定 `../Locohane_Agent-Settings/instances`。実際の場所はプロジェクトルートで `"<PYTHON_DIR>\Scripts\python.exe" -c "from src.config import resolve_instances_root; print(resolve_instances_root())"` で取得する） 直下のディレクトリ名
+   （`admin_changes.log` 等のファイルと `_` で始まるフォルダは除く。`<instances_dir>` が無ければ
    `default`のみ）を選択肢（`multiSelect: false`）にして、評価に使う
    インスタンスを1つ選ばせる。選んだインスタンスの設定（LLM接続先・
    token上限・timeout等の`config_overrides.json`による上書き）で評価が
@@ -162,7 +162,7 @@ python evals/run_all.py <target> <case_id1> <case_id2> ... --instance <instance>
   「ユーザー指示によるconfig値調整」と明記する）。選んだインスタンスの
   `config_overrides.json`に同じキーがあると`config.ini`の変更は効かない
   ため、その場合は管理ツール（`admin.bat`）で直すよう案内する。
-  `instances/`配下は直接編集しない。
+  `<instances_dir>` 配下は直接編集しない。
 - `evals/tuning_log.md`の各イテレーション見出しには、使ったインスタンス名
   も書く（インスタンスごとに接続先モデルが違うと結果が比較できないため）。
 - 1イテレーションで複数箇所を同時に直さない（原因の切り分けと振動検知

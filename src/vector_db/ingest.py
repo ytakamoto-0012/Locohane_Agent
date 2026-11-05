@@ -35,7 +35,7 @@ from ..config import Config
 from .catalog import Catalog, CatalogError, FileRecord, open_catalog
 from .chunking import split_text
 from .embedded_images import EMBEDDED_IMAGE_EXTENSIONS, extract_embedded_images
-from .embeddings import EmbeddingStopped, embed_images, embed_texts, embedding_model, open_client
+from .embeddings import EmbeddingRejected, EmbeddingStopped, embed_images, embed_texts, embedding_model, open_client
 from .extract import SUPPORTED_EXTENSIONS, ExtractError, NotTextError, extract_segments, watch_stop_file
 from .gc_pacer import GcPacer
 from .journal import IngestJournal, open_journal
@@ -1640,6 +1640,10 @@ class _Job:
         # stream のとき、書き込んだ本文のチャンクの数と、返ったが前の番号がまだそろわず書き込めないベクター。
         self.streamed = 0
         self._stream_buffer: dict[int, Sequence[float]] = {}
+        # 埋め込みサーバーがこのファイルの入力を受け付けなかった（EmbeddingRejected）ときの理由。設定したら残りは送らず、
+        # 送信中のリクエストが返り切ったら失敗一覧に載せる（_Pipeline._fail_job）。
+        self.failed: str | None = None
+        self.closed = False
 
     def receive(self, kind: str, index: int, vector: list[float]) -> None:
         """リクエストの1件分の埋め込みを受け取る（kind は "text"・"image"、index は texts・pages の番号）。
@@ -1724,6 +1728,9 @@ class _Pipeline:
         self.embeds: dict[Future, tuple[str, list[tuple[_Job, int]]]] = {}
         self.text_queue: deque[tuple[_Job, int]] = deque()
         self.image_queue: deque[tuple[_Job, int]] = deque()
+        # 複数のファイルをまとめた本文のリクエストを埋め込みサーバーが受け付けなかったとき、ファイルごとに分けて
+        # 送り直す本文（1要素が1ファイル分。_embedded 参照）。text_queue より先に送る。
+        self.retry_texts: deque[list[tuple[_Job, int]]] = deque()
         # 子プロセスの異常終了に巻き込まれ、1つずつ準備し直すファイルの _load の引数。
         self.isolate: deque[tuple] = deque()
         self.waiting = 0
@@ -1986,6 +1993,11 @@ class _Pipeline:
         ファイルの本文が、先に本文を送り終えて画像だけが残ったファイルを追い越し続け、そのファイルが後回しになるため。
         """
         while not self.stopped and len(self.embeds) < self.embed_limit:
+            if self.retry_texts:
+                if not self._submit_text_items(pool, self.retry_texts[0]):
+                    return
+                self.retry_texts.popleft()
+                continue
             count = 0
             if self.text_queue and not self._texts_held():
                 count = self.batch_size if len(self.text_queue) >= self.batch_size else self._partial_batch_size()
@@ -2047,36 +2059,51 @@ class _Pipeline:
         return True
 
     def _submit_texts(self, pool, count: int) -> bool:
-        items = list(itertools.islice(self.text_queue, count))
-        files = list(dict.fromkeys(str(job.prepared.path) for job, _ in items))
-        detail = files[0] if len(files) == 1 else f"{files[0]} (+{len(files) - 1})"
-        texts = [job.texts[i] for job, i in items]
-        if not self._submit_embed(
-            pool, "text", items, detail,
-            embed_texts, self.cfg, texts, kind="document", client=self.embedding_client, should_stop=self.should_stop,
-        ):
+        if not self._submit_text_items(pool, list(itertools.islice(self.text_queue, count))):
             return False
         for _ in range(count):
             self.text_queue.popleft()
         return True
 
+    def _submit_text_items(self, pool, items: list[tuple[_Job, int]]) -> bool:
+        files = list(dict.fromkeys(str(job.prepared.path) for job, _ in items))
+        detail = files[0] if len(files) == 1 else f"{files[0]} (+{len(files) - 1})"
+        texts = [job.texts[i] for job, i in items]
+        return self._submit_embed(
+            pool, "text", items, detail,
+            embed_texts, self.cfg, texts, kind="document", client=self.embedding_client, should_stop=self.should_stop,
+        )
+
     def _embedded(self, future: Future, kind: str, items: list[tuple[_Job, int]]) -> None:
+        jobs = _jobs_of(items)
+        rejected: EmbeddingRejected | None = None
         try:
             vectors = future.result()
         except EmbeddingStopped:
             # 埋め込みの再試行中に停止を求められた。このファイルは記録せず、次回の取り込みで処理する。
             self.stopped = True
             return
+        except EmbeddingRejected as e:
+            rejected = e
         finally:
             with self._jobs_lock:
                 now = time.monotonic()
-                for job in _jobs_of(items):
+                for job in jobs:
                     job.requests -= 1
                     job.changed_at = now
+        if rejected is not None:
+            # 埋め込みサーバーが（再試行しても）この入力を受け付けなかった（巨大な画像を展開できない等）。
+            # 取り込み全体は止めず、そのファイルだけを失敗一覧に載せる。
+            self._rejected(kind, items, jobs, rejected)
+            return
         self._stats.done(len(items))
         for (job, index), vector in zip(items, vectors, strict=True):
-            job.receive(kind, index, vector)
-        for job in _jobs_of(items):
+            if job.failed is None:
+                job.receive(kind, index, vector)
+        for job in jobs:
+            if job.failed is not None:
+                self._close_failed(job)
+                continue
             if job.stream:
                 start, chunks, vectors = job.pop_ready_chunks()
                 if chunks:
@@ -2084,6 +2111,50 @@ class _Pipeline:
             if not job.remaining:
                 self.waiting -= 1
                 self._write(job)
+
+    def _rejected(self, kind: str, items: list[tuple[_Job, int]], jobs: list[_Job], error: EmbeddingRejected) -> None:
+        """埋め込みサーバーが items を受け付けなかった（EmbeddingRejected）。
+
+        複数のファイルの本文をまとめたリクエストなら、どのファイルが原因か分からないため、ファイルごとに分けて
+        1回だけ送り直す（retry_texts）。1ファイル分のリクエスト（画像は常に1枚ずつ）なら、そのファイルを失敗にする。
+        """
+        live = [job for job in jobs if job.failed is None]
+        if kind == "text" and len(live) > 1:
+            logger.warning(
+                "vector_db ingest: the embedding server rejected a batch of %d files; resending it per file: %s", len(live), error
+            )
+            for job in live:
+                self.retry_texts.append([item for item in items if item[0] is job])
+            return
+        for job in jobs:
+            self._fail_job(job, str(error))
+            self._close_failed(job)
+
+    def _fail_job(self, job: _Job, reason: str) -> None:
+        """job を失敗にし、まだ送っていない本文・画像を送らないよう外す（送信中のものは返るのを待つ）。"""
+        if job.failed is not None:
+            return
+        job.failed = reason
+        self.text_queue = deque(item for item in self.text_queue if item[0] is not job)
+        self.image_queue = deque(item for item in self.image_queue if item[0] is not job)
+        self.retry_texts = deque(batch for batch in self.retry_texts if batch[0][0] is not job)
+
+    def _close_failed(self, job: _Job) -> None:
+        """失敗にした job の送信中のリクエストが返り切ったら、失敗一覧に載せる（ページ画像の一時フォルダも消える）。
+
+        stream のファイルで本文の一部を書き込み済みなら、journal に記録が残るため、次の取り込みの _reconcile_journal が
+        片付けて取り込み直させる。
+        """
+        if job.closed or job.requests:
+            return
+        job.closed = True
+        self.waiting -= 1
+        with self._jobs_lock:
+            self._jobs.pop(id(job), None)
+        prepared = job.prepared
+        self.writer.write(
+            _Prepared(prepared.path, prepared.record, prepared.mode, "failed", reason=job.failed, page_dir=prepared.page_dir)
+        )
 
     def _write(self, job: _Job) -> None:
         with self._jobs_lock:
