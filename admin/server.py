@@ -115,6 +115,8 @@ async def _lifespan(_app: FastAPI):
     yield
     _data_backup_router.backup_scheduler.stop()
     _knowledge_router.ingest_scheduler.stop()
+    if _knowledge_router.ingest_worker is not None:
+        _knowledge_router.ingest_worker.close()
     if _cfg.admin_stop_apps_on_exit:
         _supervisor.stop_all()
 
@@ -1440,6 +1442,8 @@ _knowledge_router = knowledge_api.build_router(
     instances_root=INSTANCES_ROOT,
     audit_log_path=AUDIT_LOG_PATH,
     client_ip=_client_ip,
+    # 取り込み・コピーは子プロセス（admin/ingest_worker.py）で動かし、ダッシュボードの応答と GIL を取り合わないようにする。
+    ingest_in_worker_process=True,
 )
 app.include_router(_knowledge_router)
 
