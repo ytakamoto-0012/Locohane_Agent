@@ -128,7 +128,7 @@ def _resolve_path_memory_tokens_in_text(text: str) -> str:
 _RAW_UNC_PATH_RE = re.compile(r"\\\\[A-Za-z0-9_.\-]+(?:\\[A-Za-z0-9_.\-]+)+")
 
 
-def register_raw_unc_paths_in_text(text: str) -> str:
+def register_raw_unc_paths_in_text(text: str, thread_id: str | None = None) -> str:
     """ユーザー入力テキスト中の生UNCパスを path_memory へ事前登録し `@N` へ置換する。
 
     低パラメータモデルはツール呼び出しのJSON argsにUNCパス（`\\\\server\\share\\...`）
@@ -150,10 +150,13 @@ def register_raw_unc_paths_in_text(text: str) -> str:
     Returns:
         検出したUNCパスを `@N` に置換したテキスト。path_memory機能が
         利用できない場合やUNCパスを含まない場合は text をそのまま返す。
+
+    thread_id を省略すると今の Chainlit セッションの thread_id を使う（セッション文脈の
+    無い HTTP の処理から呼ぶ場合は明示する。app.py の /locohane/threads/{id}/inject 参照）。
     """
     if _state._PATH_MEMORY_DIR is None:
         return text
-    thread_id = cl.user_session.get("thread_id") or "_no_session"
+    thread_id = thread_id or cl.user_session.get("thread_id") or "_no_session"
 
     def _replace(match: re.Match) -> str:
         path = match.group(0)
@@ -168,7 +171,9 @@ def register_raw_unc_paths_in_text(text: str) -> str:
 
     return _RAW_UNC_PATH_RE.sub(_replace, text)
 
-def _register_path_memory(paths: list[str], description: str | None = None) -> dict[str, str]:
+def _register_path_memory(
+    paths: list[str], description: str | None = None, thread_id: str | None = None
+) -> dict[str, str]:
     """パスの一覧を path_memory レジストリへ登録し、{"@N": path, ...} を返す。
 
     旧 skills/file-tools/scripts/_common.py の register_paths()（run_script
@@ -182,10 +187,12 @@ def _register_path_memory(paths: list[str], description: str | None = None) -> d
     Returns:
         {"@N": path, ...} の辞書。path_memory が利用できない環境でも
         例外を投げず空辞書を返す。
+
+    thread_id を省略すると今の Chainlit セッションの thread_id を使う。
     """
     if _state._PATH_MEMORY_DIR is None:
         return {}
-    thread_id = cl.user_session.get("thread_id") or "_no_session"
+    thread_id = thread_id or cl.user_session.get("thread_id") or "_no_session"
     indexes = path_memory.register_many(
         thread_id, paths, _state._PATH_MEMORY_DIR, _state._PATH_MEMORY_MAX_ENTRIES, description=description
     )

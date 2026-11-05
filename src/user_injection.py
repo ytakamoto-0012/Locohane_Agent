@@ -55,11 +55,17 @@ class Injection:
 
     Attributes:
         id: フロントエンドが反映済みかを突き合わせるための ID。
-        text: ユーザーが入力した本文。
+        text: ユーザーが入力した本文（画面に出す）。
+        llm_text: LLM へ渡す本文（添付の保存先・貼り付けテキストの展開などを済ませたもの。
+            app.py が受け付けた時点で組み立てる）。None なら text をそのまま渡す。
+        files: 添付ファイル（{"name", "path"}。path は受け付けた時点でスレッド専用フォルダへ
+            コピーした先）。画面に出す発言へ添える。
     """
 
     id: str
     text: str
+    llm_text: str | None = None
+    files: tuple[dict, ...] = ()
 
 
 @dataclass
@@ -69,6 +75,8 @@ class _TurnQueue:
     # True の間は drain が何も返さない（app.py がグラフの実行を途中で止めて状態を書き換える間、
     # 先へ進んだグラフが指示を取り出してから打ち切られ、指示が失われるのを防ぐ）。
     held: bool = False
+    # このターンで受け付けた指示（取り出し済みを含む）。同じ ID の再送を二重に積まないため。
+    seen: dict[str, Injection] = field(default_factory=dict)
 
 
 # thread_id → 受付中のターンのキュー。キーが存在する間だけ受け付ける。
@@ -85,6 +93,7 @@ def open_thread(thread_id: str) -> str:
     """
     previous = _queues.get(thread_id)
     queue = _TurnQueue(token=str(uuid.uuid4()), items=list(previous.items) if previous else [])
+    queue.seen = {i.id: i for i in queue.items}
     _queues[thread_id] = queue
     return queue.token
 
@@ -124,7 +133,14 @@ def is_open(thread_id: str) -> bool:
     return thread_id in _queues
 
 
-def enqueue(thread_id: str, text: str, injection_id: str | None = None) -> Injection | None:
+def enqueue(
+    thread_id: str,
+    text: str,
+    injection_id: str | None = None,
+    *,
+    llm_text: str | None = None,
+    files: list[dict] | tuple[dict, ...] = (),
+) -> Injection | None:
     """指示をキューへ積む。
 
     Args:
@@ -132,7 +148,10 @@ def enqueue(thread_id: str, text: str, injection_id: str | None = None) -> Injec
         text: 指示の本文。
         injection_id: フロントエンドが決めた ID（通信の失敗・タイムアウトで応答を受け取れなくても、
             チャット欄に届いた発言と突き合わせられるようにするため）。省略時は採番する。
-            同じ ID が既に積まれていれば積み直さない（再送による二重登録の防止）。
+            このターンで同じ ID を既に受け付けていれば（取り出し済みでも）積み直さない
+            （再送による二重登録の防止）。
+        llm_text: LLM へ渡す本文（Injection.llm_text）。
+        files: 添付ファイル（Injection.files）。
 
     Returns:
         積んだ（または既に積まれていた）Injection。受付が閉じている（ターンが動いていない・
@@ -141,13 +160,23 @@ def enqueue(thread_id: str, text: str, injection_id: str | None = None) -> Injec
     queue = _queues.get(thread_id)
     if queue is None:
         return None
-    if injection_id:
-        for existing in queue.items:
-            if existing.id == injection_id:
-                return existing
-    injection = Injection(id=injection_id or str(uuid.uuid4()), text=text)
+    if injection_id and injection_id in queue.seen:
+        return queue.seen[injection_id]
+    injection = Injection(
+        id=injection_id or str(uuid.uuid4()),
+        text=text,
+        llm_text=llm_text,
+        files=tuple({"name": f["name"], "path": f["path"]} for f in files),
+    )
     queue.items.append(injection)
+    queue.seen[injection.id] = injection
     return injection
+
+
+def contains(thread_id: str, injection_id: str) -> bool:
+    """このターンで、この ID の指示を既に受け付けているか（取り出し済みを含む。再送の判定用）。"""
+    queue = _queues.get(thread_id)
+    return queue is not None and injection_id in queue.seen
 
 
 def requeue(thread_id: str | None, injections: list[Injection]) -> None:
@@ -186,14 +215,17 @@ def to_human_message(injections: list[Injection], turn: str | None = None) -> Hu
     """
     if not injections:
         raise ValueError("injections must not be empty")
-    body = "\n\n".join(i.text for i in injections)
+    body = "\n\n".join(i.llm_text if i.llm_text is not None else i.text for i in injections)
     return HumanMessage(
         content=INJECTION_PREFIX + body,
         id=injections[0].id,
-        additional_kwargs={
-            INJECTION_KWARG: {"turn": turn, "items": [{"id": i.id, "text": i.text} for i in injections]},
-        },
+        additional_kwargs={INJECTION_KWARG: {"turn": turn, "items": [_item(i) for i in injections]}},
     )
+
+
+def _item(injection: Injection) -> dict:
+    """画面表示・突き合わせ用の {"id", "text", "files"}（event_payload と HumanMessage の目印で共通）。"""
+    return {"id": injection.id, "text": injection.text, "files": [dict(f) for f in injection.files]}
 
 
 def is_injection_message(message) -> bool:
@@ -202,7 +234,7 @@ def is_injection_message(message) -> bool:
 
 
 def injection_items(message, turn: str | None = None) -> list[dict]:
-    """割り込み指示の HumanMessage に入っている元の指示（{"id", "text"}）。
+    """割り込み指示の HumanMessage に入っている元の指示（{"id", "text", "files"}）。
 
     Args:
         message: 調べるメッセージ。
@@ -223,4 +255,4 @@ def injection_items(message, turn: str | None = None) -> list[dict]:
 
 def event_payload(injections: list[Injection]) -> dict:
     """INJECTION_APPLIED_EVENT に載せるデータ。"""
-    return {"injections": [{"id": i.id, "text": i.text} for i in injections]}
+    return {"injections": [_item(i) for i in injections]}

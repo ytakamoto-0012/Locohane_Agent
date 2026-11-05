@@ -849,6 +849,14 @@
   font-weight: 600;
 }
 
+.composer-queued-files {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 6px;
+  color: var(--text-muted);
+}
+
 .composer-queued-text {
   min-width: 0;
   overflow: hidden;

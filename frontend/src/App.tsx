@@ -141,6 +141,11 @@ function App() {
     setAttachments([]);
   }, []);
 
+  // 生成中の追加指示に付けた添付が伝わらなかったとき、入力欄へ戻す（Composer.tsx の restoreToInput）。
+  const handleRestoreAttachments = useCallback((restored: PendingAttachment[]) => {
+    setAttachments((prev) => [...restored, ...prev]);
+  }, []);
+
   useEffect(() => {
     const threadId = new URLSearchParams(window.location.search).get('thread');
     if (threadId) setIdToResume(threadId);
@@ -408,6 +413,7 @@ function App() {
           onAttachPastedText={handleAttachPastedText}
           onRemoveAttachment={handleRemoveAttachment}
           onAttachmentsSent={handleAttachmentsSent}
+          onRestoreAttachments={handleRestoreAttachments}
           inputLimits={inputLimits}
           interrupted={interrupted}
         />

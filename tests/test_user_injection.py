@@ -71,8 +71,8 @@ def test_to_human_message_marks_and_prefixes():
     assert message.content.endswith("CSVで出して")
     assert message.content.startswith(user_injection.INJECTION_PREFIX)
     assert user_injection.is_injection_message(message)
-    assert user_injection.injection_items(message) == [{"id": "x", "text": "CSVで出して"}]
-    assert user_injection.injection_items(message, "turn-1") == [{"id": "x", "text": "CSVで出して"}]
+    assert user_injection.injection_items(message) == [{"id": "x", "text": "CSVで出して", "files": []}]
+    assert user_injection.injection_items(message, "turn-1") == [{"id": "x", "text": "CSVで出して", "files": []}]
     assert user_injection.injection_items(message, "turn-2") == []
     assert not user_injection.is_injection_message(HumanMessage(content="普通の発言"))
 

@@ -30,7 +30,7 @@ def seeded(monkeypatch, tmp_path) -> tuple[Path, Path]:
     (default_workdir / "2021" / "note.md").write_text("クリスマス会", encoding="utf-8")
     monkeypatch.setattr(tools._state, "_DEFAULT_WORKDIR", default_workdir)
     monkeypatch.setattr(tools._state, "_LLM_CONFIG", object())
-    monkeypatch.setattr(_WORKDIR_MODULE, "_exec_tmp_name", lambda: "own")
+    monkeypatch.setattr(_WORKDIR_MODULE, "_exec_tmp_name", lambda thread_id=None: "own")
     own_tmp = _WORKDIR_MODULE._resolve_exec_workdir()
     assert (own_tmp / "2021" / "photo.png").is_file()  # シードでコピーされている前提
     (default_workdir / "_tmp_other").mkdir()

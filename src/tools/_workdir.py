@@ -272,8 +272,12 @@ def _short_thread_id(thread_id: str) -> str:
     return hashlib.sha1(thread_id.encode("utf-8")).hexdigest()[:_EXEC_TMP_ID_LEN]
 
 
-def _exec_tmp_name() -> str:
+def _exec_tmp_name(thread_id: str | None = None) -> str:
     """`_tmp_<name>` の `<name>` 部分を返す（`<作成時刻>_<thread_id の短縮ID>`）。
+
+    thread_id を省略すると、今の Chainlit セッションの thread_id を使う
+    （Chainlit のセッション文脈が無い HTTP の処理から呼ぶ場合は明示する。
+    app.py の /locohane/threads/{id}/inject 参照）。
 
     以前は thread_id（UUID等）をそのまま使っていたため、default_workdir
     直下に並ぶ `_tmp_*` フォルダをファイラーで見ても作成順に並ばず、
@@ -311,7 +315,7 @@ def _exec_tmp_name() -> str:
         見つからなければ `<YYMMDDHHMMSS>_<短縮ID>` を新規に生成して
         キャッシュする（ディレクトリ自体はここでは作成しない）。
     """
-    thread_id = cl.user_session.get("thread_id") or "_no_session"
+    thread_id = thread_id or cl.user_session.get("thread_id") or "_no_session"
     cached = _state._EXEC_TMP_NAME_CACHE.get(thread_id)
     if cached is not None:
         return cached
@@ -370,8 +374,10 @@ def _seed_exec_workdir(dest: Path) -> None:
             continue
 
 
-def _resolve_exec_workdir() -> Path:
+def _resolve_exec_workdir(thread_id: str | None = None) -> Path:
     """execute_python_code / run_script が中間生成物を書く実行用ディレクトリ。
+
+    thread_id は _exec_tmp_name と同じ（省略時は今の Chainlit セッションの thread_id）。
 
     常に default_workdir 配下に `_tmp_<thread_id>` を作って返す（無ければ
     作成する）。`_resolve_workdir()` がwork_dir未設定・アクセス不可時の
@@ -401,7 +407,7 @@ def _resolve_exec_workdir() -> Path:
     Returns:
         `_tmp_<thread_id>` ディレクトリの絶対パス。
     """
-    d = _state._DEFAULT_WORKDIR / f"_tmp_{_exec_tmp_name()}"
+    d = _state._DEFAULT_WORKDIR / f"_tmp_{_exec_tmp_name(thread_id)}"
     is_new = not d.exists()
     d.mkdir(parents=True, exist_ok=True)
     if is_new:

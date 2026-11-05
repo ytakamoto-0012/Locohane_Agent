@@ -82,6 +82,7 @@ import chainlit as cl
 from chainlit.config import FILES_DIRECTORY as CHAINLIT_FILES_DIRECTORY
 from chainlit.context import ChainlitContextException
 from chainlit.input_widget import TextInput
+from chainlit.session import WebsocketSession
 from chainlit.utils import utc_now
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -791,11 +792,6 @@ if _config.thread_store_enabled:
     class _RenameThreadBody(BaseModel):
         name: str
 
-    class _InjectBody(BaseModel):
-        text: str
-        # フロントエンドが決めた ID（応答を受け取れなくても、チャット欄に届いた発言と突き合わせるため）。
-        id: str | None = None
-
     async def _assert_owns_thread(thread_id: str, current_user) -> None:
         """指定スレッドの所有者が current_user（匿名モードでは None）と一致するか確認する。
 
@@ -986,42 +982,6 @@ if _config.thread_store_enabled:
         stopped = await _stop_thread_generating(thread_id)
         return {"stopped": stopped}
 
-    @_chainlit_asgi_app.post("/locohane/threads/{thread_id}/inject")
-    async def _locohane_inject_into_thread(
-        thread_id: str,
-        payload: _InjectBody,
-        current_user=Depends(_cl_get_current_user),
-    ):
-        """生成中のターンへユーザーの追加指示を割り込ませる（src/user_injection.py）。
-
-        Composer.tsx は生成中に送信された本文を通常の送信（on_message）ではなくここへ送る。
-        積んだ指示は、次にモデルを呼ぶ直前（ツール呼び出しの区切り）に会話へ入る。
-        ターンが動いていない・終わりかけで受付を閉じた後は 409 を返し、フロントエンドは
-        ターンの終了を待って通常のメッセージとして送り直す。添付ファイルは受け付けない。
-
-        所有者の確認は _assert_owns_thread（thread_store の行）ではなく、「呼び出し元と同じ
-        所有者が、今このスレッドを生成中か」（_generating_owner_threads）で行う。thread_store が
-        無効な構成でも使えるようにするため（受け付けるのは生成中だけなので、これで足りる）。
-        他の所有者のスレッドでも、生成中でないスレッドと同じ 409 を返す（存在を漏らさない）。
-        """
-        owner = thread_store.resolve_owner(current_user)
-        text = payload.text.strip()
-        if not text:
-            raise HTTPException(status_code=400, detail="The instruction is empty.")
-        limit = _config.ui_max_input_chars
-        if limit > 0 and len(text) > limit:
-            raise HTTPException(status_code=400, detail=f"The instruction is too long ({len(text)} > {limit} characters).")
-        injection_id = (payload.id or "").strip() or None
-        if injection_id is not None and (len(injection_id) > 64 or not re.fullmatch(r"[A-Za-z0-9-]+", injection_id)):
-            raise HTTPException(status_code=400, detail="Invalid instruction id.")
-        if _generating_owner_threads.get(owner) != thread_id:
-            raise HTTPException(status_code=409, detail="This conversation is not generating.")
-        injection = user_injection.enqueue(thread_id, text, injection_id)
-        if injection is None:
-            raise HTTPException(status_code=409, detail="This conversation is not generating.")
-        logging.getLogger(__name__).info("Queued an additional user instruction thread_id=%s id=%s", thread_id, injection.id)
-        return {"queued": True, "id": injection.id}
-
     @_chainlit_asgi_app.get("/locohane/threads/generating")
     async def _locohane_owner_generating_thread(
         exclude: str | None = None,
@@ -1062,6 +1022,117 @@ if _config.thread_store_enabled:
 
     _reorder_locohane_routes_before_spa_catchall()
 
+
+
+from pydantic import BaseModel as _PydanticBaseModel  # noqa: E402 - 受付窓口の本文モデル用
+
+
+# POST /locohane/threads/{id}/inject の本文。app.py は `from __future__ import annotations` のため、
+# 関数の中で定義すると FastAPI が型を解決できず、本文として受け取れない（422 になる）。
+class _InjectBody(_PydanticBaseModel):
+    text: str
+    # フロントエンドが決めた ID（応答を受け取れなくても、チャット欄に届いた発言と突き合わせるため）。
+    id: str | None = None
+    # 添付（アップロード済みのファイル ID）と、それをアップロードした呼び出し元のセッション ID。
+    files: list[str] | None = None
+    session_id: str | None = None
+
+
+def _register_user_injection_route() -> None:
+    """生成中の追加指示の受付窓口（POST /locohane/threads/{id}/inject）を登録する。
+
+    他の /locohane/threads* ルートは [thread_store].enabled のときだけ登録するが、追加指示は
+    スレッドの保存の有無に関わらず使えるよう、常に登録する（所有者の確認も thread_store に
+    依存しない。_locohane_inject_into_thread の docstring 参照）。Chainlit の SPA catch-all より
+    前へ並べ替えるのは、他のルートと同じ理由（_reorder_locohane_routes_before_spa_catchall 参照）。
+    """
+    from chainlit.auth import get_current_user as _cl_get_current_user
+    from chainlit.server import app as _chainlit_asgi_app
+    from fastapi import Depends, HTTPException
+
+    routes_before = len(_chainlit_asgi_app.router.routes)
+
+    @_chainlit_asgi_app.post("/locohane/threads/{thread_id}/inject")
+    async def _locohane_inject_into_thread(
+        thread_id: str,
+        payload: _InjectBody,
+        current_user=Depends(_cl_get_current_user),
+    ):
+        """生成中のターンへユーザーの追加指示を割り込ませる（src/user_injection.py）。
+
+        Composer.tsx は生成中に送信された本文を通常の送信（on_message）ではなくここへ送る。
+        積んだ指示は、次にモデルを呼ぶ直前（ツール呼び出しの区切り）に会話へ入る。
+        ターンが動いていない・終わりかけで受付を閉じた後は 409 を返し、フロントエンドは
+        ターンの終了を待って通常のメッセージとして送り直す。
+
+        添付ファイル（files: アップロード済みのファイル ID、session_id: アップロードした
+        呼び出し元の Chainlit セッション）は、受け付けたこの時点でスレッド専用フォルダへコピーし、
+        LLM へ渡す本文（保存先と `@N`・貼り付けテキストの展開。通常の送信と同じ
+        _build_user_llm_text）もここで組み立てる（_build_injection）。指示が会話へ入るのは後に
+        なるが、その時にはアップロードしたセッションが既に無くなり、Chainlit が一時ファイルを
+        消していることがある（生成中に別の会話へ移って戻ってきた画面から送った後、また移った場合など）。
+
+        所有者の確認は _assert_owns_thread（thread_store の行）ではなく、「呼び出し元と同じ
+        所有者が、今このスレッドを生成中か」（_generating_owner_threads）で行う。thread_store が
+        無効な構成でも使えるようにするため（受け付けるのは生成中だけなので、これで足りる）。
+        他の所有者のスレッドでも、生成中でないスレッドと同じ 409 を返す（存在を漏らさない）。
+        添付の session_id も、同じ所有者・同じスレッドのセッションに限る（他人のアップロードを
+        参照させない）。
+        """
+        owner = thread_store.resolve_owner(current_user)
+        text = payload.text.strip()
+        file_ids = list(dict.fromkeys(f for f in payload.files or [] if isinstance(f, str) and f))
+        if not text and not file_ids:
+            raise HTTPException(status_code=400, detail="The instruction is empty.")
+        injection_id = (payload.id or "").strip() or None
+        if injection_id is not None and (len(injection_id) > 64 or not re.fullmatch(r"[A-Za-z0-9-]+", injection_id)):
+            raise HTTPException(status_code=400, detail="Invalid instruction id.")
+        if _generating_owner_threads.get(owner) != thread_id or not user_injection.is_open(thread_id):
+            raise HTTPException(status_code=409, detail="This conversation is not generating.")
+        if injection_id is not None and user_injection.contains(thread_id, injection_id):
+            # 再送（応答を受け取れずに送り直した等）。添付を二重にコピーしない。
+            return {"queued": True, "id": injection_id}
+        sources: list[tuple[str, str | None]] = []
+        if file_ids:
+            session = WebsocketSession.get_by_id(payload.session_id) if payload.session_id else None
+            if (
+                session is None
+                or session.thread_id != thread_id
+                or thread_store.resolve_owner(session.user) != owner
+            ):
+                raise HTTPException(status_code=400, detail="The attached files are not available. Attach them again.")
+            for file_id in file_ids:
+                info = session.files.get(file_id)
+                if info is None or not Path(info["path"]).is_file():
+                    raise HTTPException(status_code=400, detail="The attached files are not available. Attach them again.")
+                sources.append((str(info["path"]), info.get("name")))
+        limit = _config.ui_max_input_chars
+        total = len(text) + sum(
+            len(_read_pasted_text(src)) for src, name in sources if _is_pasted_text_file(name or src)
+        )
+        if limit > 0 and total > limit:
+            raise HTTPException(status_code=400, detail=f"The instruction is too long ({total} > {limit} characters).")
+        # ここから enqueue まで await を挟まない（is_open の確認と積む処理の間に受付が閉じないように）。
+        try:
+            llm_text, files = _build_injection(thread_id, text, sources)
+        except OSError:
+            logging.getLogger(__name__).warning("Failed to save the attachments of an additional instruction", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to save the attached files.") from None
+        injection = user_injection.enqueue(thread_id, text, injection_id, llm_text=llm_text, files=files)
+        if injection is None:
+            raise HTTPException(status_code=409, detail="This conversation is not generating.")
+        logging.getLogger(__name__).info(
+            "Queued an additional user instruction thread_id=%s id=%s files=%d", thread_id, injection.id, len(files)
+        )
+        return {"queued": True, "id": injection.id}
+
+    routes = _chainlit_asgi_app.router.routes
+    added = routes[routes_before:]
+    del routes[routes_before:]
+    routes[0:0] = added
+
+
+_register_user_injection_route()
 
 _RUNTIME_STATUS_INTERVAL_SECONDS = 3.0
 _runtime_status_task: "asyncio.Task | None" = None
@@ -1490,14 +1561,24 @@ class _TurnInjections:
             if item["id"] in self.displayed:
                 continue
             self.displayed.add(item["id"])
-            self.texts.append(item["text"])
+            files = [f for f in item.get("files") or [] if f.get("path")]
+            names = i18n.t("list.separator").join(f["name"] for f in files)
+            self.texts.append(item["text"] + (f" [attached: {names}]" if files else ""))
             # 表示の失敗（切断済み等）でターン自体を壊さない（指示は既に会話へ入っている）。
             try:
+                elements = [
+                    cl.Image(name=f["name"], path=f["path"], display="inline")
+                    if is_image_file(Path(f["path"]))
+                    else cl.File(name=f["name"], path=f["path"], display="inline")
+                    for f in files
+                    if Path(f["path"]).is_file()
+                ]
                 await cl.Message(
                     content=item["text"],
                     author=author,
                     type="user_message",
                     metadata={INJECTION_ID_METADATA_KEY: item["id"]},
+                    elements=elements,
                 ).send()
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).warning("Failed to show an additional user instruction in the chat", exc_info=True)
@@ -1555,6 +1636,7 @@ class _TurnInjections:
                 )
         except Exception:  # noqa: BLE001
             logging.getLogger(__name__).debug("Failed to drop undisplayed user injections", exc_info=True)
+
 
 # frontend/src/components/Composer.tsx が長文の貼り付けを添付化する際のファイル名
 # （pasted-text-<時刻>[-<連番>].txt）と一致させる。これに一致する添付は保存先パスでは
@@ -3101,16 +3183,54 @@ def _save_uploads(message: cl.Message) -> list[str]:
     elements = [e for e in message.elements or [] if getattr(e, "path", None)]
     if not elements:
         return []
-    exec_dir = _resolve_exec_workdir()
+    return _copy_uploads([(str(e.path), e.name) for e in elements], _resolve_exec_workdir())
+
+
+def _build_injection(thread_id: str, text: str, sources: list[tuple[str, str | None]]) -> tuple[str, list[dict]]:
+    """生成中の追加指示の、LLM へ渡す本文と添付ファイルを、受け付けた時点で用意する。
+
+    添付は通常の送信（_save_uploads）と同じくスレッド専用フォルダの `uploads/<送信日時>/` へコピーし、
+    本文は _build_user_llm_text で同じ形にする（貼り付けテキストの展開・保存先と `@N`・UNC パスの `@N` 化）。
+    Chainlit のセッション文脈の無い HTTP の処理から呼ぶため、thread_id を明示して使う。
+
+    Args:
+        thread_id: 対象スレッド。
+        text: ユーザーが入力した本文。
+        sources: (Chainlit が保持する一時保存先, 元のファイル名) の列。
+
+    Returns:
+        (LLM へ渡す本文, 画面表示用の添付 {"name", "path"} の列)。
+
+    Raises:
+        OSError: 添付のコピーに失敗した場合。
+    """
+    saved = _copy_uploads(sources, _resolve_exec_workdir(thread_id)) if sources else []
+    llm_text = _build_user_llm_text(register_raw_unc_paths_in_text(text, thread_id), saved, thread_id=thread_id)
+    return llm_text, [{"name": Path(p).name, "path": p} for p in saved]
+
+
+def _copy_uploads(sources: list[tuple[str, str | None]], exec_dir: Path) -> list[str]:
+    """アップロードされたファイルを exec_dir の `uploads/<送信日時>/` へコピーし、保存先パスの一覧を返す。
+
+    _save_uploads と、生成中の追加指示（/locohane/threads/{id}/inject）で共通。
+
+    Args:
+        sources: (Chainlit が保持する一時保存先, 元のファイル名) の列。
+        exec_dir: スレッド専用の作業フォルダ（_resolve_exec_workdir）。
+
+    Returns:
+        保存先の絶対パス文字列のリスト（sources の順）。
+    """
+    if not sources:
+        return []
     stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:6]}"
     dest_dir = exec_dir / "uploads" / stamp
     dest_dir.mkdir(parents=True, exist_ok=True)
     saved: list[str] = []
-    for element in elements:
-        src = element.path
+    for src, original_name in sources:
         # ブラウザ以外から送られた名前のパス区切り・`..` で送信フォルダの外へ出さず、
         # Windows で使えない文字・予約デバイス名で copyfile が失敗しないようにする。
-        name = _sanitize_filename_component(element.name or Path(src).name)
+        name = _sanitize_filename_component(original_name or Path(src).name)
         dest = dest_dir / name
         n = 2
         while dest.exists():
@@ -3196,6 +3316,27 @@ def _build_human_message(user_text: str, saved_paths: list[str], work_dir_notice
     Returns:
         文字列 content の HumanMessage。
     """
+    # ユーザー自身の発話の目印（[llm].reasoning_preserve 有効時、thinking を
+    # 載せ直す範囲の境界になる。src/llm/dialect.py の mark_user_turn 参照）。
+    return mark_user_turn(HumanMessage(content=_build_user_llm_text(user_text, saved_paths, work_dir_notice)))
+
+
+def _build_user_llm_text(
+    user_text: str,
+    saved_paths: list[str],
+    work_dir_notice: str | None = None,
+    *,
+    thread_id: str | None = None,
+) -> str:
+    """_build_human_message の本文部分（貼り付けテキストの展開・アップロードの保存先と `@N`）。
+
+    生成中の追加指示（/locohane/threads/{id}/inject）でも同じ形で LLM へ渡すため切り出している。
+
+    Args:
+        user_text / saved_paths / work_dir_notice: _build_human_message と同じ。
+        thread_id: パスメモリーへ登録するスレッド。省略時は今の Chainlit セッションの thread_id
+            （セッション文脈の無い HTTP の処理から呼ぶ場合は明示する）。
+    """
     pasted_paths = [p for p in saved_paths if _is_pasted_text_file(p)]
     other_paths = [p for p in saved_paths if not _is_pasted_text_file(p)]
 
@@ -3206,18 +3347,20 @@ def _build_human_message(user_text: str, saved_paths: list[str], work_dir_notice
     if work_dir_notice:
         text += f"\n\n{work_dir_notice}"
     if other_paths:
-        tokens = {path: token for token, path in _register_path_memory(other_paths, description="upload").items()}
+        tokens = {
+            path: token
+            for token, path in _register_path_memory(other_paths, description="upload", thread_id=thread_id).items()
+        }
         lines = [f"- {tokens[p]}: {p}" if p in tokens else f"- {p}" for p in other_paths]
         folders = list(dict.fromkeys(str(Path(p).parent) for p in other_paths))
         if len(other_paths) >= 2 and len(folders) == 1:
-            folder_token = next(iter(_register_path_memory(folders, description="upload (sent folder)")), None)
+            folder_token = next(
+                iter(_register_path_memory(folders, description="upload (sent folder)", thread_id=thread_id)), None
+            )
             lines.append(f"(folder: {folder_token}: {folders[0]})" if folder_token else f"(folder: {folders[0]})")
         paths = "\n".join(lines)
         text += f"\n\n[Saved locations of uploaded files (pass @N to tools)]\n{paths}"
-
-    # ユーザー自身の発話の目印（[llm].reasoning_preserve 有効時、thinking を
-    # 載せ直す範囲の境界になる。src/llm/dialect.py の mark_user_turn 参照）。
-    return mark_user_turn(HumanMessage(content=text))
+    return text
 
 
 _TABLE_LINE_RE = re.compile(r"^[ \t]{0,3}\|")

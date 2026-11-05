@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
 import { useRecoilValue } from 'recoil';
 import { v4 as uuidv4 } from 'uuid';
-import { currentThreadIdState, useChatData, useChatInteract, useChatMessages } from '@chainlit/react-client';
+import { currentThreadIdState, sessionIdState, useChatData, useChatInteract, useChatMessages } from '@chainlit/react-client';
 import type { IFileRef, IStep } from '@chainlit/react-client';
 import { BACKEND_URL } from '../chainlitClient';
 import { useI18n } from '../i18n';
@@ -39,10 +39,13 @@ const INJECT_TIMEOUT_MS = 10000;
  * - deferred: ターンが終わりかけで受け付けられなかった（ターンの終了後に通常のメッセージとして送る）
  * - unknown: 通信エラー・タイムアウトで、受け付けられたか分からない（二重送信を避けるため、
  *   会話へ入らないままターンが終わったら自動では送らず入力欄へ戻す）
+ * attachments は一緒に送った添付（送り直す・入力欄へ戻すときに使う。バックエンドは受け付けた
+ * 時点でスレッド専用フォルダへコピーするため、受け付けられた後はこのセッションの一時ファイルに依存しない）。
  */
 interface QueuedInstruction {
   id: string;
   text: string;
+  attachments: PendingAttachment[];
   status: 'sending' | 'queued' | 'deferred' | 'unknown';
 }
 
@@ -74,6 +77,8 @@ interface ComposerProps {
   onAttachPastedText: (text: string) => void;
   onRemoveAttachment: (index: number) => void;
   onAttachmentsSent: () => void;
+  // 生成中の追加指示に付けた添付を、伝わらなかったときに入力欄へ戻す（App.tsx の handleRestoreAttachments）。
+  onRestoreAttachments: (attachments: PendingAttachment[]) => void;
   // 貼り付けテキスト化の閾値・最大入力文字数（config.ini [ui]、app.py の INPUT_LIMITS_PREFIX）。
   inputLimits: InputLimits;
   // 直近のターンが中断したまま（app.py の INTERRUPTED_PREFIX）。「続ける」ボタンを出す。
@@ -91,6 +96,7 @@ export function Composer({
   onAttachPastedText,
   onRemoveAttachment,
   onAttachmentsSent,
+  onRestoreAttachments,
   inputLimits,
   interrupted
 }: ComposerProps) {
@@ -98,6 +104,7 @@ export function Composer({
   const { sendMessage, replyMessage, stopTask } = useChatInteract();
   const { messages } = useChatMessages();
   const currentThreadId = useRecoilValue(currentThreadIdState);
+  const sessionId = useRecoilValue(sessionIdState);
   const { t } = useI18n();
   const [value, setValue] = useState('');
   const [pasteError, setPasteError] = useState<string | null>(null);
@@ -141,10 +148,21 @@ export function Composer({
       const deferred = pending.filter((q) => q.status === 'deferred');
       const restore = pending.filter((q) => q.status !== 'deferred' || inputBlockedRef.current);
       if (deferred.length > 0 && !inputBlockedRef.current) {
-        sendMessage(buildUserMessage(deferred.map((q) => q.text).join('\n\n')), []);
+        const fileReferences = deferred.flatMap((q) =>
+          q.attachments.flatMap((a) => (a.fileRef ? [{ id: a.fileRef.id }] : []))
+        );
+        sendMessage(
+          buildUserMessage(
+            deferred
+              .map((q) => q.text)
+              .filter((s) => s)
+              .join('\n\n')
+          ),
+          fileReferences
+        );
       }
       if (restore.length > 0) {
-        setValue((v) => [...restore.map((q) => q.text), v].filter((s) => s).join('\n'));
+        restoreToInput(restore);
         setPasteError(t('composer.injectNotApplied'));
       }
     }, TURN_END_SETTLE_MS);
@@ -156,14 +174,29 @@ export function Composer({
   const setQueuedStatus = (id: string, status: QueuedInstruction['status']) =>
     setQueued((prev) => prev.map((q) => (q.id === id ? { ...q, status } : q)));
 
-  // 生成中の送信: 入力欄の本文だけを追加指示としてバックエンドへ積む（添付は次の通常送信まで残す）。
+  // 伝わらなかった指示の本文・添付を入力欄へ戻す。
+  const restoreToInput = (items: QueuedInstruction[]) => {
+    const texts = items.map((q) => q.text).filter((s) => s);
+    if (texts.length > 0) setValue((v) => [...texts, v].filter((s) => s).join('\n'));
+    const restoredAttachments = items.flatMap((q) => q.attachments);
+    if (restoredAttachments.length > 0) onRestoreAttachments(restoredAttachments);
+  };
+
+  // 生成中の送信: 入力欄の本文と添付を追加指示としてバックエンドへ積む。
   const submitInstruction = () => {
     const text = value.trim();
-    if (!text) return;
+    if (!text && attachments.length === 0) return;
     const id = uuidv4();
-    setQueued((prev) => [...prev, { id, text, status: currentThreadId ? 'sending' : 'deferred' }]);
+    const sentAttachments = attachments;
+    const files = sentAttachments.flatMap((a) => (a.fileRef ? [a.fileRef.id] : []));
+    setQueued((prev) => [
+      ...prev,
+      { id, text, attachments: sentAttachments, status: currentThreadId ? 'sending' : 'deferred' }
+    ]);
     setValue('');
     setPasteError(null);
+    onAttachmentsSent();
+    if (fileInputRef.current) fileInputRef.current.value = '';
     if (!currentThreadId) return;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), INJECT_TIMEOUT_MS);
@@ -171,7 +204,7 @@ export function Composer({
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, id }),
+      body: JSON.stringify({ text, id, files, session_id: sessionId }),
       signal: controller.signal
     })
       .then((res) => {
@@ -181,9 +214,9 @@ export function Composer({
           // 確実に積まれていない（受付が閉じていた）ので、ターンの終了後に通常のメッセージとして送る。
           setQueuedStatus(id, 'deferred');
         } else {
-          // 長すぎる等で拒否された。入力欄へ戻して知らせる。
+          // 長すぎる・添付が使えない等で拒否された（確実に積まれていない）。入力欄へ戻して知らせる。
           setQueued((prev) => prev.filter((q) => q.id !== id));
-          setValue((v) => [text, v].filter((s) => s).join('\n'));
+          restoreToInput([{ id, text, attachments: sentAttachments, status: 'deferred' }]);
           setPasteError(t('composer.injectFailed'));
         }
       })
@@ -257,7 +290,7 @@ export function Composer({
 
   const submit = () => {
     if (turnRunning && !isReplying) {
-      if (!inputBlocked && !overLimit) submitInstruction();
+      if (!inputBlocked && !overLimit && !uploading) submitInstruction();
       return;
     }
     if (inputBlocked || overLimit || uploading || (!value.trim() && attachments.length === 0)) return;
@@ -351,7 +384,15 @@ export function Composer({
               <span className="composer-queued-label">
                 {q.status === 'deferred' ? t('composer.queuedNextTurn') : t('composer.queuedNextStep')}
               </span>
-              <span className="composer-queued-text">{q.text}</span>
+              <span className="composer-queued-text">
+                {q.attachments.length > 0 ? (
+                  <span className="composer-queued-files">
+                    <Icon name="paperclip" size={12} />
+                    {q.attachments.length}
+                  </span>
+                ) : null}
+                {q.text}
+              </span>
             </div>
           ))}
         </div>
@@ -428,12 +469,12 @@ export function Composer({
             ) : null}
             <PlanModeBadge step={plan} />
             {/* 生成中は停止ボタンと並べて出す（承認待ち等で loading=false の間は下の送信ボタンが同じ働きをする） */}
-            {(loading || remoteGenerating) && !isReplying && value.trim() ? (
+            {(loading || remoteGenerating) && !isReplying && (value.trim() || attachments.length > 0) ? (
               <button
                 type="button"
                 className="composer-submit-button"
                 onClick={submit}
-                disabled={inputBlocked || overLimit}
+                disabled={inputBlocked || overLimit || uploading}
                 title={t('composer.injectTitle')}
               >
                 {t('composer.inject')}
