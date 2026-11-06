@@ -188,15 +188,19 @@ def validate_settings(data: dict) -> dict:
     return result
 
 
+def read_settings_default() -> dict:
+    return json.loads(json.dumps(DEFAULT_SETTINGS))
+
+
 def read_settings(instances_root: Path, name: str) -> dict:
     path = cost_path(instances_root, name)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return json.loads(json.dumps(DEFAULT_SETTINGS))
+        return read_settings_default()
     except (OSError, ValueError) as exc:
         raise UsageCostError(_t("{0} を読めません: {1}", path.name, exc)) from exc
-    return {**json.loads(json.dumps(DEFAULT_SETTINGS)), **validate_settings(data)}
+    return {**read_settings_default(), **validate_settings(data)}
 
 
 def write_settings(instances_root: Path, name: str, data: dict) -> dict:
@@ -288,4 +292,90 @@ def compute_costs(usage: dict, settings: dict) -> dict:
         "months": result,
         "total_cost": sum(known) if known else None,
         "total_cost_jpy": _jpy(sum(known)) if known else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 全インスタンスの集計
+# ---------------------------------------------------------------------------
+
+
+def _add_optional(a: float | None, b: float | None) -> float | None:
+    if b is None:
+        return a
+    return (a or 0.0) + b
+
+
+def aggregate_instances(items: list[dict]) -> dict:
+    """インスタンスごとの使用量・金額を、月別に全インスタンス合計へまとめる。
+
+    Args:
+        items: [{"name", "display_name", "usage": monthly_usage(), "costs": compute_costs()}, ...]
+            （使用量を読めなかったインスタンスは usage を空にして渡す）。
+
+    金額は各インスタンスの料金設定で計算した値の合計。使用量か入力値があるのに金額を
+    出せないインスタンスがある月は cost_incomplete に名前を入れる（合計は分かる分だけ）。
+    円は為替レートを入れたインスタンスの分だけを足し、足りない分は jpy_incomplete に入れる。
+    ユーザーはインスタンスをまたいで同じ名前を同じユーザーとして合算する。
+    months[].users は owner -> {"total","cost","cost_jpy"}、months[].instances は
+    インスタンス名 -> {"total","cost","cost_jpy"}。
+    """
+    months: dict[str, dict] = {}
+    users: dict[str, dict] = {}
+    instance_totals: dict[str, int] = {}
+
+    def _month(key: str) -> dict:
+        return months.setdefault(
+            key,
+            {
+                "month": key, "input": 0, "output": 0, "total": 0, "calls": 0, "backfilled": False,
+                "cost": None, "cost_jpy": None, "cost_incomplete": [], "jpy_incomplete": [],
+                "instances": {}, "users": {},
+            },
+        )
+
+    for item in items:
+        name = item["name"]
+        instance_totals.setdefault(name, 0)
+        for um in item["usage"].get("months", []):
+            m = _month(um["month"])
+            for k in ("input", "output", "total", "calls"):
+                m[k] += um[k]
+            m["backfilled"] = m["backfilled"] or um["backfilled"]
+            instance_totals[name] += um["total"]
+        # compute_costs() の months は使用量のある月をすべて含み、ユーザー別の金額も持つ。
+        for cm in item["costs"].get("months", []):
+            m = _month(cm["month"])
+            m["instances"][name] = {"total": cm["total"], "cost": cm["cost"], "cost_jpy": cm["cost_jpy"]}
+            if cm["cost"] is None:
+                if cm["total"]:
+                    m["cost_incomplete"].append(name)
+            else:
+                m["cost"] = _add_optional(m["cost"], cm["cost"])
+                if cm["cost_jpy"] is None:
+                    m["jpy_incomplete"].append(name)
+                else:
+                    m["cost_jpy"] = _add_optional(m["cost_jpy"], cm["cost_jpy"])
+            for uc in cm["users"]:
+                mu = m["users"].setdefault(uc["user"], {"total": 0, "cost": None, "cost_jpy": None})
+                mu["total"] += uc["total"]
+                mu["cost"] = _add_optional(mu["cost"], uc["cost"])
+                mu["cost_jpy"] = _add_optional(mu["cost_jpy"], uc["cost_jpy"])
+                u = users.setdefault(uc["user"], {"user": uc["user"], "total": 0, "cost": None, "cost_jpy": None, "instances": set()})
+                u["total"] += uc["total"]
+                u["cost"] = _add_optional(u["cost"], uc["cost"])
+                u["cost_jpy"] = _add_optional(u["cost_jpy"], uc["cost_jpy"])
+                u["instances"].add(name)
+    month_list = [months[k] for k in sorted(months)]
+    known = [m["cost"] for m in month_list if m["cost"] is not None]
+    known_jpy = [m["cost_jpy"] for m in month_list if m["cost_jpy"] is not None]
+    user_list = sorted(users.values(), key=lambda u: (-u["total"], u["user"]))
+    for u in user_list:
+        u["instances"] = sorted(u["instances"])
+    return {
+        "months": month_list,
+        "instances": sorted(instance_totals, key=lambda n: (-instance_totals[n], n)),
+        "users": user_list,
+        "total_cost": sum(known) if known else None,
+        "total_cost_jpy": sum(known_jpy) if known_jpy else None,
     }

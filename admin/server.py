@@ -1395,6 +1395,52 @@ def _usage_view(name: str, settings: dict) -> dict[str, Any]:
     }
 
 
+@app.get("/api/usage/overview")
+def get_usage_overview(user: str = Depends(require_login)):
+    """全インスタンス（スキル調整ワーカーを除く）の月別使用量と金額の合計、およびインスタンスごとの内訳。"""
+    items, errors = [], []
+    empty_usage = {"source": None, "months": [], "users": []}
+    for name in inst.list_instance_names(INSTANCES_ROOT):
+        try:
+            meta = inst.read_instance(INSTANCES_ROOT, name)
+        except Exception:  # noqa: BLE001 - 壊れた instance.json の1件で全体を失敗させない
+            errors.append({"name": name, "error": _t("instance.json を読めません。")})
+            continue
+        if meta.kind == inst.KIND_SKILL_LAB:
+            continue
+        usage, error = empty_usage, None
+        try:
+            cfg = monitor.instance_config(INSTANCES_ROOT, CONFIG_INI_PATH, name)
+            usage = usage_cost.monthly_usage(cfg.thread_store_db)
+        except (monitor.MonitorError, sqlite3.Error) as exc:
+            error = str(exc)
+        try:
+            settings = usage_cost.read_settings(INSTANCES_ROOT, name)
+        except usage_cost.UsageCostError as exc:
+            settings, error = usage_cost.read_settings_default(), error or str(exc)
+        if error:
+            errors.append({"name": name, "error": error})
+        items.append(
+            {
+                "name": name,
+                "display_name": meta.display_name,
+                "pricing_model": settings["pricing_model"],
+                "usage": usage,
+                "costs": usage_cost.compute_costs(usage, settings),
+            }
+        )
+    aggregated = usage_cost.aggregate_instances(items)
+    return {
+        **aggregated,
+        # aggregated["instances"]（使用量順のインスタンス名）は instances_by_usage として返す。
+        "instances": [
+            {k: it[k] for k in ("name", "display_name", "pricing_model")} | {"source": it["usage"]["source"]} for it in items
+        ],
+        "instances_by_usage": aggregated["instances"],
+        "errors": errors,
+    }
+
+
 @app.get("/api/instances/{name}/usage")
 def get_usage(name: str, user: str = Depends(require_login)):
     _require_instance(name)

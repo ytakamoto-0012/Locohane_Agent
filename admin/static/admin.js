@@ -146,6 +146,7 @@ function showShell(username, version) {
 function navigate(view) {
   stopMonitorPolling();
   if (view === "instances") return renderInstances();
+  if (view === "usage") return renderUsageOverview();
   if (view === "settings") return renderSettings();
   if (view === "audit") return renderAudit();
   if (view === "admin-logs") return renderAdminLogs();
@@ -3836,14 +3837,24 @@ function drawUsage(box, data) {
   );
 }
 
-// users は全期間の使用量順（サーバー側で並べ済み）。上位7人に色を割り当て、残りは「その他」にまとめる。
-function userSeries(users) {
-  const named = users.slice(0, USER_SERIES_COLORS.length);
-  const series = named.map((u, i) => ({ key: u, label: u, color: USER_SERIES_COLORS[i] }));
-  if (users.length > named.length) {
-    series.push({ key: null, label: _t(`その他（{0}人）`, users.length - named.length), color: OTHER_SERIES_COLOR, others: users.slice(named.length) });
+// keys は全期間の使用量順（サーバー側で並べ済み）。上位7件に色を割り当て、残りは「その他」にまとめる。
+function rankedSeries(keys, labelOf, otherLabel) {
+  const named = keys.slice(0, USER_SERIES_COLORS.length);
+  const series = named.map((k, i) => ({ key: k, label: labelOf ? labelOf(k) : k, color: USER_SERIES_COLORS[i] }));
+  if (keys.length > named.length) {
+    series.push({ key: null, label: otherLabel(keys.length - named.length), color: OTHER_SERIES_COLOR, others: keys.slice(named.length) });
   }
   return series;
+}
+
+function userSeries(users) {
+  return rankedSeries(users, null, (n) => _t(`その他（{0}人）`, n));
+}
+
+// series の各月の値。field は月データの内訳（users / instances。値は {total, ...}）、metric は "total" / "cost"。
+function seriesValues(series, months, field, metric) {
+  const pick = (m, k) => ((m[field] || {})[k] || {})[metric] || 0;
+  return series.map((s) => ({ ...s, values: months.map((m) => (s.key === null ? s.others.reduce((sum, k) => sum + pick(m, k), 0) : pick(m, s.key))) }));
 }
 
 function hoursInMonth(month) {
@@ -3857,15 +3868,13 @@ function buildUsageCharts(usage, costs) {
     wrap.append(el("p", { class: "hint", text: _t("トークン使用量のデータがありません（[llm] track_token_usage=false、[thread_store] enabled=false、またはまだ会話がありません）。") }));
     return wrap;
   }
-  const series = userSeries(usage.users);
-  const valueOf = (m, s) => (s.key === null ? s.others.reduce((sum, u) => sum + ((m.users[u] || {}).total || 0), 0) : (m.users[s.key] || {}).total || 0);
   const grid = el("div", { class: "chart-grid-row" });
   grid.append(
     stackedBarChart({
       title: _t("月別のトークン使用量（ユーザー別の積み上げ）"),
       note: _t("入力＋出力の合計です（サブエージェント・圧縮処理を含む）。棒の上端が全ユーザーの合計です。"),
       categories: usage.months.map((m) => m.month),
-      series: series.map((s) => ({ ...s, values: usage.months.map((m) => valueOf(m, s)) })),
+      series: seriesValues(userSeries(usage.users), usage.months, "users", "total"),
       format: fmtNum,
       axisFormat: fmtCompact,
     })
@@ -3990,6 +3999,151 @@ function stackedBarChart({ title, note, categories, series, format, axisFormat }
       ? el("div", { class: "chart-legend" }, series.map((s) => el("span", { class: "legend-item" }, [el("span", { class: "legend-dot", style: `background:${s.color}` }), s.label])))
       : null;
   return el("figure", { class: "chart-card" }, [el("figcaption", { text: title }), legend, box, note ? el("div", { class: "hint", text: note }) : null]);
+}
+
+/* 全インスタンスの集計（上部タブ「利用量・料金」。GET /api/usage/overview） */
+
+async function renderUsageOverview() {
+  mainEl.innerHTML = "";
+  const box = el("div");
+  mainEl.append(el("div", { class: "view-usage" }, [el("div", { class: "view-header" }, [el("h2", { text: _t("利用量・料金（全インスタンス）") })]), box]));
+  box.append(el("p", { class: "hint", text: _t("読み込み中...") }));
+  let data;
+  try {
+    data = await api("/api/usage/overview");
+  } catch (e) {
+    box.replaceChildren(el("div", { class: "error", text: e.message }));
+    return;
+  }
+  if (!document.body.contains(box)) return;
+  const labelOf = Object.fromEntries(data.instances.map((i) => [i.name, i.display_name && i.display_name !== i.name ? `${i.display_name}（${i.name}）` : i.name]));
+  const thisMonth = currentMonthKey();
+  const cur = data.months.find((m) => m.month === thisMonth);
+  const allTotal = data.months.reduce((s, m) => s + m.total, 0);
+  const incompleteNote = (m) => {
+    const parts = [];
+    if (m.cost_incomplete.length) parts.push(_t(`料金未入力: {0}`, m.cost_incomplete.map((n) => labelOf[n] || n).join(", ")));
+    if (m.jpy_incomplete.length) parts.push(_t(`為替レート未入力: {0}`, m.jpy_incomplete.map((n) => labelOf[n] || n).join(", ")));
+    return parts.join(" ／ ");
+  };
+
+  const instanceSeries = rankedSeries(data.instances_by_usage, (n) => labelOf[n] || n, (n) => _t(`その他（{0}件）`, n));
+  const userKeys = data.users.map((u) => u.user);
+  const grid = el("div", { class: "chart-grid-row" });
+  if (data.months.length) {
+    const cats = data.months.map((m) => m.month);
+    grid.append(
+      stackedBarChart({
+        title: _t("月別のトークン使用量（インスタンス別の積み上げ）"),
+        note: _t("入力＋出力の合計です（サブエージェント・圧縮処理を含む）。棒の上端が全インスタンスの合計です。"),
+        categories: cats,
+        series: seriesValues(instanceSeries, data.months, "instances", "total"),
+        format: fmtNum,
+        axisFormat: fmtCompact,
+      }),
+      stackedBarChart({
+        title: _t("月別のトークン使用量（ユーザー別の積み上げ）"),
+        note: _t("同じユーザー名は、インスタンスが違っても同じユーザーとして合算しています。"),
+        categories: cats,
+        series: seriesValues(userSeries(userKeys), data.months, "users", "total"),
+        format: fmtNum,
+        axisFormat: fmtCompact,
+      })
+    );
+    const costMonths = data.months.filter((m) => m.cost !== null);
+    if (costMonths.length) {
+      grid.append(
+        stackedBarChart({
+          title: _t("月別の料金（米ドル、インスタンス別の積み上げ）"),
+          note: _t("各インスタンスの料金設定から計算した金額の合計です。"),
+          categories: costMonths.map((m) => m.month),
+          series: seriesValues(instanceSeries, costMonths, "instances", "cost"),
+          format: fmtUsd,
+          axisFormat: (v) => "$" + fmtCompact(v),
+        })
+      );
+    }
+  } else {
+    grid.append(el("p", { class: "hint", text: _t("トークン使用量のデータがありません（[llm] track_token_usage=false、[thread_store] enabled=false、またはまだ会話がありません）。") }));
+  }
+
+  const monthlyTable = dataTable(
+    [_t("対象月"), _t("合計トークン"), _t("入力"), _t("出力"), _t("LLM呼び出し回数"), _t("利用ユーザー数"), _t("料金（米ドル）"), _t("料金（円）"), _t("100万トークンあたり"), _t("注記")],
+    [...data.months].reverse().map((m) => [
+      m.month + (m.backfilled ? _t("（概算を含む）") : ""),
+      fmtNum(m.total),
+      fmtNum(m.input),
+      fmtNum(m.output),
+      fmtNum(m.calls),
+      String(Object.keys(m.users).length),
+      fmtUsd(m.cost),
+      fmtJpy(m.cost_jpy),
+      m.cost !== null && m.total && !m.cost_incomplete.length ? fmtUsd((m.cost / m.total) * 1e6) : "-",
+      el("span", { class: "hint", text: incompleteNote(m) }),
+    ]),
+    _t("データがありません。")
+  );
+
+  const instanceRows = data.instances.map((i) => {
+    const total = data.months.reduce((s, m) => s + ((m.instances[i.name] || {}).total || 0), 0);
+    const cost = data.months.reduce((s, m) => { const c = (m.instances[i.name] || {}).cost; return c === null || c === undefined ? s : (s || 0) + c; }, null);
+    const jpy = data.months.reduce((s, m) => { const c = (m.instances[i.name] || {}).cost_jpy; return c === null || c === undefined ? s : (s || 0) + c; }, null);
+    return [
+      linkBtn(labelOf[i.name], () => {
+        $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === "instances"));
+        renderInstanceDetail(i.name, "usage");
+      }),
+      PRICING_MODEL_LABELS[i.pricing_model] || i.pricing_model,
+      fmtNum(total),
+      fmtPct(allTotal ? total / allTotal : null),
+      fmtUsd(cost),
+      fmtJpy(jpy),
+    ];
+  });
+
+  const userBox = el("div");
+  const monthSelect = el("select", { class: "inline-select" }, [el("option", { value: "", text: _t("（全期間）") }), ...[...data.months].reverse().map((m) => el("option", { value: m.month, text: m.month }))]);
+  const instancesOfUser = Object.fromEntries(data.users.map((u) => [u.user, u.instances]));
+  const drawUsers = () => {
+    let list;
+    if (monthSelect.value) {
+      const m = data.months.find((x) => x.month === monthSelect.value);
+      list = Object.entries(m.users).map(([user, v]) => ({ user, ...v }));
+    } else {
+      list = data.users.map((u) => ({ ...u }));
+    }
+    list.sort((a, b) => b.total - a.total || a.user.localeCompare(b.user));
+    const sum = list.reduce((s, u) => s + u.total, 0);
+    userBox.replaceChildren(
+      dataTable(
+        [_t("ユーザー"), _t("インスタンス"), _t("合計トークン"), _t("割合"), _t("料金（米ドル）"), _t("料金（円）")],
+        list.map((u) => [u.user, (instancesOfUser[u.user] || []).map((n) => labelOf[n] || n).join(", "), fmtNum(u.total), fmtPct(sum ? u.total / sum : null), fmtUsd(u.cost), fmtJpy(u.cost_jpy)]),
+        _t("データがありません。")
+      )
+    );
+  };
+  monthSelect.addEventListener("change", drawUsers);
+  drawUsers();
+
+  const curIncomplete = cur && (cur.cost_incomplete.length || cur.jpy_incomplete.length);
+  box.replaceChildren(
+    el("div", { class: "stat-row" }, [
+      statTile(_t("今月のトークン"), fmtNum(cur ? cur.total : 0), thisMonth),
+      statTile(_t("全期間のトークン"), fmtNum(allTotal), _t(`{0}か月分`, data.months.length)),
+      statTile(_t("今月の料金"), cur && cur.cost !== null ? fmtUsd(cur.cost) : "-", cur && cur.cost_jpy !== null ? fmtJpy(cur.cost_jpy) + (curIncomplete ? _t("（一部未入力）") : "") : _t("各インスタンスで入力")),
+      statTile(_t("料金の合計"), data.total_cost !== null ? fmtUsd(data.total_cost) : "-", data.total_cost_jpy !== null ? fmtJpy(data.total_cost_jpy) : null),
+    ]),
+    ...data.errors.map((e) => el("div", { class: "error", text: `${labelOf[e.name] || e.name}: ${e.error}` })),
+    el("p", { class: "hint", text: _t("スキル調整ワーカーを除く全インスタンスの合計です。料金は各インスタンスの「利用量・料金」で入力した設定から計算した金額を足し合わせています（入力していないインスタンスの分は含みません）。") }),
+    el("section", { class: "monitor-section" }, [el("h3", { text: _t("月別のトークン使用量") }), el("div", { class: "token-charts" }, grid)]),
+    el("section", { class: "monitor-section" }, [el("h3", { text: _t("月別の集計") }), monthlyTable]),
+    el("section", { class: "monitor-section" }, [
+      el("h3", { text: _t("インスタンス別の集計（全期間）") }),
+      dataTable([_t("インスタンス"), _t("料金形態"), _t("合計トークン"), _t("割合"), _t("料金（米ドル）"), _t("料金（円）")], instanceRows, _t("データがありません。")),
+      el("p", { class: "hint", text: _t("インスタンス名を押すと、そのインスタンスの「利用量・料金」を開きます（料金の入力はそこで行います）。") }),
+    ]),
+    el("section", { class: "monitor-section" }, [el("h3", { text: _t("ユーザー別の使用量と料金") }), el("div", { class: "filter-row" }, [monthSelect]), userBox])
+  );
 }
 
 function buildMonthlyTable(usage, costs) {

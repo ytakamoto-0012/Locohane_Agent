@@ -565,6 +565,9 @@ $C "$BASE/api/instances/default/monitor/endpoints"
 月別・ユーザー別のトークン使用量と、手入力した AWS 利用料金からの金額（README_DETAIL.md「利用量・料金」節）。
 
 ```bash
+# 全インスタンス（スキル調整ワーカーを除く）の月別合計。months[].instances / months[].users に内訳、
+# cost_incomplete / jpy_incomplete に料金・為替レートが未入力のインスタンス名、errors に読めなかったインスタンス
+$C "$BASE/api/usage/overview"
 # 月別の使用量（usage）・料金設定（settings）・計算した金額（costs）
 $C "$BASE/api/instances/default/usage"
 # 料金設定の保存（pricing_model は monthly_bill / hourly / per_token。数値は空欄=未入力。

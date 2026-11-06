@@ -133,3 +133,90 @@ def test_settings_round_trip(tmp_path) -> None:
     assert saved["months"] == {}  # 空欄だけの月は保存しない
     loaded = usage_cost.read_settings(tmp_path, "default")
     assert loaded["pricing_model"] == "hourly" and loaded["hourly_rate"] == 1.2
+
+
+def _item(name: str, rows: list[tuple], settings: dict) -> dict:
+    """rows: (month, owner, input, output) のリストから aggregate_instances の入力を作る。"""
+    months: dict[str, dict] = {}
+    for month, owner, inp, out in rows:
+        m = months.setdefault(month, {"month": month, "input": 0, "output": 0, "total": 0, "calls": 1, "backfilled": False, "users": {}})
+        m["input"] += inp
+        m["output"] += out
+        m["total"] += inp + out
+        m["users"][owner] = {"input": inp, "output": out, "total": inp + out, "calls": 1}
+    usage = {"source": "ledger", "months": [months[k] for k in sorted(months)], "users": sorted({r[1] for r in rows})}
+    return {"name": name, "usage": usage, "costs": usage_cost.compute_costs(usage, usage_cost.validate_settings(settings))}
+
+
+def test_aggregate_instances_sums_usage_and_costs() -> None:
+    a = _item(
+        "inst_a",
+        [("2026-10", "alice", 600, 400), ("2026-11", "alice", 100, 0)],
+        {"pricing_model": "monthly_bill", "exchange_rate": 150, "months": {"2026-10": {"bill": 10}, "2026-11": {"bill": 2}}},
+    )
+    b = _item("inst_b", [("2026-10", "alice", 1000, 0), ("2026-10", "bob", 2000, 0)], {"pricing_model": "monthly_bill"})
+    c = _item("inst_c", [("2026-10", "bob", 500, 500)], {"pricing_model": "monthly_bill", "months": {"2026-10": {"bill": 4}}})
+    agg = usage_cost.aggregate_instances([a, b, c])
+    oct_, nov = agg["months"]
+    assert oct_["month"] == "2026-10" and oct_["total"] == 1000 + 3000 + 1000
+    # 料金は分かるインスタンスの分だけ足し、出せないインスタンスを記録する
+    assert oct_["cost"] == pytest.approx(14)
+    assert oct_["cost_incomplete"] == ["inst_b"]
+    # 円は為替レートを入れたインスタンスの分だけ
+    assert oct_["cost_jpy"] == pytest.approx(1500)
+    assert oct_["jpy_incomplete"] == ["inst_c"]
+    assert oct_["instances"]["inst_c"] == {"total": 1000, "cost": 4.0, "cost_jpy": None}
+    # 同じ名前のユーザーはインスタンスをまたいで合算する
+    assert oct_["users"]["alice"]["total"] == 2000
+    assert oct_["users"]["alice"]["cost"] == pytest.approx(10)
+    assert nov["total"] == 100 and nov["cost"] == pytest.approx(2)
+    assert agg["instances"] == ["inst_b", "inst_a", "inst_c"]
+    users = {u["user"]: u for u in agg["users"]}
+    assert users["alice"]["instances"] == ["inst_a", "inst_b"]
+    assert users["alice"]["total"] == 2100
+    assert users["bob"]["cost"] == pytest.approx(4)
+    assert agg["total_cost"] == pytest.approx(16)
+    assert agg["total_cost_jpy"] == pytest.approx(1800)
+
+
+def test_aggregate_instances_without_any_cost() -> None:
+    agg = usage_cost.aggregate_instances([_item("inst_a", [("2026-10", "alice", 1, 1)], {})])
+    assert agg["total_cost"] is None and agg["months"][0]["cost"] is None
+    assert agg["months"][0]["cost_incomplete"] == ["inst_a"]
+
+
+def test_usage_overview_endpoint_skips_skill_lab_and_reports_errors(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    from admin import instances as inst
+    from admin import monitor, server
+
+    root = tmp_path / "instances"
+    for name, kind in (("inst_a", "app"), ("inst_b", "app"), ("lab1", "skill_lab")):
+        (root / name).mkdir(parents=True)
+        (root / name / "instance.json").write_text(json.dumps({"display_name": name.upper(), "kind": kind}), encoding="utf-8")
+    db_a = tmp_path / "a.sqlite"
+    _make_db(db_a)
+    usage_cost.write_settings(root, "inst_a", {"pricing_model": "monthly_bill", "months": {"2026-10": {"bill": 30}}})
+
+    def _fake_config(instances_root, config_ini_path, name):
+        if name == "inst_b":
+            raise monitor.MonitorError("broken config")
+        return SimpleNamespace(thread_store_db=db_a)
+
+    monkeypatch.setattr(server, "INSTANCES_ROOT", root)
+    monkeypatch.setattr(monitor, "instance_config", _fake_config)
+    server.app.dependency_overrides[server.require_login] = lambda: "admin"
+    try:
+        data = TestClient(server.app).get("/api/usage/overview").json()
+    finally:
+        server.app.dependency_overrides.pop(server.require_login, None)
+    assert [i["name"] for i in data["instances"]] == ["inst_a", "inst_b"]
+    assert data["instances"][0]["display_name"] == "INST_A"
+    assert data["errors"] == [{"name": "inst_b", "error": "broken config"}]
+    assert data["instances_by_usage"][0] == "inst_a"
+    oct_ = {m["month"]: m for m in data["months"]}["2026-10"]
+    assert oct_["total"] == 3_000_000 and oct_["cost"] == pytest.approx(30)
+    assert inst.KIND_SKILL_LAB == "skill_lab"

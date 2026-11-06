@@ -2338,6 +2338,18 @@ With hourly and per-token pricing, a fixed monthly cost (EBS, data transfer, loa
 (split among users by share). Entering an exchange rate (yen per USD) also shows amounts in yen. Each save is recorded
 in the change history as `usage_cost_settings_update`.
 
+**All instances**: the "Usage & cost" tab at the top shows the totals for all instances except skill tuning workers
+(`GET /api/usage/overview`). Monthly token usage is shown as bar charts stacked by instance and by user, and the cost as
+a bar chart stacked by instance, together with a monthly summary, a per-instance summary (all time) and per-user usage and cost.
+
+- The cost is the sum of the amounts calculated from each instance's cost settings. For months where some instance has no
+  calculable cost (not entered), the "Notes" column names it and the total covers only what is known. Yen amounts are
+  likewise summed only over instances with an exchange rate.
+- The same username is counted as one user even across instances (login users are managed per instance, so different
+  people using the same name are mixed together).
+- Instances whose thread DB or settings cannot be read are shown as errors at the top, and their usage is treated as 0.
+- Costs are entered in each instance's "Usage & cost" sub-tab (open it from the instance name).
+
 Data sources and storage:
 
 | Item | Location |

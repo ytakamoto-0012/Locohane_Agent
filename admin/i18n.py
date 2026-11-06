@@ -354,4 +354,5 @@ EN: dict[str, str] = {
     '月は YYYY-MM の形式で指定してください: {0}': 'Specify the month as YYYY-MM: {0}',
     '{0} の稼働時間が1か月の時間数を超えています。': 'The running hours for {0} exceed the hours in a month.',
     '{0} を読めません: {1}': 'Cannot read {0}: {1}',
+    'instance.json を読めません。': 'Cannot read instance.json.',
 }

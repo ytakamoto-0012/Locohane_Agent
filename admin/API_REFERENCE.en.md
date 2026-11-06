@@ -568,6 +568,9 @@ $C "$BASE/api/instances/default/monitor/endpoints"
 Monthly token usage per user, and costs calculated from AWS charges entered by hand (README_DETAIL.en.md "Usage & cost").
 
 ```bash
+# Monthly totals for all instances (except skill tuning workers). Breakdown in months[].instances / months[].users,
+# instance names without a cost / exchange rate in cost_incomplete / jpy_incomplete, unreadable instances in errors
+$C "$BASE/api/usage/overview"
 # Monthly usage (usage), cost settings (settings) and calculated amounts (costs)
 $C "$BASE/api/instances/default/usage"
 # Save the cost settings (pricing_model is monthly_bill / hourly / per_token. Empty numbers = not entered.
