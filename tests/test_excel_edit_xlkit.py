@@ -1,4 +1,4 @@
-"""excel-py スキルの補助モジュール xlkit のテスト。"""
+"""excel-edit スキルの補助モジュール xlkit のテスト。"""
 
 import json
 import sys
@@ -7,11 +7,16 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "skills" / "excel-py" / "scripts"
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "skills" / "excel-edit" / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from xlkit import merge_same, new_workbook, open_workbook, save, write_table  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _without_path_memory(monkeypatch):
+    monkeypatch.delenv("AGENT_SRC_DIR", raising=False)
 
 
 def _rgb(cell) -> str | None:
@@ -101,3 +106,68 @@ def test_write_note_merges_wraps_and_sets_height():
     assert f"A{row}:C{row}" in {str(r) for r in ws.merged_cells.ranges}
     assert ws.cell(row=row, column=1).alignment.wrap_text
     assert ws.row_dimensions[row].height > 15
+
+
+def test_save_sets_cjk_font_for_new_workbook_with_japanese_text(tmp_path):
+    wb = new_workbook()
+    ws = wb.create_sheet("月別")
+    write_table(ws, [["月", "予定"], ["4月", "打ち合わせ"]])
+    save(wb, tmp_path / "jp.xlsx", new=True)
+
+    saved = openpyxl.load_workbook(tmp_path / "jp.xlsx")["月別"]
+    assert saved["A1"].font.name == "Yu Gothic"
+    assert saved["B2"].font.name == "Yu Gothic"
+
+
+def test_save_keeps_calibri_for_new_workbook_without_japanese_text(tmp_path):
+    wb = new_workbook()
+    ws = wb.create_sheet("S")
+    write_table(ws, [["month", "plan"], ["April", "meeting"]])
+    save(wb, tmp_path / "en.xlsx", new=True)
+
+    saved = openpyxl.load_workbook(tmp_path / "en.xlsx")["S"]
+    assert saved["A1"].font.name == "Calibri"
+
+
+def test_save_names_fonts_of_existing_workbook_with_the_sheet_dominant_name(tmp_path):
+    path = tmp_path / "book.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "S"
+    ws["A1"] = "既存"
+    ws["A1"].font = openpyxl.styles.Font(name="Meiryo")
+    wb.save(path)
+
+    wb2 = open_workbook(path)
+    ws2 = wb2["S"]
+    ws2["A2"] = "追記"  # openpyxlが作った名前なしのフォント
+    save(wb2, path)
+
+    saved = openpyxl.load_workbook(path)["S"]
+    assert saved["A1"].font.name == "Meiryo"
+    assert saved["A2"].font.name == "Meiryo"
+
+
+def test_save_sets_heights_of_wrapped_data_rows(tmp_path):
+    wb = new_workbook()
+    ws = wb.create_sheet("S")
+    long_text = "反省点：" + "あ" * 40  # 表示幅88（自動列幅の上限60を超える）
+    t = write_table(ws, [["項目", "内容"], ["短い", "短い"], ["長い", long_text]])
+    wrapped_row = t.last_row
+    save(wb, tmp_path / "h.xlsx", new=True)
+
+    saved = openpyxl.load_workbook(tmp_path / "h.xlsx")["S"]
+    assert saved.cell(row=wrapped_row, column=2).alignment.wrap_text
+    assert saved.row_dimensions[wrapped_row].height > 15
+
+
+def test_save_keeps_an_explicit_row_height(tmp_path):
+    wb = new_workbook()
+    ws = wb.create_sheet("S")
+    t = write_table(ws, [["項目", "内容"], ["a", "b"], ["c", "長テキスト長テキスト長テキスト長テキスト長テキスト長テキスト"]])
+    wrapped_row = t.last_row
+    ws.row_dimensions[wrapped_row].height = 20
+    save(wb, tmp_path / "h2.xlsx", new=True)
+
+    saved = openpyxl.load_workbook(tmp_path / "h2.xlsx")["S"]
+    assert saved.row_dimensions[wrapped_row].height == 20

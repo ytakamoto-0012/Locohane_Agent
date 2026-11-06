@@ -79,15 +79,18 @@
   実行をブロックする。任意コード実行が可能な `execute_python_code` でも
   git/npm/pip の起動とプロジェクト外への書き込みをガードで遮断し、最低限の
   破壊的操作を防いでいる。
-- **文書生成スキルの「ops JSON DSL」設計**（`skills/pptx-create`・`skills/excel-edit`・
-  `skills/docx-create` の `scripts/_*.py`）: 上記「bash/npm相当のツールを持たせない
-  設計」を xlsx/pptx/docx 生成にも一貫して適用したもの。`python-pptx`/`openpyxl`/
+- **文書生成スキルの「ops JSON DSL」設計**（`skills/pptx-create`・`skills/docx-create` の
+  `scripts/_*.py`）: 上記「bash/npm相当のツールを持たせない
+  設計」を pptx/docx 生成にも一貫して適用したもの。`python-pptx`/
   `python-docx` の生コードを LLM に書かせるのではなく、有限個の `op`（`set_range`/
   `add_chart`/`format_table` 等）と JSON スキーマへ閉じ込めることで、低パラメータ
   モデルでも構文エラーやファイル破損なく確実に動く操作だけに絞っている（Anthropic
   公式の `skills/pptx`・`skills/xlsx` 等は逆に、Claude自身の事前知識に頼って
   `python-pptx`/`openpyxl` の生コードを直接書かせる設計で、SKILL.md はライブラリ
   API そのものではなく「落とし穴」だけを補足する差分ドキュメントになっている）。
+  xlsx はこの設計の例外で、`skills/excel-edit` は openpyxl のコードを直接書かせる
+  （同じ内容が1セル1命令のop列より小さいpayloadになるため。見た目の統一と保存時の
+  点検は補助モジュール `xlkit` が引き受ける）。
   見た目の一貫性のため、`pptx-create`/`excel-edit`/`docx-create`/`pdf-tools` は
   同じ8色の配色テーマ（`charcoal`/`navy` 等、Anthropic公式pptxスキルのDesign
   Ideas準拠）を共有している。`pdf-tools`（`create_pdf.py`）だけは例外的に
@@ -491,8 +494,7 @@ Locohane/
 │   ├── docx-edit/           # 既存docxの編集（検索置換・Track Changes・段落追加削除）
 │   ├── docx-render/         # Word文書ページの画像化
 │   ├── excel-read/          # xlsx/xls/xlsm読込専用（シート一覧・セルデータ）
-│   ├── excel-py/            # xlsx/xlsm新規作成・編集（openpyxl直書き＋補助モジュールxlkit。試行中）
-│   ├── excel-edit/          # xlsx/xlsm新規作成・編集（セル/書式/行列/グラフ等）
+│   ├── excel-edit/          # xlsx/xlsm新規作成・編集（openpyxl直書き＋補助モジュールxlkit）
 │   ├── excel-recalc/        # xlsx/xlsm/xls数式再計算・エラーセル検出
 │   ├── excel-vba-read/      # xlsm/xls VBAマクロコード読込専用
 │   ├── excel-vba-edit/      # xlsm VBAマクロコード追加/上書き/削除・実行
@@ -881,8 +883,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 ^
 | `docx-edit` | `skills/` | スクリプト実行を伴う | 既存docxの編集（検索置換、画像挿入・サイズ変更、Track Changes/変更履歴の付与・確定・却下を含む。画像トリミングは非対応）。 |
 | `docx-render` | `skills/` | スクリプト実行を伴う | Word文書ページの画像化（レイアウト・表・画像配置・強調表現の視覚把握）。 |
 | `excel-read` | `skills/` | スクリプト実行を伴う | xlsx/xls/xlsmの読込専用（シート一覧・セルデータ・画像有無）。 |
-| `excel-py` | `skills/` | コード実行を伴う | xlsx/xlsmの新規作成・編集。`execute_python_code` で openpyxl を直接書き、補助モジュール `xlkit`（見出し・罫線・縞模様・列幅・折り返し・グループ列の結合、保存時のバックアップと点検）を import する。excel-edit（JSON op）との比較のため試行中 |
-| `excel-edit` | `skills/` | スクリプト実行を伴う | xlsx/xlsmの新規作成・編集（セル/書式/行列/グラフ・画像追加と位置調整・条件付き書式・データ検証を含む。画像トリミングは非対応）。 |
+| `excel-edit` | `skills/` | コード実行を伴う | xlsx/xlsmの新規作成・編集。`execute_python_code` で openpyxl を直接書き、補助モジュール `xlkit`（見出し・罫線・縞模様・列幅・折り返し・グループ列の結合、保存時のフォント名と折返し行の高さ、バックアップと点検）を import する。グラフ・画像追加・条件付き書式・データ検証も openpyxl で書く（画像トリミングは非対応）。 |
 | `excel-recalc` | `skills/` | スクリプト実行を伴う | xlsx/xlsm/xlsの数式再計算・エラーセル検出。 |
 | `excel-vba-read` | `skills/` | スクリプト実行を伴う | xlsm/xlsのVBAマクロコードの読み込み専用。 |
 | `excel-vba-edit` | `skills/` | スクリプト実行を伴う | xlsmのVBAマクロコードの追加/上書き/削除・実行。 |

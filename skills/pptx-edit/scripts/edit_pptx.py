@@ -698,7 +698,8 @@ def _check_touched_slides(prs: Presentation, touched: list) -> tuple[list[str], 
 
     はみ出しは pptx-inspect の `overflow_warnings` と同じ判定（check_shape_overflow）。
     作業役が保存直後に気づいて同じ実行のうちに直せるようにし、要約は確認のための
-    pptx-inspect の再実行を省くために返す（Excel の edit_excel.py の warnings/sheet_summaries と同じ考え方）。
+    pptx-inspect の再実行を省くために返す（Excel の excel-edit スキル、xlkit の `save()`
+    が返す warnings / シート要約と同じ考え方）。
     """
     slide_width_cm = _length_cm(prs.slide_width)
     slide_height_cm = _length_cm(prs.slide_height)

@@ -7,7 +7,7 @@ run_script から
     python edit_docx.py <docx_path> --ops-file <JSONファイルのパス> [--output ...]
 の形で呼ばれる（このプロジェクトには汎用のファイル書き込みツールが無いため、
 LLMが組み立てたJSONをそのまま --ops-json 引数として渡せるようにしている。
-excel-edit の edit_excel.py と同じ設計）。
+excel-edit スキルも、JSONではなくスクリプトそのものを渡す形になっている）。
 
 このスクリプトは既存ファイルの編集専用（--newは持たない）。新規作成は
 create_docx.py を使うこと。--output を省略した場合は <docx_path> へ

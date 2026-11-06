@@ -64,11 +64,11 @@ def test_explore_allowed_read_only_skill_passes_allowlist_guard():
 
 
 def test_explore_blocked_from_write_skill():
-    # explore.md は「edit_excel.py 等の書き込み系スクリプトは絶対に呼び出さない」
+    # explore.md は「edit_docx.py 等の書き込み系スクリプトは絶対に呼び出さない」
     # とプロンプト上で約束しているが、これをコード側でも強制する。
     token = _set_agent_type("explore")
     try:
-        result = tools._script_job._prepare_script_execution("excel-edit", "edit_excel.py", ["dummy.xlsx"])
+        result = tools._script_job._prepare_script_execution("docx-edit", "edit_docx.py", ["dummy.docx"])
     finally:
         tools._state._SUBAGENT_AGENT_TYPE.reset(token)
 

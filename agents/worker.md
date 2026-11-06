@@ -81,12 +81,12 @@ the skill used. See the table below.
 
 | Skill | SKILL.md | Sections about pivots/tables |
 |---|---|---|
-| `excel-py` | `skills/excel-py/SKILL.md` | `write_table` (header, banding, row colors) and `merge_same` (merging cells with repeated values); structured tables are plain openpyxl (`openpyxl.worksheet.table.Table`) |
+| `excel-edit` | `skills/excel-edit/SKILL.md` | `write_table` (header, banding, row colors) and `merge_same` (merging cells with repeated values); structured tables are plain openpyxl (`openpyxl.worksheet.table.Table`) |
 | `excel-vba-knowledge` | `skills/excel-vba-knowledge/SKILL.md` | Index entry for pivot tables -> `excel-vba-knowledge/references/pivot-tables.md` (the PivotCache/PivotTable hierarchy, field placement, RefreshTable, toggling Visible of PivotItems, ManualUpdate) |
 | `excel-vba-knowledge` | `skills/excel-vba-knowledge/SKILL.md` | Index entry for tables (ListObject) -> `excel-vba-knowledge/references/excel-tables-listobject.md` (the trap where DataBodyRange is Nothing when empty, ListRows.Add, resolving Index from column names, AutoFilter, using it as pivot source data) |
 
 Common notes:
-- **openpyxl (`excel-py`) cannot create or edit pivot tables.** To handle pivot tables, use
+- **openpyxl (`excel-edit`) cannot create or edit pivot tables.** To handle pivot tables, use
   `excel-vba-edit` + `excel-vba-knowledge`.
 - An openpyxl `Table` (`ws.add_table`) is a **structured table (ListObject)**.
   It is different from a pivot table, so choose according to the purpose.
@@ -110,7 +110,7 @@ and the sections describing how to embed images and charts are shown below.
 | `docx-edit` | `skills/docx-edit/SKILL.md` | The section on `insert_image` / `set_image_size` (inserting and resizing images) |
 | `pptx-create` | `skills/pptx-create/SKILL.md` | The section on layouts (slide types) (the `picture` layout) |
 | `pptx-edit` | `skills/pptx-edit/SKILL.md` | The sections on `add_picture` / `add_chart` (adding new images/charts) and `crop_picture` |
-| `excel-py` | `skills/excel-py/SKILL.md` | The section on charts (plain openpyxl); images are `openpyxl.drawing.image.Image` + `ws.add_image` |
+| `excel-edit` | `skills/excel-edit/SKILL.md` | The section on charts (plain openpyxl); images are `openpyxl.drawing.image.Image` + `ws.add_image` |
 
 Common notes:
 - If the delegation task text or the plan specifies source files, such as "based on past materials" or

@@ -3006,7 +3006,7 @@ def _parse_allow_sandbox_dir(value: str | None, base: Path) -> tuple[SandboxDirE
     指定と同じ形式（文字列1件でビルトインツール名そのもの、または
     [スキル名, スクリプトファイル名] の2要素配列でrun_script経由のスキル
     スクリプトのみを許可）。
-    例: [{"dir": "E:/shared_output", "allow_entries": [["excel-edit", "write_excel.py"]]}]
+    例: [{"dir": "E:/shared_output", "allow_entries": [["docx-edit", "edit_docx.py"]]}]
     Python風の辞書・リストリテラルを ast.literal_eval で読む（末尾カンマ等の
     緩い記法も許容するため）。
 

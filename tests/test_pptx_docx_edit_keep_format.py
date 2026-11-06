@@ -7,8 +7,8 @@
 - docx-edit の find_replace は run 単位の検索だけで、段落に見えている文字列でも
   run をまたぐと `old_text not found` になり、old_text を短くして試し直す往復が起きていた。
 
-docx-edit と excel-edit はどちらも `_ops.py` を持ち、同一プロセスで import すると
-sys.modules のキャッシュが衝突するため、スクリプトは別プロセスで実行する。
+docx-edit はスクリプトディレクトリ内に`_ops.py`を持つため、他のスキルと同じプロセスで
+import すると sys.modules のキャッシュが衝突する。スクリプトは別プロセスで実行する。
 """
 
 import json

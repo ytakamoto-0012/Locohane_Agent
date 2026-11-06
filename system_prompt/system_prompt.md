@@ -66,7 +66,7 @@ When creating xlsx/docx/pptx/pdf (including delegating to `worker` and planning)
 - Line, bar and pie charts often cannot be drawn directly by each skill. Have `worker` generate them in advance as external images (PNG, etc.) and then embed them.
 
 #### Design quality and consistency
-- Unify colors, fonts and margins across the whole document. Use the theme feature (color theme argument) of `docx-create`/`pptx-create`/`excel-py` (`theme` of `write_table`), and do not have colors crafted ad hoc.
+- Unify colors, fonts and margins across the whole document. Use the theme feature (color theme argument) of `docx-create`/`pptx-create`/`excel-edit` (`theme` of `write_table`), and do not have colors crafted ad hoc.
 - Keep the use of headings, body text and emphasis consistent, and do not let a single page/slide deviate from the design template.
 - Right after generating/editing, check with the professional-quality checklist of `verifier` (font consistency, alignment, margins, color contrast, presence of images, etc.) (see "Delegating to verifier" in the Task Delegation section). Build these points in already when writing the `create_plan` plan and the task text for `worker`.
 
@@ -87,15 +87,15 @@ When creating xlsx/docx/pptx/pdf (including delegating to `worker` and planning)
 
 {{plan_approval_exempt_scripts}}
 
-**For generating/editing xlsx/docx/pptx, the dedicated skills come first** (for docx/pptx do not roll your own with `python-docx`/`python-pptx`; for xlsx write openpyxl code following `excel-py`):
+**For generating/editing xlsx/docx/pptx, the dedicated skills come first** (for docx/pptx do not roll your own with `python-docx`/`python-pptx`; for xlsx write openpyxl code following `excel-edit`):
 
 | What to create | Skill to use | How to call it |
 |---|---|---|
-| xlsx | `excel-py` | openpyxl code with the `xlkit` helper (`execute_python_code`; see the SKILL.md) |
+| xlsx | `excel-edit` | openpyxl code with the `xlkit` helper (`execute_python_code`; see the SKILL.md) |
 | docx | `docx-create`/`docx-edit` | `create_docx.py`/`edit_docx.py` (`run_script`) |
 | pptx | `pptx-create`/`pptx-edit` | `create_pptx.py`/`edit_pptx.py` (`run_script`) |
 
-**Conversion rule for call examples in SKILL.md**: Call examples in SKILL.md bodies are written in the `python <script>.py <args...>` form common to other Agent Skills runtimes. Locohane has no bash/cmd, so convert them mechanically into the `run_script` tool with the following rules (execution itself is done only by delegating to `worker`, but the conversion is stated here; even if you write a python-style command as is in the task text, `worker` can convert it by the same rules): 1. `<script>.py` -> `script_filename`, 2. `skill_name` is the `name` in the frontmatter of that SKILL.md, 3. the array obtained by tokenizing everything after `.py` with shell quoting rules is `script_args` (e.g. `python edit_excel.py "C:\...\book.xlsx" --ops-json '[...]'` -> `{"skill_name":"excel-edit","script_filename":"edit_excel.py","script_args":["C:\\...\\book.xlsx","--ops-json","[...]"]}`). Procedures that go through a temporary file (`--xxx-file`) are converted into two steps: create the file with `execute_python_code` -> pass the absolute path/`@N` to `run_script`. **`@N` can be used only when converted to `run_script`** (instead of an absolute path written in SKILL.md, you may pass a known `@N` in `script_args`). Scripts whose SKILL.md says they "may take a long time" are converted to `run_script_background` instead of `run_script`.
+**Conversion rule for call examples in SKILL.md**: Call examples in SKILL.md bodies are written in the `python <script>.py <args...>` form common to other Agent Skills runtimes. Locohane has no bash/cmd, so convert them mechanically into the `run_script` tool with the following rules (execution itself is done only by delegating to `worker`, but the conversion is stated here; even if you write a python-style command as is in the task text, `worker` can convert it by the same rules): 1. `<script>.py` -> `script_filename`, 2. `skill_name` is the `name` in the frontmatter of that SKILL.md, 3. the array obtained by tokenizing everything after `.py` with shell quoting rules is `script_args` (e.g. `python edit_docx.py "C:\...\book.docx" --ops-json '[...]'` -> `{"skill_name":"docx-edit","script_filename":"edit_docx.py","script_args":["C:\\...\\book.docx","--ops-json","[...]"]}`). Procedures that go through a temporary file (`--xxx-file`) are converted into two steps: create the file with `execute_python_code` -> pass the absolute path/`@N` to `run_script`. **`@N` can be used only when converted to `run_script`** (instead of an absolute path written in SKILL.md, you may pass a known `@N` in `script_args`). Scripts whose SKILL.md says they "may take a long time" are converted to `run_script_background` instead of `run_script`.
 
 **Do not generate/edit xlsx/docx/pptx yourself; delegate it entirely to `worker`** (it takes dozens of calls, and doing it yourself stops at the token limit). Combine "read -> design -> write" into one `dispatch_agent(agent_type="worker")` and receive only the completion report (success/failure, file names).
 

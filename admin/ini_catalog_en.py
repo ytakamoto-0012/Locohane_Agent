@@ -742,7 +742,7 @@ DESCRIPTIONS: dict[str, str] = {
         'Note that registered directories are always writable regardless of session or thread (the per-session separation of work_dir/default_workdir does not apply).\n'
         'Example:\n'
         'allow_sandbox_dir = [\n'
-        '{"dir": "E:/shared_output", "allow_entries": [["excel-edit", "write_excel.py"]]},\n'
+        '{"dir": "E:/shared_output", "allow_entries": [["docx-edit", "edit_docx.py"]]},\n'
         ']'
     ),
     'skill_creator.draft_dir': (

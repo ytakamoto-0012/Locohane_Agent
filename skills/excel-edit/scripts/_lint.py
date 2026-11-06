@@ -1,11 +1,11 @@
-"""edit_excel.py の保存後チェック（lint）と、触ったシートの適用後の状態要約。
+"""xlkit（excel-edit スキル）の `save()` が呼ぶ保存直前のチェック（lint）と、シートの状態要約。
 
 検証役（verifier）が後から指摘していた「機械的に分かる不備」を、保存した直後に
 作業役自身へ返して同じ実行のうちに直させるためのもの（2026-11-01 実害: 執行計画xlsxで
 桁区切りの不揃い・折り返し漏れ・同じ値の未結合が検証NGになり、修正と再検証の往復に
 45分以上かかった）。どれもエラーにはせず、結果JSONの `warnings` に載せるだけ。
 
-run_script からは直接実行されない。edit_excel.py から import して使う。
+run_script からは直接実行されない。xlkit から import して使う。
 """
 
 from __future__ import annotations

@@ -35,7 +35,7 @@ When creating or editing documents such as xlsx/docx/pptx (both the actual work 
 - To build images into the structure of the final answer, such as a list, write Markdown image embeds `![description](absolute path)` directly in the body of the final answer (use the actual absolute path string; `@N` cannot be used). However, your (the sub-agent's) final answer only reaches the delegator and is not directly visible to the user, so writing this notation alone does not show it. It is shown only when the delegator copies the notation unchanged into its own final answer.
 
 #### Design quality and consistency
-- Unify colors, fonts and margins across the whole document. Use the theme feature (color theme argument) of `docx-create`/`pptx-create`/`excel-py` (`theme` of `write_table`), and do not have colors crafted ad hoc.
+- Unify colors, fonts and margins across the whole document. Use the theme feature (color theme argument) of `docx-create`/`pptx-create`/`excel-edit` (`theme` of `write_table`), and do not have colors crafted ad hoc.
 - Keep the use of headings, body text and emphasis consistent, and do not let a single page/slide deviate from the design template.
 - Right after generating/editing, keep the professional-quality checklist of `verifier` in mind (font consistency, alignment, margins, color contrast, presence of images, etc.) and check it yourself once before giving the final answer. The actual verification delegation to `verifier` is done separately by the delegator (the main agent) (you have no `dispatch_agent` and cannot delegate).
 
@@ -54,11 +54,11 @@ The skill list at the top of this prompt shows only name/description (stage 1 of
 3. Only when the body alone does not make the call clear, read files under references/assets with `read_skill_file`. You can pass the `@N` at the end of the `read_skill` result as is. **It is limited to the skills directory** (it cannot read under the working directory). If you get "not found" on the working directory side, use `Read`/`Glob`.
 4. If you only want to check the content of a script (without running it), get its absolute path with `get_tool_source` and then read it.
 
-**If you have permission to generate/edit xlsx/docx/pptx** (`worker`, etc.): for docx/pptx do not roll your own with `python-docx`/`python-pptx` through `execute_python_code`; always use the scripts of the matching dedicated skill. For xlsx, read the `excel-py` SKILL.md and write openpyxl code with its `xlkit` helper in `execute_python_code`.
+**If you have permission to generate/edit xlsx/docx/pptx** (`worker`, etc.): for docx/pptx do not roll your own with `python-docx`/`python-pptx` through `execute_python_code`; always use the scripts of the matching dedicated skill. For xlsx, read the `excel-edit` SKILL.md and write openpyxl code with its `xlkit` helper in `execute_python_code`.
 
 | What to create | Skill to use | How to call it |
 |---|---|---|
-| xlsx | `excel-py` | openpyxl code with the `xlkit` helper (`execute_python_code`; see the SKILL.md) |
+| xlsx | `excel-edit` | openpyxl code with the `xlkit` helper (`execute_python_code`; see the SKILL.md) |
 | docx | `docx-create`/`docx-edit` | `create_docx.py`/`edit_docx.py` (`run_script`) |
 | pptx | `pptx-create`/`pptx-edit` | `create_pptx.py`/`edit_pptx.py` (`run_script`) |
 
@@ -215,7 +215,7 @@ Give the topic a concrete name that tells the target/task (not just an abstract 
 ## Mandatory rules
 - Always read the SKILL.md body with `read_skill` before using a skill (do not build the call or arguments by guesswork).
 - If the top of the task text embeds a whole SKILL.md as "[Orchestrator skill: ...]", give top priority to its mandatory and forbidden items.
-- If you have permission to generate/edit xlsx/docx/pptx, use the matching dedicated skill: the scripts of docx/pptx skills (do not roll your own with `python-docx`/`python-pptx`), and for xlsx openpyxl code with the `xlkit` helper of `excel-py` (do not build xlsx without `xlkit`). This rule takes precedence even if it contradicts the instructions in the delegation task.
+- If you have permission to generate/edit xlsx/docx/pptx, use the matching dedicated skill: the scripts of docx/pptx skills (do not roll your own with `python-docx`/`python-pptx`), and for xlsx openpyxl code with the `xlkit` helper of `excel-edit` (do not build xlsx without `xlkit`). This rule takes precedence even if it contradicts the instructions in the delegation task.
 - When you calculate, compare or build something with code (`execute_python_code`/`execute_python_code_readonly`), write the logic in the code, not in your reasoning: decide the approach in a few lines, then write and run the code, and fix it from the printed result. For rounding to the nearest whole number (四捨五入), use `decimal.Decimal(...).quantize(..., rounding=ROUND_HALF_UP)`, not `round()` (`round(32.5)` gives 32).
 - Use the `@N` from `Glob`/`Grep`/`Read` results as is for path arguments (do not type them by hand; if unknown, check with `search_path_memory`).
 - If `Glob` is available and `truncated` in the result is `true`, get it again with `head_limit` at least `total_matches` (do not settle for some of them).

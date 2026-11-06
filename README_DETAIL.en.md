@@ -77,14 +77,17 @@ whether to reflect them in the official procedures is decided through external e
   under skills, and all write tools are blocked until user approval through `create_plan` -> `approve_plan`.
   Even `execute_python_code`, which can run arbitrary code, has guards that block starting
   git/npm/pip and writing outside the project, preventing the minimum of destructive operations.
-- **The "ops JSON DSL" design of document generation skills** (`scripts/_*.py` of `skills/pptx-create`, `skills/excel-edit`,
-  `skills/docx-create`): applies the "no bash/npm-equivalent tools" design above consistently
-  to generating xlsx/pptx/docx. Instead of having the LLM write raw `python-pptx`/`openpyxl`/
+- **The "ops JSON DSL" design of document generation skills** (`scripts/_*.py` of `skills/pptx-create`
+  and `skills/docx-create`): applies the "no bash/npm-equivalent tools" design above consistently
+  to generating pptx/docx. Instead of having the LLM write raw `python-pptx`/
   `python-docx` code, it is confined to a finite set of `op`s (`set_range`/
   `add_chart`/`format_table`, etc.) and a JSON schema, narrowing it down to operations that work reliably without syntax errors
   or file corruption even with low-parameter models (Anthropic's official `skills/pptx`, `skills/xlsx`, etc. take the opposite approach,
   relying on Claude's own prior knowledge to write raw `python-pptx`/`openpyxl` code directly, and their SKILL.md is a diff document
   that adds only the "pitfalls" rather than the library API itself).
+  xlsx is the exception to this design: `skills/excel-edit` lets the LLM write raw openpyxl code directly
+  (the same content becomes a smaller payload than a list of one op per cell; the helper module `xlkit`
+  takes care of the consistent look and the checks on save).
   For visual consistency, `pptx-create`/`excel-edit`/`docx-create`/`pdf-tools`
   share the same 8-color themes (`charcoal`/`navy`, etc., based on the Design
   Ideas of Anthropic's official pptx skill). Only `pdf-tools` (`create_pdf.py`) is an exception,
@@ -486,8 +489,7 @@ Locohane/
 │   ├── docx-edit/           # editing existing docx (find/replace, Track Changes, adding/deleting paragraphs)
 │   ├── docx-render/         # rendering Word document pages as images
 │   ├── excel-read/          # xlsx/xls/xlsm read-only (sheet list, cell data)
-│   ├── excel-py/            # creating/editing xlsx/xlsm (openpyxl code + the xlkit helper; on trial)
-│   ├── excel-edit/          # creating/editing xlsx/xlsm (cells/formatting/rows and columns/charts, etc.)
+│   ├── excel-edit/          # creating/editing xlsx/xlsm (openpyxl code + the xlkit helper)
 │   ├── excel-recalc/        # recalculating formulas of xlsx/xlsm/xls, detecting error cells
 │   ├── excel-vba-read/      # reading VBA macro code of xlsm/xls only
 │   ├── excel-vba-edit/      # adding/overwriting/deleting and running VBA macro code of xlsm
@@ -872,8 +874,7 @@ The SKILL.md files, references and script messages of the bundled skills are wri
 | `docx-edit` | `skills/` | Runs scripts | Editing existing docx (find/replace, inserting and resizing images, adding/accepting/rejecting Track Changes. Cropping images is not supported). |
 | `docx-render` | `skills/` | Runs scripts | Rendering Word document pages as images (visually grasping layout, tables, image placement and emphasis). |
 | `excel-read` | `skills/` | Runs scripts | xlsx/xls/xlsm read-only (sheet list, cell data, whether there are images). |
-| `excel-py` | `skills/` | Runs code | Creating/editing xlsx/xlsm by writing openpyxl code with `execute_python_code` and importing the helper `xlkit` (header, borders, banding, column widths, wrapping, merging group columns; backup and checks on save). On trial for comparison with excel-edit (JSON ops) |
-| `excel-edit` | `skills/` | Runs scripts | Creating/editing xlsx/xlsm (cells/formatting/rows and columns/charts, adding and positioning images, conditional formatting, data validation. Cropping images is not supported). |
+| `excel-edit` | `skills/` | Runs code | Creating/editing xlsx/xlsm by writing openpyxl code with `execute_python_code` and importing the helper `xlkit` (header, borders, banding, column widths, wrapping, merging group columns; the font name and wrapped row heights set on save, backup and checks). Charts, added images, conditional formatting and data validation are plain openpyxl too (cropping images is not supported). |
 | `excel-recalc` | `skills/` | Runs scripts | Recalculating formulas of xlsx/xlsm/xls, detecting error cells. |
 | `excel-vba-read` | `skills/` | Runs scripts | Reading VBA macro code of xlsm/xls only. |
 | `excel-vba-edit` | `skills/` | Runs scripts | Adding/overwriting/deleting and running VBA macro code of xlsm. |

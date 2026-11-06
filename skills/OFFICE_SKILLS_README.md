@@ -38,12 +38,12 @@ Excel/Word/PowerPointを扱うスキル群固有の実装上の注意点をま�
 > - `docx-edit/scripts/_track_changes.py` と `docx-read/scripts/_track_changes.py`
 >   はかつて1-Aの複製関係にあったが、`docx-read/scripts/_track_changes.py` は
 >   削除し、`read_docx.py` から `docx-edit/scripts/` を `sys.path` 経由で import
->   する 1-B 方式へ移行した（excel-read → excel-edit のパターンと同様）。
+>   する 1-B 方式へ移行した（excel系は `office_shared/excel_common.py` を read / edit 両側で共有する1-B方式）。
 > - `excel-*`（6スキル）/ `docx-*`（4スキル）/ `pptx-*`（5スキル）の`_common.py`
 >   も、かつては各ファミリー内で1-Aの複製関係にあった（ファミリー内ではバイト単位で
 >   完全一致していた）。個別スキルフォルダの単体持ち出しは実際の運用ケースではない
 >   （本ファイル冒頭参照）ため複製で保つ根拠が薄く、`excel-edit/scripts/
->   _excel_shared.py`（B1方式だった列グルーピングロジック）も含めて
+>   _excel_shared.py`（B1方式だった列グルーピングロジック、この統合で削除）も含めて
 >   `office_shared/excel_common.py` / `office_shared/docx_common.py` /
 >   `office_shared/pptx_common.py` へ統合し、1-B方式（下記B2）へ移行した。
 >   pptx-inspect限定だった`check_shape_overflow`もこの際`pptx_common.py`に
@@ -134,8 +134,9 @@ write側が操作する値をread側のどこかが可視化できていなけ�
 
 ## 4. アドレッシング設計（拡張時に踏襲すべきパターン）
 
-`excel-edit`（`insert_row_group`のアンカー解決）、`docx-edit`（`DocEditContext`）、
-`pptx-edit`（`EditContext`）は、いずれも共通の設計原則に従う:
+`docx-edit`（`DocEditContext`）、`pptx-edit`（`EditContext`）は、いずれも共通の設計原則に従う
+（excel-edit の openpyxl 編集でも、image / chart の index は read 側が示した「呼び出し開始時点の番号」
+のまま解決される）:
 
 > **既存コンテンツを指す番号・indexは、常に「そのスクリプト呼び出しを開始した
 > 時点（＝直前のread/inspect系スキルが見せていた状態）の番号」として解決し、

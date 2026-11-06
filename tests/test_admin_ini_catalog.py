@@ -137,7 +137,7 @@ def test_schema_accepts_documented_allow_sandbox_dir_example():
     """既定値が [] の allow_sandbox_dir は、説明コメントの記入例で形式を検証する。"""
     catalog = parse_file(CONFIG_INI_PATH)
     info = next(i for i in catalog.keys if (i.section, i.key) == ("default_workdir", "allow_sandbox_dir"))
-    example = [{"dir": "E:/shared_output", "allow_entries": [["excel-edit", "write_excel.py"], "run_script"]}]
+    example = [{"dir": "E:/shared_output", "allow_entries": [["docx-edit", "edit_docx.py"], "run_script"]}]
     assert _schema_matches(info.schema, example)
 
 
