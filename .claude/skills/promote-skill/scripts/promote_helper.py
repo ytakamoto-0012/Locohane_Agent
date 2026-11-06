@@ -12,7 +12,7 @@
 ハッシュ・コピー規則は evals/skill_tree.py（skill-creator の _common.py と同じ規則）を使う。
 
 昇格先は --instance のインスタンス専用の置き場（[skill_lab].instance_locohane_dir の skills/、
-既定 instances/<名前>/skills/）だけ。同梱の skills/ や全インスタンス共通の
+既定 <instances_dir>/<名前>/skills/）だけ。同梱の skills/ や全インスタンス共通の
 project_locohane_dir に置くと他のインスタンスまで汚染するため。同梱・共有スキルの改善案も
 専用の置き場に同じ名前で置く（そのインスタンスでだけ置き換わる）。昇格したドラフトは
 [skill_creator] archive_dir へ移す（管理ツールのスキル研究室と同じ admin/skill_lab/promotion.py の
@@ -31,7 +31,7 @@ install は昇格の前に次を確かめる:
   config_overrides.json の値はキー単位で config.ini を置き換えるため、今の実効値
   （上書き値、無ければ config.ini の値）に足した全体を書く。保存は管理ツールと同じ
   admin/overrides.py の save() で行う（load_config() による検証・バックアップ・
-  instances/admin_changes.log への記録）。
+  <instances_dir>/admin_changes.log への記録）。
 """
 
 from __future__ import annotations

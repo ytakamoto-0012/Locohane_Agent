@@ -21,6 +21,7 @@ language when you answer.
 - **Skill Lab (スキル研究室)**: the workspace where the AI fixes skills and sub-agents by itself until they are finished, and you approve and promote them to an instance. Nothing progresses unless a skill tuning worker (an instance of kind skill_lab) is running.
 - **Display settings (表示設定)**: header.md, tab_title.md, welcome.md, icon and favicon shared by all instances.
 - **Change history (変更履歴)**: the audit log of setting changes, starts/stops, user operations, etc.
+- **Admin tool log (管理ツールログ)**: the admin tool's own log (`admin_*.log`: knowledge ingestion, backups, instance start/stop failures, etc.), filtered by level and text. Use it to investigate errors in the dashboard itself.
 - **API reference (APIリファレンス)**: how to do the same things as the screen operations with curl.
 
 ## Sub tabs of the instance details (opened from "Settings" etc. on a card)

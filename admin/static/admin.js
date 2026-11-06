@@ -148,6 +148,7 @@ function navigate(view) {
   if (view === "instances") return renderInstances();
   if (view === "settings") return renderSettings();
   if (view === "audit") return renderAudit();
+  if (view === "admin-logs") return renderAdminLogs();
   if (view === "data-backup") return renderDataBackup();
   if (view === "admin-settings") return renderAdminSettings();
   if (view === "skill-lab") return renderSkillLab();
@@ -3758,33 +3759,40 @@ function lineChart({ title, note, points, series, markers }) {
 
 /* --- アプリログ --- */
 
+// opts.admin = true なら管理ツール自身のログ（/api/admin-logs、admin_*.log）を表示する。
 async function renderLogs(container, opts) {
+  const admin = !!opts.admin;
   const level = el("select", { class: "inline-select" }, ["WARNING", "ERROR", "INFO", "DEBUG"].map((l) => el("option", { value: l, text: _t(`{0} 以上`, l) })));
   const search = el("input", { type: "search", placeholder: _t("メッセージで絞り込み...") });
-  const threadInput = el("input", { type: "search", placeholder: _t("thread_id で絞り込み") });
-  threadInput.value = opts.threadId || "";
+  const threadInput = admin ? null : el("input", { type: "search", placeholder: _t("thread_id で絞り込み") });
+  if (threadInput) threadInput.value = opts.threadId || "";
   if (opts.threadId) level.value = "INFO";
   const listBox = el("div", { class: "log-list" });
+  const hint = el("p", {
+    class: "hint",
+    text: admin ? _t("管理ツール自身のログ（admin_*.log）を新しい順に最大500件表示します。") : _t("[log] dir の app_*.log を新しい順に最大500件表示します。"),
+  });
   container.append(
     el("div", { class: "filter-row" }, [level, search, threadInput, el("button", { text: _t("再読み込み"), onclick: () => load() })]),
-    el("p", { class: "hint", text: _t("[log] dir の app_*.log を新しい順に最大500件表示します。") }),
+    hint,
     listBox
   );
   async function load() {
     const params = new URLSearchParams({ level: level.value, limit: 500 });
     if (search.value.trim()) params.set("q", search.value.trim());
-    if (threadInput.value.trim()) params.set("thread_id", threadInput.value.trim());
+    if (threadInput && threadInput.value.trim()) params.set("thread_id", threadInput.value.trim());
     const seq = nextRequestSeq(listBox);
     listBox.replaceChildren(el("p", { class: "hint", text: _t("読み込み中...") }));
     try {
-      const data = await api(monitorPath(`/logs?${params}`));
+      const data = await api(admin ? `/api/admin-logs?${params}` : monitorPath(`/logs?${params}`));
       if (!isLatestRequest(listBox, seq)) return;
+      if (admin && data.log_dir) hint.textContent = _t("{0} の admin_*.log を新しい順に最大500件表示します。", data.log_dir);
       listBox.replaceChildren(
         ...data.entries.map((e) =>
           el("div", { class: `log-entry log-${e.level.toLowerCase()}` }, [
             el("div", { class: "log-head" }, [
               el("span", { class: "badge " + ({ WARNING: "warn", ERROR: "critical", CRITICAL: "critical" }[e.level] || "") , text: e.level }),
-              el("span", { class: "hint", text: _t(`{0} ・ {1}{2}`, fmtTime(e.ts), e.logger, e.thread_id ? _t(" ・ ") + e.thread_id : "") }),
+              el("span", { class: "hint", text: _t(`{0} ・ {1}{2}`, fmtTime(e.ts), e.logger, e.thread_id || e.thread_name ? _t(" ・ ") + (e.thread_id || e.thread_name) : "") }),
             ]),
             el("pre", { class: "msg-pre", text: e.message }),
           ])
@@ -3797,13 +3805,22 @@ async function renderLogs(container, opts) {
   }
   level.addEventListener("change", load);
   let t = null;
-  for (const input of [search, threadInput]) {
+  for (const input of [search, threadInput].filter(Boolean)) {
     input.addEventListener("input", () => {
       clearTimeout(t);
       t = setTimeout(load, 400);
     });
   }
   await load();
+}
+
+/* ---------------------------------------------------- 管理ツールログ */
+
+async function renderAdminLogs() {
+  mainEl.innerHTML = "";
+  const view = el("div", { class: "view-admin-logs" }, [el("h2", { text: _t("管理ツールログ") })]);
+  mainEl.appendChild(view);
+  await renderLogs(view, { admin: true });
 }
 
 /* ---------------------------------------------------- APIリファレンス */

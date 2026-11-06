@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import sys
 import threading
 import time
@@ -506,6 +507,7 @@ def _bare_pipeline(slots, *, batch_size=2, embed_limit=3):
     pipeline.embeds, pipeline.loads = {}, {}
     pipeline.batch_size, pipeline.embed_limit = batch_size, embed_limit
     pipeline.text_queue, pipeline.image_queue = ingest.deque(), ingest.deque()
+    pipeline.retry_texts = ingest.deque()
     pipeline.slots, pipeline.slot_user = slots, slots.join("inst1", "a")
     pipeline.sent = []
 
@@ -543,6 +545,54 @@ def test_older_files_are_embedded_before_newer_ones():
     pipeline.image_queue.extend([(old, 0)])
     pipeline._start_embeds(None)
     assert pipeline.sent == [("text", [0, 0]), ("image", 0)]
+
+
+def test_rejected_batch_of_several_files_is_resent_per_file_and_only_the_culprit_fails():
+    """複数のファイルをまとめた本文のリクエストを埋め込みサーバーが受け付けなければ、ファイルごとに分けて送り直す。
+    1ファイル分のリクエストが受け付けられなければ、そのファイルだけを失敗にして残りの本文・画像を送らない。"""
+    from src.vector_db.embeddings import EmbeddingRejected
+
+    def prepared(name):
+        return ingest._Prepared(Path(name), None, "text+image", "embed", path_text=name, chunks=[ingest.ChunkRecord("", "t")])
+
+    pipeline = _bare_pipeline(ingest.IngestSlots(1, 0, 3))
+    pipeline._jobs, pipeline._jobs_lock = {}, threading.Lock()
+    written = []
+    pipeline.writer = types.SimpleNamespace(write=written.append)
+    good, bad = ingest._Job(prepared("good.md"), 0), ingest._Job(prepared("bad.pdf"), 1)
+    for job in (good, bad):
+        pipeline._jobs[id(job)] = job
+    pipeline.waiting = 2
+    batch = [(good, 0), (good, 1), (bad, 0), (bad, 1)]
+    pipeline._rejected("text", batch, [good, bad], EmbeddingRejected("HTTP 400"))
+    assert [[job.seq for job, _ in items] for items in pipeline.retry_texts] == [[0, 0], [1, 1]]
+    assert good.failed is None and bad.failed is None and not written
+
+    # 送り直しは text_queue より先に送る。
+    sent = []
+
+    def submit_text_items(pool, items):
+        sent.append([job.seq for job, _ in items])
+        pipeline.embeds[object()] = None
+        return True
+
+    pipeline._submit_text_items = submit_text_items
+    pipeline.text_queue.append((good, 0))
+    pipeline.embed_limit = 2
+    pipeline._start_embeds(None)
+    assert sent == [[0, 0], [1, 1]] and list(pipeline.text_queue) == [(good, 0)]
+
+    # bad.pdf だけのリクエストも受け付けられなければ、bad.pdf を失敗にし、まだ送っていない画像も外す。
+    pipeline.image_queue.extend([(bad, 0), (good, 0)])
+    bad.requests = 1
+    pipeline._fail_job(bad, "HTTP 400")
+    assert list(pipeline.image_queue) == [(good, 0)] and not written  # 送信中のリクエストが返るまで待つ
+    bad.requests = 0
+    pipeline._close_failed(bad)
+    pipeline._close_failed(bad)  # 2回呼んでも1回だけ書く
+    [failed] = written
+    assert (failed.kind, failed.path.name, failed.reason) == ("failed", "bad.pdf", "HTTP 400")
+    assert pipeline.waiting == 1 and id(bad) not in pipeline._jobs
 
 
 def test_partial_batches_wait_for_more_texts_while_files_are_loading():

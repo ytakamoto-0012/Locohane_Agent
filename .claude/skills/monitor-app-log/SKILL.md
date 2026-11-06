@@ -1,6 +1,6 @@
 ---
 name: monitor-app-log
-description: Locohane の data/<インスタンス名>/logs/app_*.log（監視対象インスタンスは手動起動時にユーザーへ質問して選ぶ）を5分おきに定期監視し、WARNING/ERROR/CRITICALログおよびコンテキスト圧縮（src.context_compaction）の発火を検知したら、issue/ ディレクトリ配下にケースごとのMarkdownファイルとして自動起票・追記する。スキル自身がCronCreateで5分間隔・durable:trueの自己スケジュールを登録し、以後はcron発火のたびに自分自身を再度呼び出す。「app.logを監視して」「ログからissueを起票して」「/monitor-app-log」等で使う。ユーザーが手動で /loop を回す運用ではなく、このスキル自身が定期実行を管理する点が他スキルと異なる。
+description: Locohane の ../Locohane_Agent-Settings/data/<インスタンス名>/logs/app_*.log（監視対象インスタンスは手動起動時にユーザーへ質問して選ぶ）を5分おきに定期監視し、WARNING/ERROR/CRITICALログおよびコンテキスト圧縮（src.context_compaction）の発火を検知したら、issue/ ディレクトリ配下にケースごとのMarkdownファイルとして自動起票・追記する。スキル自身がCronCreateで5分間隔・durable:trueの自己スケジュールを登録し、以後はcron発火のたびに自分自身を再度呼び出す。「app.logを監視して」「ログからissueを起票して」「/monitor-app-log」等で使う。ユーザーが手動で /loop を回す運用ではなく、このスキル自身が定期実行を管理する点が他スキルと異なる。
 ---
 
 # monitor-app-log: app*.log の定期監視によるissue自動起票
@@ -8,9 +8,9 @@ description: Locohane の data/<インスタンス名>/logs/app_*.log（監視�
 `Locohane` は `<log_dir>/app_YYYYMMDD_HHMMSS_N.log` に
 `%(asctime)s %(levelname)s %(name)s: %(message)s` 形式でアプリログを出力する
 （`app.py` の `initialize()`、`src/log_rotation.py`）。`log_dir` はインスタンス
-ごとに異なる（既定 `./data/<インスタンス名>/logs`。`config.ini` の
-`[paths] common_data_dir = ./data/${instance}` 由来で、管理ツールの
-`instances/<name>/config_overrides.json` で上書きされている場合もある）。このスキルは新規に
+ごとに異なる（既定 `../Locohane_Agent-Settings/data/<インスタンス名>/logs`。`config.ini` の
+`[paths] common_data_dir = ../Locohane_Agent-Settings/data/${instance}` 由来で、管理ツールの
+`<instances_dir>/<name>/config_overrides.json` で上書きされている場合もある）。このスキルは新規に
 出力されたログを5分おきに確認し、バグ・改善点・問題点をプロジェクト直下
 `issue/` ディレクトリに Markdown として書き残す。
 
@@ -38,15 +38,24 @@ Qwen Code はこれまで `issue.md`（単一ファイル）に「症状／発�
 
 ### 0. 監視対象インスタンスの決定
 
-- **ユーザーが手動で起動した場合**: `instances/` 直下のディレクトリ名
-  （`admin_changes.log` 等のファイルは除く。`instances/` が無ければ `default` のみ）
+インスタンス置き場 `<instances_dir>`（`config.ini` の `[admin] instances_dir`。既定
+`../Locohane_Agent-Settings/instances`、環境変数 `INSTANCES_DIR` で上書き可）の実際の場所は、
+プロジェクトルートで次のコマンドで取得する（パスを手で組み立てない）:
+
+```
+"<PYTHON_DIR>\Scripts\python.exe" -c "from src.config import resolve_instances_root; print(resolve_instances_root())"
+```
+
+- **ユーザーが手動で起動した場合**: `<instances_dir>` 直下のディレクトリ名
+  （`admin_changes.log` 等のファイルと、`_admin_logs` 等の `_` で始まるフォルダは除く。
+  `<instances_dir>` が無ければ `default` のみ）
   を選択肢にして、必ず `AskUserQuestion`（`multiSelect: true`）で監視対象を選ばせる。
   `state.json` に `instances` があれば、その現在値も質問文に添える。
   選ばれた一覧を `state.json` の `instances` に保存する。
 - **cron発火による自動起動の場合**: 質問しない（無人実行のため応答が返らない）。
   `state.json` の `instances` をそのまま使う。`instances` が無い場合は
   `["default"]` とみなす。
-- 保存済みのインスタンスが `instances/` から消えている（削除された）場合は、
+- 保存済みのインスタンスが `<instances_dir>` から消えている（削除された）場合は、
   そのインスタンスを飛ばす。
 
 ### 1. 自己スケジュールの確認・登録
@@ -77,7 +86,7 @@ Qwen Code はこれまで `issue.md`（単一ファイル）に「症状／発�
 Python（`<PYTHON_DIR>\Scripts\python.exe`）を使い、プロジェクトルートで実行する:
 
 ```
-LOCOHANE_INSTANCE=<name> CONFIG_OVERRIDES_PATH=instances/<name>/config_overrides.json "<PYTHON_DIR>\Scripts\python.exe" -c "from src.config import load_config; print(load_config().log_dir)"
+LOCOHANE_INSTANCE=<name> CONFIG_OVERRIDES_PATH=<instances_dir>/<name>/config_overrides.json "<PYTHON_DIR>\Scripts\python.exe" -c "from src.config import load_config; print(load_config().log_dir)"
 ```
 
 ### 3. 新規ログ抽出
@@ -178,7 +187,7 @@ issue起票時には、該当ログから `code` フィールドを抽出し、�
 - **区分**: バグ | 改善点 | 問題点
 - **検知日時**: YYYY-MM-DD HH:MM:SS
 - **インスタンス**: <インスタンス名>
-- **対象ログファイル**: data/<インスタンス名>/logs/app_YYYYMMDD_HHMMSS_N.log（プロジェクトルート相対）
+- **対象ログファイル**: <log_dir>/app_YYYYMMDD_HHMMSS_N.log（手順2で得た log_dir をプロジェクトルート相対で書く。既定 ../Locohane_Agent-Settings/data/<インスタンス名>/logs。絶対パスは書かない）
 
 ## 経緯
 
@@ -227,6 +236,6 @@ Traceback等の原文をそのまま貼る。改善点・問題点の場合は�
 - 同一原因の繰り返しは新規ファイルを乱立させず、既存ファイルへの追記で
   対応する（`issue/` の肥大化・重複を防ぐ）。
 - `issue/` 配下以外のファイル（アプリ本体のコード・`config.ini`・
-  `instances/` 配下等）は一切変更しない（`state.json` の更新は除く）。
+  `<instances_dir>` 配下等）は一切変更しない（`state.json` の更新は除く）。
 - cron発火による自動起動時は `AskUserQuestion` を呼ばない。
 - git へのコミット・ステージングは行わない。

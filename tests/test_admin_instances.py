@@ -88,7 +88,7 @@ def test_config_ini_default_common_data_dir_uses_instance_placeholder(monkeypatc
     from src.config import load_config
 
     cfg = load_config(config_path=CONFIG_INI_PATH, overrides_path=PROJECT_ROOT / "nope.json", instance_name="default")
-    assert cfg.checkpoint_db.parent == PROJECT_ROOT / "data" / "default"
+    assert cfg.checkpoint_db.parent.resolve() == (PROJECT_ROOT.parent / "Locohane_Agent-Settings" / "data" / "default").resolve()
 
 
 def test_create_instance_rejects_duplicate_name(root):

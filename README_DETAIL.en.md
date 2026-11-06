@@ -325,6 +325,7 @@ Locohane/
 │   ├── audit.py              # change history log (JSON Lines)
 │   ├── monitor.py            # read processing for the monitor screen (running status, conversations, token trends, logs, LLM endpoints)
 │   ├── knowledge.py          # HTTP API of the knowledge screen (vector DB collection management, ingestion jobs)
+│   ├── ingest_worker.py      # child process that runs ingestion and copying (ingest worker) and its client in the admin tool
 │   ├── memories.py           # HTTP API of the memory screen (viewing and editing the instance's persistent memory)
 │   ├── assistant.py          # HTTP API of the admin assistant ("Ask AI" at the top right; only reads settings and advises)
 │   ├── assistant_index.py    # search for the admin assistant (simple RAG over config.ini, README_DETAIL.md and the API reference)
@@ -562,7 +563,7 @@ Specification: <https://agentskills.io/specification>
 
 ## Where data is stored and how to delete it manually
 
-Everything is under `data/` (changeable with the `dir` keys of `[paths]`/`[elements]`/`[log]`/`[default_workdir]` etc. in `config.ini`). `data/` is .gitignored. To change the storage root all at once, instead of rewriting each key individually, change only `[paths] common_data_dir` (default `./data/${instance}`) (the values of the corresponding keys are written referring to `${common_data_dir}`). `${instance}` is replaced with the name of the running instance (`default` when started directly with `app.bat`), so by default data is separated per instance into `data/<instance name>/`. `data/` in the table below means `data/<instance name>/` (e.g. `data/default/`) with the default settings.
+Everything is under `data/` (changeable with the `dir` keys of `[paths]`/`[elements]`/`[log]`/`[default_workdir]` etc. in `config.ini`). By default, data is kept in `../Locohane_Agent-Settings/`, at the same level as the repository (outside the repository, so it survives re-cloning or deleting the working tree; `data/` and `instances/` are also .gitignored in case you keep them inside the repository). To change the storage root all at once, instead of rewriting each key individually, change only `[paths] common_data_dir` (default `../Locohane_Agent-Settings/data/${instance}`) (the values of the corresponding keys are written referring to `${common_data_dir}`). `${instance}` is replaced with the name of the running instance (`default` when started directly with `app.bat`), so by default data is separated per instance into `../Locohane_Agent-Settings/data/<instance name>/`. `data/` in the table below means `../Locohane_Agent-Settings/data/<instance name>/` (e.g. `../Locohane_Agent-Settings/data/default/`) with the default settings.
 
 **Not on a network:** `[admin] instances_dir`, `[paths] common_data_dir`, `checkpoint_db`, `[thread_store] db` and `[vector_db] dir`
 (where SQLite databases are kept) must be on a local disk. A UNC path (`\\server\share\…`) or a network drive (Z: etc.) is rejected at startup
@@ -570,6 +571,8 @@ and when saving on the settings dashboard (SQLite on a file share locks slowly a
 and WAL cannot be used). Use "Data backup" (in the settings dashboard section) to keep copies on a file share.
 
 **Migrating from old versions (that stored data directly under `data/`):** the default storage location changed from `./data` to `./data/${instance}`, so if you just start it, past threads, persistent memory, etc. become invisible (they are not deleted). While the app is stopped, moving the files and folders directly under `data/` (`checkpoints.sqlite`, `chat_threads.sqlite`, `memory/`, `logs/`, `elements/`, `plans/`, `path_memory/`, `logs_chat/`, `temp/`, `app.lock`, etc.) to `data/default/` carries them over. If you want to keep using the old location without moving, set `[paths] common_data_dir` of the default instance to `./data` on the admin tool's settings screen.
+
+**Migrating from old versions (that stored data in `data/` and `instances/` inside the repository):** the default storage locations changed from `./data/${instance}` and `./instances` to `../Locohane_Agent-Settings/data/${instance}` and `../Locohane_Agent-Settings/instances`. With the app and the admin tool stopped, move the `data/` and `instances/` folders at the repository root, as whole folders, under `../Locohane_Agent-Settings/` to carry them over (move `instances/` first, because the per-instance `config_overrides.json` is read from under `instances_dir`). To keep using the old locations without moving, set the environment variables `COMMON_DATA_DIR=./data/${instance}` and `INSTANCES_DIR=./instances`.
 
 | Path | Content | When it may be deleted | How to delete |
 |------|------|------------------------|----------|
@@ -1357,6 +1360,9 @@ Image files (`.png`, `.jpg`/`.jpeg`, `.gif`, `.bmp`, `.webp`, `.tif`/`.tiff`, `.
   Excel exports each visible sheet with fit printing of 1 page wide x 1 page tall (changes to the print settings are not saved;
   hidden and empty sheets are excluded), and hidden PowerPoint slides are not included. Rendering Office files needs Windows and
   Microsoft Office; in environments where they cannot be used, those files are listed in the failure list.
+  Pages whose long side at `image_dpi` would exceed the long side of A4 rendered at `image_dpi` (1169px at 100 DPI), such as A0 drawings,
+  very wide pages, or large Excel sheets fitted to one page, are shrunk to that long side like image files
+  (otherwise one side reaches tens of thousands of px and the embedding server (llama-server) fails to decode the image and returns an error).
   Macros of the source files (`Workbook_Open` of `.xlsm`, etc.) are not run (`AutomationSecurity` is set to
   `msoAutomationSecurityForceDisable`, and Excel also stops events). Password-protected files are given a dummy password
   so they do not stop at the input screen and are listed in the failure list (PowerPoint may still stop). In case it stops at an invisible dialog (password input,
@@ -1428,10 +1434,17 @@ Operate it from the "Knowledge" button on the instance card (or the "Knowledge" 
    `*.pdf` for an extension). They apply to files only (a folder name containing one makes the files inside match; folders are still
    traversed). Files that also match an exclusion keyword are not ingested (exclusion wins). Already ingested files that are no longer
    targeted are also removed at the next ingestion.
-2. Pressing "Ingest (differential)" starts ingestion inside the admin tool's process, and the progress (number of files processed, file being processed) and
+2. Pressing "Ingest (differential)" starts ingestion in the ingest worker (see below), and the progress (number of files processed, file being processed) and
    results (counts of added, updated, unchanged, deleted and failed, with failure reasons) appear in the table. During ingestion it can be interrupted with "Stop"
    (unprocessed files are processed in the next ingestion and are not treated as deleted). During ingestion, the instance list card also shows
    the collection name, the number of files processed and a progress bar (click it to open the Knowledge screen).
+   Ingestion and copying run, for all instances and collections together, in a child process (the ingest worker, `admin/ingest_worker.py`,
+   `python -m admin.ingest_worker`) that the admin tool starts at the first ingestion. Ingestion runs many CPU-bound threads, so in the
+   admin tool's own process they would compete with the dashboard for Python's GIL and delay its responses by seconds (when many
+   collections are ingested at once). The admin tool process keeps only the job records, the queueing, the scheduled ingestion and deletion,
+   and exchanges progress, stop requests, slot status and logs with the ingest worker over a named pipe (with a per-start authentication key;
+   the worker's logs appear in the admin tool log with the thread name `ingest-worker/…`). If the ingest worker crashes, the running jobs
+   become errors (the admin tool stays up) and it is restarted at the next ingestion. Exiting the admin tool also ends the ingest worker.
 3. After adding or updating documents, press "Ingest (differential)" again, or set up the automatic ingestion below. When you change the embedding model or `document_prefix`, "Rebuild".
 
 #### Scheduled automatic ingestion
@@ -1464,7 +1477,7 @@ Ingestion proceeds in `_Pipeline` of `src/vector_db/ingest.py` through scan -> p
   only make progress on one at a time, so it gets faster when there are many PDFs, Excel files, etc. and CPU cores to spare; starting child processes takes a few seconds).
   When a child process crashes (PDFium fell over on a broken PDF, etc.), the files being prepared at that time are prepared again one by one in new child processes,
   and files that crash even alone are listed in the failure list and ingestion continues (when preparing in threads = `ingest_processes = 0`,
-  the whole admin tool goes down, so for sources with many files of unknown origin, 1 or more is safer).
+  the whole ingest worker goes down and every running ingestion fails, so for sources with many files of unknown origin, 1 or more is safer).
   Files with the same size and modification time as last time are not read, and changed files are read once and used both to compute SHA-256 and to extract text.
   When `ingest_workers` or `ingest_processes` is 2 or more, larger files are started first. PDF text and page rendering use pypdfium2,
   one at a time within the same process (PDFium cannot be called from several threads at the same time). For Office files with `image_input = true`,
@@ -1555,7 +1568,7 @@ To use the same documents in another instance without re-ingesting them, use one
     same as the source collection's. Otherwise only the definition (description, source folder, whether to include subfolders) is copied, and
     you run "Ingest (diff)" in the destination (the dialog shows the reason).
   - The scheduled ingestion settings are not copied by default (so that two instances do not ingest the same folder automatically; selectable in the dialog).
-  - The copy runs as a job of the destination collection inside the admin tool process, and the progress is shown in the destination's
+  - The copy runs as a job of the destination collection in the ingest worker, and the progress is shown in the destination's
     Knowledge screen. While copying, the source collection cannot be ingested (manually or on schedule) or deleted. "Stop" ends it keeping
     the files copied so far (the rest is filled in by "Ingest (diff)" in the destination). It is recorded in the change history as `knowledge_collection_copy`.
 - **Reference** ("Reference knowledge of other instances" at the bottom of the Knowledge screen): adds a collection of another instance to the
@@ -1687,7 +1700,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[llm]` | `max_concurrent_requests` | Upper limit on concurrent requests to the inference server. 1 or more guards with Semaphore(N) (default 1 = fully serialized); 0 or less is unlimited. Counted across all sessions, occupying a slot only during one generation. Even if `max_parallel` of `[graph]`/`[subagent]` is larger than this value, the excess just waits right before calling the LLM, without errors (waiting time is not counted toward timeouts) | `LLM_MAX_CONCURRENT_REQUESTS` |
 | `[llm]` | `round_robin_slots_probe_timeout_seconds` | Timeout in seconds of the GET /slots query itself, sent before the `round_robin`/`priority_failover` strategies choose an endpoint with provider="llama_cpp" (default 3; fail-safe that considers it free if it cannot be checked) | `LLM_ROUND_ROBIN_SLOTS_PROBE_TIMEOUT_SECONDS` |
 | `[llm]` | `round_robin_busy_poll_interval_seconds` | Seconds to wait before rechecking when none of the candidate endpoints had free slots under the `round_robin`/`priority_failover` strategies (default 2) | `LLM_ROUND_ROBIN_BUSY_POLL_INTERVAL_SECONDS` |
-| `[paths]` | `common_data_dir` | Common base directory for the various data storage paths (default `./data/${instance}`). Writing `${common_data_dir}` in the values of `checkpoint_db`/`memory_dir`/`plans_dir` of this section and the `dir` keys of `[log]`/`[default_workdir]`/`[path_memory]`/`[chat_log]` replaces it with this value (not configparser's standard interpolation but config.py's own replacement). In `common_data_dir` itself and these keys, `${instance}` is replaced with the instance name (the environment variable `LOCOHANE_INSTANCE`, `default` if not set). Local disk only (no UNC paths or network drives) | `COMMON_DATA_DIR` |
+| `[paths]` | `common_data_dir` | Common base directory for the various data storage paths (default `../Locohane_Agent-Settings/data/${instance}`). Writing `${common_data_dir}` in the values of `checkpoint_db`/`memory_dir`/`plans_dir` of this section and the `dir` keys of `[log]`/`[default_workdir]`/`[path_memory]`/`[chat_log]` replaces it with this value (not configparser's standard interpolation but config.py's own replacement). In `common_data_dir` itself and these keys, `${instance}` is replaced with the instance name (the environment variable `LOCOHANE_INSTANCE`, `default` if not set). Local disk only (no UNC paths or network drives) | `COMMON_DATA_DIR` |
 | `[paths]` | `skills_dir` | Skills folder | `SKILLS_DIR` |
 | `[paths]` | `agents_dir` | Agent kind definitions folder (`agent_type` of `dispatch_agent`) | `AGENTS_DIR` |
 | `[paths]` | `project_locohane_dir` | Project-specific extension directories (equivalent to Claude Code's `.claude/`). Automatically detects `skills/` (merged into the scan of `skills_dir`, same names take precedence), `agents/` (merged into the scan of `agents_dir`, same names take precedence) and `LOCOHANE.md` (project-specific instructions; no error if missing) under it. Several directories can be specified in the same list form as `nudge_messages`. Writing an element as a dict `{"dir": ..., "python": ...}` starts only the `.py` scripts under that directory's `skills/` with a dedicated Python environment (takes precedence over `[scripts].python`) | `PROJECT_LOCOHANE_DIR` |
@@ -1904,7 +1917,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[admin]` | `assistant_use_embedding` | Whether to use embeddings (`[vector_db] embedding_url`) to choose the keys and paragraphs close to the question. If false, character 2-grams only | `ADMIN_ASSISTANT_USE_EMBEDDING` |
 | `[admin]` | `assistant_embedding_instance` | Name of the instance to take the embedding endpoints from. If empty, it is searched automatically | `ADMIN_ASSISTANT_EMBEDDING_INSTANCE` |
 | `[admin]` | `assistant_max_history_messages` | Maximum number of recent conversation messages passed to the AI | `ADMIN_ASSISTANT_MAX_HISTORY_MESSAGES` |
-| `[admin]` | `instances_dir` | Root of the per-instance directories (default `./instances`). Also used as the location the default instance's `.env` and `config_overrides.json` are read from when started directly with app.bat. When changed, move the existing contents by hand | `INSTANCES_DIR` |
+| `[admin]` | `instances_dir` | Root of the per-instance directories (default `../Locohane_Agent-Settings/instances`). Also used as the location the default instance's `.env` and `config_overrides.json` are read from when started directly with app.bat. When changed, move the existing contents by hand | `INSTANCES_DIR` |
 | `[data_backup]` | `enabled`, `dest_dir`, `times`, `weekdays`, `keep`, `exclude_workdir`, `exclude_logs`, `exclude` | Defaults of the data backup (see "Data backup"). Shared by all instances (cannot be overridden per instance). Values saved on the settings dashboard (`<instances_dir>/data_backup.json`) take precedence | - |
 | `[ui]` | `default_language` | Default display language (`auto` = the browser's language / `ja` / `en`). When a user chooses a language on screen, that takes precedence. The AI also answers in the chosen language (the "Language switching (Japanese / English)" section) | `UI_DEFAULT_LANGUAGE` |
 | `[ui]` | `max_display_messages` | Maximum number of messages drawn on the chat screen (display-only thinning; `0` is unlimited) | `UI_MAX_DISPLAY_MESSAGES` |
@@ -2169,8 +2182,7 @@ and values that fail are not saved. On every save, the content before the change
 
 ### Instances
 
-Under `instances/<instance name>/`, each instance has the following
-(.gitignored).
+Under `<instance name>/` of `[admin] instances_dir` (default `../Locohane_Agent-Settings/instances`; written as `instances/` below), each instance has the following.
 
 ```
 instances/
@@ -2191,7 +2203,7 @@ instances/
 
 The data itself (conversation history `checkpoints.sqlite`, thread list, persistent memory,
 uploads, logs, etc.; see "Where data is stored and how to delete it manually") is automatically separated into
-`data/<instance name>/` by config.ini's default `[paths] common_data_dir = ./data/${instance}`.
+`../Locohane_Agent-Settings/data/<instance name>/` by config.ini's default `[paths] common_data_dir = ../Locohane_Agent-Settings/data/${instance}`.
 The admin tool passes the environment variable `LOCOHANE_INSTANCE=<instance name>` when starting child processes, and
 it is `default` when started directly with `app.bat`. If you want to share only persistent memory across all instances,
 override `memory_dir` with a fixed path that does not contain `${instance}`.
@@ -2503,6 +2515,14 @@ operator, source IP, kind of operation and (for settings changes) the values bef
 values of keys whose names contain `api_key`/`password`/`secret`/`token`, and
 `[llm].main_url`/`sub_url` (which can contain `api_key` as nested JSON), are
 masked. It can be viewed on the "Change history" tab of the admin tool.
+
+### Admin tool log
+
+The admin tool's own log (knowledge ingestion/deletion, backups, failures to start or stop instances, etc.) is written to
+`<instances_dir>/_admin_logs/admin_*.log` (rotated by line count with `[log] max_lines`; not written with `[log] level = none`).
+The "Admin tool log" tab at the top shows up to 500 entries newest first, filtered by level and text (read-only).
+The `[ ]` part of each line is the Python thread name, not a conversation thread_id, so there is no thread_id filter.
+Each instance's app log (`app_*.log`) is shown on the "Logs" sub-tab of the instance details.
 
 ### API reference (direct operation with curl)
 

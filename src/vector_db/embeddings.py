@@ -29,6 +29,15 @@ class EmbeddingStopped(EmbeddingError):
     """再試行を待っている間に should_stop() が True を返した（取り込みの「停止」）。"""
 
 
+class EmbeddingRejected(EmbeddingError):
+    """全接続先で失敗し、そのうち少なくとも1つは HTTP のエラーを返した（サーバーは動いているが、この入力を埋め込めない）。
+
+    巨大な画像を展開できない・入力が長すぎる等、入力ごとの失敗のことが多いため、取り込みはそのファイルだけを
+    失敗一覧に載せて続ける（_Pipeline._embedded）。全接続先に接続できなかったときは EmbeddingError のまま
+    （サーバーが止まっているため、取り込みを止める）。
+    """
+
+
 # 接続先の選び方（[vector_db].embedding_routing_strategy）のための状態。管理ツールのプロセスでは
 # 複数インスタンスの設定が混在するため、接続先の base_url（の並び）をキーにする。
 _routing_lock = threading.Lock()
@@ -439,6 +448,7 @@ def _embed_batch(
     while True:
         errors: list[str] = []
         retryable = False
+        responded = False
         order, claimed = _choose_order(cfg, client, endpoints, wait_when_busy, should_stop)
         for n, endpoint in enumerate(order):
             url = endpoint.base_url.rstrip("/") + "/embeddings"
@@ -458,6 +468,7 @@ def _embed_batch(
             if response.status_code != 200:
                 logger.warning("embeddings: %s returned an error (HTTP %d): %s", url, response.status_code, response.text[:300])
                 errors.append(f"{url} returned an error (HTTP {response.status_code}): {response.text[:300]}")
+                responded = True
                 if _retryable_status(response.status_code):
                     retryable = True
                     _mark_failed(endpoint)
@@ -466,7 +477,8 @@ def _embed_batch(
         detail = " / ".join(errors)
         if not retryable or (max_retries is not None and retries >= max_retries):
             suffix = f" (retried {retries} times)" if retries else ""
-            raise EmbeddingError(f"Could not compute the embeddings{suffix}: {detail}")
+            error = EmbeddingRejected if responded else EmbeddingError
+            raise error(f"Could not compute the embeddings{suffix}: {detail}")
         retries += 1
         interval = cfg.vector_db_embedding_retry_interval_seconds
         logger.warning(
