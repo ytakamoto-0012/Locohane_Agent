@@ -1,9 +1,9 @@
 """edit_vba.py が適用する「操作（op）」のディスパッチ実装。
 
 各関数は (workbook, vb_project, op_dict) を受け取り、COM経由でVBAプロジェクト
-（vb_project = workbook.VBProject）へ副作用を適用する。openpyxl版の _ops.py と
-同じ「OP_HANDLERS辞書 + apply_op」の構造だが、COM操作には Workbook と VBProject
-の両方が要るためシグネチャが異なり、ファイルも分離している。
+（vb_project = workbook.VBProject）へ副作用を適用する。「OP_HANDLERS辞書 +
+apply_op」の構造だが、COM操作には Workbook と VBProject の両方が要るため、
+ワークブックだけ渡して呼ぶ方式にはできず、ファイルも分離している。
 
 run_script からは直接実行されない。edit_vba.py から import して使う。
 """
