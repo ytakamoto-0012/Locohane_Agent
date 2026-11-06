@@ -1013,6 +1013,8 @@ const I18N_EN = {
   "（全期間）": "(all time)",
   "（概算を含む）": " (includes estimate)",
   "その他（{0}件）": "Others ({0})",
+  "未配分": "Unallocated",
+  "うち {0} は、トークン使用量が0の月の料金のため、どのインスタンス・ユーザーにも按分していません（未配分）。インスタンス別・ユーザー別の合計は、その分だけ料金の合計より少なくなります。": "{0} of this is the cost of months with no token usage, so it is not split to any instance or user (unallocated). The per-instance and per-user totals are lower than the total cost by that amount.",
   "インスタンス別の集計（全期間）": "By instance (all time)",
   "入力＋出力の合計です（サブエージェント・圧縮処理を含む）。棒の上端が全インスタンスの合計です。": "Input + output (including sub-agents and compaction). The top of each bar is the total for all instances.",
   "利用量・料金（全インスタンス）": "Usage & cost (all instances)",

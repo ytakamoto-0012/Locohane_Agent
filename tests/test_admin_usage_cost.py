@@ -124,10 +124,17 @@ def test_monthly_bill_is_one_shared_amount_split_by_share() -> None:
     assert view["instances_by_usage"] == ["inst_b", "inst_a"]
 
 
-def test_bill_month_without_usage_is_listed() -> None:
-    view = usage_cost.overview(ITEMS, _settings(months={"2026-12": {"bill": 5}}))
-    dec = {m["month"]: m for m in view["months"]}["2026-12"]
+def test_bill_month_without_usage_is_listed_as_unallocated() -> None:
+    view = usage_cost.overview(ITEMS, _settings(months={"2026-10": {"bill": 400}, "2026-12": {"bill": 5}}))
+    by_month = {m["month"]: m for m in view["months"]}
+    dec = by_month["2026-12"]
     assert dec["total"] == 0 and dec["cost"] == pytest.approx(5) and dec["instances"] == {}
+    # 使用量0の月の請求額は誰にも按分できないため「未配分」として返し、合計と内訳の差を説明できるようにする
+    assert dec["unallocated"] == pytest.approx(5)
+    assert by_month["2026-10"]["unallocated"] == pytest.approx(0)
+    assert by_month["2026-11"]["unallocated"] is None  # 請求額の未入力
+    assert view["unallocated_cost"] == pytest.approx(5)
+    assert sum(u["cost"] for u in view["users"]) + view["unallocated_cost"] == pytest.approx(view["total_cost"])
 
 
 def test_hourly_defaults_to_all_hours_and_adds_fixed_cost_once() -> None:
@@ -173,6 +180,9 @@ def test_instance_costs_are_its_share_of_the_shared_cost() -> None:
         {"hourly_rate": "abc"},
         {"months": {"2026-13": {"bill": 1}}},
         {"months": {"2026-10": {"hours": 1000}}},
+        # 上限はその月の実際の時間数（2月は 28日 × 24 = 672時間、30日の月は 720時間）
+        {"months": {"2026-02": {"hours": 673}}},
+        {"months": {"2026-11": {"hours": 721}}},
     ],
 )
 def test_invalid_settings_are_rejected(data) -> None:
@@ -237,6 +247,11 @@ def test_usage_api_saves_shared_settings_and_allocates(tmp_path, monkeypatch) ->
     assert detail["settings"]["pricing_model"] == "monthly_bill"
     inst_oct = {m["month"]: m for m in detail["costs"]["months"]}["2026-10"]
     assert inst_oct["share_of_all"] == pytest.approx(1.0) and inst_oct["cost"] == pytest.approx(30)
+
+    # 全体集計の対象外（スキル調整ワーカー）でも、自分自身を分母に含めて按分する（割合が 100% を超えない）
+    lab = client.get("/api/instances/lab1/usage").json()
+    lab_oct = {m["month"]: m for m in lab["costs"]["months"]}["2026-10"]
+    assert lab_oct["share_of_all"] == pytest.approx(0.5) and lab_oct["cost"] == pytest.approx(15)
 
     assert client.put("/api/usage/cost-settings", json={"pricing_model": "x"}).status_code == 400
     assert json.loads((tmp_path / "audit.log").read_text(encoding="utf-8").splitlines()[0])["action"] == "usage_cost_settings_update"

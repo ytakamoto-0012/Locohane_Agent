@@ -1465,6 +1465,10 @@ def get_usage(name: str, user: str = Depends(require_login)):
     except (monitor.MonitorError, sqlite3.Error) as exc:
         usage, usage_error = _EMPTY_USAGE, str(exc)
     items, _errors = _collect_usage()
+    # 全体集計の対象外（スキル調整ワーカー等）でも、按分の分母にこのインスタンス自身を含める。
+    # 含めないと、他のインスタンスに使用量がある月の割合が 100% を超える。
+    if all(it["name"] != name for it in items):
+        items.append({"name": name, "usage": usage})
     return {
         "usage": usage,
         "usage_error": usage_error,

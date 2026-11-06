@@ -182,7 +182,7 @@ def validate_settings(data: dict) -> dict:
             raise UsageCostError(_t("月は YYYY-MM の形式で指定してください: {0}", month))
         entry = entry if isinstance(entry, dict) else {}
         hours = _number(entry.get("hours"), f"{month} hours")
-        if hours is not None and hours > 24 * 31:
+        if hours is not None and hours > hours_in_month(str(month)):
             raise UsageCostError(_t("{0} の稼働時間が1か月の時間数を超えています。", month))
         clean = {"bill": _number(entry.get("bill"), f"{month} bill"), "hours": hours}
         clean = {k: v for k, v in clean.items() if v is not None}
@@ -363,6 +363,7 @@ def overview(items: list[dict], settings: dict) -> dict:
     users: dict[str, dict] = {}
     for month, mc in mcs.items():
         u = usage_by_month.get(month) or {**_zero(), "backfilled": False, "instances": {}, "users": {}}
+        instance_costs_ = {n: slice_cost(settings, mc, iu) for n, iu in u["instances"].items()}
         user_costs = {owner: slice_cost(settings, mc, uu) for owner, uu in u["users"].items()}
         for owner, sc in user_costs.items():
             agg = users.setdefault(owner, {"user": owner, "total": 0, "costs": [], "jpy": []})
@@ -374,8 +375,9 @@ def overview(items: list[dict], settings: dict) -> dict:
                 **mc,
                 "calls": u["calls"],
                 "backfilled": u["backfilled"],
-                "instances": {n: slice_cost(settings, mc, iu) for n, iu in u["instances"].items()},
+                "instances": instance_costs_,
                 "users": user_costs,
+                "unallocated": _unallocated(mc, instance_costs_),
             }
         )
     user_list = [
@@ -396,7 +398,20 @@ def overview(items: list[dict], settings: dict) -> dict:
         "users": user_list,
         "total_cost": _sum_optional(m["cost"] for m in months),
         "total_cost_jpy": _sum_optional(m["cost_jpy"] for m in months),
+        "unallocated_cost": _sum_optional(m["unallocated"] for m in months),
     }
+
+
+def _unallocated(mc: dict, parts: dict[str, dict]) -> float | None:
+    """その月の料金のうち、どのインスタンスにも按分されなかった金額（使用量0の月の請求額・固定費等）。
+
+    按分の割合はトークン数なので、全体のトークンが0の月は誰にも割り振れない。
+    合計と内訳の差を画面で「未配分」として見せるために返す。金額を出せない月は None。
+    """
+    if mc["cost"] is None:
+        return None
+    rest = mc["cost"] - sum(p["cost"] or 0.0 for p in parts.values())
+    return rest if abs(rest) > 1e-9 else 0.0
 
 
 def instance_costs(instance_usage: dict, all_items: list[dict], settings: dict) -> dict:
@@ -404,7 +419,8 @@ def instance_costs(instance_usage: dict, all_items: list[dict], settings: dict) 
 
     Args:
         instance_usage: そのインスタンスの monthly_usage()。
-        all_items: 按分の分母にする全インスタンスの [{"name", "usage"}, ...]（このインスタンスを含む）。
+        all_items: 按分の分母にする全インスタンスの [{"name", "usage"}, ...]。このインスタンスを
+            必ず含めること（含めないと割合が 100% を超えうる）。
     """
     mcs = month_costs(combine_usage(all_items)["months"], settings)
     months = []

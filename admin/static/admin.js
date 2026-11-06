@@ -3766,6 +3766,8 @@ function lineChart({ title, note, points, series, markers }) {
 // 色はユーザーの順位ではなく全期間の使用量順で固定し、9人目以降は「その他」にまとめる。
 const USER_SERIES_COLORS = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9"];
 const OTHER_SERIES_COLOR = "#6b7280";
+// 「未配分」（使用量0の月の料金）。「その他」の灰色と見分けられるよう、明るい灰色にする。
+const UNALLOCATED_SERIES_COLOR = "#b8bec9";
 const PRICING_MODEL_LABELS = {
   monthly_bill: _t("月額の請求額を入力（実績）"),
   hourly: _t("時間課金（EC2 等: 時間単価×稼働時間）"),
@@ -4064,7 +4066,14 @@ function drawUsageOverview(box, data) {
           title: _t("月別の料金（米ドル、インスタンス別の積み上げ）"),
           note: _t("全インスタンス共通の料金設定から計算した金額を、各インスタンスの使用量で按分して積み上げています。"),
           categories: costMonths.map((m) => m.month),
-          series: seriesValues(instanceSeries, costMonths, "instances", "cost"),
+          // 使用量0の月の請求額・固定費はどのインスタンスにも按分できないため「未配分」として積み、
+          // 棒の上端が月の料金と一致するようにする。
+          series: [
+            ...seriesValues(instanceSeries, costMonths, "instances", "cost"),
+            ...(costMonths.some((m) => m.unallocated > 0)
+              ? [{ key: "unallocated", label: _t("未配分"), color: UNALLOCATED_SERIES_COLOR, values: costMonths.map((m) => m.unallocated || 0) }]
+              : []),
+          ],
           format: fmtUsd,
           axisFormat: (v) => "$" + fmtCompact(v),
         })
@@ -4139,6 +4148,9 @@ function drawUsageOverview(box, data) {
     ]),
     ...data.errors.map((e) => el("div", { class: "error", text: `${labelOf[e.name] || e.name}: ${e.error}` })),
     el("p", { class: "hint", text: _t("スキル調整ワーカーを除く全インスタンスの合計です。料金は全インスタンス共通の料金設定（このページの下）から計算し、インスタンス別・ユーザー別には使用量の割合で按分しています（トークン課金なら使用量×単価）。") }),
+    ...(data.unallocated_cost > 0
+      ? [el("p", { class: "hint", text: _t("うち {0} は、トークン使用量が0の月の料金のため、どのインスタンス・ユーザーにも按分していません（未配分）。インスタンス別・ユーザー別の合計は、その分だけ料金の合計より少なくなります。", fmtUsd(data.unallocated_cost)) })]
+      : []),
     el("section", { class: "monitor-section" }, [el("h3", { text: _t("月別のトークン使用量") }), el("div", { class: "token-charts" }, grid)]),
     el("section", { class: "monitor-section" }, [el("h3", { text: _t("月別の集計") }), monthlyTable]),
     el("section", { class: "monitor-section" }, [
@@ -4256,7 +4268,7 @@ function buildCostForm(s, usageMonths, onSaved) {
     if (monthInputs[month]) return;
     const entry = (s.months || {})[month] || {};
     const bill = numInput(entry.bill, { "aria-label": _t(`{0} の請求額`, month) });
-    const hours = numInput(entry.hours, { max: "744", "aria-label": _t(`{0} の稼働時間`, month), placeholder: _t(`{0}（全時間）`, hoursInMonth(month)) });
+    const hours = numInput(entry.hours, { max: String(hoursInMonth(month)),"aria-label": _t(`{0} の稼働時間`, month), placeholder: _t(`{0}（全時間）`, hoursInMonth(month)) });
     monthInputs[month] = { bill, hours };
     const tr = el("tr", { "data-month": month }, [el("td", { text: month }), el("td", { class: "col-bill" }, bill), el("td", { class: "col-hours" }, hours)]);
     const rows = [...monthBody.children];

@@ -2349,6 +2349,9 @@ How costs are allocated:
   They are split among instances and users by their share of the tokens of all instances that month.
 - Only the usage-based part of per-token pricing is calculated from each instance's or user's own input/output tokens ×
   the unit price (the fixed cost is split by share).
+- The cost of a month with no token usage (the bill or fixed cost of a month without conversations) cannot be split by
+  share, so it is not allocated to anyone and is shown as "unallocated". The per-instance and per-user totals are lower
+  than the total cost by that amount.
 - The same username is counted as one user even across instances (login users are managed per instance, so different
   people using the same name are mixed together).
 - Instances whose thread DB or settings cannot be read are shown as errors at the top of the all-instances screen, and
