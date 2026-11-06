@@ -2722,6 +2722,24 @@ async def _persist_token_usage() -> None:
         logging.getLogger(__name__).warning("Failed to save cumulative token usage immediately thread_id=%s", thread_id, exc_info=True)
 
 
+async def _record_monthly_usage(usage: dict) -> None:
+    """LLM 呼び出し1回分の usage_metadata を、月別・ユーザー別のトークン台帳へ加算する。
+
+    設定ダッシュボードの「利用量・料金」画面用（src/thread_store.py の
+    token_usage_monthly）。スレッドの累計とは別に持つのは、月の区切りが要るのと、
+    スレッドを削除しても使った量は消さないため。失敗しても会話は止めない。
+    """
+    if not (_config.thread_store_enabled and _thread_store_conn is not None):
+        return
+    totals = _new_usage_totals()
+    _accumulate_usage(totals, usage)
+    try:
+        owner = thread_store.resolve_owner(cl.user_session.get("user"))
+        await thread_store.add_monthly_usage(_thread_store_conn, owner, totals)
+    except Exception:  # noqa: BLE001 - 集計用の付帯情報のため
+        logging.getLogger(__name__).warning("Failed to record monthly token usage", exc_info=True)
+
+
 async def _on_compaction_usage(kind: str, role: str, usage: dict) -> None:
     """圧縮処理自身のLLM呼び出し（要約・write_thread_note 強制実行）のトークンを会話累計へ加算する。
 
@@ -2739,6 +2757,7 @@ async def _on_compaction_usage(kind: str, role: str, usage: dict) -> None:
     _accumulate_usage(cumulative, usage)
     cl.user_session.set("token_usage_cumulative", cumulative)
     await _persist_token_usage()
+    await _record_monthly_usage(usage)
     call_totals = _new_usage_totals()
     _accumulate_usage(call_totals, usage)
     await _send_token_usage({"compaction": {"label": i18n.t("usage.compaction"), **call_totals}})
@@ -4511,6 +4530,7 @@ async def _on_message_impl(message: cl.Message) -> None:
                         # ターンが完了しないまま切断・停止されても再開時に累計が
                         # 0 に戻らないよう、加算のたびに保存する（関数docstring参照）。
                         await _persist_token_usage()
+                        await _record_monthly_usage(usage)
                         # ツール呼び出しを挟んで長く動くターンでも、LLM呼び出しの
                         # たびにサイドパネルの表示を更新する（ターン完了まで待たないと
                         # 見えない、という問題を避けるため）。表示は「このターン」の

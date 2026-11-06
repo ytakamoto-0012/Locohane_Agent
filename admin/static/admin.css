@@ -361,6 +361,18 @@ select.inline-select { width: auto; }
 .tt-row { display: flex; align-items: center; gap: 6px; }
 .tt-key { display: inline-block; width: 12px; height: 2px; }
 .chart-table summary { cursor: pointer; color: var(--text-dim); font-size: 12px; }
+.chart-legend { flex-wrap: wrap; }
+.chart-hover-band { fill: rgba(255, 255, 255, 0.05); }
+
+/* 利用量・料金 */
+.cost-form { display: flex; flex-direction: column; gap: 10px; max-width: 720px; }
+.cost-group { display: flex; flex-direction: column; gap: 8px; }
+.cost-field { display: flex; flex-direction: column; gap: 4px; }
+.cost-label { font-weight: 600; font-size: 13px; }
+.cost-input { width: 200px; }
+.cost-note { width: 100%; }
+.cost-month-table { max-width: 480px; }
+.cost-month-table .cost-input { width: 160px; }
 
 .log-list { display: flex; flex-direction: column; gap: 6px; }
 .log-entry { border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 10px; background: var(--panel); }

@@ -575,7 +575,7 @@ and WAL cannot be used). Use "Data backup" (in the settings dashboard section) t
 | Path | Content | When it may be deleted | How to delete |
 |------|------|------------------------|----------|
 | `data/checkpoints.sqlite` | LangGraph conversation state (the history of all threads) | When past conversation history is no longer needed | Delete the file (while the app is stopped) |
-| `data/chat_threads.sqlite` | Metadata for the conversation thread list (left sidebar) and resuming (thread names, owners, Chainlit Step history). A separate file from `checkpoints.sqlite` (see `[thread_store]`) | When the list/resume feature is no longer needed | Delete the file (while the app is stopped; `checkpoints.sqlite` itself remains, so conversation state is not lost) |
+| `data/chat_threads.sqlite` | Metadata for the conversation thread list (left sidebar) and resuming (thread names, owners, Chainlit Step history), and the ledger of monthly token usage per user (`token_usage_monthly`, for "Usage & cost" in the settings dashboard). A separate file from `checkpoints.sqlite` (see `[thread_store]`) | When the list/resume feature is no longer needed | Delete the file (while the app is stopped; `checkpoints.sqlite` itself remains, so conversation state is not lost) |
 | `data/logs/app.log` | App operation log | Any time | Delete the file |
 | `data/memory/` | Persistent memory (common `user`/`feedback`/`project`/`reference` subfolders + the `MEMORY.md` index, and per-user `users/<user>/`) | When the accumulated memories are no longer needed | Delete the folder contents (`MEMORY.md` is regenerated on the next save). For one user only, delete `users/<user>/` |
 | `data/vector_db/` | The vector DB's `catalog.sqlite` (collection definitions, records of ingested files), the vectors `vectors.sqlite` with `backend = sqlite_vec`, the keyword index of the text `keywords/<collection name>.sqlite` (one file per collection), and the ingestion journal `ingest_journal.sqlite` that records files left half-written by a forced termination (`[vector_db] dir`). `catalog.sqlite` also holds references to collections of other instances (the `collection_refs` table). The source documents themselves are not copied | When a collection is no longer needed | Delete the collection on the Knowledge screen of the settings dashboard (to delete the whole folder, stop the app and the admin tool's ingestion first; with `backend = qdrant` the vectors remain on the Qdrant side) |
@@ -2192,6 +2192,7 @@ instances/
 │   └── app_stdout.log           # stdout of the main process
 ├── <other instance name>/
 │   └── ... (same as above)
+├── aws_cost.json                # AWS cost settings shared by all instances, entered in "Usage & cost" of the settings dashboard (see "Usage & cost")
 ├── admin_settings.json          # settings shared by all instances saved in "Admin settings" of the settings dashboard (see "Admin settings")
 ├── data_backup.json             # data backup settings saved on the settings dashboard (see "Data backup")
 ├── _admin_logs/                 # admin tool log (admin_*.log: progress of knowledge ingestion/deletion, etc.; rotated every [log] max_lines lines)
@@ -2313,6 +2314,56 @@ Data sources:
 It reads files instead of communicating with the main app over HTTP so that instances started directly with `app.bat`
 (where the admin tool was not involved in starting them) look the same, and because there is no mechanism
 for sharing an authentication secret between the admin tool and the main app (the main app may be published on `0.0.0.0`).
+
+### Usage & cost (monthly token usage and AWS charges)
+
+Shows cumulative token usage per month, and calculates amounts from AWS charges entered by hand (`admin/usage_cost.py`).
+There are two screens.
+
+- **The "Usage & cost" tab at the top (all instances)**: totals for all instances except skill tuning workers
+  (`GET /api/usage/overview`). Monthly token usage is shown as bar charts stacked by instance and by user, and the cost as
+  a bar chart stacked by instance, together with a monthly summary, a per-instance summary (all time) and per-user usage and cost.
+  **The AWS cost settings (shared by all instances) are entered at the bottom of this screen.**
+- **The "Usage & cost" sub-tab of an instance**: that instance's monthly usage (stacked by user), the amount allocated to
+  this instance from the shared cost, its share of all instances, and the per-user breakdown. It has no input fields for costs.
+
+Chart colors go to the top 7 (instances or users) by all-time usage; the 8th and beyond are folded into "Others".
+Usage is input + output (including sub-agents and compaction).
+
+In the cost settings, choose a pricing model and enter the values by hand. Amounts are estimates from the values entered,
+not the AWS bill itself.
+
+| Pricing model | Intended use | What to enter |
+|---|---|---|
+| Monthly bill (`monthly_bill`) | Use the actual amounts from the AWS bill or Cost Explorer as they are | The amount billed for each month |
+| Hourly (`hourly`) | Running the inference server (llama.cpp / vLLM) on an EC2 GPU instance, etc. The cost is proportional to the hours the instance runs, not to the tokens (the rate differs between On-Demand, Savings Plans, Reserved and Spot) | Hourly rate (USD/hour), running hours per month (empty = every hour of the month, i.e. always on) |
+| Per-token (`per_token`) | Services billed by input/output tokens, such as Amazon Bedrock on-demand | Price per 1M input tokens and per 1M output tokens (USD) |
+
+With hourly and per-token pricing, a fixed monthly cost (EBS, data transfer, load balancers, etc.) can be added. Entering
+an exchange rate (yen per USD) also shows amounts in yen. Each save is recorded in the change history as
+`usage_cost_settings_update`.
+
+How costs are allocated:
+
+- The billed amount, the hourly cost and the fixed cost are **one amount for all instances** (not counted per instance).
+  They are split among instances and users by their share of the tokens of all instances that month.
+- Only the usage-based part of per-token pricing is calculated from each instance's or user's own input/output tokens ×
+  the unit price (the fixed cost is split by share).
+- The cost of a month with no token usage (the bill or fixed cost of a month without conversations) cannot be split by
+  share, so it is not allocated to anyone and is shown as "unallocated". The per-instance and per-user totals are lower
+  than the total cost by that amount.
+- The same username is counted as one user even across instances (login users are managed per instance, so different
+  people using the same name are mixed together).
+- Instances whose thread DB or settings cannot be read are shown as errors at the top of the all-instances screen, and
+  their usage is treated as 0 (they are not part of the denominator either).
+
+Data sources and storage:
+
+| Item | Location |
+|---|---|
+| Monthly usage | The `token_usage_monthly` table in `[thread_store] db`. The main app adds to the row for the current month (in the main app's local time) and user on every LLM call (`add_monthly_usage` in `src/thread_store.py`). Deleting a thread does not reduce it. Nothing is recorded with `[thread_store] enabled=false` or `[llm] track_token_usage=false` |
+| Usage from before the ledger | Once, on the first start that creates this table, the totals of existing threads (`token_usage_cumulative`) are counted in each thread's last-updated month. Conversations spanning months lean toward their last-updated month, so this is an estimate (shown as "includes estimate"). If the main app has not been started since the update, the same estimate is calculated on the fly |
+| Cost settings | `instances/aws_cost.json`, shared by all instances (directly under `[admin] instances_dir`; created on the first save in the admin tool) |
 
 ### Admin settings
 

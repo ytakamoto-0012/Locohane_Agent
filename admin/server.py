@@ -40,7 +40,7 @@ from src.config import (
 from src.version import __version__
 
 from . import api_docs, assistant, assistant_index, audit, auth, env_files, env_overrides, monitor, overrides, settings_files, supervisor
-from . import ini_catalog_en
+from . import ini_catalog_en, usage_cost
 from . import instances as inst
 from . import admin_settings as admin_settings_api
 from . import data_backup as data_backup_api
@@ -1372,6 +1372,109 @@ def get_monitor_logs(
 def get_monitor_endpoints(name: str, user: str = Depends(require_login)):
     cfg = _monitor_config(name)
     return {"endpoints": monitor.probe_endpoints(cfg)}
+
+
+# ---------------------------------------------------------------------------
+# 利用量・料金（月別トークン使用量と、手入力した AWS 利用料金。admin/usage_cost.py）
+# ---------------------------------------------------------------------------
+
+
+_EMPTY_USAGE = {"source": None, "months": [], "users": []}
+
+
+def _collect_usage() -> tuple[list[dict], list[dict]]:
+    """料金の按分の対象にする全インスタンス（スキル調整ワーカーを除く）の月別使用量。
+
+    Returns: (items, errors)。items は [{"name", "display_name", "usage"}, ...]。
+    スレッドDB・設定を読めないインスタンスは使用量0として items に入れ、errors にも載せる。
+    """
+    items, errors = [], []
+    for name in inst.list_instance_names(INSTANCES_ROOT):
+        try:
+            meta = inst.read_instance(INSTANCES_ROOT, name)
+        except Exception:  # noqa: BLE001 - 壊れた instance.json の1件で全体を失敗させない
+            errors.append({"name": name, "error": _t("instance.json を読めません。")})
+            continue
+        if meta.kind == inst.KIND_SKILL_LAB:
+            continue
+        usage = _EMPTY_USAGE
+        try:
+            cfg = monitor.instance_config(INSTANCES_ROOT, CONFIG_INI_PATH, name)
+            usage = usage_cost.monthly_usage(cfg.thread_store_db)
+        except (monitor.MonitorError, sqlite3.Error) as exc:
+            errors.append({"name": name, "error": str(exc)})
+        items.append({"name": name, "display_name": meta.display_name, "usage": usage})
+    return items, errors
+
+
+def _read_cost_settings() -> dict:
+    try:
+        return usage_cost.read_settings(INSTANCES_ROOT)
+    except usage_cost.UsageCostError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _usage_overview_view(settings: dict) -> dict[str, Any]:
+    items, errors = _collect_usage()
+    return {
+        **usage_cost.overview(items, settings),
+        "instances": [{"name": it["name"], "display_name": it["display_name"], "source": it["usage"]["source"]} for it in items],
+        "errors": errors,
+        "settings": settings,
+    }
+
+
+@app.get("/api/usage/overview")
+def get_usage_overview(user: str = Depends(require_login)):
+    """全インスタンス（スキル調整ワーカーを除く）の月別使用量・料金と、インスタンス別・ユーザー別の按分、料金設定。"""
+    return _usage_overview_view(_read_cost_settings())
+
+
+@app.put("/api/usage/cost-settings")
+def put_usage_cost_settings(
+    body: dict[str, Any],
+    request: Request,
+    user: str = Depends(require_login),
+    _csrf: None = Depends(require_csrf),
+):
+    """全インスタンス共通の料金設定（<instances_dir>/aws_cost.json）を保存し、集計し直した結果を返す。"""
+    try:
+        settings = usage_cost.write_settings(INSTANCES_ROOT, body)
+    except usage_cost.UsageCostError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit.append(
+        AUDIT_LOG_PATH,
+        {
+            "instance": None,
+            "actor": user,
+            "remote_addr": _client_ip(request),
+            "action": "usage_cost_settings_update",
+            "pricing_model": settings["pricing_model"],
+        },
+    )
+    return _usage_overview_view(settings)
+
+
+@app.get("/api/instances/{name}/usage")
+def get_usage(name: str, user: str = Depends(require_login)):
+    """1インスタンスの月別使用量と、全インスタンス共通の料金からこのインスタンスへ按分した金額。"""
+    cfg = _monitor_config(name)
+    settings = _read_cost_settings()
+    try:
+        usage, usage_error = usage_cost.monthly_usage(cfg.thread_store_db), None
+    except (monitor.MonitorError, sqlite3.Error) as exc:
+        usage, usage_error = _EMPTY_USAGE, str(exc)
+    items, _errors = _collect_usage()
+    # 全体集計の対象外（スキル調整ワーカー等）でも、按分の分母にこのインスタンス自身を含める。
+    # 含めないと、他のインスタンスに使用量がある月の割合が 100% を超える。
+    if all(it["name"] != name for it in items):
+        items.append({"name": name, "usage": usage})
+    return {
+        "usage": usage,
+        "usage_error": usage_error,
+        "settings": settings,
+        "costs": usage_cost.instance_costs(usage, items, settings),
+    }
 
 
 # ---------------------------------------------------------------------------

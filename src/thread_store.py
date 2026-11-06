@@ -82,7 +82,29 @@ CREATE TABLE IF NOT EXISTS elements (
   data_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_elements_thread ON elements(thread_id, created_at);
+
+-- 月別・ユーザー別のトークン使用量の台帳（設定ダッシュボードの「利用量・料金」用）。
+-- month はローカル時刻の "YYYY-MM"。LLM 呼び出しのたびに加算する（add_monthly_usage）。
+-- スレッドを削除しても減らさない（使った事実は消えないため）。
+CREATE TABLE IF NOT EXISTS token_usage_monthly (
+  month TEXT NOT NULL,
+  owner TEXT NOT NULL,
+  input INTEGER NOT NULL DEFAULT 0,
+  output INTEGER NOT NULL DEFAULT 0,
+  total INTEGER NOT NULL DEFAULT 0,
+  calls INTEGER NOT NULL DEFAULT 0,
+  backfilled INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (month, owner)
+);
+
+CREATE TABLE IF NOT EXISTS store_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
 """
+
+# store_meta のキー: 台帳導入前のスレッド累計を台帳へ振り分け済みか。
+_MONTHLY_BACKFILL_KEY = "token_usage_monthly_backfilled"
 
 
 def resolve_owner(user: "User | PersistedUser | None") -> str:
@@ -127,7 +149,77 @@ async def init_db(db_path: Path) -> aiosqlite.Connection:
     await conn.execute("PRAGMA foreign_keys = ON")
     await conn.executescript(_DDL)
     await conn.commit()
+    try:
+        await _backfill_monthly_usage(conn)
+    except Exception:  # noqa: BLE001 - 集計用の補完に失敗しても会話機能は止めない
+        logger.warning("Failed to backfill the monthly token usage ledger", exc_info=True)
     return conn
+
+
+def usage_month(when: datetime | None = None) -> str:
+    """台帳の month キー（ローカル時刻の "YYYY-MM"）。aware な日時はローカル時刻へ直してから使う。"""
+    when = when or datetime.now()
+    if when.tzinfo is not None:
+        when = when.astimezone()
+    return when.strftime("%Y-%m")
+
+
+async def add_monthly_usage(
+    conn: aiosqlite.Connection, owner: str, usage: dict, *, when: datetime | None = None
+) -> None:
+    """LLM 呼び出し1回分の usage（{"input","output","total"}）を当月・owner の台帳行へ加算する。
+
+    UPSERT 1文で加算するため、並行して呼ばれても取りこぼさない。
+    """
+    values = [int(usage.get(k, 0) or 0) for k in ("input", "output", "total")]
+    if not any(values):
+        return
+    await conn.execute(
+        "INSERT INTO token_usage_monthly (month, owner, input, output, total, calls) VALUES (?, ?, ?, ?, ?, 1) "
+        "ON CONFLICT(month, owner) DO UPDATE SET input = input + excluded.input, "
+        "output = output + excluded.output, total = total + excluded.total, calls = calls + 1",
+        (usage_month(when), owner or ANONYMOUS_OWNER, *values),
+    )
+    await conn.commit()
+
+
+async def _backfill_monthly_usage(conn: aiosqlite.Connection) -> None:
+    """台帳の導入前からあるスレッドのトークン累計を、各スレッドの最終更新月へ一度だけ振り分ける。
+
+    スレッドには会話全体の累計しか残っていないため、月をまたいだ会話は最終更新月に
+    まとめて計上される（概算。backfilled=1 で区別する）。以後の呼び出しは
+    add_monthly_usage が実際の月へ加算する。
+    """
+    cursor = await conn.execute("SELECT value FROM store_meta WHERE key = ?", (_MONTHLY_BACKFILL_KEY,))
+    if await cursor.fetchone() is not None:
+        return
+    cursor = await conn.execute("SELECT owner, updated_at, metadata_json FROM threads")
+    rows = await cursor.fetchall()
+    buckets: dict[tuple[str, str], list[int]] = {}
+    for owner, updated_at, metadata_json in rows:
+        try:
+            cum = (json.loads(metadata_json or "{}") or {}).get("token_usage_cumulative") or {}
+            month = usage_month(datetime.fromisoformat(updated_at))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        values = [int(cum.get(k, 0) or 0) for k in ("input", "output", "total")]
+        if not any(values):
+            continue
+        bucket = buckets.setdefault((month, owner), [0, 0, 0])
+        for i, v in enumerate(values):
+            bucket[i] += v
+    for (month, owner), (inp, out, total) in buckets.items():
+        await conn.execute(
+            "INSERT INTO token_usage_monthly (month, owner, input, output, total, calls, backfilled) "
+            "VALUES (?, ?, ?, ?, ?, 0, 1) ON CONFLICT(month, owner) DO UPDATE SET "
+            "input = input + excluded.input, output = output + excluded.output, "
+            "total = total + excluded.total, backfilled = 1",
+            (month, owner, inp, out, total),
+        )
+    await conn.execute(
+        "INSERT INTO store_meta (key, value) VALUES (?, ?)", (_MONTHLY_BACKFILL_KEY, _now())
+    )
+    await conn.commit()
 
 
 async def upsert_thread_stub(conn: aiosqlite.Connection, thread_id: str, owner: str) -> None:

@@ -60,6 +60,34 @@ async def test_save_failure_does_not_break_the_turn(monkeypatch) -> None:
     await app._persist_token_usage()
 
 
+@pytest.mark.asyncio
+async def test_records_monthly_usage_for_the_session_user(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    conn = await thread_store.init_db(tmp_path / "chat_threads.sqlite")
+    try:
+        monkeypatch.setattr(app, "_thread_store_conn", conn)
+        monkeypatch.setattr(app.cl, "user_session", _FakeUserSession({"user": SimpleNamespace(identifier="alice")}))
+        await app._record_monthly_usage({"input_tokens": 90, "output_tokens": 10, "total_tokens": 100})
+        await app._record_monthly_usage({"input_tokens": 9, "output_tokens": 1, "total_tokens": 10})
+        cursor = await conn.execute("SELECT month, owner, input, output, total, calls FROM token_usage_monthly")
+        rows = [tuple(r) for r in await cursor.fetchall()]
+        assert rows == [(thread_store.usage_month(), "alice", 99, 11, 110, 2)]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_monthly_usage_failure_does_not_break_the_turn(monkeypatch) -> None:
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(app, "_thread_store_conn", object())
+    monkeypatch.setattr(app.thread_store, "add_monthly_usage", _boom)
+    monkeypatch.setattr(app.cl, "user_session", _FakeUserSession({}))
+    await app._record_monthly_usage({"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})
+
+
 class _MutableUserSession(_FakeUserSession):
     def set(self, key, value):
         self._values[key] = value

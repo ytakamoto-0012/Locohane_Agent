@@ -347,4 +347,12 @@ EN: dict[str, str] = {
     '選択したメモリーの本文が長すぎます（{0} 文字。上限 {1} 文字）。選ぶメモリーを減らしてください。': 'The selected memories are too long ({0} characters; the limit is {1}). Select fewer memories.',
     'LLM の応答を SKILL.md として読めませんでした: {0}': 'Could not read the LLM response as a SKILL.md: {0}',
     '（共通）': '(common)',
+    '{0} には数値を入れてください。': 'Enter a number for {0}.',
+    '{0} には0以上の数値を入れてください。': 'Enter a number of 0 or more for {0}.',
+    '料金設定の形式が正しくありません。': 'The cost settings are malformed.',
+    '料金形態は {0} のいずれかにしてください。': 'The pricing model must be one of {0}.',
+    '月は YYYY-MM の形式で指定してください: {0}': 'Specify the month as YYYY-MM: {0}',
+    '{0} の稼働時間が1か月の時間数を超えています。': 'The running hours for {0} exceed the hours in a month.',
+    '{0} を読めません: {1}': 'Cannot read {0}: {1}',
+    'instance.json を読めません。': 'Cannot read instance.json.',
 }
