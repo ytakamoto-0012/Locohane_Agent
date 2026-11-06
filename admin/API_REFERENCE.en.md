@@ -563,6 +563,23 @@ $C "$BASE/api/instances/default/monitor/endpoints"
 %C% "%BASE%/api/instances/default/monitor/threads/<thread_id>/tokens"
 ```
 
+## Usage & cost
+
+Monthly token usage per user, and costs calculated from AWS charges entered by hand (README_DETAIL.en.md "Usage & cost").
+
+```bash
+# Monthly usage (usage), cost settings (settings) and calculated amounts (costs)
+$C "$BASE/api/instances/default/usage"
+# Save the cost settings (pricing_model is monthly_bill / hourly / per_token. Empty numbers = not entered.
+# months is "YYYY-MM" -> {"bill": amount billed, "hours": running hours}. The response has the same shape as GET)
+$C -X PUT $BASE/api/instances/default/usage/cost-settings -H "$H" -H "$J" \
+  -d '{"pricing_model":"hourly","hourly_rate":1.006,"fixed_monthly":20,"exchange_rate":150,"months":{"2026-10":{"hours":300}}}'
+```
+
+```bat
+%C% -X PUT %BASE%/api/instances/default/usage/cost-settings -H %H% -H %J% -d "{\"pricing_model\":\"monthly_bill\",\"months\":{\"2026-10\":{\"bill\":123.45}}}"
+```
+
 ## Skill Lab
 
 All operations on research themes are under the target instance (`/api/instances/<name>/skill-lab/...`).

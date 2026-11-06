@@ -40,7 +40,7 @@ from src.config import (
 from src.version import __version__
 
 from . import api_docs, assistant, assistant_index, audit, auth, env_files, env_overrides, monitor, overrides, settings_files, supervisor
-from . import ini_catalog_en
+from . import ini_catalog_en, usage_cost
 from . import instances as inst
 from . import admin_settings as admin_settings_api
 from . import data_backup as data_backup_api
@@ -1372,6 +1372,63 @@ def get_monitor_logs(
 def get_monitor_endpoints(name: str, user: str = Depends(require_login)):
     cfg = _monitor_config(name)
     return {"endpoints": monitor.probe_endpoints(cfg)}
+
+
+# ---------------------------------------------------------------------------
+# 利用量・料金（月別トークン使用量と、手入力した AWS 利用料金。admin/usage_cost.py）
+# ---------------------------------------------------------------------------
+
+
+def _usage_view(name: str, settings: dict) -> dict[str, Any]:
+    cfg = _monitor_config(name)
+    try:
+        usage = usage_cost.monthly_usage(cfg.thread_store_db)
+        usage_error = None
+    except (monitor.MonitorError, sqlite3.Error) as exc:
+        usage = {"source": None, "months": [], "users": []}
+        usage_error = str(exc)
+    return {
+        "usage": usage,
+        "usage_error": usage_error,
+        "settings": settings,
+        "costs": usage_cost.compute_costs(usage, settings),
+    }
+
+
+@app.get("/api/instances/{name}/usage")
+def get_usage(name: str, user: str = Depends(require_login)):
+    _require_instance(name)
+    try:
+        settings = usage_cost.read_settings(INSTANCES_ROOT, name)
+    except usage_cost.UsageCostError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _usage_view(name, settings)
+
+
+@app.put("/api/instances/{name}/usage/cost-settings")
+def put_usage_cost_settings(
+    name: str,
+    body: dict[str, Any],
+    request: Request,
+    user: str = Depends(require_login),
+    _csrf: None = Depends(require_csrf),
+):
+    _require_instance(name)
+    try:
+        settings = usage_cost.write_settings(INSTANCES_ROOT, name, body)
+    except usage_cost.UsageCostError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit.append(
+        AUDIT_LOG_PATH,
+        {
+            "instance": name,
+            "actor": user,
+            "remote_addr": _client_ip(request),
+            "action": "usage_cost_settings_update",
+            "pricing_model": settings["pricing_model"],
+        },
+    )
+    return _usage_view(name, settings)
 
 
 # ---------------------------------------------------------------------------

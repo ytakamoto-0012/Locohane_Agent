@@ -560,6 +560,23 @@ $C "$BASE/api/instances/default/monitor/endpoints"
 %C% "%BASE%/api/instances/default/monitor/threads/<thread_id>/tokens"
 ```
 
+## 利用量・料金
+
+月別・ユーザー別のトークン使用量と、手入力した AWS 利用料金からの金額（README_DETAIL.md「利用量・料金」節）。
+
+```bash
+# 月別の使用量（usage）・料金設定（settings）・計算した金額（costs）
+$C "$BASE/api/instances/default/usage"
+# 料金設定の保存（pricing_model は monthly_bill / hourly / per_token。数値は空欄=未入力。
+# months は "YYYY-MM" -> {"bill": 請求額, "hours": 稼働時間}。応答は GET と同じ形）
+$C -X PUT $BASE/api/instances/default/usage/cost-settings -H "$H" -H "$J" \
+  -d '{"pricing_model":"hourly","hourly_rate":1.006,"fixed_monthly":20,"exchange_rate":150,"months":{"2026-10":{"hours":300}}}'
+```
+
+```bat
+%C% -X PUT %BASE%/api/instances/default/usage/cost-settings -H %H% -H %J% -d "{\"pricing_model\":\"monthly_bill\",\"months\":{\"2026-10\":{\"bill\":123.45}}}"
+```
+
 ## スキル研究室
 
 研究テーマの操作は、すべて対象インスタンスの下（`/api/instances/<name>/skill-lab/...`）にある。

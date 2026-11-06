@@ -575,7 +575,7 @@ and WAL cannot be used). Use "Data backup" (in the settings dashboard section) t
 | Path | Content | When it may be deleted | How to delete |
 |------|------|------------------------|----------|
 | `data/checkpoints.sqlite` | LangGraph conversation state (the history of all threads) | When past conversation history is no longer needed | Delete the file (while the app is stopped) |
-| `data/chat_threads.sqlite` | Metadata for the conversation thread list (left sidebar) and resuming (thread names, owners, Chainlit Step history). A separate file from `checkpoints.sqlite` (see `[thread_store]`) | When the list/resume feature is no longer needed | Delete the file (while the app is stopped; `checkpoints.sqlite` itself remains, so conversation state is not lost) |
+| `data/chat_threads.sqlite` | Metadata for the conversation thread list (left sidebar) and resuming (thread names, owners, Chainlit Step history), and the ledger of monthly token usage per user (`token_usage_monthly`, for "Usage & cost" in the settings dashboard). A separate file from `checkpoints.sqlite` (see `[thread_store]`) | When the list/resume feature is no longer needed | Delete the file (while the app is stopped; `checkpoints.sqlite` itself remains, so conversation state is not lost) |
 | `data/logs/app.log` | App operation log | Any time | Delete the file |
 | `data/memory/` | Persistent memory (common `user`/`feedback`/`project`/`reference` subfolders + the `MEMORY.md` index, and per-user `users/<user>/`) | When the accumulated memories are no longer needed | Delete the folder contents (`MEMORY.md` is regenerated on the next save). For one user only, delete `users/<user>/` |
 | `data/vector_db/` | The vector DB's `catalog.sqlite` (collection definitions, records of ingested files), the vectors `vectors.sqlite` with `backend = sqlite_vec`, the keyword index of the text `keywords/<collection name>.sqlite` (one file per collection), and the ingestion journal `ingest_journal.sqlite` that records files left half-written by a forced termination (`[vector_db] dir`). `catalog.sqlite` also holds references to collections of other instances (the `collection_refs` table). The source documents themselves are not copied | When a collection is no longer needed | Delete the collection on the Knowledge screen of the settings dashboard (to delete the whole folder, stop the app and the admin tool's ingestion first; with `backend = qdrant` the vectors remain on the Qdrant side) |
@@ -2189,6 +2189,7 @@ instances/
 │   ├── .env                     # instance-only sign-in users etc. (optional)
 │   ├── settings/                # instance-only display settings (optional; see below)
 │   ├── backups/                 # snapshots before saving/restoring
+│   ├── aws_cost.json            # AWS cost settings entered in "Usage & cost" (created on the first save)
 │   └── app_stdout.log           # stdout of the main process
 ├── <other instance name>/
 │   └── ... (same as above)
@@ -2313,6 +2314,37 @@ Data sources:
 It reads files instead of communicating with the main app over HTTP so that instances started directly with `app.bat`
 (where the admin tool was not involved in starting them) look the same, and because there is no mechanism
 for sharing an authentication secret between the admin tool and the main app (the main app may be published on `0.0.0.0`).
+
+### Usage & cost (monthly token usage and AWS charges)
+
+The "Usage & cost" sub-tab of an instance shows that instance's cumulative token usage per month, and calculates
+amounts from AWS charges entered by hand (`admin/usage_cost.py`).
+
+- **Charts**: monthly token usage (input + output, including sub-agents and compaction) as a bar chart stacked by user
+  (the top of each bar is the total for all users). Colors go to the top 7 users by all-time usage; the 8th user and
+  beyond are folded into "Others". If any month has a calculable cost, a bar chart of the monthly cost (USD) is shown too.
+- **Tables**: a monthly summary (total/input/output tokens, number of LLM calls, active users, cost, cost per 1M tokens),
+  and per-user usage, share and cost (for a chosen month or all time).
+- **AWS cost settings**: choose a pricing model and enter the values by hand. Amounts are estimates from the values
+  entered, not the AWS bill itself.
+
+| Pricing model | Intended use | What to enter | Per-user amount |
+|---|---|---|---|
+| Monthly bill (`monthly_bill`) | Use the actual amounts from the AWS bill or Cost Explorer as they are | The amount billed for each month | Split by share of the month's total tokens |
+| Hourly (`hourly`) | Running the inference server (llama.cpp / vLLM) on an EC2 GPU instance, etc. The cost is proportional to the hours the instance runs, not to the tokens (the rate differs between On-Demand, Savings Plans, Reserved and Spot) | Hourly rate (USD/hour), running hours per month (empty = every hour of the month, i.e. always on) | Split by share |
+| Per-token (`per_token`) | Services billed by input/output tokens, such as Amazon Bedrock on-demand | Price per 1M input tokens and per 1M output tokens (USD) | Each user's input/output tokens × the price |
+
+With hourly and per-token pricing, a fixed monthly cost (EBS, data transfer, load balancers, etc.) can be added
+(split among users by share). Entering an exchange rate (yen per USD) also shows amounts in yen. Each save is recorded
+in the change history as `usage_cost_settings_update`.
+
+Data sources and storage:
+
+| Item | Location |
+|---|---|
+| Monthly usage | The `token_usage_monthly` table in `[thread_store] db`. The main app adds to the row for the current month (in the main app's local time) and user on every LLM call (`add_monthly_usage` in `src/thread_store.py`). Deleting a thread does not reduce it. Nothing is recorded with `[thread_store] enabled=false` or `[llm] track_token_usage=false` |
+| Usage from before the ledger | Once, on the first start that creates this table, the totals of existing threads (`token_usage_cumulative`) are counted in each thread's last-updated month. Conversations spanning months lean toward their last-updated month, so this is an estimate (shown as "includes estimate"). If the main app has not been started since the update, the same estimate is calculated on the fly |
+| Cost settings | `instances/<instance name>/aws_cost.json` (created on the first save in the admin tool) |
 
 ### Admin settings
 
