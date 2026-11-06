@@ -85,3 +85,43 @@ def test_returns_none_when_iteration_cut_is_none() -> None:
     messages: list = [HumanMessage(content="q1"), AIMessage(content="final")]
 
     assert _find_compaction_cut_index(messages, 3) is None
+
+
+def test_mid_turn_user_injection_does_not_move_the_protection_boundary() -> None:
+    """ターン途中に入った追加指示（src/user_injection.py）を保護の起点にしない。
+
+    起点にすると、そのターンの依頼文 q2 が要約に飲まれる。依頼文を起点にすれば、
+    その後ろにある追加指示も原文のまま残る。
+    """
+    from src import user_injection
+
+    messages = _messages_with_two_user_turns()
+    q2_index = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
+    messages.append(user_injection.to_human_message([user_injection.Injection(id="inj", text="CSVで")], "turn"))
+    for i in range(3):
+        messages += _round_trip(f"c{i}")
+
+    cut_index = _find_compaction_cut_index(messages, 1)
+
+    assert cut_index is not None and cut_index <= q2_index
+    kept = messages[cut_index:]
+    assert any(isinstance(m, HumanMessage) and m.content == "q2" for m in kept)
+    assert any(user_injection.is_injection_message(m) for m in kept)
+
+
+def test_leftover_injection_marked_as_user_turn_is_a_protection_boundary() -> None:
+    """最終回答の後に残っていて新しいユーザー発話として入れたもの（mark_user_turn 付き）は、通常の発話と同じ扱い。"""
+    from src import user_injection
+    from src.llm import mark_user_turn
+
+    messages = _messages_with_two_user_turns()
+    messages.append(AIMessage(content="answer"))
+    messages.append(mark_user_turn(user_injection.to_human_message([user_injection.Injection(id="inj", text="次は")], "turn")))
+    leftover_index = len(messages) - 1
+    for i in range(3):
+        messages += _round_trip(f"c{i}")
+
+    cut_index = _find_compaction_cut_index(messages, 1)
+
+    assert cut_index is not None and cut_index <= leftover_index
+    assert cut_index > max(i for i, m in enumerate(messages[:leftover_index]) if isinstance(m, HumanMessage))

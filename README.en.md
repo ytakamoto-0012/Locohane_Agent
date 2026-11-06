@@ -206,6 +206,12 @@ When sign-in is enabled, only your own conversations are shown.
 
 You can interrupt at any time with the stop button. For long-running work, elapsed time and progress are shown in the chat.
 
+### Add instructions while it works
+
+You can type in the input box while the AI is working. Send with "Add instruction" (or Enter) and it is passed to the AI from
+the next step without stopping the work (e.g. "Please give me the result as CSV"). You can attach files too. See "Additional instructions during work
+(interjection)" in [README_DETAIL.en.md](README_DETAIL.en.md) for details.
+
 ### Have it remember things
 
 Say something like "Remember that drawing numbers in this project are always written in the ○○ format",

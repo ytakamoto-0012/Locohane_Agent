@@ -216,6 +216,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ja": "他の会話が処理中です。完了してから送信してください。",
         "en": "Another conversation is being processed. Please send after it finishes.",
     },
+    "notice.this_thread_busy": {
+        "ja": "この会話はまだ処理中（または停止処理中）のため、このメッセージは処理していません。少し待ってから送り直してください。",
+        "en": "This conversation is still being processed (or stopping), so this message was not processed. Please wait a moment and send it again.",
+    },
     # --- 実行計画・質問（src/tools/） ---
     "plan.heading": {"ja": "### 実行計画", "en": "### Plan"},
     "plan.approve_question": {

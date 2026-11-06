@@ -93,7 +93,7 @@ def test_build_human_message_adds_path_memory_tokens_and_folder(tmp_path, monkey
     # dispatch_agent_batch の path に渡せる送信フォルダも載せる。
     registered = {}
 
-    def _fake_register(paths, description=None):
+    def _fake_register(paths, description=None, thread_id=None):
         result = {}
         for p in paths:
             registered.setdefault(p, f"@{len(registered) + 1}")

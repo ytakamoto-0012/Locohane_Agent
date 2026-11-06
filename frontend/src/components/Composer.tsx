@@ -1,13 +1,15 @@
-import { useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
+import { useRecoilValue } from 'recoil';
 import { v4 as uuidv4 } from 'uuid';
-import { useChatData, useChatInteract } from '@chainlit/react-client';
+import { currentThreadIdState, sessionIdState, useChatData, useChatInteract, useChatMessages } from '@chainlit/react-client';
 import type { IFileRef, IStep } from '@chainlit/react-client';
+import { BACKEND_URL } from '../chainlitClient';
 import { useI18n } from '../i18n';
 import { WorkDirButton } from './WorkDirButton';
 import { ReasoningEffortButton, getStoredReasoningEffort } from './ReasoningEffortButton';
 import { PlanModeBadge } from './PlanModeBadge';
 import { Icon } from './Icon';
-import type { InputLimits } from '../utils/messageTree';
+import { selectAppliedInjectionIds, type InputLimits } from '../utils/messageTree';
 
 export interface PendingAttachment {
   name: string;
@@ -23,6 +25,29 @@ export interface PendingAttachment {
 const PASTED_PREVIEW_CHARS = 200;
 // 文字数カウンターを表示し始める、最大入力文字数に対する割合。
 const CHAR_COUNTER_SHOW_RATIO = 0.8;
+// ターンが終わった（loading が false になった）と判断するまで待つ時間。承認待ち等の "ask" の
+// 前後で loading が一瞬 false になるため、すぐには「終わった」とみなさない。
+const TURN_END_SETTLE_MS = 1500;
+// 追加指示の送信がこれより長くかかったら打ち切る（応答待ちのまま、ターン終了後の処理が止まらないように）。
+const INJECT_TIMEOUT_MS = 10000;
+
+/**
+ * 生成中に送った追加指示（app.py の /locohane/threads/{id}/inject、src/user_injection.py）。
+ * id はここで決めてバックエンドへ渡し、チャット欄に届いたユーザー発言（metadata.injection_id）と突き合わせる。
+ * - sending: 送信中
+ * - queued: バックエンドが受け付けた（次にモデルを呼ぶ前に会話へ入る）
+ * - deferred: ターンが終わりかけで受け付けられなかった（ターンの終了後に通常のメッセージとして送る）
+ * - unknown: 通信エラー・タイムアウトで、受け付けられたか分からない（二重送信を避けるため、
+ *   会話へ入らないままターンが終わったら自動では送らず入力欄へ戻す）
+ * attachments は一緒に送った添付（送り直す・入力欄へ戻すときに使う。バックエンドは受け付けた
+ * 時点でスレッド専用フォルダへコピーするため、受け付けられた後はこのセッションの一時ファイルに依存しない）。
+ */
+interface QueuedInstruction {
+  id: string;
+  text: string;
+  attachments: PendingAttachment[];
+  status: 'sending' | 'queued' | 'deferred' | 'unknown';
+}
 
 function countLines(text: string): number {
   let lines = 1;
@@ -52,6 +77,8 @@ interface ComposerProps {
   onAttachPastedText: (text: string) => void;
   onRemoveAttachment: (index: number) => void;
   onAttachmentsSent: () => void;
+  // 生成中の追加指示に付けた添付を、伝わらなかったときに入力欄へ戻す（App.tsx の handleRestoreAttachments）。
+  onRestoreAttachments: (attachments: PendingAttachment[]) => void;
   // 貼り付けテキスト化の閾値・最大入力文字数（config.ini [ui]、app.py の INPUT_LIMITS_PREFIX）。
   inputLimits: InputLimits;
   // 直近のターンが中断したまま（app.py の INTERRUPTED_PREFIX）。「続ける」ボタンを出す。
@@ -69,20 +96,133 @@ export function Composer({
   onAttachPastedText,
   onRemoveAttachment,
   onAttachmentsSent,
+  onRestoreAttachments,
   inputLimits,
   interrupted
 }: ComposerProps) {
-  const { askUser, disabled, loading } = useChatData();
+  const { askUser, connected, loading } = useChatData();
   const { sendMessage, replyMessage, stopTask } = useChatInteract();
+  const { messages } = useChatMessages();
+  const currentThreadId = useRecoilValue(currentThreadIdState);
+  const sessionId = useRecoilValue(sessionIdState);
   const { t } = useI18n();
   const [value, setValue] = useState('');
   const [pasteError, setPasteError] = useState<string | null>(null);
+  const [queued, setQueued] = useState<QueuedInstruction[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
 
   const isReplying = askUser?.spec.type === 'text';
-  // 他セッションでこのスレッドが処理中、または同じ所有者の別スレッドが
-  // 処理中の間は送信自体を止める。
-  const inputBlocked = disabled || Boolean(remoteGenerating) || Boolean(blockedByOtherThread);
+  // この会話のターンが動いている間（承認ボタン等の応答待ちを含む）。送信は追加指示（割り込み）
+  // として扱う。生成中に別の会話へ移って戻ってきた画面（remoteGenerating。生成しているのは
+  // 別のセッション）も含める。そちらは loading が false のままなので、含めないと送った直後に
+  // 「ターンが終わった」とみなして、まだ伝わっていない指示を入力欄へ戻してしまう。
+  const turnRunning = loading || askUser?.spec.type === 'action' || Boolean(remoteGenerating);
+  // useChatData().disabled は生成中（loading）も true になるが、生成中も追加指示を
+  // 入力できるよう、未接続とファイル・要素の応答待ちのときだけ止める。
+  // 同じ所有者の別スレッドが処理中の間は送信自体を止める（この会話が他セッションで
+  // 処理中の間は、追加指示としてだけ送れる）。
+  const askBlocksInput = askUser?.spec.type === 'file' || askUser?.spec.type === 'element';
+  const inputBlocked = !connected || askBlocksInput || Boolean(blockedByOtherThread);
+  const inputBlockedRef = useRef(inputBlocked);
+  inputBlockedRef.current = inputBlocked;
+
+  // 会話へ入った（チャット欄にユーザー発言として届いた）追加指示は「送信待ち」から外す。
+  useEffect(() => {
+    if (queued.length === 0) return;
+    const applied = selectAppliedInjectionIds(messages);
+    if (queued.some((q) => applied.has(q.id))) {
+      setQueued((prev) => prev.filter((q) => !applied.has(q.id)));
+    }
+  }, [messages, queued]);
+
+  // ターンが終わったら、受け付けられなかった指示（deferred）は通常のメッセージとして送り、
+  // 受け付けたのに反映されないまま終わった指示（停止・エラーで中断した場合）は入力欄へ戻す。
+  useEffect(() => {
+    if (turnRunning || queued.length === 0 || queued.some((q) => q.status === 'sending')) return;
+    const timer = setTimeout(() => {
+      const applied = selectAppliedInjectionIds(messagesRef.current);
+      const pending = queued.filter((q) => !applied.has(q.id));
+      setQueued([]);
+      const deferred = pending.filter((q) => q.status === 'deferred');
+      const restore = pending.filter((q) => q.status !== 'deferred' || inputBlockedRef.current);
+      if (deferred.length > 0 && !inputBlockedRef.current) {
+        const fileReferences = deferred.flatMap((q) =>
+          q.attachments.flatMap((a) => (a.fileRef ? [{ id: a.fileRef.id }] : []))
+        );
+        sendMessage(
+          buildUserMessage(
+            deferred
+              .map((q) => q.text)
+              .filter((s) => s)
+              .join('\n\n')
+          ),
+          fileReferences
+        );
+      }
+      if (restore.length > 0) {
+        restoreToInput(restore);
+        setPasteError(t('composer.injectNotApplied'));
+      }
+    }, TURN_END_SETTLE_MS);
+    return () => clearTimeout(timer);
+    // buildUserMessage・sendMessage・t は毎回作り直されるが、判定には使わない
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turnRunning, queued]);
+
+  const setQueuedStatus = (id: string, status: QueuedInstruction['status']) =>
+    setQueued((prev) => prev.map((q) => (q.id === id ? { ...q, status } : q)));
+
+  // 伝わらなかった指示の本文・添付を入力欄へ戻す。
+  const restoreToInput = (items: QueuedInstruction[]) => {
+    const texts = items.map((q) => q.text).filter((s) => s);
+    if (texts.length > 0) setValue((v) => [...texts, v].filter((s) => s).join('\n'));
+    const restoredAttachments = items.flatMap((q) => q.attachments);
+    if (restoredAttachments.length > 0) onRestoreAttachments(restoredAttachments);
+  };
+
+  // 生成中の送信: 入力欄の本文と添付を追加指示としてバックエンドへ積む。
+  const submitInstruction = () => {
+    const text = value.trim();
+    if (!text && attachments.length === 0) return;
+    const id = uuidv4();
+    const sentAttachments = attachments;
+    const files = sentAttachments.flatMap((a) => (a.fileRef ? [a.fileRef.id] : []));
+    setQueued((prev) => [
+      ...prev,
+      { id, text, attachments: sentAttachments, status: currentThreadId ? 'sending' : 'deferred' }
+    ]);
+    setValue('');
+    setPasteError(null);
+    onAttachmentsSent();
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    if (!currentThreadId) return;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), INJECT_TIMEOUT_MS);
+    fetch(`${BACKEND_URL}/locohane/threads/${currentThreadId}/inject`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, id, files, session_id: sessionId }),
+      signal: controller.signal
+    })
+      .then((res) => {
+        if (res.ok) {
+          setQueuedStatus(id, 'queued');
+        } else if (res.status === 409) {
+          // 確実に積まれていない（受付が閉じていた）ので、ターンの終了後に通常のメッセージとして送る。
+          setQueuedStatus(id, 'deferred');
+        } else {
+          // 長すぎる・添付が使えない等で拒否された（確実に積まれていない）。入力欄へ戻して知らせる。
+          setQueued((prev) => prev.filter((q) => q.id !== id));
+          restoreToInput([{ id, text, attachments: sentAttachments, status: 'deferred' }]);
+          setPasteError(t('composer.injectFailed'));
+        }
+      })
+      .catch(() => setQueuedStatus(id, 'unknown'))
+      .finally(() => clearTimeout(timeout));
+  };
 
   // 最大入力文字数の判定対象は、入力欄の本文＋貼り付けテキストの合計
   // （app.py の _check_input_length と同じ数え方）。
@@ -149,6 +289,10 @@ export function Composer({
   };
 
   const submit = () => {
+    if (turnRunning && !isReplying) {
+      if (!inputBlocked && !overLimit && !uploading) submitInstruction();
+      return;
+    }
     if (inputBlocked || overLimit || uploading || (!value.trim() && attachments.length === 0)) return;
 
     const message = buildUserMessage(value);
@@ -233,6 +377,26 @@ export function Composer({
           )}
         </div>
       ) : null}
+      {queued.length > 0 ? (
+        <div className="composer-queued">
+          {queued.map((q) => (
+            <div key={q.id} className="composer-queued-item">
+              <span className="composer-queued-label">
+                {q.status === 'deferred' ? t('composer.queuedNextTurn') : t('composer.queuedNextStep')}
+              </span>
+              <span className="composer-queued-text">
+                {q.attachments.length > 0 ? (
+                  <span className="composer-queued-files">
+                    <Icon name="paperclip" size={12} />
+                    {q.attachments.length}
+                  </span>
+                ) : null}
+                {q.text}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {pasteError ? <div className="composer-paste-error">{pasteError}</div> : null}
       {attachments.some((a) => a.pastedText === undefined) ? (
         <div className="composer-attachments">
@@ -259,12 +423,12 @@ export function Composer({
           className="composer-textarea"
           value={value}
           placeholder={
-            remoteGenerating
-              ? t('composer.placeholderBusy')
-              : blockedByOtherThread
-                ? t('composer.placeholderOtherBusy')
-                : isReplying
-                  ? t('composer.placeholderReply')
+            blockedByOtherThread
+              ? t('composer.placeholderOtherBusy')
+              : isReplying
+                ? t('composer.placeholderReply')
+                : turnRunning
+                  ? t('composer.placeholderInject')
                   : t('composer.placeholder')
           }
           disabled={inputBlocked}
@@ -304,6 +468,18 @@ export function Composer({
               </span>
             ) : null}
             <PlanModeBadge step={plan} />
+            {/* 生成中は停止ボタンと並べて出す（承認待ち等で loading=false の間は下の送信ボタンが同じ働きをする） */}
+            {(loading || remoteGenerating) && !isReplying && (value.trim() || attachments.length > 0) ? (
+              <button
+                type="button"
+                className="composer-submit-button"
+                onClick={submit}
+                disabled={inputBlocked || overLimit || uploading}
+                title={t('composer.injectTitle')}
+              >
+                {t('composer.inject')}
+              </button>
+            ) : null}
             {loading ? (
               <button type="button" className="composer-stop-button" onClick={stopTask}>
                 {t('common.stop')}

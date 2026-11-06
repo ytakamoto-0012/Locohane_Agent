@@ -463,3 +463,91 @@ async def test_stop_thread_generating_returns_false_when_nothing_to_stop(monkeyp
     monkeypatch.setattr(app, "aclose_active_llm_clients", fake_aclose)
 
     assert await app._stop_thread_generating("t1") is False
+
+
+@pytest.mark.asyncio
+async def test_on_message_rejects_while_the_same_thread_is_still_generating(monkeypatch) -> None:
+    """同じスレッドが生成中（停止の後始末中・戻ってきた直後の送信）なら、2本目のターンを走らせない。
+
+    並行して走らせると同じチェックポイントを奪い合い、追加指示の受付（src/user_injection.py）も
+    取り違える。走っている側の受付・記録には触れない。
+    """
+    from src import user_injection
+
+    app._generating_thread_ids.clear()
+    app._generating_owner_threads.clear()
+    app._generating_thread_tasks.clear()
+    user_injection._queues.clear()
+    app._mark_thread_generating("t1", "anonymous", "other-sid")
+    running_token = user_injection.open_thread("t1")
+
+    monkeypatch.setattr(app.cl, "user_session", _FakeUserSession("t1"))
+    monkeypatch.setattr(app.cl, "context", _FakeContext(_FakeEmitSession("t1")))
+    sent_messages = []
+
+    class _FakeMessage:
+        def __init__(self, content=None, type=None):
+            sent_messages.append(content)
+
+        async def send(self):
+            return None
+
+    monkeypatch.setattr(app.cl, "Message", _FakeMessage)
+    called = []
+
+    async def fake_impl(message):
+        called.append(True)
+
+    monkeypatch.setattr(app, "_on_message_impl", fake_impl)
+
+    await app.on_message(object())
+
+    assert called == []
+    assert sent_messages
+    assert "t1" in app._generating_thread_ids
+    assert user_injection.current_token("t1") == running_token
+    app._generating_thread_ids.clear()
+    app._generating_owner_threads.clear()
+    user_injection._queues.clear()
+
+
+@pytest.mark.asyncio
+async def test_on_message_opens_injection_queue_for_the_turn_and_closes_it(monkeypatch) -> None:
+    from src import user_injection
+
+    app._generating_thread_ids.clear()
+    app._generating_owner_threads.clear()
+    user_injection._queues.clear()
+    monkeypatch.setattr(app.cl, "user_session", _FakeUserSession("t1"))
+    monkeypatch.setattr(app.cl, "context", _FakeContext(_FakeEmitSession("t1")))
+    seen = {}
+
+    async def fake_impl(message):
+        # _on_message_impl の冒頭（await より前）と同じ取り方でトークンが見える。
+        seen["token"] = user_injection.current_token("t1")
+        seen["queued"] = user_injection.enqueue("t1", "追加") is not None
+
+    monkeypatch.setattr(app, "_on_message_impl", fake_impl)
+    await app.on_message(object())
+
+    assert seen["token"] is not None and seen["queued"] is True
+    assert not user_injection.is_open("t1")  # 取り込まれずに終わった指示は捨てて閉じる
+
+
+@pytest.mark.asyncio
+async def test_stop_thread_generating_closes_injection_queue_immediately(monkeypatch) -> None:
+    from src import user_injection
+
+    user_injection._queues.clear()
+    user_injection.open_thread("t1")
+    user_injection.enqueue("t1", "追加")
+
+    async def _noop(thread_id):
+        return False
+
+    monkeypatch.setattr(app, "cancel_dispatch_agent_jobs_for_thread", _noop)
+    monkeypatch.setattr(app, "cancel_background_script_jobs_for_thread", _noop)
+    monkeypatch.setattr(app, "aclose_active_llm_clients", _noop)
+    await app._stop_thread_generating("t1")
+    assert not user_injection.is_open("t1")
+    assert user_injection.enqueue("t1", "停止後") is None

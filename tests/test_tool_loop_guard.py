@@ -363,4 +363,4 @@ async def test_prebuilt_hook_detects_loop_even_when_token_guard_appends(monkeypa
     )
     await graph_mod._build_prebuilt_graph(cfg, "sp", None)
     with pytest.raises(ToolCallLoopDetected):
-        captured["hook"]({"messages": _history(_err(), _err(), _err())})
+        await captured["hook"]({"messages": _history(_err(), _err(), _err())}, {})
