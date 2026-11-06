@@ -94,6 +94,51 @@ _POST_COMPACTION_SUSPICIOUS_RESPONSE_NUDGE_TEXT = (
     "Based on the work so far (the results of your tool calls), answer the original task again]"
 )
 
+# サブエージェントが実行したツール呼び出しを1件ずつ受け取るコールバック（評価ハーネス用）。
+# dispatch_agent の戻り値はサブエージェントの最終回答だけなので、委譲先で何を呼んだか
+# （read_skill・execute_python_code の中身）は呼び出し元の会話に残らない。
+# evals/run_case.py がここへ登録して結果JSONに残す（2026-11-07 evals xlkit: 「read_skill して
+# xlkit を import したか」を transcript から直接確かめられなかった）。本番では誰も登録しない。
+_TOOL_CALL_OBSERVERS: list[Callable[[dict], None]] = []
+
+
+def add_tool_call_observer(observer: Callable[[dict], None]) -> None:
+    """サブエージェントのツール呼び出しの観測者を登録する。
+
+    observer は1件ごとに {"task", "iteration", "name", "args", "is_error", "result"} の
+    dict を受け取る（result はツール結果の先頭部分）。例外を送出しても無視される。
+    """
+    _TOOL_CALL_OBSERVERS.append(observer)
+
+
+def remove_tool_call_observer(observer: Callable[[dict], None]) -> None:
+    """add_tool_call_observer で登録した観測者を外す（登録されていなければ何もしない）。"""
+    if observer in _TOOL_CALL_OBSERVERS:
+        _TOOL_CALL_OBSERVERS.remove(observer)
+
+
+_OBSERVED_RESULT_CHARS = 500
+
+
+def _notify_tool_call_observers(task: str, iteration: int, tool_calls: list, results: list) -> None:
+    if not _TOOL_CALL_OBSERVERS:
+        return
+    for call, (tool_message, _followup) in zip(tool_calls, results, strict=False):
+        content = tool_message.content if isinstance(tool_message.content, str) else str(tool_message.content)
+        record = {
+            "task": task,
+            "iteration": iteration,
+            "name": call.get("name"),
+            "args": call.get("args") or {},
+            "is_error": getattr(tool_message, "status", None) == "error" or looks_like_error(content),
+            "result": content[:_OBSERVED_RESULT_CHARS],
+        }
+        for observer in list(_TOOL_CALL_OBSERVERS):
+            try:
+                observer(record)
+            except Exception:  # noqa: BLE001 - 観測の失敗でサブエージェントを止めない
+                logger.exception("subagent: a tool call observer failed")
+
 
 async def _run_one_tool_call(call: dict, tools_by_name: dict[str, BaseTool]) -> tuple[ToolMessage, HumanMessage | None]:
     """1件の tool_call を実行し、(ToolMessage, followup) を返す。例外は送出しない。"""
@@ -806,6 +851,7 @@ async def run_subagent(
             # 並列の同名呼び出しは1つにまとめる（dict.fromkeys で順序を保つ）。
             _set_activity(("tools", *dict.fromkeys(call["name"] for call in tool_calls)))
             results = await asyncio.gather(*(_run_one_tool_call(call, tools_by_name) for call in tool_calls))
+            _notify_tool_call_observers(task, iteration, tool_calls, results)
             for tool_message, followup in results:
                 messages.append(tool_message)
                 if followup is not None:

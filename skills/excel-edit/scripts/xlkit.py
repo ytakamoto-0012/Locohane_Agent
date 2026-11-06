@@ -53,9 +53,16 @@ def fill(color: str) -> PatternFill:
 
 
 def new_workbook() -> Workbook:
-    """シートが1枚も無い新しいブック。最初に `wb.create_sheet(名前)` でシートを作る。"""
+    """シートが1枚も無い新しいブック。最初に `wb.create_sheet(名前)` でシートを作る。
+
+    xlkit で一から組み立てたブックだと分かる印を付ける。保存時の日本語フォントの判定は
+    save() の new ではなくこの印で決める（2026-11-07 evals xlkit run3: 修正のため同じ
+    スクリプトを実行し直した worker が、既にあるファイルへ new=False で保存したところ
+    Yu Gothic が付かず Calibri に戻った）。
+    """
     wb = Workbook()
     wb.remove(wb.active)
+    wb._xlkit_built_new = True
     return wb
 
 
@@ -166,7 +173,13 @@ def write_table(
         _fit_title_height(ws, title_row, first_col, last_col, title)
     if freeze and header_row is not None:
         ws.freeze_panes = ws.cell(row=first_row, column=first_col).coordinate
-    return Table(title_row, header_row, first_row, last_row, first_col, last_col)
+    table = Table(title_row, header_row, first_row, last_row, first_col, last_col)
+    tables = getattr(ws, "_xlkit_tables", None)
+    if tables is None:
+        tables = []
+        ws._xlkit_tables = tables
+    tables.append(table)
+    return table
 
 
 def write_note(ws, row: int, text: str, first_col: int = 1, last_col: int | None = None, *, bold: bool = False) -> None:
@@ -224,8 +237,13 @@ def save(wb, path, *, new: bool = False) -> dict:
     from _lint import lint_sheet, sheet_summary
 
     path = Path(path).resolve()
+    replaced_own_output = False
     if new and path.exists():
-        raise FileExistsError(f"{path} already exists. Open it with open_workbook() and save with new=False to edit it")
+        # 同じ会話で xlkit が保存したファイルは、修正のために同じスクリプトを実行し直した
+        # 結果なので、そのまま作り直す（バックアップも取らない）。ユーザーのファイルは今までどおり拒否する。
+        if not _is_own_output(path):
+            raise FileExistsError(f"{path} already exists. Open it with open_workbook() and save with new=False to edit it")
+        replaced_own_output = True
     if path.suffix.lower() == ".xlsm" and getattr(wb, "vba_archive", None) is None:
         raise ValueError("Saving as .xlsm needs a workbook opened from an existing .xlsm with open_workbook() (keeps the macros)")
     if not wb.sheetnames:
@@ -241,7 +259,9 @@ def save(wb, path, *, new: bool = False) -> dict:
     result: dict = {"path": str(path), "sheets": [sheet_summary(ws) for ws in wb.worksheets]}
     if backup is not None:
         result["backup"] = str(backup)
-    ref = register_output_path(path, description="excel-edit output")
+    if replaced_own_output:
+        result["replaced"] = "rebuilt the file this conversation saved before"
+    ref = register_output_path(path, description=_OUTPUT_DESCRIPTION)
     if ref:
         result["ref"] = ref
     if warnings:
@@ -251,18 +271,96 @@ def save(wb, path, *, new: bool = False) -> dict:
 
 
 def finalize_sheets(wb, *, new: bool) -> None:
-    """保存直前に、フォント名と折返し行の高さを確定させる（書かなかった分を埋める）。
+    """保存直前に、フォント名・折返し行の高さ・印刷設定を確定させる（書かなかった分を埋める）。
 
     openpyxl はフォント名を書かなければ Calibri のまま、折返しセルがあっても行の高さを
     設定しない。どちらも開くアプリ・レンダリングで見え方が変わり、点検（lint）と検証役が
     NG にして修正往復が増えていた（2026-11-06 bench001: 臂3回で日本語フォント 0/3、
     折返し行の高さ欠落の中央値 37.5）。ここで固定すれば recipe を覚えていなくても出る。
-    明示的に設定したフォント名・行の高さは変えない。
+    明示的に設定したフォント名・行の高さ・印刷設定は変えない。
+
+    日本語フォントにするのは、xlkit で一から組み立てたブック（new_workbook() の印か new=True）と、
+    既存ブックでも名前の付いたフォントが1つも無い（openpyxl 等で作られ、誰もフォントを
+    選んでいない）ブックに日本語がある場合。既存ブックに名前の付いたフォントがあれば、
+    シート（無ければブック）で一番多い名前に揃える（元ファイルの見た目を変えない）。
     """
-    cjk_font = _CJK_FONT if new and _workbook_has_cjk(wb) else None
+    built_new = new or bool(getattr(wb, "_xlkit_built_new", False))
+    has_cjk = _workbook_has_cjk(wb)
+    workbook_names = [name for ws in wb.worksheets for name in _named_fonts(ws)]
+    if built_new:
+        fallback = _CJK_FONT if has_cjk else None
+    elif workbook_names:
+        fallback = max(set(workbook_names), key=workbook_names.count)
+    else:
+        fallback = _CJK_FONT if has_cjk else "Calibri"
     for ws in wb.worksheets:
-        _finalize_fonts(ws, cjk_font)
+        _finalize_fonts(ws, _CJK_FONT if built_new and has_cjk else None, fallback)
         _fit_wrapped_row_heights(ws)
+        _fit_print_setup(ws)
+
+
+_OUTPUT_DESCRIPTION = "excel-edit output"
+
+
+def _is_own_output(path: Path) -> bool:
+    """この会話のパスメモリーに、xlkit の save() が保存したファイルとして登録済みか。"""
+    import os
+
+    src_dir = os.environ.get("AGENT_SRC_DIR")
+    if not src_dir:
+        return False
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+    try:
+        import path_memory
+    except ImportError:
+        return False
+    thread_id, pm_dir, _ = path_memory.env_params()
+    target = str(path.resolve())
+    return any(
+        entry.get("path") == target and entry.get("description") == _OUTPUT_DESCRIPTION
+        for entry in path_memory.list_entries(thread_id, pm_dir)
+    )
+
+
+# 用紙（A4・余白 0.7 インチ）に 100% で入る列幅の合計の目安（列幅の単位で）。
+_PORTRAIT_WIDTH = 94
+_LANDSCAPE_WIDTH = 140
+
+
+def _fit_print_setup(ws) -> None:
+    """write_table で表を書いたシートの印刷設定を、表が読める形にそろえる（設定済みなら変えない）。
+
+    openpyxl の既定（縦・100%）のままだと、列幅の広い表は横に何ページにも分かれて
+    印刷される（2026-11-07 evals xlkit run2: 列幅60の列が2つある表が月間3頁・週間6頁に
+    分かれると検証役が指摘）。横幅を1ページに収め（縦は成り行き）、表が縦向きの用紙に
+    収まらない幅なら横向きにし、最初の表の見出し行を各ページの先頭に繰り返す。
+    """
+    tables = getattr(ws, "_xlkit_tables", None)
+    if not tables:
+        return
+    props = ws.sheet_properties.pageSetUpPr
+    if ws.page_setup.orientation is not None or ws.page_setup.fitToWidth is not None or (props is not None and props.fitToPage):
+        return
+    first_col = min(t.first_col for t in tables)
+    last_col = max(t.last_col for t in tables)
+    width = _print_width(ws, first_col, last_col)
+    ws.page_setup.orientation = "landscape" if width > _PORTRAIT_WIDTH else "portrait"
+    if props is None:
+        from openpyxl.worksheet.properties import PageSetupProperties
+
+        ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    else:
+        props.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    header_row = tables[0].header_row
+    if header_row is not None and not ws.print_title_rows:
+        ws.print_title_rows = f"{header_row}:{header_row}"
+
+
+def _print_width(ws, first_col: int, last_col: int) -> float:
+    return sum(ws.column_dimensions[get_column_letter(c)].width or 8.43 for c in range(first_col, last_col + 1))
 
 
 def _column_index(letter: str) -> int:
@@ -318,23 +416,29 @@ def _workbook_has_cjk(wb) -> bool:
     return False
 
 
-def _finalize_fonts(ws, cjk_font: str | None) -> None:
-    """openpyxl が名前を書かなかったフォント（既定の Calibri）に名前を付ける。
-
-    新規ブックで日本語があれば cjk_font（Yu Gothic）へ、そうでなければそのシートで明示的に
-    名前の付いたフォントの中で一番多い名前に揃える（無ければ Calibri）。名前の付いたフォント
-    （元ファイル由来のもの）は変えない。既定フォントはモデルが選んだ名前ではないため、
-    Calibri のまま残るとシート内でそのセルだけ違う名前に見える。
-    """
-    from copy import copy
-
-    names = [
+def _named_fonts(ws) -> list[str]:
+    """シートのセルに明示的に付いたフォント名（既定の Calibri・名前なしを除く）。"""
+    return [
         cell.font.name
         for row in ws.iter_rows()
         for cell in row
         if cell.font is not None and cell.font.name not in _DEFAULT_LATIN_FONTS
     ]
-    target = cjk_font or (max(set(names), key=names.count) if names else "Calibri")
+
+
+def _finalize_fonts(ws, cjk_font: str | None, fallback: str | None) -> None:
+    """openpyxl が名前を書かなかったフォント（既定の Calibri）に名前を付ける。
+
+    cjk_font（xlkit で組み立てた日本語のブック）があればそれへ、無ければそのシートで明示的に
+    名前の付いたフォントの中で一番多い名前に、それも無ければ fallback（finalize_sheets が
+    ブック全体から決めた名前）に揃える。名前の付いたフォント（元ファイル由来のもの）は変えない。
+    既定フォントはモデルが選んだ名前ではないため、Calibri のまま残るとシート内でそのセルだけ
+    違う名前に見える。
+    """
+    from copy import copy
+
+    names = _named_fonts(ws)
+    target = cjk_font or (max(set(names), key=names.count) if names else (fallback or "Calibri"))
     for row in ws.iter_rows():
         for cell in row:
             font = cell.font

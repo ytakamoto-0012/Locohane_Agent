@@ -171,3 +171,108 @@ def test_save_keeps_an_explicit_row_height(tmp_path):
 
     saved = openpyxl.load_workbook(tmp_path / "h2.xlsx")["S"]
     assert saved.row_dimensions[wrapped_row].height == 20
+
+
+def test_rebuilt_new_workbook_saved_over_existing_file_still_gets_cjk_font(tmp_path):
+    # 2026-11-07 evals xlkit run3: 実行し直したスクリプトが new=False で上書きすると Calibri に戻っていた
+    path = tmp_path / "re.xlsx"
+    for _ in range(2):
+        wb = new_workbook()
+        write_table(wb.create_sheet("月別"), [["月", "予定"], ["4月", "打ち合わせ"]])
+        save(wb, path, new=not path.exists())
+
+    saved = openpyxl.load_workbook(path)["月別"]
+    assert saved["A1"].font.name == "Yu Gothic"
+    assert saved["B2"].font.name == "Yu Gothic"
+
+
+def test_existing_workbook_without_any_named_font_gets_cjk_font(tmp_path):
+    path = tmp_path / "plain.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.title = "S"
+    wb.active["A1"] = "既存の日本語"
+    wb.save(path)
+
+    wb2 = open_workbook(path)
+    wb2["S"]["A2"] = "追記"
+    save(wb2, path)
+
+    saved = openpyxl.load_workbook(path)["S"]
+    assert saved["A1"].font.name == "Yu Gothic"
+    assert saved["A2"].font.name == "Yu Gothic"
+
+
+def test_save_new_overwrites_its_own_output_of_this_conversation(tmp_path, monkeypatch):
+    import xlkit
+
+    path = tmp_path / "own.xlsx"
+    registered: set[str] = set()
+    monkeypatch.setattr(xlkit, "_is_own_output", lambda p: str(p) in registered)
+    monkeypatch.setattr(xlkit, "register_output_path", lambda p, description=None: registered.add(str(Path(p).resolve())))
+
+    wb = new_workbook()
+    wb.create_sheet("S")["A1"] = 1
+    save(wb, path, new=True)
+    wb = new_workbook()
+    wb.create_sheet("S")["A1"] = 2
+    result = save(wb, path, new=True)
+
+    assert "replaced" in result and "backup" not in result
+    assert openpyxl.load_workbook(path)["S"]["A1"].value == 2
+    assert not list(tmp_path.glob("own.bak_*"))
+
+
+def test_save_fits_a_wide_table_to_one_landscape_page_and_repeats_the_header(tmp_path):
+    wb = new_workbook()
+    ws = wb.create_sheet("S")
+    long = "長い説明" * 20
+    write_table(ws, [["月", "内容", "備考"], ["4月", long, long]], "A1", title="予定")
+    result = save(wb, tmp_path / "p.xlsx", new=True)
+
+    saved = openpyxl.load_workbook(tmp_path / "p.xlsx")["S"]
+    assert saved.page_setup.orientation == "landscape"
+    assert saved.sheet_properties.pageSetUpPr.fitToPage
+    assert saved.page_setup.fitToWidth == 1 and saved.page_setup.fitToHeight == 0
+    assert saved.print_title_rows == "$2:$2"
+    assert result["sheets"][0]["print"]["orientation"] == "landscape"
+
+
+def test_save_keeps_a_narrow_table_portrait_and_an_explicit_print_setup(tmp_path):
+    wb = new_workbook()
+    narrow = wb.create_sheet("N")
+    write_table(narrow, [["月", "x"], ["4月", 1]])
+    explicit = wb.create_sheet("E")
+    write_table(explicit, [["月", "x"], ["4月", 1]])
+    explicit.page_setup.orientation = "landscape"
+    plain = wb.create_sheet("P")
+    plain["A1"] = "no table"
+    save(wb, tmp_path / "q.xlsx", new=True)
+
+    saved = openpyxl.load_workbook(tmp_path / "q.xlsx")
+    assert saved["N"].page_setup.orientation == "portrait"
+    assert saved["E"].page_setup.orientation == "landscape"
+    assert not saved["E"].sheet_properties.pageSetUpPr.fitToPage
+    assert saved["P"].page_setup.orientation is None
+
+
+def test_save_warns_about_a_long_note_wrapped_in_one_narrow_cell(tmp_path):
+    from openpyxl.styles import Alignment
+
+    wb = new_workbook()
+    ws = wb.create_sheet("S")
+    ws["A1"] = "前提: 週は月曜始まり。予定日は過去5年の中央値から推定し、画像由来の値は要確認。" * 2
+    ws["A1"].alignment = Alignment(wrap_text=True)
+    write_table(ws, [["月", "週", "内容"], ["4月", "W1", "a"]], "A3")
+    result = save(wb, tmp_path / "n.xlsx", new=True)
+    assert any("write_note" in w and "A1" in w for w in result.get("warnings", []))
+
+
+def test_save_does_not_warn_about_notes_written_with_write_note(tmp_path):
+    from xlkit import write_note
+
+    wb = new_workbook()
+    ws = wb.create_sheet("S")
+    t = write_table(ws, [["月", "週", "内容"], ["4月", "W1", "a"]])
+    write_note(ws, t.last_row + 2, "前提: 週は月曜始まり。" * 6, last_col=t.last_col)
+    result = save(wb, tmp_path / "n2.xlsx", new=True)
+    assert not any("write_note" in w for w in result.get("warnings", []))

@@ -16,7 +16,7 @@ from pathlib import Path
 _OFFICE_SHARED = Path(__file__).resolve().parent.parent.parent / "office_shared"
 if str(_OFFICE_SHARED) not in sys.path:
     sys.path.append(str(_OFFICE_SHARED))
-from excel_common import cell_column_width, exceeds_column_width  # noqa: E402
+from excel_common import _display_width, cell_column_width, exceeds_column_width  # noqa: E402
 
 # 1種類の警告に並べる番地の最大数（多すぎると結果JSONが長くなり読み飛ばされるため）
 _MAX_ITEMS = 15
@@ -81,7 +81,8 @@ def lint_sheet(ws) -> list[str]:
     if overflow:
         warnings.append(
             f"{ws.title}: text may be cut off (no wrap_text and wider than the column) in {_join(_compress(overflow))}. "
-            'Apply set_style {"wrap_text": true} to them (or widen the column with set_column_width, up to 255)'
+            "Set cell.alignment = Alignment(wrap_text=True) on them (xlkit sets the row height on save), "
+            "or widen the column with ws.column_dimensions[letter].width (up to 255)"
         )
 
     # 同じ列の数値・数式セルで、表示形式（桁区切り等）が付いたセルと General のセルが混在している
@@ -93,7 +94,8 @@ def lint_sheet(ws) -> list[str]:
             warnings.append(
                 f"{ws.title}: number formats are inconsistent in column {get_column_letter(col)} "
                 f"(other numeric/formula cells use {shown_formats}, but {_join(_compress(general))} are General). "
-                'If they are the same kind of value, apply the same number_format with set_style'
+                "If they are the same kind of value, give them the same cell.number_format "
+                "(or pass number_formats= to write_table)"
             )
 
     # 結合されていない「同じ文字列が縦に2行以上続く」部分。既に縦の結合がある列（＝グループ列）だけを見る。
@@ -116,10 +118,50 @@ def lint_sheet(ws) -> list[str]:
     if runs:
         warnings.append(
             f"{ws.title}: in a grouping column that has merged cells elsewhere, consecutive rows with the same value are not merged: "
-            f"{_join(runs)}. Merge each run with merge_cells + set_style "
-            '{"valign": "center"} like the other groups of that column'
+            f"{_join(runs)}. Call merge_same(ws, column, first_row, last_row) on that column after writing the table"
+        )
+
+    tall_notes = _lone_tall_notes(ws, in_merge)
+    if tall_notes:
+        warnings.append(
+            f"{ws.title}: a long line of text is wrapped inside one narrow cell and makes a tall block: {_join(tall_notes)}. "
+            "Write it with write_note(ws, row, text, last_col=t.last_col) so it spans the table width"
         )
     return warnings
+
+
+# 1セルに折り返した文が、この行数以上の縦長になったら警告する
+_TALL_NOTE_LINES = 4
+
+
+def _lone_tall_notes(ws, in_merge: set[tuple[int, int]]) -> list[str]:
+    """行にそのセルしか値が無いのに、結合せず狭い1列の中で何行にも折り返している文（注記・前提の行）。
+
+    2026-11-07 evals xlkit run2: 週間予定表の前提の注記を A1（幅13）だけに書いて折り返し、
+    行の高さ289の縦長のブロックになったと検証役が指摘した（write_note を使えば表の幅に広がる）。
+    """
+    import math
+
+    from openpyxl.utils import get_column_letter
+
+    max_col = ws.max_column or 0
+    found: list[str] = []
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row or 0, max_col=max_col):
+        values = [c for c in row if c.value not in (None, "")]
+        if len(values) != 1:
+            continue
+        cell = values[0]
+        if (cell.row, cell.column) in in_merge or not isinstance(cell.value, str) or not cell.alignment.wrap_text:
+            continue
+        if cell.border is not None and cell.border.left is not None and cell.border.left.style:
+            continue  # 罫線のある表の中のセル（他の列がたまたま空の行）は注記ではない
+        if cell.column >= max_col:
+            continue  # 右に列が無い（広げる先が無い）
+        width = cell_column_width(ws, cell.row, cell.column, None)
+        lines = sum(max(1, math.ceil(_display_width(part) / max(width - 1, 1))) for part in cell.value.split("\n"))
+        if lines >= _TALL_NOTE_LINES:
+            found.append(f"{get_column_letter(cell.column)}{cell.row} (about {lines} lines)")
+    return found
 
 
 def sheet_summary(ws) -> dict:
@@ -139,4 +181,13 @@ def sheet_summary(ws) -> dict:
         summary["merged_cells_omitted"] = len(merged) - _MAX_MERGED
     if ws.freeze_panes:
         summary["freeze_panes"] = ws.freeze_panes
+    setup = ws.page_setup
+    props = ws.sheet_properties.pageSetUpPr
+    if setup.orientation or (props is not None and props.fitToPage):
+        printing = {"orientation": setup.orientation or "portrait"}
+        if props is not None and props.fitToPage:
+            printing["fit_to_pages_wide"] = setup.fitToWidth
+        if ws.print_title_rows:
+            printing["repeat_rows"] = ws.print_title_rows
+        summary["print"] = printing
     return summary
