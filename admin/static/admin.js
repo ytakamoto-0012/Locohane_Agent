@@ -3826,15 +3826,24 @@ function drawUsage(box, data) {
     el("div", { class: "stat-row" }, [
       statTile(_t("今月のトークン"), fmtNum(cur ? cur.total : 0), thisMonth),
       statTile(_t("全期間のトークン"), fmtNum(allTotal), _t(`{0}か月分`, usage.months.length)),
-      statTile(_t("今月の料金"), curCost && curCost.cost !== null ? fmtUsd(curCost.cost) : "-", curCost && curCost.cost_jpy !== null ? fmtJpy(curCost.cost_jpy) : _t("料金設定で入力")),
-      statTile(_t("料金の合計"), costs.total_cost !== null ? fmtUsd(costs.total_cost) : "-", costs.total_cost_jpy !== null ? fmtJpy(costs.total_cost_jpy) : PRICING_MODEL_LABELS[costs.pricing_model]),
+      statTile(_t("今月の料金（按分）"), curCost && curCost.cost !== null ? fmtUsd(curCost.cost) : "-", curCost && curCost.cost_jpy !== null ? fmtJpy(curCost.cost_jpy) : null),
+      statTile(_t("料金の合計（按分）"), costs.total_cost !== null ? fmtUsd(costs.total_cost) : "-", costs.total_cost_jpy !== null ? fmtJpy(costs.total_cost_jpy) : PRICING_MODEL_LABELS[costs.pricing_model]),
     ]),
     ...notes,
+    el("p", { class: "hint" }, [
+      _t("料金は、全インスタンス共通の料金設定から、このインスタンスの使用量の割合で按分した金額です（トークン課金なら使用量×単価）。料金設定は上部の「利用量・料金」タブで入力します。"),
+      " ",
+      linkBtn(_t("料金設定を開く"), openUsageOverviewTab),
+    ]),
     el("section", { class: "monitor-section" }, [el("h3", { text: _t("月別のトークン使用量") }), buildUsageCharts(usage, costs)]),
     el("section", { class: "monitor-section" }, [el("h3", { text: _t("月別の集計") }), buildMonthlyTable(usage, costs)]),
-    el("section", { class: "monitor-section" }, [el("h3", { text: _t("ユーザー別の使用量と料金") }), buildUserBreakdown(usage, costs)]),
-    el("section", { class: "monitor-section" }, [el("h3", { text: _t("AWS 利用料金の設定") }), buildCostForm(box, data)])
+    el("section", { class: "monitor-section" }, [el("h3", { text: _t("ユーザー別の使用量と料金") }), buildUserBreakdown(usage, costs)])
   );
+}
+
+function openUsageOverviewTab() {
+  $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === "usage"));
+  navigate("usage");
 }
 
 // keys は全期間の使用量順（サーバー側で並べ済み）。上位7件に色を割り当て、残りは「その他」にまとめる。
@@ -3884,7 +3893,7 @@ function buildUsageCharts(usage, costs) {
     grid.append(
       stackedBarChart({
         title: _t("月別の料金（米ドル）"),
-        note: _t("料金設定から計算した金額です。"),
+        note: _t("全インスタンス共通の料金設定から、このインスタンスへ按分した金額です。"),
         categories: costMonths.map((m) => m.month),
         series: [{ key: "cost", label: _t("料金"), color: SERIES_BLUE, values: costMonths.map((m) => m.cost) }],
         format: fmtUsd,
@@ -4016,16 +4025,14 @@ async function renderUsageOverview() {
     return;
   }
   if (!document.body.contains(box)) return;
+  drawUsageOverview(box, data);
+}
+
+function drawUsageOverview(box, data) {
   const labelOf = Object.fromEntries(data.instances.map((i) => [i.name, i.display_name && i.display_name !== i.name ? `${i.display_name}（${i.name}）` : i.name]));
   const thisMonth = currentMonthKey();
   const cur = data.months.find((m) => m.month === thisMonth);
   const allTotal = data.months.reduce((s, m) => s + m.total, 0);
-  const incompleteNote = (m) => {
-    const parts = [];
-    if (m.cost_incomplete.length) parts.push(_t(`料金未入力: {0}`, m.cost_incomplete.map((n) => labelOf[n] || n).join(", ")));
-    if (m.jpy_incomplete.length) parts.push(_t(`為替レート未入力: {0}`, m.jpy_incomplete.map((n) => labelOf[n] || n).join(", ")));
-    return parts.join(" ／ ");
-  };
 
   const instanceSeries = rankedSeries(data.instances_by_usage, (n) => labelOf[n] || n, (n) => _t(`その他（{0}件）`, n));
   const userKeys = data.users.map((u) => u.user);
@@ -4055,7 +4062,7 @@ async function renderUsageOverview() {
       grid.append(
         stackedBarChart({
           title: _t("月別の料金（米ドル、インスタンス別の積み上げ）"),
-          note: _t("各インスタンスの料金設定から計算した金額の合計です。"),
+          note: _t("全インスタンス共通の料金設定から計算した金額を、各インスタンスの使用量で按分して積み上げています。"),
           categories: costMonths.map((m) => m.month),
           series: seriesValues(instanceSeries, costMonths, "instances", "cost"),
           format: fmtUsd,
@@ -4068,7 +4075,7 @@ async function renderUsageOverview() {
   }
 
   const monthlyTable = dataTable(
-    [_t("対象月"), _t("合計トークン"), _t("入力"), _t("出力"), _t("LLM呼び出し回数"), _t("利用ユーザー数"), _t("料金（米ドル）"), _t("料金（円）"), _t("100万トークンあたり"), _t("注記")],
+    [_t("対象月"), _t("合計トークン"), _t("入力"), _t("出力"), _t("LLM呼び出し回数"), _t("利用ユーザー数"), _t("料金（米ドル）"), _t("料金（円）"), _t("100万トークンあたり")],
     [...data.months].reverse().map((m) => [
       m.month + (m.backfilled ? _t("（概算を含む）") : ""),
       fmtNum(m.total),
@@ -4078,8 +4085,7 @@ async function renderUsageOverview() {
       String(Object.keys(m.users).length),
       fmtUsd(m.cost),
       fmtJpy(m.cost_jpy),
-      m.cost !== null && m.total && !m.cost_incomplete.length ? fmtUsd((m.cost / m.total) * 1e6) : "-",
-      el("span", { class: "hint", text: incompleteNote(m) }),
+      fmtUsd(m.cost_per_million),
     ]),
     _t("データがありません。")
   );
@@ -4093,7 +4099,6 @@ async function renderUsageOverview() {
         $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === "instances"));
         renderInstanceDetail(i.name, "usage");
       }),
-      PRICING_MODEL_LABELS[i.pricing_model] || i.pricing_model,
       fmtNum(total),
       fmtPct(allTotal ? total / allTotal : null),
       fmtUsd(cost),
@@ -4125,24 +4130,27 @@ async function renderUsageOverview() {
   monthSelect.addEventListener("change", drawUsers);
   drawUsers();
 
-  const curIncomplete = cur && (cur.cost_incomplete.length || cur.jpy_incomplete.length);
   box.replaceChildren(
     el("div", { class: "stat-row" }, [
       statTile(_t("今月のトークン"), fmtNum(cur ? cur.total : 0), thisMonth),
       statTile(_t("全期間のトークン"), fmtNum(allTotal), _t(`{0}か月分`, data.months.length)),
-      statTile(_t("今月の料金"), cur && cur.cost !== null ? fmtUsd(cur.cost) : "-", cur && cur.cost_jpy !== null ? fmtJpy(cur.cost_jpy) + (curIncomplete ? _t("（一部未入力）") : "") : _t("各インスタンスで入力")),
-      statTile(_t("料金の合計"), data.total_cost !== null ? fmtUsd(data.total_cost) : "-", data.total_cost_jpy !== null ? fmtJpy(data.total_cost_jpy) : null),
+      statTile(_t("今月の料金"), cur && cur.cost !== null ? fmtUsd(cur.cost) : "-", cur && cur.cost_jpy !== null ? fmtJpy(cur.cost_jpy) : _t("料金設定で入力")),
+      statTile(_t("料金の合計"), data.total_cost !== null ? fmtUsd(data.total_cost) : "-", data.total_cost_jpy !== null ? fmtJpy(data.total_cost_jpy) : PRICING_MODEL_LABELS[data.pricing_model]),
     ]),
     ...data.errors.map((e) => el("div", { class: "error", text: `${labelOf[e.name] || e.name}: ${e.error}` })),
-    el("p", { class: "hint", text: _t("スキル調整ワーカーを除く全インスタンスの合計です。料金は各インスタンスの「利用量・料金」で入力した設定から計算した金額を足し合わせています（入力していないインスタンスの分は含みません）。") }),
+    el("p", { class: "hint", text: _t("スキル調整ワーカーを除く全インスタンスの合計です。料金は全インスタンス共通の料金設定（このページの下）から計算し、インスタンス別・ユーザー別には使用量の割合で按分しています（トークン課金なら使用量×単価）。") }),
     el("section", { class: "monitor-section" }, [el("h3", { text: _t("月別のトークン使用量") }), el("div", { class: "token-charts" }, grid)]),
     el("section", { class: "monitor-section" }, [el("h3", { text: _t("月別の集計") }), monthlyTable]),
     el("section", { class: "monitor-section" }, [
       el("h3", { text: _t("インスタンス別の集計（全期間）") }),
-      dataTable([_t("インスタンス"), _t("料金形態"), _t("合計トークン"), _t("割合"), _t("料金（米ドル）"), _t("料金（円）")], instanceRows, _t("データがありません。")),
-      el("p", { class: "hint", text: _t("インスタンス名を押すと、そのインスタンスの「利用量・料金」を開きます（料金の入力はそこで行います）。") }),
+      dataTable([_t("インスタンス"), _t("合計トークン"), _t("割合"), _t("料金（米ドル）"), _t("料金（円）")], instanceRows, _t("データがありません。")),
+      el("p", { class: "hint", text: _t("インスタンス名を押すと、そのインスタンスの「利用量・料金」を開きます。") }),
     ]),
-    el("section", { class: "monitor-section" }, [el("h3", { text: _t("ユーザー別の使用量と料金") }), el("div", { class: "filter-row" }, [monthSelect]), userBox])
+    el("section", { class: "monitor-section" }, [el("h3", { text: _t("ユーザー別の使用量と料金") }), el("div", { class: "filter-row" }, [monthSelect]), userBox]),
+    el("section", { class: "monitor-section" }, [
+      el("h3", { text: _t("AWS 利用料金の設定（全インスタンス共通）") }),
+      buildCostForm(data.settings, data.months.map((m) => m.month), (next) => drawUsageOverview(box, next)),
+    ])
   );
 }
 
@@ -4157,13 +4165,14 @@ function buildMonthlyTable(usage, costs) {
       fmtNum(u.output || 0),
       fmtNum(u.calls || 0),
       String(Object.keys(u.users || {}).length),
+      fmtPct(c.share_of_all),
       fmtUsd(c.cost),
       fmtJpy(c.cost_jpy),
       fmtUsd(c.cost_per_million),
     ];
   });
   return dataTable(
-    [_t("対象月"), _t("合計トークン"), _t("入力"), _t("出力"), _t("LLM呼び出し回数"), _t("利用ユーザー数"), _t("料金（米ドル）"), _t("料金（円）"), _t("100万トークンあたり")],
+    [_t("対象月"), _t("合計トークン"), _t("入力"), _t("出力"), _t("LLM呼び出し回数"), _t("利用ユーザー数"), _t("全インスタンスに占める割合"), _t("料金（米ドル）"), _t("料金（円）"), _t("100万トークンあたり")],
     rows,
     _t("データがありません。")
   );
@@ -4206,14 +4215,15 @@ function buildUserBreakdown(usage, costs) {
   draw();
   wrap.append(
     el("div", { class: "filter-row" }, [select]),
-    el("p", { class: "hint", text: _t("料金はトークン課金ならユーザーごとの入力・出力トークン×単価、それ以外はその月の合計トークンに占める割合で按分しています（固定費は常に割合で按分）。") }),
+    el("p", { class: "hint", text: _t("料金はトークン課金ならユーザーごとの入力・出力トークン×単価、それ以外はその月の全インスタンス合計のトークンに占める割合で按分しています（固定費は常に割合で按分）。") }),
     tableBox
   );
   return wrap;
 }
 
-function buildCostForm(box, data) {
-  const s = data.settings;
+// 全インスタンス共通の料金設定の入力欄。usageMonths は使用量のある月（入力欄の行に並べる）、
+// onSaved は保存後に返る /api/usage/overview と同じ形の結果で画面を描き直す関数。
+function buildCostForm(s, usageMonths, onSaved) {
   const numInput = (value, attrs) => {
     const input = el("input", { type: "number", min: "0", step: "any", class: "cost-input", ...(attrs || {}) });
     input.value = value === null || value === undefined ? "" : String(value);
@@ -4238,7 +4248,7 @@ function buildCostForm(box, data) {
   const fixedField = el("div", { class: "cost-group" }, [field(_t("月額固定費（米ドル）"), fixed, _t("EBS・データ転送・ロードバランサー等。各月に加算します"))]);
 
   // 月ごとの入力欄（請求額 or 稼働時間）。使用量のある月・入力済みの月・今月を並べ、月を追加できる。
-  const monthKeys = new Set([...data.usage.months.map((m) => m.month), ...Object.keys(s.months || {}), currentMonthKey()]);
+  const monthKeys = new Set([...usageMonths, ...Object.keys(s.months || {}), currentMonthKey()]);
   const monthInputs = {};
   const monthBody = el("tbody");
   const monthHead = el("tr");
@@ -4276,7 +4286,7 @@ function buildCostForm(box, data) {
     monthTable.querySelectorAll(".col-hours").forEach((n) => n.classList.toggle("hidden", m !== "hourly"));
     monthSection.classList.toggle("hidden", m === "per_token");
     modeHint.textContent = {
-      monthly_bill: _t("AWS の請求書や Cost Explorer に出ている月ごとの実績額を入れます。EC2・EBS・データ転送などすべて込みの金額をそのまま使い、ユーザー別にはトークンの割合で按分します。"),
+      monthly_bill: _t("AWS の請求書や Cost Explorer に出ている月ごとの実績額を入れます。EC2・EBS・データ転送などすべて込みの金額をそのまま使い、インスタンス別・ユーザー別にはトークンの割合で按分します。"),
       hourly: _t("EC2 の GPU インスタンス等で推論サーバーを動かす場合。料金はインスタンスが起動している時間に比例し、使ったトークン数には比例しません。稼働時間を空欄にするとその月の全時間（常時起動）として計算します。"),
       per_token: _t("Amazon Bedrock のオンデマンド等、入力・出力トークン数に応じて課金される場合。出力の単価は入力より高いのが一般的です（モデルごとに異なるため、AWS の料金ページの値を入れてください）。"),
     }[m];
@@ -4313,8 +4323,7 @@ function buildCostForm(box, data) {
       save.disabled = true;
       status.textContent = _t("保存中...");
       try {
-        const next = await api(`/api/instances/${encodeURIComponent(currentInstanceName)}/usage/cost-settings`, { method: "PUT", body });
-        drawUsage(box, next);
+        onSaved(await api("/api/usage/cost-settings", { method: "PUT", body }));
       } catch (e) {
         status.textContent = e.message;
         save.disabled = false;
@@ -4332,7 +4341,7 @@ function buildCostForm(box, data) {
     field(_t("為替レート（1米ドルあたりの円）"), exchangeRate, _t("入れると円換算も表示します")),
     field(_t("メモ"), note),
     el("div", { class: "filter-row" }, [save, status]),
-    el("p", { class: "hint", text: _t("入力値はこのインスタンスの aws_cost.json に保存します。金額は入力値からの試算で、AWS の請求額そのものではありません。") }),
+    el("p", { class: "hint", text: _t("入力値は全インスタンス共通の aws_cost.json（インスタンスの置き場の直下）に保存します。金額は入力値からの試算で、AWS の請求額そのものではありません。") }),
   ]);
   applyMode();
   return form;

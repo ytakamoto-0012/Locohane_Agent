@@ -2189,10 +2189,10 @@ instances/
 │   ├── .env                     # instance-only sign-in users etc. (optional)
 │   ├── settings/                # instance-only display settings (optional; see below)
 │   ├── backups/                 # snapshots before saving/restoring
-│   ├── aws_cost.json            # AWS cost settings entered in "Usage & cost" (created on the first save)
 │   └── app_stdout.log           # stdout of the main process
 ├── <other instance name>/
 │   └── ... (same as above)
+├── aws_cost.json                # AWS cost settings shared by all instances, entered in "Usage & cost" of the settings dashboard (see "Usage & cost")
 ├── admin_settings.json          # settings shared by all instances saved in "Admin settings" of the settings dashboard (see "Admin settings")
 ├── data_backup.json             # data backup settings saved on the settings dashboard (see "Data backup")
 ├── _admin_logs/                 # admin tool log (admin_*.log: progress of knowledge ingestion/deletion, etc.; rotated every [log] max_lines lines)
@@ -2317,38 +2317,42 @@ for sharing an authentication secret between the admin tool and the main app (th
 
 ### Usage & cost (monthly token usage and AWS charges)
 
-The "Usage & cost" sub-tab of an instance shows that instance's cumulative token usage per month, and calculates
-amounts from AWS charges entered by hand (`admin/usage_cost.py`).
+Shows cumulative token usage per month, and calculates amounts from AWS charges entered by hand (`admin/usage_cost.py`).
+There are two screens.
 
-- **Charts**: monthly token usage (input + output, including sub-agents and compaction) as a bar chart stacked by user
-  (the top of each bar is the total for all users). Colors go to the top 7 users by all-time usage; the 8th user and
-  beyond are folded into "Others". If any month has a calculable cost, a bar chart of the monthly cost (USD) is shown too.
-- **Tables**: a monthly summary (total/input/output tokens, number of LLM calls, active users, cost, cost per 1M tokens),
-  and per-user usage, share and cost (for a chosen month or all time).
-- **AWS cost settings**: choose a pricing model and enter the values by hand. Amounts are estimates from the values
-  entered, not the AWS bill itself.
+- **The "Usage & cost" tab at the top (all instances)**: totals for all instances except skill tuning workers
+  (`GET /api/usage/overview`). Monthly token usage is shown as bar charts stacked by instance and by user, and the cost as
+  a bar chart stacked by instance, together with a monthly summary, a per-instance summary (all time) and per-user usage and cost.
+  **The AWS cost settings (shared by all instances) are entered at the bottom of this screen.**
+- **The "Usage & cost" sub-tab of an instance**: that instance's monthly usage (stacked by user), the amount allocated to
+  this instance from the shared cost, its share of all instances, and the per-user breakdown. It has no input fields for costs.
 
-| Pricing model | Intended use | What to enter | Per-user amount |
-|---|---|---|---|
-| Monthly bill (`monthly_bill`) | Use the actual amounts from the AWS bill or Cost Explorer as they are | The amount billed for each month | Split by share of the month's total tokens |
-| Hourly (`hourly`) | Running the inference server (llama.cpp / vLLM) on an EC2 GPU instance, etc. The cost is proportional to the hours the instance runs, not to the tokens (the rate differs between On-Demand, Savings Plans, Reserved and Spot) | Hourly rate (USD/hour), running hours per month (empty = every hour of the month, i.e. always on) | Split by share |
-| Per-token (`per_token`) | Services billed by input/output tokens, such as Amazon Bedrock on-demand | Price per 1M input tokens and per 1M output tokens (USD) | Each user's input/output tokens × the price |
+Chart colors go to the top 7 (instances or users) by all-time usage; the 8th and beyond are folded into "Others".
+Usage is input + output (including sub-agents and compaction).
 
-With hourly and per-token pricing, a fixed monthly cost (EBS, data transfer, load balancers, etc.) can be added
-(split among users by share). Entering an exchange rate (yen per USD) also shows amounts in yen. Each save is recorded
-in the change history as `usage_cost_settings_update`.
+In the cost settings, choose a pricing model and enter the values by hand. Amounts are estimates from the values entered,
+not the AWS bill itself.
 
-**All instances**: the "Usage & cost" tab at the top shows the totals for all instances except skill tuning workers
-(`GET /api/usage/overview`). Monthly token usage is shown as bar charts stacked by instance and by user, and the cost as
-a bar chart stacked by instance, together with a monthly summary, a per-instance summary (all time) and per-user usage and cost.
+| Pricing model | Intended use | What to enter |
+|---|---|---|
+| Monthly bill (`monthly_bill`) | Use the actual amounts from the AWS bill or Cost Explorer as they are | The amount billed for each month |
+| Hourly (`hourly`) | Running the inference server (llama.cpp / vLLM) on an EC2 GPU instance, etc. The cost is proportional to the hours the instance runs, not to the tokens (the rate differs between On-Demand, Savings Plans, Reserved and Spot) | Hourly rate (USD/hour), running hours per month (empty = every hour of the month, i.e. always on) |
+| Per-token (`per_token`) | Services billed by input/output tokens, such as Amazon Bedrock on-demand | Price per 1M input tokens and per 1M output tokens (USD) |
 
-- The cost is the sum of the amounts calculated from each instance's cost settings. For months where some instance has no
-  calculable cost (not entered), the "Notes" column names it and the total covers only what is known. Yen amounts are
-  likewise summed only over instances with an exchange rate.
+With hourly and per-token pricing, a fixed monthly cost (EBS, data transfer, load balancers, etc.) can be added. Entering
+an exchange rate (yen per USD) also shows amounts in yen. Each save is recorded in the change history as
+`usage_cost_settings_update`.
+
+How costs are allocated:
+
+- The billed amount, the hourly cost and the fixed cost are **one amount for all instances** (not counted per instance).
+  They are split among instances and users by their share of the tokens of all instances that month.
+- Only the usage-based part of per-token pricing is calculated from each instance's or user's own input/output tokens ×
+  the unit price (the fixed cost is split by share).
 - The same username is counted as one user even across instances (login users are managed per instance, so different
   people using the same name are mixed together).
-- Instances whose thread DB or settings cannot be read are shown as errors at the top, and their usage is treated as 0.
-- Costs are entered in each instance's "Usage & cost" sub-tab (open it from the instance name).
+- Instances whose thread DB or settings cannot be read are shown as errors at the top of the all-instances screen, and
+  their usage is treated as 0 (they are not part of the denominator either).
 
 Data sources and storage:
 
@@ -2356,7 +2360,7 @@ Data sources and storage:
 |---|---|
 | Monthly usage | The `token_usage_monthly` table in `[thread_store] db`. The main app adds to the row for the current month (in the main app's local time) and user on every LLM call (`add_monthly_usage` in `src/thread_store.py`). Deleting a thread does not reduce it. Nothing is recorded with `[thread_store] enabled=false` or `[llm] track_token_usage=false` |
 | Usage from before the ledger | Once, on the first start that creates this table, the totals of existing threads (`token_usage_cumulative`) are counted in each thread's last-updated month. Conversations spanning months lean toward their last-updated month, so this is an estimate (shown as "includes estimate"). If the main app has not been started since the update, the same estimate is calculated on the fly |
-| Cost settings | `instances/<instance name>/aws_cost.json` (created on the first save in the admin tool) |
+| Cost settings | `instances/aws_cost.json`, shared by all instances (directly under `[admin] instances_dir`; created on the first save in the admin tool) |
 
 ### Admin settings
 

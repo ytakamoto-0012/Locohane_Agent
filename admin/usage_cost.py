@@ -1,19 +1,21 @@
 """月別のトークン使用量（全ユーザー合計・ユーザー別）と、手入力した AWS 利用料金からの金額計算。
 
-設定ダッシュボードのインスタンス画面「利用量・料金」用。
+設定ダッシュボードの上部タブ「利用量・料金」（全インスタンス）と、インスタンス画面の
+「利用量・料金」サブタブ用。
 
-- 使用量: そのインスタンスのスレッドDB（[thread_store] db）の token_usage_monthly
+- 使用量: 各インスタンスのスレッドDB（[thread_store] db）の token_usage_monthly
   （本体が LLM 呼び出しごとに加算する台帳。src/thread_store.py 参照）を読み取り専用で読む。
   本体を更新後まだ一度も起動していない（台帳が無い）DBでは、スレッドの累計を
   最終更新月へ振り分けた概算を返す（source="threads_estimate"）。
-- 料金設定: instances/<インスタンス名>/aws_cost.json（このモジュールだけが読み書きする）。
+- 料金設定: 全インスタンス共通の <instances_dir>/aws_cost.json（このモジュールだけが読み書きする）。
   AWS の料金は次の3つの形態から選んで手入力する。
     monthly_bill: 月ごとの請求額（AWS 請求書・Cost Explorer の実績値）をそのまま入れる。
     hourly:       EC2 等の時間課金。時間単価 × 稼働時間（月ごとに上書き可、既定はその月の全時間）。
     per_token:    Amazon Bedrock のオンデマンド等のトークン課金。入力・出力の100万トークン単価。
   hourly / per_token には、EBS・データ転送等の月額固定費（fixed_monthly）を足せる。
-  ユーザー別の金額は、per_token なら各ユーザーの入力・出力トークン×単価、それ以外は
-  その月の合計トークンに占める割合で按分する（固定費は常に割合で按分）。
+- 按分: 請求額・時間課金・固定費は全インスタンスで1つの金額とし、インスタンス別・ユーザー別には
+  その月の全インスタンス合計トークンに占める割合で按分する。per_token の従量分だけは、
+  それぞれの入力・出力トークン×単価で求める（slice_cost）。
 """
 
 from __future__ import annotations
@@ -133,13 +135,14 @@ def monthly_usage(db_path: Path) -> dict:
     }
 
 
+
 # ---------------------------------------------------------------------------
-# 料金設定（instances/<name>/aws_cost.json）
+# 料金設定（全インスタンス共通。<instances_dir>/aws_cost.json）
 # ---------------------------------------------------------------------------
 
 
-def cost_path(instances_root: Path, name: str) -> Path:
-    return inst.instance_dir(instances_root, name) / COST_FILENAME
+def cost_path(instances_root: Path) -> Path:
+    return instances_root / COST_FILENAME
 
 
 def _number(value, field: str) -> float | None:
@@ -192,8 +195,8 @@ def read_settings_default() -> dict:
     return json.loads(json.dumps(DEFAULT_SETTINGS))
 
 
-def read_settings(instances_root: Path, name: str) -> dict:
-    path = cost_path(instances_root, name)
+def read_settings(instances_root: Path) -> dict:
+    path = cost_path(instances_root)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -203,13 +206,69 @@ def read_settings(instances_root: Path, name: str) -> dict:
     return {**read_settings_default(), **validate_settings(data)}
 
 
-def write_settings(instances_root: Path, name: str, data: dict) -> dict:
+def write_settings(instances_root: Path, data: dict) -> dict:
     clean = validate_settings(data)
-    path = cost_path(instances_root, name)
+    path = cost_path(instances_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
     return clean
+
+
+# ---------------------------------------------------------------------------
+# 全インスタンスの使用量の合算
+# ---------------------------------------------------------------------------
+
+_USAGE_FIELDS = ("input", "output", "total", "calls")
+
+
+def _zero() -> dict:
+    return {k: 0 for k in _USAGE_FIELDS}
+
+
+def _add_usage(dst: dict, src: dict) -> None:
+    for k in _USAGE_FIELDS:
+        dst[k] += int(src.get(k, 0) or 0)
+
+
+def combine_usage(items: list[dict]) -> dict:
+    """インスタンスごとの monthly_usage() を、月別に全インスタンス合計へまとめる。
+
+    Args:
+        items: [{"name", "usage": monthly_usage()}, ...]（読めなかったインスタンスは usage を空にして渡す）。
+
+    Returns:
+        {"months": [{"month", "input", "output", "total", "calls", "backfilled",
+                     "instances": {name: {"input","output","total","calls"}},
+                     "users": {owner: {"input","output","total","calls"}}}, ...]（古い順）,
+         "instances": [name, ...]・"users": [owner, ...]（全期間の合計トークンが多い順）,
+         "user_instances": {owner: [name, ...]}}
+        ユーザーはインスタンスをまたいで同じ名前を同じユーザーとして合算する。
+    """
+    months: dict[str, dict] = {}
+    instance_totals: dict[str, int] = {}
+    user_totals: dict[str, int] = {}
+    user_instances: dict[str, set] = {}
+    for item in items:
+        name = item["name"]
+        instance_totals.setdefault(name, 0)
+        for um in item["usage"].get("months", []):
+            m = months.setdefault(um["month"], {"month": um["month"], **_zero(), "backfilled": False, "instances": {}, "users": {}})
+            _add_usage(m, um)
+            m["backfilled"] = m["backfilled"] or bool(um["backfilled"])
+            _add_usage(m["instances"].setdefault(name, _zero()), um)
+            instance_totals[name] += um["total"]
+            for owner, uu in um["users"].items():
+                _add_usage(m["users"].setdefault(owner, _zero()), uu)
+                user_totals[owner] = user_totals.get(owner, 0) + uu["total"]
+                user_instances.setdefault(owner, set()).add(name)
+    return {
+        "months": [months[k] for k in sorted(months)],
+        "instances": sorted(instance_totals, key=lambda n: (-instance_totals[n], n)),
+        "users": sorted(user_totals, key=lambda u: (-user_totals[u], u)),
+        "user_instances": {u: sorted(v) for u, v in user_instances.items()},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -222,160 +281,157 @@ def hours_in_month(month: str) -> int:
     return calendar.monthrange(year, mon)[1] * 24
 
 
-def compute_costs(usage: dict, settings: dict) -> dict:
-    """月ごとの金額（米ドル、為替レートがあれば円も）と、ユーザー別の内訳を計算する。
+def month_costs(total_months: list[dict], settings: dict) -> dict[str, dict]:
+    """全インスタンス合計の使用量から、月ごとの料金（全体で1つの金額）を求める。
 
-    金額を出せない月（請求額の未入力・単価の未入力）は cost=None。
+    請求額・時間課金・固定費は全インスタンスで共有する1つの金額。金額を出せない月
+    （請求額・単価の未入力）は cost=None。
+
+    Returns: month -> {"month", "input", "output", "total", "hours", "cost", "fixed", "cost_jpy", "cost_per_million"}
     """
     model = settings.get("pricing_model") or "monthly_bill"
     rate = settings.get("exchange_rate")
     fixed = settings.get("fixed_monthly") or 0.0
     entries = settings.get("months") or {}
-    usage_by_month = {m["month"]: m for m in usage.get("months", [])}
-    month_keys = sorted(set(usage_by_month) | set(entries))
-
-    def _jpy(v: float | None) -> float | None:
-        return None if v is None or rate is None else v * rate
-
-    result = []
-    for month in month_keys:
-        u = usage_by_month.get(month) or {"input": 0, "output": 0, "total": 0, "users": {}}
+    by_month = {m["month"]: m for m in total_months}
+    result: dict[str, dict] = {}
+    for month in sorted(set(by_month) | set(entries)):
+        u = by_month.get(month) or _zero()
         entry = entries.get(month) or {}
         hours = None
-        variable: float | None
         if model == "monthly_bill":
-            variable = entry.get("bill")
-            month_fixed = 0.0
+            variable, month_fixed = entry.get("bill"), 0.0
         elif model == "hourly":
             hours = entry.get("hours", hours_in_month(month))
             variable = None if settings.get("hourly_rate") is None else settings["hourly_rate"] * hours
             month_fixed = fixed
         else:
             in_price, out_price = settings.get("input_per_million"), settings.get("output_per_million")
-            if in_price is None and out_price is None:
-                variable = None
-            else:
-                variable = u["input"] / 1e6 * (in_price or 0) + u["output"] / 1e6 * (out_price or 0)
+            variable = (
+                None
+                if in_price is None and out_price is None
+                else u["input"] / 1e6 * (in_price or 0) + u["output"] / 1e6 * (out_price or 0)
+            )
             month_fixed = fixed
         cost = None if variable is None else variable + month_fixed
-        users = []
-        for owner, uu in u["users"].items():
-            share = uu["total"] / u["total"] if u["total"] else 0.0
-            if cost is None:
-                user_cost = None
-            elif model == "per_token":
-                user_cost = (
-                    uu["input"] / 1e6 * (settings.get("input_per_million") or 0)
-                    + uu["output"] / 1e6 * (settings.get("output_per_million") or 0)
-                    + month_fixed * share
-                )
-            else:
-                user_cost = cost * share
-            users.append(
-                {"user": owner, "total": uu["total"], "share": share, "cost": user_cost, "cost_jpy": _jpy(user_cost)}
+        result[month] = {
+            "month": month,
+            "input": u["input"],
+            "output": u["output"],
+            "total": u["total"],
+            "hours": hours,
+            "cost": cost,
+            "fixed": month_fixed,
+            "cost_jpy": None if cost is None or rate is None else cost * rate,
+            "cost_per_million": None if cost is None or not u["total"] else cost / u["total"] * 1e6,
+        }
+    return result
+
+
+def slice_cost(settings: dict, mc: dict, part: dict) -> dict:
+    """その月の料金 mc のうち、使用量 part（インスタンス・ユーザー等の一部分）が負担する金額。
+
+    トークン課金なら part の入力・出力トークン×単価＋固定費の割合分、それ以外は
+    その月の全インスタンス合計トークンに占める割合で按分する。
+    """
+    share = part["total"] / mc["total"] if mc["total"] else 0.0
+    cost = None
+    if mc["cost"] is not None:
+        if (settings.get("pricing_model") or "monthly_bill") == "per_token":
+            cost = (
+                part["input"] / 1e6 * (settings.get("input_per_million") or 0)
+                + part["output"] / 1e6 * (settings.get("output_per_million") or 0)
+                + mc["fixed"] * share
             )
-        users.sort(key=lambda x: (-x["total"], x["user"]))
-        result.append(
+        else:
+            cost = mc["cost"] * share
+    rate = settings.get("exchange_rate")
+    return {"total": part["total"], "share": share, "cost": cost, "cost_jpy": None if cost is None or rate is None else cost * rate}
+
+
+def _sum_optional(values) -> float | None:
+    known = [v for v in values if v is not None]
+    return sum(known) if known else None
+
+
+def overview(items: list[dict], settings: dict) -> dict:
+    """全インスタンスの月別使用量・料金と、インスタンス別・ユーザー別の按分。"""
+    combined = combine_usage(items)
+    mcs = month_costs(combined["months"], settings)
+    usage_by_month = {m["month"]: m for m in combined["months"]}
+    months = []
+    users: dict[str, dict] = {}
+    for month, mc in mcs.items():
+        u = usage_by_month.get(month) or {**_zero(), "backfilled": False, "instances": {}, "users": {}}
+        user_costs = {owner: slice_cost(settings, mc, uu) for owner, uu in u["users"].items()}
+        for owner, sc in user_costs.items():
+            agg = users.setdefault(owner, {"user": owner, "total": 0, "costs": [], "jpy": []})
+            agg["total"] += sc["total"]
+            agg["costs"].append(sc["cost"])
+            agg["jpy"].append(sc["cost_jpy"])
+        months.append(
             {
-                "month": month,
-                "total": u["total"],
-                "hours": hours,
-                "cost": cost,
-                "cost_jpy": _jpy(cost),
-                "cost_per_million": None if cost is None or not u["total"] else cost / u["total"] * 1e6,
-                "users": users,
+                **mc,
+                "calls": u["calls"],
+                "backfilled": u["backfilled"],
+                "instances": {n: slice_cost(settings, mc, iu) for n, iu in u["instances"].items()},
+                "users": user_costs,
             }
         )
-    known = [m["cost"] for m in result if m["cost"] is not None]
+    user_list = [
+        {
+            "user": a["user"],
+            "total": a["total"],
+            "cost": _sum_optional(a["costs"]),
+            "cost_jpy": _sum_optional(a["jpy"]),
+            "instances": combined["user_instances"].get(a["user"], []),
+        }
+        for a in users.values()
+    ]
+    user_list.sort(key=lambda x: (-x["total"], x["user"]))
     return {
-        "pricing_model": model,
-        "months": result,
-        "total_cost": sum(known) if known else None,
-        "total_cost_jpy": _jpy(sum(known)) if known else None,
+        "pricing_model": settings.get("pricing_model") or "monthly_bill",
+        "months": months,
+        "instances_by_usage": combined["instances"],
+        "users": user_list,
+        "total_cost": _sum_optional(m["cost"] for m in months),
+        "total_cost_jpy": _sum_optional(m["cost_jpy"] for m in months),
     }
 
 
-# ---------------------------------------------------------------------------
-# 全インスタンスの集計
-# ---------------------------------------------------------------------------
-
-
-def _add_optional(a: float | None, b: float | None) -> float | None:
-    if b is None:
-        return a
-    return (a or 0.0) + b
-
-
-def aggregate_instances(items: list[dict]) -> dict:
-    """インスタンスごとの使用量・金額を、月別に全インスタンス合計へまとめる。
+def instance_costs(instance_usage: dict, all_items: list[dict], settings: dict) -> dict:
+    """1インスタンスの月ごとの負担額（全インスタンス共通の料金からの按分）と、その中のユーザー別内訳。
 
     Args:
-        items: [{"name", "display_name", "usage": monthly_usage(), "costs": compute_costs()}, ...]
-            （使用量を読めなかったインスタンスは usage を空にして渡す）。
-
-    金額は各インスタンスの料金設定で計算した値の合計。使用量か入力値があるのに金額を
-    出せないインスタンスがある月は cost_incomplete に名前を入れる（合計は分かる分だけ）。
-    円は為替レートを入れたインスタンスの分だけを足し、足りない分は jpy_incomplete に入れる。
-    ユーザーはインスタンスをまたいで同じ名前を同じユーザーとして合算する。
-    months[].users は owner -> {"total","cost","cost_jpy"}、months[].instances は
-    インスタンス名 -> {"total","cost","cost_jpy"}。
+        instance_usage: そのインスタンスの monthly_usage()。
+        all_items: 按分の分母にする全インスタンスの [{"name", "usage"}, ...]（このインスタンスを含む）。
     """
-    months: dict[str, dict] = {}
-    users: dict[str, dict] = {}
-    instance_totals: dict[str, int] = {}
-
-    def _month(key: str) -> dict:
-        return months.setdefault(
-            key,
+    mcs = month_costs(combine_usage(all_items)["months"], settings)
+    months = []
+    for um in instance_usage.get("months", []):
+        mc = mcs.get(um["month"])
+        if mc is None:  # 分母に入っていない（集計対象外のインスタンス等）
+            mc = month_costs([um], settings)[um["month"]]
+        own = slice_cost(settings, mc, um)
+        users = []
+        for owner, uu in um["users"].items():
+            sc = slice_cost(settings, mc, uu)
+            users.append({"user": owner, **sc, "share": uu["total"] / um["total"] if um["total"] else 0.0})
+        users.sort(key=lambda x: (-x["total"], x["user"]))
+        months.append(
             {
-                "month": key, "input": 0, "output": 0, "total": 0, "calls": 0, "backfilled": False,
-                "cost": None, "cost_jpy": None, "cost_incomplete": [], "jpy_incomplete": [],
-                "instances": {}, "users": {},
-            },
+                "month": um["month"],
+                "total": um["total"],
+                "share_of_all": own["share"],
+                "cost": own["cost"],
+                "cost_jpy": own["cost_jpy"],
+                "cost_per_million": None if own["cost"] is None or not um["total"] else own["cost"] / um["total"] * 1e6,
+                "users": users,
+            }
         )
-
-    for item in items:
-        name = item["name"]
-        instance_totals.setdefault(name, 0)
-        for um in item["usage"].get("months", []):
-            m = _month(um["month"])
-            for k in ("input", "output", "total", "calls"):
-                m[k] += um[k]
-            m["backfilled"] = m["backfilled"] or um["backfilled"]
-            instance_totals[name] += um["total"]
-        # compute_costs() の months は使用量のある月をすべて含み、ユーザー別の金額も持つ。
-        for cm in item["costs"].get("months", []):
-            m = _month(cm["month"])
-            m["instances"][name] = {"total": cm["total"], "cost": cm["cost"], "cost_jpy": cm["cost_jpy"]}
-            if cm["cost"] is None:
-                if cm["total"]:
-                    m["cost_incomplete"].append(name)
-            else:
-                m["cost"] = _add_optional(m["cost"], cm["cost"])
-                if cm["cost_jpy"] is None:
-                    m["jpy_incomplete"].append(name)
-                else:
-                    m["cost_jpy"] = _add_optional(m["cost_jpy"], cm["cost_jpy"])
-            for uc in cm["users"]:
-                mu = m["users"].setdefault(uc["user"], {"total": 0, "cost": None, "cost_jpy": None})
-                mu["total"] += uc["total"]
-                mu["cost"] = _add_optional(mu["cost"], uc["cost"])
-                mu["cost_jpy"] = _add_optional(mu["cost_jpy"], uc["cost_jpy"])
-                u = users.setdefault(uc["user"], {"user": uc["user"], "total": 0, "cost": None, "cost_jpy": None, "instances": set()})
-                u["total"] += uc["total"]
-                u["cost"] = _add_optional(u["cost"], uc["cost"])
-                u["cost_jpy"] = _add_optional(u["cost_jpy"], uc["cost_jpy"])
-                u["instances"].add(name)
-    month_list = [months[k] for k in sorted(months)]
-    known = [m["cost"] for m in month_list if m["cost"] is not None]
-    known_jpy = [m["cost_jpy"] for m in month_list if m["cost_jpy"] is not None]
-    user_list = sorted(users.values(), key=lambda u: (-u["total"], u["user"]))
-    for u in user_list:
-        u["instances"] = sorted(u["instances"])
     return {
-        "months": month_list,
-        "instances": sorted(instance_totals, key=lambda n: (-instance_totals[n], n)),
-        "users": user_list,
-        "total_cost": sum(known) if known else None,
-        "total_cost_jpy": sum(known_jpy) if known_jpy else None,
+        "pricing_model": settings.get("pricing_model") or "monthly_bill",
+        "months": months,
+        "total_cost": _sum_optional(m["cost"] for m in months),
+        "total_cost_jpy": _sum_optional(m["cost_jpy"] for m in months),
     }

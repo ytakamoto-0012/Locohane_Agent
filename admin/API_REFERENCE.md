@@ -565,19 +565,19 @@ $C "$BASE/api/instances/default/monitor/endpoints"
 月別・ユーザー別のトークン使用量と、手入力した AWS 利用料金からの金額（README_DETAIL.md「利用量・料金」節）。
 
 ```bash
-# 全インスタンス（スキル調整ワーカーを除く）の月別合計。months[].instances / months[].users に内訳、
-# cost_incomplete / jpy_incomplete に料金・為替レートが未入力のインスタンス名、errors に読めなかったインスタンス
+# 全インスタンス（スキル調整ワーカーを除く）の月別合計と料金・料金設定（settings）。
+# months[].instances / months[].users に按分した内訳、errors に読めなかったインスタンス
 $C "$BASE/api/usage/overview"
-# 月別の使用量（usage）・料金設定（settings）・計算した金額（costs）
-$C "$BASE/api/instances/default/usage"
-# 料金設定の保存（pricing_model は monthly_bill / hourly / per_token。数値は空欄=未入力。
-# months は "YYYY-MM" -> {"bill": 請求額, "hours": 稼働時間}。応答は GET と同じ形）
-$C -X PUT $BASE/api/instances/default/usage/cost-settings -H "$H" -H "$J" \
+# 全インスタンス共通の料金設定の保存（pricing_model は monthly_bill / hourly / per_token。数値は空欄=未入力。
+# months は "YYYY-MM" -> {"bill": 請求額, "hours": 稼働時間}。応答は GET /api/usage/overview と同じ形）
+$C -X PUT $BASE/api/usage/cost-settings -H "$H" -H "$J" \
   -d '{"pricing_model":"hourly","hourly_rate":1.006,"fixed_monthly":20,"exchange_rate":150,"months":{"2026-10":{"hours":300}}}'
+# 1インスタンスの月別の使用量（usage）と、共通の料金からこのインスタンスへ按分した金額（costs）
+$C "$BASE/api/instances/default/usage"
 ```
 
 ```bat
-%C% -X PUT %BASE%/api/instances/default/usage/cost-settings -H %H% -H %J% -d "{\"pricing_model\":\"monthly_bill\",\"months\":{\"2026-10\":{\"bill\":123.45}}}"
+%C% -X PUT %BASE%/api/usage/cost-settings -H %H% -H %J% -d "{\"pricing_model\":\"monthly_bill\",\"months\":{\"2026-10\":{\"bill\":123.45}}}"
 ```
 
 ## スキル研究室

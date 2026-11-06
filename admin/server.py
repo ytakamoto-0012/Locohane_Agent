@@ -1379,27 +1379,16 @@ def get_monitor_endpoints(name: str, user: str = Depends(require_login)):
 # ---------------------------------------------------------------------------
 
 
-def _usage_view(name: str, settings: dict) -> dict[str, Any]:
-    cfg = _monitor_config(name)
-    try:
-        usage = usage_cost.monthly_usage(cfg.thread_store_db)
-        usage_error = None
-    except (monitor.MonitorError, sqlite3.Error) as exc:
-        usage = {"source": None, "months": [], "users": []}
-        usage_error = str(exc)
-    return {
-        "usage": usage,
-        "usage_error": usage_error,
-        "settings": settings,
-        "costs": usage_cost.compute_costs(usage, settings),
-    }
+_EMPTY_USAGE = {"source": None, "months": [], "users": []}
 
 
-@app.get("/api/usage/overview")
-def get_usage_overview(user: str = Depends(require_login)):
-    """全インスタンス（スキル調整ワーカーを除く）の月別使用量と金額の合計、およびインスタンスごとの内訳。"""
+def _collect_usage() -> tuple[list[dict], list[dict]]:
+    """料金の按分の対象にする全インスタンス（スキル調整ワーカーを除く）の月別使用量。
+
+    Returns: (items, errors)。items は [{"name", "display_name", "usage"}, ...]。
+    スレッドDB・設定を読めないインスタンスは使用量0として items に入れ、errors にも載せる。
+    """
     items, errors = [], []
-    empty_usage = {"source": None, "months": [], "users": []}
     for name in inst.list_instance_names(INSTANCES_ROOT):
         try:
             meta = inst.read_instance(INSTANCES_ROOT, name)
@@ -1408,73 +1397,80 @@ def get_usage_overview(user: str = Depends(require_login)):
             continue
         if meta.kind == inst.KIND_SKILL_LAB:
             continue
-        usage, error = empty_usage, None
+        usage = _EMPTY_USAGE
         try:
             cfg = monitor.instance_config(INSTANCES_ROOT, CONFIG_INI_PATH, name)
             usage = usage_cost.monthly_usage(cfg.thread_store_db)
         except (monitor.MonitorError, sqlite3.Error) as exc:
-            error = str(exc)
-        try:
-            settings = usage_cost.read_settings(INSTANCES_ROOT, name)
-        except usage_cost.UsageCostError as exc:
-            settings, error = usage_cost.read_settings_default(), error or str(exc)
-        if error:
-            errors.append({"name": name, "error": error})
-        items.append(
-            {
-                "name": name,
-                "display_name": meta.display_name,
-                "pricing_model": settings["pricing_model"],
-                "usage": usage,
-                "costs": usage_cost.compute_costs(usage, settings),
-            }
-        )
-    aggregated = usage_cost.aggregate_instances(items)
+            errors.append({"name": name, "error": str(exc)})
+        items.append({"name": name, "display_name": meta.display_name, "usage": usage})
+    return items, errors
+
+
+def _read_cost_settings() -> dict:
+    try:
+        return usage_cost.read_settings(INSTANCES_ROOT)
+    except usage_cost.UsageCostError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _usage_overview_view(settings: dict) -> dict[str, Any]:
+    items, errors = _collect_usage()
     return {
-        **aggregated,
-        # aggregated["instances"]（使用量順のインスタンス名）は instances_by_usage として返す。
-        "instances": [
-            {k: it[k] for k in ("name", "display_name", "pricing_model")} | {"source": it["usage"]["source"]} for it in items
-        ],
-        "instances_by_usage": aggregated["instances"],
+        **usage_cost.overview(items, settings),
+        "instances": [{"name": it["name"], "display_name": it["display_name"], "source": it["usage"]["source"]} for it in items],
         "errors": errors,
+        "settings": settings,
     }
 
 
-@app.get("/api/instances/{name}/usage")
-def get_usage(name: str, user: str = Depends(require_login)):
-    _require_instance(name)
-    try:
-        settings = usage_cost.read_settings(INSTANCES_ROOT, name)
-    except usage_cost.UsageCostError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _usage_view(name, settings)
+@app.get("/api/usage/overview")
+def get_usage_overview(user: str = Depends(require_login)):
+    """全インスタンス（スキル調整ワーカーを除く）の月別使用量・料金と、インスタンス別・ユーザー別の按分、料金設定。"""
+    return _usage_overview_view(_read_cost_settings())
 
 
-@app.put("/api/instances/{name}/usage/cost-settings")
+@app.put("/api/usage/cost-settings")
 def put_usage_cost_settings(
-    name: str,
     body: dict[str, Any],
     request: Request,
     user: str = Depends(require_login),
     _csrf: None = Depends(require_csrf),
 ):
-    _require_instance(name)
+    """全インスタンス共通の料金設定（<instances_dir>/aws_cost.json）を保存し、集計し直した結果を返す。"""
     try:
-        settings = usage_cost.write_settings(INSTANCES_ROOT, name, body)
+        settings = usage_cost.write_settings(INSTANCES_ROOT, body)
     except usage_cost.UsageCostError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit.append(
         AUDIT_LOG_PATH,
         {
-            "instance": name,
+            "instance": None,
             "actor": user,
             "remote_addr": _client_ip(request),
             "action": "usage_cost_settings_update",
             "pricing_model": settings["pricing_model"],
         },
     )
-    return _usage_view(name, settings)
+    return _usage_overview_view(settings)
+
+
+@app.get("/api/instances/{name}/usage")
+def get_usage(name: str, user: str = Depends(require_login)):
+    """1インスタンスの月別使用量と、全インスタンス共通の料金からこのインスタンスへ按分した金額。"""
+    cfg = _monitor_config(name)
+    settings = _read_cost_settings()
+    try:
+        usage, usage_error = usage_cost.monthly_usage(cfg.thread_store_db), None
+    except (monitor.MonitorError, sqlite3.Error) as exc:
+        usage, usage_error = _EMPTY_USAGE, str(exc)
+    items, _errors = _collect_usage()
+    return {
+        "usage": usage,
+        "usage_error": usage_error,
+        "settings": settings,
+        "costs": usage_cost.instance_costs(usage, items, settings),
+    }
 
 
 # ---------------------------------------------------------------------------
