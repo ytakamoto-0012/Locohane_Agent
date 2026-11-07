@@ -206,9 +206,7 @@ def test_save_new_overwrites_its_own_output_of_this_conversation(tmp_path, monke
     import xlkit
 
     path = tmp_path / "own.xlsx"
-    registered: set[str] = set()
-    monkeypatch.setattr(xlkit, "_is_own_output", lambda p: str(p) in registered)
-    monkeypatch.setattr(xlkit, "register_output_path", lambda p, description=None: registered.add(str(Path(p).resolve())))
+    monkeypatch.setattr(xlkit, "_own_outputs_file", lambda: tmp_path / "outputs.json")
 
     wb = new_workbook()
     wb.create_sheet("S")["A1"] = 1
@@ -225,6 +223,32 @@ def test_save_new_overwrites_its_own_output_of_this_conversation(tmp_path, monke
     assert "replaced" in result and "backup" not in result
     assert openpyxl.load_workbook(path)["S"]["A1"].value == 3
     assert not list(tmp_path.glob("own.bak_*"))
+
+
+def test_save_treats_a_file_changed_after_xlkit_saved_it_as_the_users(tmp_path, monkeypatch):
+    import os
+    import xlkit
+
+    path = tmp_path / "changed.xlsx"
+    monkeypatch.setattr(xlkit, "_own_outputs_file", lambda: tmp_path / "outputs.json")
+    wb = new_workbook()
+    wb.create_sheet("S")["A1"] = 1
+    save(wb, path, new=True)
+    other = openpyxl.Workbook()
+    other.active["A1"] = "user edit"
+    other.save(path)
+    os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 10_000_000))
+
+    with pytest.raises(FileExistsError):
+        save(_one_sheet(), path, new=True)
+    result = save(open_workbook(path), path, new=False)
+    assert "backup" in result
+
+
+def _one_sheet():
+    wb = new_workbook()
+    wb.create_sheet("S")["A1"] = 9
+    return wb
 
 
 def test_save_fits_a_wide_table_to_one_landscape_page_and_repeats_the_header(tmp_path):

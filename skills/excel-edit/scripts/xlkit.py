@@ -254,6 +254,7 @@ def save(wb, path, *, new: bool = False) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True)
     finalize_sheets(wb, new=new)
     wb.save(path)
+    _remember_own_output(path)
 
     warnings: list[str] = []
     for ws in wb.worksheets:
@@ -263,7 +264,7 @@ def save(wb, path, *, new: bool = False) -> dict:
         result["backup"] = str(backup)
     if replaced_own_output:
         result["replaced"] = "rebuilt the file this conversation saved before"
-    ref = register_output_path(path, description=_OUTPUT_DESCRIPTION)
+    ref = register_output_path(path, description="excel-edit output")
     if ref:
         result["ref"] = ref
     if warnings:
@@ -301,28 +302,61 @@ def finalize_sheets(wb, *, new: bool) -> None:
         _fit_print_setup(ws)
 
 
-_OUTPUT_DESCRIPTION = "excel-edit output"
+def _own_outputs_file() -> Path | None:
+    """この会話で xlkit が保存したファイルの記録（`_tmp_<thread_id>/xlkit/outputs.json`）。
 
-
-def _is_own_output(path: Path) -> bool:
-    """この会話のパスメモリーに、xlkit の save() が保存したファイルとして登録済みか。"""
+    パスメモリーの説明文では判定できない（xlkit が "excel-edit output" と登録した直後に、
+    execute_python_code の新規ファイル登録が同じパスの説明を上書きする。2026-11-07 evals xlkit
+    run2: 自分の出力と判定できず、実行し直した save(new=True) が FileExistsError になった）ため、
+    xlkit 自身の記録を会話の一時フォルダに置く。会話の外（テスト・手動実行）では None。
+    """
     import os
 
+    if not (os.environ.get("AGENT_EXEC_TMP_NAME") or os.environ.get("AGENT_THREAD_ID")):
+        return None
     src_dir = os.environ.get("AGENT_SRC_DIR")
     if not src_dir:
-        return False
+        return None
     if src_dir not in sys.path:
         sys.path.insert(0, src_dir)
     try:
         import path_memory
     except ImportError:
+        return None
+    return path_memory.exec_tmp_dir("xlkit") / "outputs.json"
+
+
+def _load_own_outputs(record: Path) -> dict:
+    try:
+        data = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _file_signature(path: Path) -> list[int]:
+    stat = path.stat()
+    return [stat.st_size, stat.st_mtime_ns]
+
+
+def _is_own_output(path: Path) -> bool:
+    """この会話で xlkit が保存し、その後だれも書き換えていないファイルか。"""
+    record = _own_outputs_file()
+    if record is None or not path.exists():
         return False
-    thread_id, pm_dir, _ = path_memory.env_params()
-    target = str(path.resolve())
-    return any(
-        entry.get("path") == target and entry.get("description") == _OUTPUT_DESCRIPTION
-        for entry in path_memory.list_entries(thread_id, pm_dir)
-    )
+    return _load_own_outputs(record).get(str(path.resolve())) == _file_signature(path)
+
+
+def _remember_own_output(path: Path) -> None:
+    record = _own_outputs_file()
+    if record is None:
+        return
+    outputs = _load_own_outputs(record)
+    outputs[str(path.resolve())] = _file_signature(path)
+    try:
+        record.write_text(json.dumps(outputs, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
 
 
 # 用紙（A4・余白 0.7 インチ）に 100% で入る列幅の合計の目安（列幅の単位で）。
