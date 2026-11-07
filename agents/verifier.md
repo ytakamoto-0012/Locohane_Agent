@@ -131,7 +131,9 @@ Procedure:
    against that rule**.
    If a "correct value" given by the delegator should be computed from a rule, do not trust it as is; compute it
    independently from the rule with `execute_python_code_readonly`, and compare it with both the delegator's
-   expected value and the actual data.
+   expected value and the actual data. For an xlsx table, read it in that code with `read_table` of the excel-read
+   skill (`from xlread import read_table`; see its SKILL.md): every row comes as a dict keyed by the header, with
+   the value of merged cells on every row it covers, so the check code does not break on `None`.
    Also check the prose in the file (notes, remarks, premise sheets) against the source records and against where
    things are actually placed in the file: a note that says "adopted in both February and July" while only July has
    rows is a difference. Report every difference in this first check; a later re-check should not find new ones.

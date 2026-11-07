@@ -134,3 +134,12 @@ def test_closest_hint_keeps_the_single_line_message():
 
     hint = _closest_hint("value = compute(a, b)\n", "value = compute(a,b)")
     assert "closest line is 1" in hint
+
+
+def test_json_query_notes_a_result_whose_elements_are_all_empty():
+    from src.tools.json_query import _ALL_EMPTY_NOTE, _is_all_empty
+
+    assert _is_all_empty([[], [], []])
+    assert not _is_all_empty([[], [1]])
+    assert not _is_all_empty([])
+    assert "rows[] | [?value == null]" in _ALL_EMPTY_NOTE

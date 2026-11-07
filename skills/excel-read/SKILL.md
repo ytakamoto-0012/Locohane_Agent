@@ -99,7 +99,7 @@ The top-level keys of `result_path` (a JSON file) include `path` (the file read)
 
 **Sheet list mode** (`--sheet` omitted): only `sheets` = a list of elements `{"name","max_row","max_column","print_area"}`. `print_area` is the print area set on each sheet (e.g. `"'Sheet1'!$A$1:$B$20"`; for sheets with several ranges, a comma-joined string), `null` if not set. Values are filled only for `.xlsx`/`.xlsm`; for `.xls` the `print_area` key itself does not exist (xlrd cannot get print areas, so it is not supported).
 
-**Cell data mode** (`--sheet` given) common keys: `sheet` (the resolved sheet name), `total_rows`/`total_columns` (the numbers of rows and columns of the whole sheet; they do not change even when narrowed with `--columns`), `start_row`/`end_row` (the range of 1-based row numbers included in `rows` this time; both `null` if no rows are returned; this `end_row` can be passed as is as the next `--offset`), `columns` (the array of column letters included in `rows` this time, e.g. `["A","C","E"]`; all columns if `--columns` is omitted), `rows` (a list of one array per row, only within the range of `--offset`/`--limit`/`--columns`). **The `j`-th element of each row of `rows` is always the value of column `columns[j]`** (even when columns are thinned out with `--columns`, this correspondence tells you the original column. Do not count columns by position within the row alone). For `.xlsx`/`.xlsm`, **each cell also carries its address in `ref`** (e.g. `"D3"`), so use `ref` instead of computing row/column numbers from array positions, and include `ref` when you extract fields with `json_query` (e.g. `rows[*][*].{ref: ref, v: value, wrap: style.wrap_text}`) so that the result keeps the address even where a field is missing.
+**Cell data mode** (`--sheet` given) common keys: `sheet` (the resolved sheet name), `total_rows`/`total_columns` (the numbers of rows and columns of the whole sheet; they do not change even when narrowed with `--columns`), `start_row`/`end_row` (the range of 1-based row numbers included in `rows` this time; both `null` if no rows are returned; this `end_row` can be passed as is as the next `--offset`), `columns` (the array of column letters included in `rows` this time, e.g. `["A","C","E"]`; all columns if `--columns` is omitted), `rows` (a list of one array per row, only within the range of `--offset`/`--limit`/`--columns`). **The `j`-th element of each row of `rows` is always the value of column `columns[j]`** (even when columns are thinned out with `--columns`, this correspondence tells you the original column. Do not count columns by position within the row alone). For `.xlsx`/`.xlsm`, **each cell also carries its address in `ref`** (e.g. `"D3"`), so use `ref` instead of computing row/column numbers from array positions, and include `ref` when you extract fields with `json_query` so that the result keeps the address even where a field is missing. Flatten the rows with `[]` first: `rows[].{ref: ref, v: value, wrap: style.wrap_text}` (all cells), `rows[2:36][].{ref: ref, v: value}` (a slice already projects, so do not add `[*][*]` after it), `rows[] | [?value == null].ref` (filter cells: flatten, then pipe into the filter).
 
 - For `.xls`: cell values in `rows` are ISO8601 strings for dates/times and `null` for empty cells (style information is not supported).
 - For `.xlsx`/`.xlsm`: each cell of `rows` is `{"ref":"D3", "value":..., "merged":"D3:D9", "style":{...}}` (`merged` only for cells inside a merged range, including its top-left anchor; the value of a merged range is in the anchor and the other cells are `null`. The `style` key only when there is a value). `value` is an ISO8601 string for dates/times, `null` for empty cells, and for formula cells the formula string by default (e.g. `"=SUM(A1:A10)"`); with `--data-only` it becomes the cached value Excel last calculated (e.g. `15`). In addition, `merged_cells` (the whole sheet, all of them regardless of the offset/limit range) and `tables` (the list of structured tables) are added at the top level.
@@ -116,6 +116,24 @@ The top-level keys of `result_path` (a JSON file) include `path` (the file read)
     - `row_heights`: the height of each row in the returned range (`start_row`-`end_row`) (`{"3": 15.0, ...}`). Rows not set are omitted.
     - `warnings`: an array of warnings about structural problems (the key is omitted if there are none). Points out possible cut-off text in cells without `wrap_text` whose estimated display width exceeds the column width. It also points out possible circular reference errors in Excel when the reference range of a formula cell (can be judged only without `--data-only`) includes its own cell (e.g. `=SUM(B8:N8)` in cell `N8`) (sheet-qualified references such as `Sheet2!A1:B2` are not checked).
 - With `--query-json`: in addition to the `rows` set above, `query_results` is added at the top level. **`query_results` covers the whole sheet regardless of the `--offset`/`--limit` range** (details and examples in the next section, "Structured queries"). `query_results` does not include style information (with or without `--style`).
+
+## Checking every row against a rule in code (`read_table`)
+
+To check every row of a table with your own code in `execute_python_code_readonly` (recomputing weeks, dates, counts, colors), read the table with `read_table` instead of walking openpyxl cells:
+
+```python
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.environ["AGENT_SRC_DIR"]), "skills", "excel-read", "scripts"))
+from xlread import read_table
+rows = read_table(path, "Weekly")          # or header_row=2 when the header is not the first row with 2+ values
+for r in rows:
+    print(r["_row"], r["Month"], r["Week"], r["_fill"])
+```
+
+- Each body row is a dict keyed by the header text, plus `_row` (the row number, for the report) and `_fill` (the fill of the first cell, `"RRGGBB"` or `None`).
+- The value of a merged cell (a month or category column) is on every row it covers, so it is never `None` there. A real empty cell is still `None`: guard with `if r["Notes"]:` before using it as text.
+- The header row is found automatically (the first row with two or more values that is not one merged title line). The table ends at the first row that is empty in every table column or that is one merged line across the table (a note); read notes separately.
+- `data_only=True` returns the values Excel last calculated for formula cells.
 
 ## Structured queries (`--query-json`, a mandatory rule)
 
