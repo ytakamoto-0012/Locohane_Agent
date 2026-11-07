@@ -10,6 +10,7 @@ run_script からは直接実行されない。xlkit から import して使う�
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -121,6 +122,13 @@ def lint_sheet(ws) -> list[str]:
             f"{_join(runs)}. Call merge_same(ws, column, first_row, last_row) on that column after writing the table"
         )
 
+    wrong_days = _wrong_weekdays(ws)
+    if wrong_days:
+        warnings.append(
+            f"{ws.title}: the weekday in parentheses does not match the date: {_join(wrong_days)}. "
+            "Compute the weekday in the script (\"月火水木金土日\"[d.weekday()]) instead of typing it"
+        )
+
     tall_notes = _lone_tall_notes(ws, in_merge)
     if tall_notes:
         warnings.append(
@@ -128,6 +136,36 @@ def lint_sheet(ws) -> list[str]:
             "Write it with write_note(ws, row, text, last_col=t.last_col) so it spans the table width"
         )
     return warnings
+
+
+_WEEKDAYS = "月火水木金土日"
+# 年まで書いた日付の直後の括弧内の曜日（2027-01-01(金)・2027/1/1（金）・2027年1月1日(金曜)）
+_DATED_WEEKDAY = re.compile(
+    r"(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})\s*日?\s*[(（]\s*([月火水木金土日])(?:曜日?)?\s*[)）]"
+)
+
+
+def _wrong_weekdays(ws) -> list[str]:
+    """セルの文の中で、年付きの日付と括弧内の曜日が合わないもの。
+
+    注記・備考の曜日は手で書かれやすく、検証役の指摘と修正の往復になっていた（2026-11-07 evals xlkit
+    run2: 修正の worker が注記に「2027/1/1(日)」と書き、実際は金曜で再検証 NG になった）。
+    """
+    from datetime import date
+
+    found: list[str] = []
+    for row in ws.iter_rows():
+        for cell in row:
+            if not isinstance(cell.value, str):
+                continue
+            for m in _DATED_WEEKDAY.finditer(cell.value):
+                try:
+                    actual = _WEEKDAYS[date(int(m.group(1)), int(m.group(2)), int(m.group(3))).weekday()]
+                except ValueError:
+                    continue
+                if actual != m.group(4):
+                    found.append(f"{cell.coordinate} {m.group(0)!r} (is {actual})")
+    return found
 
 
 # 1セルに折り返した文が、この行数以上の縦長になったら警告する

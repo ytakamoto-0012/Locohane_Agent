@@ -17,6 +17,8 @@ import difflib
 import json
 import locale
 import logging
+import os
+import threading
 from pathlib import Path
 
 import chainlit as cl
@@ -83,9 +85,29 @@ def _read_keeping_format(path: Path) -> tuple[str, str, str]:
 
 
 def _write_text(path: Path, text: str, encoding: str, newline: str) -> None:
+    """同じフォルダの一時ファイルへ書いてから置き換える（書きかけの内容を他から読ませない）。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding=encoding, newline="") as f:
-        f.write(text.replace("\n", newline) if newline != "\n" else text)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with open(tmp, "w", encoding=encoding, newline="") as f:
+            f.write(text.replace("\n", newline) if newline != "\n" else text)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+# 同じファイルへの Write/Edit を1つずつ行うためのロック（パスごと）。サブエージェントは1回の応答の
+# ツール呼び出しを並列に実行するため、同じファイルへの Edit を3つ同時に呼ぶと、書きかけの切れた
+# 内容を別の Edit が読み、UTF-8 として読めずに cp932 として読み直して書き戻し、ファイルが壊れた
+# （2026-11-07 evals xlkit run2: build_annual.py が SyntaxError (unicode error) になった）。
+_PATH_LOCKS: dict[str, threading.Lock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _path_lock(path: Path) -> threading.Lock:
+    key = os.path.normcase(str(path))
+    with _PATH_LOCKS_GUARD:
+        return _PATH_LOCKS.setdefault(key, threading.Lock())
 
 
 def _numbered(lines: list[str], start: int, end: int) -> str:
@@ -155,6 +177,11 @@ def write_tool(file_path: str, content: str, overwrite: bool = False) -> str:
         return f"Error: {error}"
     if path.is_dir():
         return f"Error: the path is a directory: {path}"
+    with _path_lock(path):
+        return _write_locked(path, content, overwrite)
+
+
+def _write_locked(path: Path, content: str, overwrite: bool) -> str:
     if path.exists() and not overwrite:
         return f"Error: {path} already exists. To change part of it use Edit; to replace the whole file pass overwrite=true."
     if path.exists() and looks_binary(path):
@@ -200,6 +227,11 @@ def edit_tool(file_path: str, old_string: str, new_string: str, replace_all: boo
     path, error = _resolve_write_path(file_path)
     if error:
         return f"Error: {error}"
+    with _path_lock(path):
+        return _edit_locked(path, old_string, new_string, replace_all)
+
+
+def _edit_locked(path: Path, old_string: str, new_string: str, replace_all: bool) -> str:
     if not path.is_file():
         return f"Error: file not found: {path}"
     if looks_binary(path):

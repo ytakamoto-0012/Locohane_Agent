@@ -305,3 +305,18 @@ def test_save_does_not_warn_about_notes_written_with_write_note(tmp_path):
     write_note(ws, t.last_row + 2, "前提: 週は月曜始まり。" * 6, last_col=t.last_col)
     result = save(wb, tmp_path / "n2.xlsx", new=True)
     assert not any("write_note" in w for w in result.get("warnings", []))
+
+
+def test_save_warns_about_a_typed_weekday_that_does_not_match_the_date(tmp_path):
+    # 2026-11-07 evals xlkit run2: 注記の「2027/1/1(日)」（実際は金曜）が再検証で NG になった
+    from xlkit import write_note
+
+    wb = new_workbook()
+    ws = wb.create_sheet("S")
+    t = write_table(ws, [["週", "日付"], ["第1週", "2026-12-28(月)〜2027-01-03(日)"]])
+    write_note(ws, t.last_row + 2, "凡例: 2026-12-28(月)開始の週(2027/1/1(日)まで)。実施日2027年2月3日（水）", last_col=t.last_col)
+    result = save(wb, tmp_path / "w.xlsx", new=True)
+    weekday_warnings = [w for w in result.get("warnings", []) if "weekday" in w]
+    assert len(weekday_warnings) == 1
+    assert "2027/1/1(日)" in weekday_warnings[0] and "is 金" in weekday_warnings[0]
+    assert "2026-12-28" not in weekday_warnings[0] and "2月3日" not in weekday_warnings[0]

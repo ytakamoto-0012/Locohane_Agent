@@ -143,3 +143,22 @@ def test_json_query_notes_a_result_whose_elements_are_all_empty():
     assert not _is_all_empty([[], [1]])
     assert not _is_all_empty([])
     assert "rows[] | [?value == null]" in _ALL_EMPTY_NOTE
+
+
+def test_parallel_edits_of_one_file_all_apply_and_keep_utf8(env):
+    # 2026-11-07 evals xlkit run2: 1回の応答で同じファイルへ Edit を3つ並列に呼び、ファイルが壊れた
+    from concurrent.futures import ThreadPoolExecutor
+
+    lines = [f'print("チェック{i} -> 日曜日")' for i in range(40)]
+    _write(file_path="p.py", content="\n".join(lines) + "\n" + "# 末尾の日本語コメント\n" * 2000)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(
+                lambda i: _edit(file_path="p.py", old_string=f'print("チェック{i} -> 日曜日")', new_string=f'print("確認{i} -> 月曜日")'),
+                range(40),
+            )
+        )
+    assert all(not r.startswith("Error") for r in results), [r for r in results if r.startswith("Error")][:2]
+    text = (tools._workdir._resolve_exec_workdir() / "p.py").read_bytes().decode("utf-8")
+    assert all(f'print("確認{i} -> 月曜日")' in text for i in range(40))
+    assert not list(tools._workdir._resolve_exec_workdir().glob(".p.py.*.tmp"))
