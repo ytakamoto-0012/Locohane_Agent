@@ -155,6 +155,15 @@ Reading only the extracted text of a file and judging from it causes hallucinati
 
 **Always write the concrete facts from your investigation with `write_thread_note`** (if available; except Assigned files runs and runs that return a file list under "Finding information"; do not skip it out of hesitation): Do not estimate "whether other agents will refer to it" or "whether the task text asks for it"; always write it. The delegator cannot receive anything other than your final answer, so facts you do not write are simply lost. Do not try to write everything at the end; write each time a topic reaches a break (if a cutoff or context compaction happens first, unrecorded parts are lost). Unlike `execute_python_code`/`run_script`, it can always be called even if the plan is not approved.
 
+**Write records as a `records` block**: When the facts are records of the same shape (one per event, item, document or row: a date, a name, a count, a source) that a later step will put in a table or compute from, write them inside a fenced block marked `records`, one JSON object per line, with the same keys on every line. Write the values as read (a name you could not read is `null`, not a guess), the source file on every line, and no derived values (no week numbers, weekdays, totals or classifications). Write observations and doubts as normal text outside the block. The worker's script reads these blocks directly (`records()` of excel-edit), so a record left out of the block is left out of the file. In an Assigned files run, put the block in your final answer (the delegator saves it to a thread note).
+
+````
+```records
+{"date": "2021-01-24", "name": "節分祭", "participants": 27, "source": "2021/photo_01.png", "read_from": "ocr_md/md_photo_01.md"}
+{"date": "2021-11-16", "name": null, "participants": 28, "source": "2021/photo_04.png", "read_from": "image (name unreadable)"}
+```
+````
+
 **write_scratch_note is an auxiliary temporary backup** (if available): It is not a replacement for `write_thread_note`; use it in addition, only for resilience against cutoffs. It differs from `write_thread_note` in that it is limited to this one sub-agent run and cannot be read by others. It writes only to a dedicated scratch area and never touches the user's working directory or output files.
 
 **Before writing your final answer, always leave the minutes of this whole run once with `write_thread_note`** (if available; except Assigned files runs, whose final answer the delegator saves, and runs that return a file list under "Finding information", whose list is the whole record): Treat one sub-agent run as one "meeting", and summarize the following as minutes so the next sub-agent that reads this thread note (the next meeting) can continue where you left off without investigating from scratch.

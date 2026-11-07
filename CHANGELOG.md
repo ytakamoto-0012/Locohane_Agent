@@ -42,6 +42,15 @@
 
 ### 変更
 
+- xlsx を記録とルールから作るときの流れを、「1つの実行できる仕様を worker と verifier で共有する」形に変えました。
+  - サブエージェントは、表にする記録をスレッドノートに `records` ブロック（1行1件の JSON）で書きます。
+  - worker は excel-edit の新しい補助モジュール `xlspec` で、記録を `records()` で読み、ルールを `rules.py`、要件ごとのチェックを
+    `checks.py` に1回だけ書き、build スクリプトの最後に `run_checks()` を実行します。
+  - verifier はルールを自分で再実装せず、`rules.py`・`checks.py` をルールの文章と突き合わせ、同じ `run_checks()` を実行し、
+    数行を手で照合します。再検証も同じチェックの再実行です。
+  これまでは記録とルールを文章で受け渡し、worker と verifier が別々にコードへ直していたため、曖昧な箇所で解釈が分かれて検証 NG と
+  修正の往復が増え、記録の写し漏れも起きていました（2026-11-07 の eval 9回で、最初の検証の NG の大半がこの2つ）。
+
 - xlsx の新規作成・編集を、JSON の op 列を渡す方式から `execute_python_code` で openpyxl のコードを直接書く方式へ一本化しました。
   同一内容を決定的な条件で比べた結果、payload が script 766 chars / op list 5,391 chars（43 ops）で、点検（lint）と見た目の既定値は
   どちらでも同じ基準で出るため、payload の小さいほうを残しました。スキル名は `excel-edit` のままです。

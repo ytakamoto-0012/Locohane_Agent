@@ -4,12 +4,12 @@ description: A skill that creates new xlsx/xlsm files and edits existing ones by
 license: MIT
 metadata:
   author: ytakamoto
-  version: "0.3"
+  version: "0.4"
 ---
 
 # excel-edit
 
-Create and edit Excel files by writing openpyxl code with `execute_python_code`. Import the helper module `xlkit` from this skill for the table look and for saving.
+Create and edit Excel files by writing openpyxl code with `execute_python_code`. Import the helper module `xlkit` from this skill for the table look and for saving, and `xlspec` for the records, rules and checks that the verifier reuses.
 
 ## Start of every code
 
@@ -17,6 +17,7 @@ Create and edit Excel files by writing openpyxl code with `execute_python_code`.
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.environ["AGENT_SRC_DIR"]), "skills", "excel-edit", "scripts"))
 from xlkit import new_workbook, open_workbook, write_table, write_note, merge_same, save, fill
+from xlspec import records, check, run_checks
 ```
 
 ## xlkit
@@ -39,13 +40,27 @@ What `save` fills in (only where the code set nothing; your own `cell.font`, `ws
 
 Anything else (single cells, charts, conditional formatting, data validation, images) is plain openpyxl on the sheet.
 
+## xlspec (records, rules, checks)
+
+| Function | What it does |
+|---|---|
+| `records(topic=None)` | The records written in ```` ```records ```` blocks of the thread notes (one JSON object per line), in order, each with `_topic`. Read the topics the task names (`[r for t in topics for r in records(t)]`); without `topic` it reads every block, including copies in other topics. Use it instead of copying the facts into the script by hand. |
+| `@check("requirement")` | In `checks.py`: register one check. The function gets `book` and returns a list of problems (empty = OK) or `True`/`False`. `book.table(sheet)` gives the table rows as dicts keyed by the header (merged cells filled on every row, plus `_row` and `_fill`); `book.texts(sheet)` gives `(cell, text)` of every text cell; `book.wb` is the openpyxl workbook. |
+| `run_checks(path, "checks.py")` | Run every check and print one line of JSON: `passed`, `failed` (the problems of each failed requirement) and `errors` (a check that crashed: a bug in the check, not in the file). |
+
 ## How to write the code
 
-1. Write the whole build script once to a file with `Write` (e.g. `build_xlsx.py`; a relative name goes to the cwd of `execute_python_code`), then run it with `execute_python_code`: `import runpy; runpy.run_path("build_xlsx.py")`. When something fails or a check is wrong, fix only those lines with `Edit` and run the same one-line `execute_python_code` again (keep `save(wb, out, new=True)`; it rebuilds the file). Do not resend the whole script.
-2. Compute everything from the data in the script: dates, week numbers, groups, averages, counts, which rows exist. Build `rows` (and `row_fills`) as lists in the script, then write each table with one `write_table`. Do not type computed values into the script by hand. When the source data is a file the script can read (CSV, JSON, text), read it in the script instead of writing the values into the script.
-3. Save to the absolute path in the working directory with `save(...)`.
-4. Check at the end of the same script: open the saved file again with `openpyxl.load_workbook` and print one check per requirement of the task (e.g. every month has rows for weeks 1–5, every row of a kind has its color, the notes the task asks for are present). Fix and run again until every check passes. Printing only row counts is not a check.
-5. Fix every item in `warnings` before reporting.
+When the file is built from records and rules (schedules, lists derived from past records, aggregations), write three files with `Write`, in this order. The verifier reviews `rules.py` and `checks.py` and runs the same checks, so whatever they say is what gets verified.
+
+1. **`rules.py`**: one function per rule of the task and the thread notes (which records are used, the month of an event, the week number of a date, the dates of preparation and meetings, the label of an estimated value). Put the rule sentence as the docstring and handle its edge cases in the code (ties, a single record, outliers, a week that starts in the previous month). When the rule text does not decide a case, choose a reading, write `ASSUMPTION: ...` in the docstring, and list every assumption in your final answer. No values typed from memory: dates and weekdays come from `datetime`.
+2. **`checks.py`**: one `@check` per requirement of the task (every selected record has its rows, every month/week that must exist exists, each row has the color of its kind, the notes the task asks for are present, every count, date and list written in a note matches the data). Compute the expected values with `records()` and `rules.py` (`import rules`) and compare them with `book.table(...)`. A problem says the sheet, the row or cell, the expected and the actual value.
+3. **`build_xlsx.py`**: read the records with `records()` (or read the source file when the data is a file), compute every value with `rules.py`, write the tables, save, then `run_checks(out, "checks.py")`. Run it with `execute_python_code`: `import runpy; runpy.run_path("build_xlsx.py")`.
+4. When `failed`, `errors` or the `warnings` of `save` are not empty, fix only those lines with `Edit` (in `build_xlsx.py`, `rules.py` or `checks.py`) and run the same one-line `execute_python_code` again (keep `save(wb, out, new=True)`; it rebuilds the file). Do not resend a whole script.
+5. Report the file path, the paths of `rules.py` and `checks.py`, the result of `run_checks`, and the assumptions.
+
+Text in notes, legends and remarks is built from the data in `build_xlsx.py` too: counts (`f"{len(unknown)}件"`), lists (`", ".join(...)`), dates and weekdays (`"月火水木金土日"[d.weekday()]`). A number or a date typed into a sentence by hand drifts from the table.
+
+For a small edit of an existing file (change some cells, add a column), one script with a check at its end is enough: reopen the saved file with `openpyxl.load_workbook` and print one check per requirement.
 
 ## The shapes that come up most (keep the script to these)
 
@@ -58,10 +73,12 @@ write_note(ws, t.last_row + 2, "前提: 参加者30人・予算40,000円", last_
 save(wb, out, new=True)
 ```
 
-Two views of the same records on two sheets (monthly and weekly): build the records once as a list, then write one table per sheet from that same list. Do not re-derive the values per sheet; the week number and the month are computed in the script.
+Two views of the same records on two sheets (monthly and weekly): read the records once, compute each value once with `rules.py`, then write one table per sheet from that same list. Do not re-derive the values per sheet.
 
 ```python
-records = [(year, month, day, name, attendees), ...]   # read them from the source, do not type them
+import rules
+recs = records()                                   # from the ```records blocks, not typed
+events = [rules.plan_event(r) for r in rules.selected(recs)]
 ```
 
 Per-row color by kind: pass `row_fills` (one entry per body row), not `banded=False` plus manual fills. `number_formats={col: "#,##0"}` for money and participant counts.
