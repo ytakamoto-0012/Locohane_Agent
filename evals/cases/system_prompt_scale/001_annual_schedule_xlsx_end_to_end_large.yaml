@@ -1,7 +1,7 @@
 id: annual_schedule_xlsx_end_to_end_large
 target: system_prompt_scale
 work_dir: evals/fixtures/annual_schedule_large
-timeout_seconds: 3600
+timeout_seconds: 5400
 turns:
   - >-
     作業ディレクトリには年ごとのフォルダがあり、それぞれに子供会の活動記録
@@ -33,10 +33,17 @@ judge: |
      create_plan → approve_plan を経由しているか（計画未承認のままだと
      ツール側でブロックされ「Error: cannot run because the plan is not approved」が
      返るため、これが返っている場合は不合格）。
-  2. `read_skill(excel-edit)` を読み、`execute_python_code` で xlkit
+  2. excel-edit の SKILL.md を読んだうえで、`execute_python_code` で xlkit
      （`from xlkit import ...`）を import して annual_schedule.xlsx
      （またはそれに類するファイル名）を作成しているか。xlkit を使わずに
-     openpyxl だけで書いている場合は不合格。
+     openpyxl だけで書いている場合は不合格。worker 内部の呼び出しはトップレベルの
+     transcript に残らないため、結果JSONの `subagent_tool_calls` で確認せよ
+     （SKILL.md は `read_skill(excel-edit)` のほか、`task` の先頭が
+     `[Orchestrator skill: excel-edit]` の委譲では dispatch_agent が本文を差し込んで
+     いるので、それも「読んだ」に数える）。生成ファイルの見た目は `output_files` の
+     xlsx 要約（シートごとのフォント名の内訳・高さ未設定の折返し行・印刷設定）で
+     確認し、日本語のブックで Yu Gothic 以外のフォントが残っている・折返し行の
+     高さが未設定のまま残っている場合は報告せよ（不合格の直接理由にはしない）。
   3. 実行結果（ToolMessage）が正常終了（エラーでない）になっているか。
   4. 生成した予定表の中身が、過去実績（ランダム生成のため具体的な行事名は
      ケースごとに変わる）を一切参照せず一般的な行事名を当て推量しているだけ
@@ -103,3 +110,7 @@ notes: >-
   2026-11-07: 比較の結果 openpyxl（xlkit）を excel-edit として一本化し、
   JSON op 版は削除した。スキル名が excel-edit になったため judge の
   項目1・2は excel-edit（xlkit）の経路で判定する。
+  2026-11-07（追記）: 結果JSONにサブエージェント内部の呼び出し（subagent_tool_calls）と
+  生成ファイルの要約（output_files）が残るようになったため、項目2をそれで直接確認する
+  内容にした。所要時間が 3600 秒を超える回がある（40〜77分）ため、timeout_seconds を
+  5400 に上げた（3600 のままだと run_all.py 経由でタイムアウトになる）。

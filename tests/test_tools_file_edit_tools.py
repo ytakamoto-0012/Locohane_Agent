@@ -117,3 +117,20 @@ def test_edit_refuses_binary(env):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"PK\x00\x01abc")
     assert "binary" in _edit(file_path=str(target), old_string="abc", new_string="d")
+
+
+def test_closest_hint_points_at_the_first_differing_line_of_a_multi_line_old_string():
+    from src.tools.file_edit_tools import _closest_hint
+
+    text = "a = 1\nres = save(wb, OUT, new=True)\nprint(res)\n\n# checks\nx = 2\n"
+    hint = _closest_hint(text, "res = save(wb, OUT, new=True)\nprint(res)\n# checks")
+    assert "first 2 line(s) of old_string match the file from line 2" in hint
+    assert "'# checks'" in hint
+    assert "4\t\n5\t# checks" in hint
+
+
+def test_closest_hint_keeps_the_single_line_message():
+    from src.tools.file_edit_tools import _closest_hint
+
+    hint = _closest_hint("value = compute(a, b)\n", "value = compute(a,b)")
+    assert "closest line is 1" in hint

@@ -93,6 +93,10 @@ def _numbered(lines: list[str], start: int, end: int) -> str:
     return "\n".join(f"{i + 1}\t{lines[i]}" for i in range(max(start, 0), min(end, len(lines))))
 
 
+# 続きの行が違うときに見せるファイルの行数の上限
+_MISMATCH_CONTEXT_LINES = 15
+
+
 def _closest_hint(text: str, old_string: str) -> str:
     """old_string が見つからないとき、いちばん近い行を示す（空白や記号の写し間違いに気付かせる）。"""
     first = next((line for line in old_string.split("\n") if line.strip()), "")
@@ -102,7 +106,23 @@ def _closest_hint(text: str, old_string: str) -> str:
     best = difflib.get_close_matches(first, lines, n=1, cutoff=0.6)
     if not best:
         return ""
-    line_no = lines.index(best[0]) + 1
+    start = lines.index(best[0])
+    line_no = start + 1
+    old_lines = old_string.split("\n")
+    first_offset = old_lines.index(first)
+    if best[0] == first and len(old_lines) - first_offset > 1:
+        # 1行目は合っていて、続きの行の写し間違い（2026-11-07 evals xlkit: 失敗した Edit の多くが
+        # これで、1行目だけを示すと同じ1行目から書き直してまた外していた）。違う行と、その位置の
+        # ファイルの実際の行を見せる。
+        for offset, old_line in enumerate(old_lines[first_offset:]):
+            file_index = start + offset
+            if file_index >= len(lines) or lines[file_index] != old_line:
+                shown_end = min(start + len(old_lines) - first_offset + 2, start + _MISMATCH_CONTEXT_LINES, len(lines))
+                return (
+                    f" The first {offset} line(s) of old_string match the file from line {line_no}, but the next line "
+                    f"differs: old_string has {old_line!r}. The file has there:\n{_numbered(lines, start, shown_end)}\n"
+                    "Copy old_string exactly from these lines."
+                )
     return f" The closest line is {line_no}: {best[0]!r}. Copy old_string exactly from the file (Read it if unsure)."
 
 
