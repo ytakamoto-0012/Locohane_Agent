@@ -38,7 +38,8 @@
   同一内容を決定的な条件で比べた結果、payload が script 766 chars / op list 5,391 chars（43 ops）で、点検（lint）と見た目の既定値は
   どちらでも同じ基準で出るため、payload の小さいほうを残しました。スキル名は `excel-edit` のままです。
 - `xlkit` の `save(new=True)` は、同じ会話で xlkit が保存したファイルなら作り直すようにしました（修正のためにスクリプトを
-  実行し直すと `FileExistsError` になり、`new=False` に切り替えてバックアップが溜まっていました）。ユーザーの既存ファイルは今までどおり拒否します。
+  実行し直すと `FileExistsError` になり、`new=False` に切り替えてバックアップが溜まっていました）。`new=False` でも、自分の出力ならバックアップを
+  取りません。ユーザーの既存ファイルは今までどおり、`new=True` なら拒否、`new=False` ならバックアップを取ります。
 - `xlkit` の点検の警告文を、削除した JSON op の用語（`set_style` 等）から openpyxl・xlkit の書き方に直しました。
 
 ### 削除

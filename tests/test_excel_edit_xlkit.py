@@ -219,6 +219,11 @@ def test_save_new_overwrites_its_own_output_of_this_conversation(tmp_path, monke
 
     assert "replaced" in result and "backup" not in result
     assert openpyxl.load_workbook(path)["S"]["A1"].value == 2
+    wb = open_workbook(path)
+    wb["S"]["A1"] = 3
+    result = save(wb, path, new=False)
+    assert "replaced" in result and "backup" not in result
+    assert openpyxl.load_workbook(path)["S"]["A1"].value == 3
     assert not list(tmp_path.glob("own.bak_*"))
 
 

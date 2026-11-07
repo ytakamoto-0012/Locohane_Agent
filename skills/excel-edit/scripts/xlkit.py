@@ -233,22 +233,24 @@ def save(wb, path, *, new: bool = False) -> dict:
         new: 新規作成なら True。既存ファイルを上書きする場合（new=False）は、
             保存前に同じフォルダへ `<名前>.bak_<日時>` としてバックアップを取る。
             new=True で既にファイルがあればエラー（取り違えて上書きしないため）。
+            どちらも、同じ会話で xlkit が保存したファイル（自分の出力）なら、エラーにも
+            バックアップにもせずそのまま上書きする。
     """
     from _lint import lint_sheet, sheet_summary
 
     path = Path(path).resolve()
-    replaced_own_output = False
-    if new and path.exists():
-        # 同じ会話で xlkit が保存したファイルは、修正のために同じスクリプトを実行し直した
-        # 結果なので、そのまま作り直す（バックアップも取らない）。ユーザーのファイルは今までどおり拒否する。
-        if not _is_own_output(path):
-            raise FileExistsError(f"{path} already exists. Open it with open_workbook() and save with new=False to edit it")
-        replaced_own_output = True
+    # 同じ会話で xlkit が保存したファイルは、修正のためにスクリプトを実行し直した結果なので、
+    # そのまま上書きする（バックアップも取らない。2026-11-07 evals xlkit run1: 修正の worker が
+    # 自分の出力を new=False で9回上書きし、.bak が9個たまった）。ユーザーのファイルは今までどおり
+    # new=True なら拒否、new=False ならバックアップを取る。
+    replaced_own_output = path.exists() and _is_own_output(path)
+    if new and path.exists() and not replaced_own_output:
+        raise FileExistsError(f"{path} already exists. Open it with open_workbook() and save with new=False to edit it")
     if path.suffix.lower() == ".xlsm" and getattr(wb, "vba_archive", None) is None:
         raise ValueError("Saving as .xlsm needs a workbook opened from an existing .xlsm with open_workbook() (keeps the macros)")
     if not wb.sheetnames:
         raise ValueError("The workbook has no sheets. Create one with wb.create_sheet(name)")
-    backup = None if new else backup_before_overwrite(path)
+    backup = None if new or replaced_own_output else backup_before_overwrite(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     finalize_sheets(wb, new=new)
     wb.save(path)

@@ -61,6 +61,13 @@ def describe_outputs(root: Path, rels: list[str], keep_dir: Path | None = None) 
     return out
 
 
+def _display_width(text: str) -> int:
+    """全角を2、半角を1と数えた幅（skills/office_shared/excel_common.py と同じ数え方）。"""
+    import unicodedata
+
+    return sum(2 if unicodedata.east_asian_width(ch) in "WFA" else 1 for ch in text)
+
+
 def summarize_xlsx(path: Path) -> list[dict]:
     """シートごとのフォント名の内訳・高さ未設定の折返し行・印刷設定。"""
     from openpyxl import load_workbook
@@ -77,7 +84,11 @@ def summarize_xlsx(path: Path) -> list[dict]:
                     continue
                 fonts[str(cell.font.name)] += 1
                 if cell.alignment is not None and cell.alignment.wrap_text and isinstance(cell.value, str):
-                    row_wraps = True
+                    letter = cell.column_letter
+                    width = ws.column_dimensions[letter].width or 8.43
+                    # 1行に収まる文（見出し等）は高さ未設定でも見え方は変わらないので数えない
+                    if "\n" in cell.value or _display_width(cell.value) > width:
+                        row_wraps = True
             if row and row_wraps and ws.row_dimensions[row[0].row].height is None:
                 wrapped_rows_without_height.append(row[0].row)
         props = ws.sheet_properties.pageSetUpPr

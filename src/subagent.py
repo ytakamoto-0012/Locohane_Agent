@@ -105,8 +105,9 @@ _TOOL_CALL_OBSERVERS: list[Callable[[dict], None]] = []
 def add_tool_call_observer(observer: Callable[[dict], None]) -> None:
     """サブエージェントのツール呼び出しの観測者を登録する。
 
-    observer は1件ごとに {"task", "iteration", "name", "args", "is_error", "result"} の
-    dict を受け取る（result はツール結果の先頭部分）。例外を送出しても無視される。
+    observer は1件ごとに {"task", "iteration", "name", "args", "is_error", "result", "result_tail"} の
+    dict を受け取る（result はツール結果の先頭部分。エラーで長い結果は、原因の書かれた
+    Traceback の末尾を result_tail に入れる）。例外を送出しても無視される。
     """
     _TOOL_CALL_OBSERVERS.append(observer)
 
@@ -118,6 +119,7 @@ def remove_tool_call_observer(observer: Callable[[dict], None]) -> None:
 
 
 _OBSERVED_RESULT_CHARS = 500
+_OBSERVED_ERROR_TAIL_CHARS = 1000
 
 
 def _notify_tool_call_observers(task: str, iteration: int, tool_calls: list, results: list) -> None:
@@ -125,13 +127,15 @@ def _notify_tool_call_observers(task: str, iteration: int, tool_calls: list, res
         return
     for call, (tool_message, _followup) in zip(tool_calls, results, strict=False):
         content = tool_message.content if isinstance(tool_message.content, str) else str(tool_message.content)
+        is_error = getattr(tool_message, "status", None) == "error" or looks_like_error(content)
         record = {
             "task": task,
             "iteration": iteration,
             "name": call.get("name"),
             "args": call.get("args") or {},
-            "is_error": getattr(tool_message, "status", None) == "error" or looks_like_error(content),
+            "is_error": is_error,
             "result": content[:_OBSERVED_RESULT_CHARS],
+            "result_tail": content[-_OBSERVED_ERROR_TAIL_CHARS:] if is_error and len(content) > _OBSERVED_RESULT_CHARS else "",
         }
         for observer in list(_TOOL_CALL_OBSERVERS):
             try:

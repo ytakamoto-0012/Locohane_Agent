@@ -322,6 +322,7 @@ def _subagent_call_recorder() -> tuple[list[dict], object]:
                 "args": _truncate_args(record["args"]),
                 "is_error": record["is_error"],
                 "result": record["result"],
+                **({"result_tail": record["result_tail"]} if record.get("result_tail") else {}),
             }
         )
 
