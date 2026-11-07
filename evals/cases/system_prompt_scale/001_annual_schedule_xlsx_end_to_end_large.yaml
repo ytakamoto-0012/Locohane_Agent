@@ -1,7 +1,7 @@
 id: annual_schedule_xlsx_end_to_end_large
 target: system_prompt_scale
 work_dir: evals/fixtures/annual_schedule_large
-timeout_seconds: 5400
+timeout_seconds: 10800
 turns:
   - >-
     作業ディレクトリには年ごとのフォルダがあり、それぞれに子供会の活動記録
@@ -112,5 +112,5 @@ notes: >-
   項目1・2は excel-edit（xlkit）の経路で判定する。
   2026-11-07（追記）: 結果JSONにサブエージェント内部の呼び出し（subagent_tool_calls）と
   生成ファイルの要約（output_files）が残るようになったため、項目2をそれで直接確認する
-  内容にした。所要時間が 3600 秒を超える回がある（40〜77分）ため、timeout_seconds を
-  5400 に上げた（3600 のままだと run_all.py 経由でタイムアウトになる）。
+  内容にした。所要時間が 3600 秒を超える回がある（2026-11-07 の6回で 40〜150分）ため、
+  timeout_seconds を 10800 に上げた（3600 のままだと run_all.py 経由でタイムアウトになる）。
