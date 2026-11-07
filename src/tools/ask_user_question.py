@@ -7,7 +7,7 @@ import chainlit as cl
 import logging
 
 from . import _state
-from ._ask_echo import _echo_ask_answer
+from ._ask_echo import ASK_TIMEOUT_MESSAGE, _echo_ask_answer
 from ._ask_echo import _is_text_ask_cancelled
 from ._ask_relay_helper import _ask_with_cross_session_relay
 from ._state import _resolve_ask_timeout
@@ -54,7 +54,7 @@ async def ask_user_question(question: str, labels: list[str] | None = None) -> s
 
         res = await _ask_with_cross_session_relay(thread_id, _factory, timeout)
         if res is None:
-            return "Error: there was no response from the user (timeout)."
+            return ASK_TIMEOUT_MESSAGE
         if _is_text_ask_cancelled(res):
             return _ASK_QUESTION_CANCEL_MESSAGE
         return res.get("output", "")
@@ -79,7 +79,7 @@ async def ask_user_question(question: str, labels: list[str] | None = None) -> s
 
     res = await _ask_with_cross_session_relay(thread_id, _factory_element, timeout)
     if res is None:
-        return "Error: there was no response from the user (timeout)."
+        return ASK_TIMEOUT_MESSAGE
     if not res.get("submitted", True):
         return _ASK_QUESTION_CANCEL_MESSAGE
     values = res.get("values") or []

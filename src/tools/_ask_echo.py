@@ -47,3 +47,14 @@ async def _echo_ask_answer(ask_message, question: str, answer: str) -> None:
         await cl.Message(content=answer, author=_ANSWER_AUTHOR, type="user_message").send()
     except Exception:  # noqa: BLE001 - 表示の失敗でツールの結果を失わせない
         logger.warning("Could not show the answer of the ask tool in the chat", exc_info=True)
+
+# 質問がタイムアウトしたときにツールが返す文。利用者が席を外していることもあるため、自分で決められる
+# 前提なら既定で進めるよう案内する（2026-11-07 evals xlkit: メインが対象年・準備ルールの既定を示して
+# 質問し、タイムアウト後に「回答があれば作成します」と書いて何も作らずに終わった）。書き込みの前には
+# 計画の承認が要るので、既定で進めても利用者の承認なしにファイルは作られない。
+ASK_TIMEOUT_MESSAGE = (
+    "Error: there was no response from the user (timeout). The user may be away. "
+    "If you can choose a reasonable default yourself (for example a default you already stated in the question), "
+    "continue the task with it and say in your final answer which default you used and that it can be changed. "
+    "Stop and ask again in your final answer only when the task cannot be done without the answer."
+)
