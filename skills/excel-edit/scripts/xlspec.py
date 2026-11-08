@@ -6,6 +6,8 @@
 ここでは次の3つを1か所にする:
 
 - 記録: スレッドノートの ```records ブロック（1行1件の JSON）を `records()` で読む（手で写さない）。
+  読めない行は飛ばして報告し、1行に複数の JSON があれば分け、全く同じ行は1件にまとめる
+  （不正な1行で全体がエラーになり、worker がノートファイルを手で読み直して膨らぶ実測がある）。
 - ルール: 作り手が `rules.py` に関数として1回だけ書き、build スクリプトもチェックも import する。
 - 合格基準: `checks.py` に要件1つにつき1つの `@check` を書き、`run_checks()` で両者が同じ判定をする。
 
@@ -36,6 +38,9 @@ _TOPIC_RE = re.compile(r"^## (.+)\n<!-- (.+?) by (.+?) -->\n", re.MULTILINE)
 _RECORDS_RE = re.compile(r"```records[ \t]*\n(.*?)\n```", re.DOTALL)
 # 1つのチェックが返す問題のうち、結果に載せる数（多すぎると読み飛ばされるため）
 _MAX_PROBLEMS = 10
+# 飛ばした行の報告で示す件数（本番で1回の調査で数十行不正だったため、全件ではなく先頭を出す）
+_MAX_SKIPPED_REPORTED = 10
+_JSON_DECODER = json.JSONDecoder()
 
 
 def _notes_text(notes_path) -> str:
@@ -46,6 +51,29 @@ def _notes_text(notes_path) -> str:
             "or pass notes_path="
         )
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _record_values_on_line(line: str) -> list[dict]:
+    """1行から JSON オブジェクトを読む（続けて2つ書かれていれば分けて返す）。
+
+    Returns:
+        その行の JSON オブジェクト（通常1件、同じ行に複数の記録が並ぶ書かれ方をしたときは複数）。
+
+    Raises:
+        ValueError: JSON として読めない、または JSON オブジェクトではない。
+    """
+    text = line.strip().rstrip(",")
+    values: list[dict] = []
+    pos = 0
+    while pos < len(text):
+        value, end = _JSON_DECODER.raw_decode(text, pos)
+        if not isinstance(value, dict):
+            raise ValueError(f"not a JSON object: {text[pos:pos + 120]}")
+        values.append(value)
+        pos = end
+        while pos < len(text) and text[pos] in " ,\t":
+            pos += 1
+    return values
 
 
 def records(topic: str | None = None, *, notes_path=None) -> list[dict]:
@@ -59,14 +87,25 @@ def records(topic: str | None = None, *, notes_path=None) -> list[dict]:
 
     Returns:
         各行の JSON オブジェクトに、書かれたトピック名 `_topic` を足した dict の一覧。
+        書き手が書かなかったキーは存在しない（キーの有無で「記載なし」を区別するため、
+        値を読むときは `r.get(key)` を使う）。
+
+    Notes:
+        読めない行は例外にするのではなく飛ばして続けます（1行の誤りで全体が読めないと、
+        呼び出し側がノートファイルを手で読み直して往復を増やす実測がある）。1行に複数の
+        JSON が並ぶ書き方でも読め、全く同じ行は1件にまとめます。飛ばした・まとめた行が
+        あるときだけ、標準出力に1行の JSON で報告します（件数の違いを最終回答へ写すため）。
 
     Raises:
-        ValueError: JSON として読めない行がある・記録が1件も無い（どのトピック・どの行かを示す）。
+        ValueError: 1件も読めなかった場合（どのトピック・どの行が読めなかったかを示す）。
     """
     text = _notes_text(notes_path)
     matches = list(_TOPIC_RE.finditer(text))
     found: list[dict] = []
     topics_seen: list[str] = []
+    skipped: list[dict] = []
+    seen: set[str] = set()
+    merged = 0
     for i, m in enumerate(matches):
         name = m.group(1).strip()
         topics_seen.append(name)
@@ -75,22 +114,32 @@ def records(topic: str | None = None, *, notes_path=None) -> list[dict]:
         body = text[m.end() : matches[i + 1].start() if i + 1 < len(matches) else len(text)]
         for block in _RECORDS_RE.finditer(body):
             for line_no, line in enumerate(block.group(1).splitlines(), start=1):
-                line = line.strip().rstrip(",")
-                if not line or line.startswith("//"):
+                if not line.strip() or line.strip().startswith("//"):
                     continue
                 try:
-                    value = json.loads(line)
-                except json.JSONDecodeError as e:
-                    raise ValueError(f'records block in topic "{name}", line {line_no} is not JSON ({e.msg}): {line[:120]}') from e
-                if not isinstance(value, dict):
-                    raise ValueError(f'records block in topic "{name}", line {line_no} is not a JSON object: {line[:120]}')
-                found.append({**value, "_topic": name})
+                    values = _record_values_on_line(line)
+                except ValueError as e:
+                    skipped.append({"topic": name, "line": line_no, "problem": str(e), "text": line.strip()[:120]})
+                    continue
+                for value in values:
+                    key = json.dumps(value, sort_keys=True, ensure_ascii=False)
+                    if key in seen:
+                        merged += 1
+                        continue
+                    seen.add(key)
+                    found.append({**value, "_topic": name})
     if not found:
         where = f'topic "{topic}"' if topic else "any topic"
+        detail = f" (skipped lines: {len(skipped)}, first: {skipped[0]})" if skipped else ""
         raise ValueError(
             f"No ```records block in {where} of the thread notes (topics: {', '.join(dict.fromkeys(topics_seen)) or 'none'}). "
-            "Ask the delegator for the records, or read the facts from the topic text"
+            "Ask the delegator for the records, or read the facts from the topic text" + detail
         )
+    if skipped or merged:
+        report: dict = {"records": len(found), "skipped_lines": len(skipped), "duplicate_lines_merged": merged}
+        if skipped:
+            report["skipped"] = skipped[:_MAX_SKIPPED_REPORTED]
+        print(json.dumps(report, ensure_ascii=False))
     return found
 
 

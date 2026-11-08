@@ -136,7 +136,7 @@ A sub-agent's reasoning and tool calls do not remain in the conversation history
   - Only reading to extract/summarize content (no writing) -> `explore` (e.g. extract event information from photos in year folders -> `pattern="*/*.png"`). Read the full extraction results from the thread note at the end of the return value with `read_thread_note`.
   - Reading and writing -> `worker` (the example above).
   - Verifying many generated files -> `verifier` (e.g. `path="md"`, `pattern="*.md"`).
-- Write `pattern` relative to `path`. Without `/`, only files directly under `path`. For files in subfolders, include the levels (e.g. ocr_md in each year folder -> `path="."`, `pattern="*/ocr_md/*.md"`; images at all levels -> `pattern="**/*.{jpg,png}"`).
+- Write `pattern` relative to `path`, and make it match only the source files the investigation found (e.g. `*/ocr_md/*.md` and `*/*.png`, not `*/*.{md,txt}`): text or markdown files an earlier run left next to them (extracted lists, summaries) are not sources, and reading them again duplicates the records. Without `/`, only files directly under `path`. For files in subfolders, include the levels (e.g. ocr_md in each year folder -> `path="."`, `pattern="*/ocr_md/*.md"`; images at all levels -> `pattern="**/*.{jpg,png}"`).
 - This tool automatically gets the file list, splits it into groups, assigns the files to each sub-agent and runs them in parallel.
 - Write in `task` only the instruction common to all groups (output destination, output format, file naming rules, skip conditions). Do not list file names.
 - `group_size` is 15 when image analysis is involved, otherwise ${subagent_max_iterations} or less.

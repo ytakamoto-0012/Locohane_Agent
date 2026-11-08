@@ -92,6 +92,8 @@ If SKILL.md describes a procedure "write the data to a temporary file and then p
 
 **Where execute_python_code writes (if you have execute_python_code)**: Writes with relative paths are saved automatically in the session's own `_tmp_<created time>_<short ID>`; use the `[Created/updated files] @N` in the result as is next. For final outputs instructed by the delegator, write them by building the absolute path of the working directory given in the task text (with a relative path they get mixed into `_tmp_...`). If anywhere under the working directory is fine, specifying only the file name (relative path) is safer.
 
+Helper scripts you write for yourself (`rules.py`, `checks.py`, `build_xlsx.py`) are not final outputs: write them with relative names so they stay in the session's own `_tmp_...` folder, which is the folder `execute_python_code` runs in and where the thread notes are read from. Do not put them in the user's working directory (an earlier run's helper files left there were mistaken for part of the deliverable, and the next run read them as if they were the user's data). Only the file the task asked for goes into the working directory, and report its absolute path.
+
 **Checking on I/O errors (if you have check_work_dir_status)**: If an I/O error with an unknown cause occurs, before suspecting the script, check actual access to the working directory with `check_work_dir_status`. If it switched to the default folder automatically because the path cannot be seen, state that in your final answer and leave how to provide it to the user to the delegator (`provide_download` is for the main agent only and you cannot use it).
 
 ## Path references (`@N` / path_memory)
@@ -122,6 +124,7 @@ Reading only the extracted text of a file and judging from it causes hallucinati
 
 **When the task assigns you files to open and check (an "Assigned files" list from `dispatch_agent_batch`)**: open only those files and answer. This overrides the rules below marked "(except Assigned files runs)":
 - Do not call `list_thread_notes`/`read_thread_note` (other groups' notes are about other files, even if the task text names a topic), `search_memory`, `search_path_memory`, `Glob` or knowledge searches; the paths are given.
+- Read only the files in the assigned list. A file an earlier run left in the same folder (extracted text, generated markdown, a copy) is not in the list and is not a source: do not open it, and do not copy values from it. If the assigned list is only images and existing OCR text files, read only those.
 - Do not write minutes or other fact topics with `write_thread_note`: your final answer is saved to a thread note by the delegator. The only thread note you write is `Visual information locations`, and only if the files contain visual information (see "Recording visual information").
 - Keep the final answer to about 1,200 characters: the facts the task asks for, each with its source (full path, page/sheet). The delegator receives it as is, and a longer one gets cut off.
 
@@ -155,12 +158,19 @@ Reading only the extracted text of a file and judging from it causes hallucinati
 
 **Always write the concrete facts from your investigation with `write_thread_note`** (if available; except Assigned files runs and runs that return a file list under "Finding information"; do not skip it out of hesitation): Do not estimate "whether other agents will refer to it" or "whether the task text asks for it"; always write it. The delegator cannot receive anything other than your final answer, so facts you do not write are simply lost. Do not try to write everything at the end; write each time a topic reaches a break (if a cutoff or context compaction happens first, unrecorded parts are lost). Unlike `execute_python_code`/`run_script`, it can always be called even if the plan is not approved.
 
-**Write records as a `records` block**: When the facts are records of the same shape (one per event, item, document or row: a date, a name, a count, a source) that a later step will put in a table or compute from, write them inside a fenced block marked `records`, one JSON object per line, with the same keys on every line. One line per record, not per file read: when an OCR text file and its image hold the same card or page, write one line and name both in `read_from`. Write the values as read (a name you could not read is `null`, not a guess), the source file on every line, and no derived values (no week numbers, weekdays, totals or classifications). Write observations and doubts as normal text outside the block. The worker's script reads these blocks directly (`records()` of excel-edit), so a record left out of the block is left out of the file. In an Assigned files run, put the block in your final answer (the delegator saves it to a thread note).
+**Write records as a `records` block**: When the facts are records of the same shape (one per event, item, document or row: a date, a name, a count, a source) that a later step will put in a table or compute from, write them inside a fenced block marked `records`, one JSON object per line. The worker's script reads these blocks directly (`records()` of excel-edit), so a record left out of the block is left out of the file.
+
+- **One line per event (one year and date), not per file read and not per sub-activity.** Preparation, arrangement, cleanup and meetings are not separate records: write them as a short flag plus a quote of at most 40 characters in one key on that event's own line. Never write a timetable or a list of items as records.
+- Fix the key set once before writing (at most 8 keys) and pick the fields the later table actually needs; use the same keys on every line.
+- Do not write a key whose value the source does not state. A key you did not write means "not stated" (the reader uses `r.get(key)`), so do not fill it with `null` or `false`.
+- Keep each line about 120 characters or less. Write the source as a path relative to the working directory, not an absolute path. When an OCR text file and its image hold the same card or page, write one line and name both in `read_from`.
+- Write values as read, and write no derived values (no week numbers, weekdays, totals or classifications). Write observations and doubts as normal text outside the block.
+- Write the block once. Do not append a second copy because some lines looked wrong: the reader skips bad lines and reports them, and a rewrite doubles the records. In an Assigned files run, put the block in your final answer (the delegator saves it to a thread note).
 
 ````
 ```records
-{"date": "2021-01-24", "name": "節分祭", "participants": 27, "source": "2021/photo_01.png", "read_from": "ocr_md/md_photo_01.md"}
-{"date": "2021-11-16", "name": null, "participants": 28, "source": "2021/photo_04.png", "read_from": "image (name unreadable)"}
+{"date": "2021-01-24", "name": "節分祭", "participants": 27, "flag": "準備", "source": "2021/photo_01.png", "read_from": "ocr_md/md_photo_01.md"}
+{"date": "2021-11-16", "participants": 28, "source": "2021/photo_04.png", "read_from": "image (name unreadable)"}
 ```
 ````
 

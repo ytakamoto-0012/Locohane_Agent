@@ -47,12 +47,26 @@ def test_records_reads_every_block_in_order_with_its_topic(tmp_path):
     assert [r["date"] for r in records("2022 activities", notes_path=_notes(tmp_path))] == ["2022-11-16"]
 
 
-def test_records_reports_a_bad_line_and_a_missing_block(tmp_path):
+def test_records_skips_a_bad_line_and_reports_it(tmp_path, capsys):
     bad = _notes(tmp_path, _NOTES.replace('"participants": 27', "participants: 27"))
-    with pytest.raises(ValueError, match='topic "2021 activities", line 1'):
-        records(notes_path=bad)
+    rows = records(notes_path=bad)
+    assert [r["name"] for r in rows] == ["川遊び", None]
+    report = capsys.readouterr().out
+    assert '"skipped_lines": 1' in report and "2021 activities" in report
     with pytest.raises(ValueError, match="No ```records block"):
         records("Rules", notes_path=_notes(tmp_path))
+
+
+def test_records_splits_objects_on_one_line_and_merges_identical_lines(tmp_path, capsys):
+    text = _NOTES.replace(
+        '{"date": "2022-11-16", "name": null, "participants": 28, "source": "2022/photo_04.png"}',
+        '{"date": "2022-11-16", "participants": 28, "source": "2022/photo_04.png"}{"date": "2022-12-15", "name": "夏祭り", "source": "2022/photo_01.png"}\n'
+        '{"date": "2022-11-16", "participants": 28, "source": "2022/photo_04.png"}',
+    )
+    rows = records("2022 activities", notes_path=_notes(tmp_path, text))
+    assert [r["date"] for r in rows] == ["2022-11-16", "2022-12-15"]
+    assert "name" not in rows[0]
+    assert '"duplicate_lines_merged": 1' in capsys.readouterr().out
 
 
 def test_run_checks_separates_failed_requirements_from_broken_checks(tmp_path, monkeypatch):
