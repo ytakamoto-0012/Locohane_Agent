@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-09
+
 ### 追加
 
 - 設定ダッシュボードの上部に「利用量・料金」タブを追加しました。スキル調整ワーカーを除く全インスタンスの累計使用トークンを
@@ -1040,7 +1042,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.4.9...v0.5.0
