@@ -44,6 +44,7 @@ from .context_compaction import (
 )
 from .context_trim import is_trigger_reached, trim_old_ai_messages, trim_old_tool_messages
 from .images import image_followup_message
+from .today import with_today
 from .tool_errors import looks_like_error
 from .tool_args_guard import find_unknown_tool_args, unknown_tool_args_error
 from .tool_loop_guard import detect_tool_call_loop, find_leaked_tool_markup, leaked_tool_markup_error
@@ -668,7 +669,8 @@ async def run_subagent(
 
     tools = apply_session_tool_overrides(tools)
     tools_by_name = {t.name: t for t in tools}
-    messages: list = [SystemMessage(content=system_prompt), HumanMessage(content=task)]
+    # 今日の日付は末尾に付ける（src/today.py。メインエージェントと同じ）。
+    messages: list = [SystemMessage(content=with_today(system_prompt)), HumanMessage(content=task)]
 
     logger.info("dispatch_agent start: task=%r max_iterations=%d", task, max_iterations)
 

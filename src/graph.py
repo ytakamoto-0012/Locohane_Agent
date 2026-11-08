@@ -47,6 +47,7 @@ from .llm import (
 from .main_token_guard import maybe_append_token_guard
 from .tool_loop_guard import raise_if_tool_call_loop
 from .tools import ImageAwareToolNode, filter_main_agent_tools, get_all_tools
+from .today import with_today
 from .tools.session_tools import apply_session_tool_overrides
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,8 @@ async def _build_handwritten_graph(config: Config, system_prompt: str, checkpoin
             # 促す（src/context_compaction.py）。両方を同時に差し込むと
             # 「ツールを呼ぶな」と「write_thread_noteを呼べ」が矛盾するため。
             history = maybe_append_precompact_note_nudge(history, config)
-        messages = [SystemMessage(content=system_prompt), *history]
+        # 今日の日付は末尾に付ける（src/today.py。相対的な日付の解釈を推測させないため）。
+        messages = [SystemMessage(content=with_today(system_prompt)), *history]
         response = await model.ainvoke(messages)
         return {"messages": [response]}
 
@@ -240,7 +242,9 @@ async def _build_prebuilt_graph(config: Config, system_prompt: str, checkpointer
     return create_react_agent(
         model,
         ImageAwareToolNode(main_tools),
-        prompt=system_prompt,
+        # 今日の日付を末尾に付けるため呼び出し可能オブジェクトで渡す（src/today.py）。
+        # pre_model_hook がある場合 state["messages"] は llm_input_messages に置き換わっている。
+        prompt=lambda state: [SystemMessage(content=with_today(system_prompt)), *state["messages"]],
         # トリミング・トークンガード・圧縮予告ナッジ・ツール呼び出しループ検知の
         # いずれかが有効なら
         # フックが必要（一部だけを見て None にすると、残りが黙って効かなく
