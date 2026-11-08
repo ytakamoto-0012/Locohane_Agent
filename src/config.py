@@ -941,6 +941,16 @@ class Config:
             候補リスト。思考のループとは別に数えた回数に応じて順番に使い、
             使い切ったらランダムに選ぶ。末尾には何を繰り返したかの説明が
             添えられる。空リストなら組み込みの既定文言を使う。
+        read_volume_guard_enabled: 作業ディレクトリの読み取り対象ファイルが多いとき、
+            読み取りの委譲（同じ応答に並んだ2本以上の explore/worker、または
+            dispatch_agent_batch）を実行する前に、所要時間の見積もりを添えて
+            ユーザーに「全部読む／代表だけ読む／中止」を確認する機能の有効/無効
+            （src/tools/_read_volume_guard.py）。確認はセッションにつき1回。
+        read_volume_guard_threshold_files: 確認を出すファイル数の閾値（これを超えたら確認）。
+        read_volume_guard_seconds_per_file: 見積もりに使う1ファイルあたりの秒数
+            （サブエージェント1本で読んで記録するまで。並列数 subagent_max_parallel で割る）。
+        read_volume_guard_sample_files_per_folder: 「代表だけ読む」を選んだときに
+            1フォルダから読むファイル数。
         thinking_control_enabled: ReActループの各ステップで、直前の履歴の形から
             思考レベル（THINKING_LEVELS）を選んでリクエストごとに切り替える機能
             全体の有効/無効（src.llm.thinking_control 参照）。False なら従来と
@@ -1396,6 +1406,12 @@ class Config:
     tool_loop_guard_max_repeats: int
     tool_loop_guard_exclude_tools: list[str]
     tool_loop_guard_nudge_messages: list[str]
+
+    # --- 大量のファイルを読む前にユーザーへ確認する（src/tools/_read_volume_guard.py） ---
+    read_volume_guard_enabled: bool
+    read_volume_guard_threshold_files: int
+    read_volume_guard_seconds_per_file: float
+    read_volume_guard_sample_files_per_folder: int
 
     # --- ステップごとの思考レベル切り替え（src/llm/thinking_control.py） ---
     thinking_control_enabled: bool
@@ -3006,7 +3022,7 @@ def _parse_allow_sandbox_dir(value: str | None, base: Path) -> tuple[SandboxDirE
     指定と同じ形式（文字列1件でビルトインツール名そのもの、または
     [スキル名, スクリプトファイル名] の2要素配列でrun_script経由のスキル
     スクリプトのみを許可）。
-    例: [{"dir": "E:/shared_output", "allow_entries": [["excel-edit", "write_excel.py"]]}]
+    例: [{"dir": "E:/shared_output", "allow_entries": [["docx-edit", "edit_docx.py"]]}]
     Python風の辞書・リストリテラルを ast.literal_eval で読む（末尾カンマ等の
     緩い記法も許容するため）。
 
@@ -3240,6 +3256,7 @@ def load_config(
     thinking_loop_guard = parser["thinking_loop_guard"] if parser.has_section("thinking_loop_guard") else {}
     thinking_control = parser["thinking_control"] if parser.has_section("thinking_control") else {}
     tool_loop_guard = parser["tool_loop_guard"] if parser.has_section("tool_loop_guard") else {}
+    read_volume_guard = parser["read_volume_guard"] if parser.has_section("read_volume_guard") else {}
     context_trim = parser["context_trim"] if parser.has_section("context_trim") else {}
     context_trim_subagent = parser["context_trim.subagent"] if parser.has_section("context_trim.subagent") else {}
     context_compaction = parser["context_compaction"] if parser.has_section("context_compaction") else {}
@@ -4013,6 +4030,18 @@ def load_config(
             os.getenv(
                 "THINKING_LOOP_GUARD_EMPTY_RESPONSE_MAX_RETRIES",
                 thinking_loop_guard.get("empty_response_max_retries", 2),
+            )
+        ),
+        read_volume_guard_enabled=_as_bool(os.getenv("READ_VOLUME_GUARD_ENABLED", read_volume_guard.get("enabled", True))),
+        read_volume_guard_threshold_files=int(
+            os.getenv("READ_VOLUME_GUARD_THRESHOLD_FILES", read_volume_guard.get("threshold_files", 30))
+        ),
+        read_volume_guard_seconds_per_file=float(
+            os.getenv("READ_VOLUME_GUARD_SECONDS_PER_FILE", read_volume_guard.get("seconds_per_file", 15))
+        ),
+        read_volume_guard_sample_files_per_folder=int(
+            os.getenv(
+                "READ_VOLUME_GUARD_SAMPLE_FILES_PER_FOLDER", read_volume_guard.get("sample_files_per_folder", 2)
             )
         ),
         tool_loop_guard_enabled=_as_bool(os.getenv("TOOL_LOOP_GUARD_ENABLED", tool_loop_guard.get("enabled", True))),

@@ -13,6 +13,7 @@ import tempfile
 from . import _state
 from ._duplicate_guard import _track_failure_streak
 from ._python_fs_guard import _exec_guard_roots, _python_fs_guard_preamble, _register_exec_output_files
+from ._error_hints import error_hints
 from ._subprocess_env import _subprocess_env
 from ._workdir import _resolve_exec_workdir, _tmp_dir_parents
 
@@ -150,6 +151,7 @@ async def execute_python_code(code: str) -> str:
         parts.append(f"[stdout]\n{proc.stdout.rstrip()}")
     if proc.stderr:
         parts.append(f"[stderr]\n{proc.stderr.rstrip()}")
+        parts.extend(error_hints(proc.stderr))
 
     path_memory_note = _register_exec_output_files(workdir, before_snapshot, cl.user_session.get("thread_id") or "_no_session")
     if path_memory_note:

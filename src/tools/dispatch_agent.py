@@ -8,6 +8,7 @@ import asyncio
 import chainlit as cl
 import json
 import logging
+import re
 import time
 import uuid
 
@@ -68,6 +69,36 @@ def _task_with_plan_hint(task: str) -> str:
     if not status:
         return task
     return f"[Plan (in progress, highest priority task)]\n{status}\n\n{task}"
+
+# 件数を書いているtask文の検出（「369件」「137行」「7 records」等、スペースの有無を問わない）
+_COUNTS_PATTERN = re.compile(r"\d+\s*(件数|件|行|グループ|枚|records|items|rows|files)")
+# 記録（records ブロック）を使う委譲だけに添える（docx の行数など、records() と関係のない委譲には添えない）
+_RECORDS_PATTERN = re.compile(r"records|記録", re.IGNORECASE)
+
+def _task_with_counts_note(task: str, agent_type: str) -> str:
+    """task 文に件数が書かれていたら、その件数が測定値ではなく委譲元の推定である旨をtaskの末尾に添える。
+
+    委譲元（メインエージェント）がtask文に書く件数は、自らの記憶（前回の委譲の最終回答）からの
+    書き起こしであり、実測と食い違う（本番実測: task 文に 369/137/37/7 件と書かれていたが
+    `records()` の実測は 365/330/156/1 件）。worker は食い違いを確かめるためにスレッドノートを
+    手で約20回読み直し、コンテキストが圧縮されて不完全な回答で戻り、約24分かかった。
+    記録の件数のground truthは `records()` が返す値なので、委譲元の書き起こしを信用せずこの旨を
+    機械的に添える（_task_with_work_dir_hint / _task_with_plan_hint と同じ注入パターン）。
+
+    件数を含まないtask文・記録（records）に触れないtask文・調査役（explore）には何も添えない
+    （余計な指示を足さないため。tests/test_tools_dispatch_agent_counts_note.py で確認する）。
+    """
+    if agent_type not in ("worker", "verifier"):
+        return task
+    if not _COUNTS_PATTERN.search(task) or not _RECORDS_PATTERN.search(task):
+        return task
+    note = (
+        "[Note on counts] Counts written above are the delegator's estimate from memory, not a measurement. "
+        "Count them from the records blocks with records() (excel-edit xlspec) and use that count; "
+        "if it differs, build from records() and report the difference. "
+        "Do not write a hand-typed count into the output file."
+    )
+    return f"{task}\n\n{note}"
 
 def _task_with_orchestrator_skill_hint(task: str, orchestrator_skill: str) -> tuple[str | None, str | None]:
     """orchestrator_skill 指定時、その SKILL.md 全文を task の先頭に機械的に注入する。
@@ -167,6 +198,7 @@ async def dispatch_agent(
     task = _resolve_path_memory_tokens_in_text(task)
     task = _task_with_work_dir_hint(task)
     task = _task_with_plan_hint(task)
+    task = _task_with_counts_note(task, agent_type)
     orchestrator_skill = (orchestrator_skill or "").strip() or None
     if orchestrator_skill is not None:
         injected_task, error = _task_with_orchestrator_skill_hint(task, orchestrator_skill)

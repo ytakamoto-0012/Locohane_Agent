@@ -77,14 +77,17 @@ whether to reflect them in the official procedures is decided through external e
   under skills, and all write tools are blocked until user approval through `create_plan` -> `approve_plan`.
   Even `execute_python_code`, which can run arbitrary code, has guards that block starting
   git/npm/pip and writing outside the project, preventing the minimum of destructive operations.
-- **The "ops JSON DSL" design of document generation skills** (`scripts/_*.py` of `skills/pptx-create`, `skills/excel-edit`,
-  `skills/docx-create`): applies the "no bash/npm-equivalent tools" design above consistently
-  to generating xlsx/pptx/docx. Instead of having the LLM write raw `python-pptx`/`openpyxl`/
+- **The "ops JSON DSL" design of document generation skills** (`scripts/_*.py` of `skills/pptx-create`
+  and `skills/docx-create`): applies the "no bash/npm-equivalent tools" design above consistently
+  to generating pptx/docx. Instead of having the LLM write raw `python-pptx`/
   `python-docx` code, it is confined to a finite set of `op`s (`set_range`/
   `add_chart`/`format_table`, etc.) and a JSON schema, narrowing it down to operations that work reliably without syntax errors
   or file corruption even with low-parameter models (Anthropic's official `skills/pptx`, `skills/xlsx`, etc. take the opposite approach,
   relying on Claude's own prior knowledge to write raw `python-pptx`/`openpyxl` code directly, and their SKILL.md is a diff document
   that adds only the "pitfalls" rather than the library API itself).
+  xlsx is the exception to this design: `skills/excel-edit` lets the LLM write raw openpyxl code directly
+  (the same content becomes a smaller payload than a list of one op per cell; the helper module `xlkit`
+  takes care of the consistent look and the checks on save).
   For visual consistency, `pptx-create`/`excel-edit`/`docx-create`/`pdf-tools`
   share the same 8-color themes (`charcoal`/`navy`, etc., based on the Design
   Ideas of Anthropic's official pptx skill). Only `pdf-tools` (`create_pdf.py`) is an exception,
@@ -268,6 +271,7 @@ Tool descriptions and return values are written in English (the LLM relays them 
 | `get_tool_source` | When `run_script` errors, returns the absolute path of the script for investigating the cause (does not return its content) |
 | `check_work_dir_status` | Checks the actual access status of the current working directory |
 | `Read` / `Glob` / `Grep` | Reading, file name search and full-text search on any absolute path on the local file system (names matching Claude Code's tools of the same names. Read-only, so they can always be called even without plan approval. Logic in `src/tools/read_tool.py`/`glob_tool.py`/`grep_tool.py`, common processing in `_file_tools_common.py`) |
+| `Write` / `Edit` | Creating text files and replacing parts of them (names matching Claude Code's tools). Sub-agent (`worker`) only; not given to the main agent. Needs plan approval, and writes only under the working directory and the session's `_tmp_` folder (the same range as `execute_python_code`). Relative paths are based on the cwd of `execute_python_code` (`_tmp_`). A long script is put in a file once and fixed by replacing only the wrong part, saving the time and context of resending the whole script for each fix. Write does not replace an existing file without `overwrite`; Edit replaces only a unique match, keeps the encoding and line endings, and returns the changed lines with line numbers (`src/tools/file_edit_tools.py`) |
 | `json_query` | JMESPath queries on JSON/dicts (read-only) |
 | `search_path_memory` | Searches the current conversation's path memory (`@N`) for paths similar to a file name etc. (character bigrams + cosine similarity, read-only). Tools that take a path resolve not only a bare `@N` but also a folder's `@N` followed by a child path (`@N/file name`) |
 | `provide_download` | Presents an existing file as a download button on the chat screen |
@@ -486,7 +490,7 @@ Locohane/
 │   ├── docx-edit/           # editing existing docx (find/replace, Track Changes, adding/deleting paragraphs)
 │   ├── docx-render/         # rendering Word document pages as images
 │   ├── excel-read/          # xlsx/xls/xlsm read-only (sheet list, cell data)
-│   ├── excel-edit/          # creating/editing xlsx/xlsm (cells/formatting/rows and columns/charts, etc.)
+│   ├── excel-edit/          # creating/editing xlsx/xlsm (openpyxl code + the xlkit helper)
 │   ├── excel-recalc/        # recalculating formulas of xlsx/xlsm/xls, detecting error cells
 │   ├── excel-vba-read/      # reading VBA macro code of xlsm/xls only
 │   ├── excel-vba-edit/      # adding/overwriting/deleting and running VBA macro code of xlsm
@@ -871,7 +875,7 @@ The SKILL.md files, references and script messages of the bundled skills are wri
 | `docx-edit` | `skills/` | Runs scripts | Editing existing docx (find/replace, inserting and resizing images, adding/accepting/rejecting Track Changes. Cropping images is not supported). |
 | `docx-render` | `skills/` | Runs scripts | Rendering Word document pages as images (visually grasping layout, tables, image placement and emphasis). |
 | `excel-read` | `skills/` | Runs scripts | xlsx/xls/xlsm read-only (sheet list, cell data, whether there are images). |
-| `excel-edit` | `skills/` | Runs scripts | Creating/editing xlsx/xlsm (cells/formatting/rows and columns/charts, adding and positioning images, conditional formatting, data validation. Cropping images is not supported). |
+| `excel-edit` | `skills/` | Runs code | Creating/editing xlsx/xlsm by writing openpyxl code with `execute_python_code` and importing the helper `xlkit` (header, borders, banding, column widths, wrapping, merging group columns; the font name and wrapped row heights set on save, backup and checks). Charts, added images, conditional formatting and data validation are plain openpyxl too (cropping images is not supported). |
 | `excel-recalc` | `skills/` | Runs scripts | Recalculating formulas of xlsx/xlsm/xls, detecting error cells. |
 | `excel-vba-read` | `skills/` | Runs scripts | Reading VBA macro code of xlsm/xls only. |
 | `excel-vba-edit` | `skills/` | Runs scripts | Adding/overwriting/deleting and running VBA macro code of xlsm. |
@@ -1801,6 +1805,10 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[thinking_loop_guard]` | `max_retries` | Maximum number of retries injecting a warning message after a loop is detected | `THINKING_LOOP_GUARD_MAX_RETRIES` |
 | `[thinking_loop_guard]` | `empty_response_max_retries` | Maximum number of retries when an empty response of the main agent (neither tool_calls nor content) is detected | `THINKING_LOOP_GUARD_EMPTY_RESPONSE_MAX_RETRIES` |
 | `[thinking_loop_guard]` | `nudge_messages` | Warning messages injected after a loop is detected (several allowed) | `THINKING_LOOP_GUARD_NUDGE_MESSAGES` |
+| `[read_volume_guard]` | `enabled` | When the working directory has many files to read (images, PDF, Office, md/txt/csv/json; not under the session temp folders `_tmp_…`), asks the user "read all / read only representative files per folder / stop" with a time estimate before anything is read (`src/tools/_read_volume_guard.py`): right after the survey explore returns (counting under the folders it listed with Glob, and appending the answer to its result), or, without a survey, before a reading delegation runs (two or more explore/worker calls in one response, or `dispatch_agent_batch`), whichever comes first. The code asks once per session and reuses the answer. On timeout it reads all and continues | `READ_VOLUME_GUARD_ENABLED` |
+| `[read_volume_guard]` | `threshold_files` | Ask when the number of files is above this (default 30) | `READ_VOLUME_GUARD_THRESHOLD_FILES` |
+| `[read_volume_guard]` | `seconds_per_file` | Seconds per file for the estimate (default 15, divided by `[subagent] max_parallel`) | `READ_VOLUME_GUARD_SECONDS_PER_FILE` |
+| `[read_volume_guard]` | `sample_files_per_folder` | Files read per folder with "representative files only" (default 2) | `READ_VOLUME_GUARD_SAMPLE_FILES_PER_FOLDER` |
 | `[tool_loop_guard]` | `enabled` | Enables/disables detecting loops that repeat exactly the same response (the body and the names/arguments of tool calls) consecutively (`src/tool_loop_guard.py`). Tool results and whether they are errors are not compared. When detected, with the same mechanism as `[thinking_loop_guard]`, it removes the repeated responses and their results from the conversation history (if left, the model keeps copying the same call), retries with a warning message plus "what was repeated", and stops at `max_retries` (combined with thinking loops), notifying the user. Sub-agents return their progress so far and stop at the limit. `tool_choice`, which forces tool calls on the model, does not work with Qwen3.6, so it is not used | `TOOL_LOOP_GUARD_ENABLED` |
 | `[tool_loop_guard]` | `max_repeats` | How many consecutive identical responses count as a loop (1 or less disables it) | `TOOL_LOOP_GUARD_MAX_REPEATS` |
 | `[tool_loop_guard]` | `nudge_messages` | Warning messages injected after a loop is detected (several allowed; used in order of a count kept separately from thinking loops, with what was repeated appended automatically at the end) | `TOOL_LOOP_GUARD_NUDGE_MESSAGES` |

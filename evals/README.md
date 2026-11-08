@@ -23,6 +23,12 @@ docstring といった「LLM に渡すプロンプト資産」を、実際のロ
   どのターンで打ち切りが起きたかは結果 JSON の `turn_cutoffs`
   （`[{"turn_index": ..., "reason": "recursion_limit"|"thinking_loop"}]`）に
   記録される。
+- 結果 JSON の `subagent_tool_calls` に、`dispatch_agent` の委譲先が呼んだツールを1件ずつ記録する
+  （`dispatch` は委譲の通し番号、`args` は長い文字列を切り詰めたもの、`is_error`、`result` の先頭）。
+  委譲先の `read_skill`・`execute_python_code` は transcript に残らないため、判定に使うときはこちらを見る。
+- ケースが `work_dir` を持つ場合、結果 JSON の `output_files` に、作業フォルダで新しく作られた・変わったファイルを記録する
+  （xlsx はシートごとのフォント名の内訳・高さ未設定の折返し行・印刷設定の要約付き）。
+  `run_all.py --keep-outputs`（`run_case.py --keep-outputs <dir>`）で、ファイル自体を結果フォルダの `outputs/` に残せる。
 
 ## 実行方法
 

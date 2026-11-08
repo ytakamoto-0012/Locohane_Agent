@@ -11,6 +11,7 @@ import tempfile
 
 from . import _state
 from ._python_fs_guard import _python_fs_guard_preamble
+from ._error_hints import error_hints
 from ._subprocess_env import _subprocess_env
 from ._workdir import _resolve_exec_workdir, _tmp_dir_parents
 
@@ -83,4 +84,5 @@ async def execute_python_code_readonly(code: str) -> str:
         parts.append(f"[stdout]\n{proc.stdout.rstrip()}")
     if proc.stderr:
         parts.append(f"[stderr]\n{proc.stderr.rstrip()}")
+        parts.extend(error_hints(proc.stderr))
     return "\n".join(parts)

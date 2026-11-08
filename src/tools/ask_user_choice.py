@@ -7,7 +7,7 @@ import chainlit as cl
 import logging
 
 from . import _state
-from ._ask_echo import _echo_ask_answer
+from ._ask_echo import ASK_TIMEOUT_MESSAGE, _echo_ask_answer
 from ._ask_echo import _is_text_ask_cancelled
 from ._ask_relay_helper import _ask_with_cross_session_relay
 from ._state import _resolve_ask_timeout
@@ -80,7 +80,7 @@ async def ask_user_choice(question: str, choices: list[str], multi_select: bool 
 
         res = await _ask_with_cross_session_relay(thread_id, _factory_multi, timeout)
         if res is None:
-            return "Error: there was no response from the user (timeout)."
+            return ASK_TIMEOUT_MESSAGE
         if not res.get("submitted", True):
             return _ASK_CHOICE_CANCEL_MESSAGE
         return _multi_select_answer(res)
@@ -99,7 +99,7 @@ async def ask_user_choice(question: str, choices: list[str], multi_select: bool 
 
     res = await _ask_with_cross_session_relay(thread_id, _factory_single, timeout)
     if res is None:
-        return "Error: there was no response from the user (timeout)."
+        return ASK_TIMEOUT_MESSAGE
     value = res["payload"].get("value") or res.get("label", "")
     if value == _ASK_CHOICE_CANCEL_VALUE:
         return _ASK_CHOICE_CANCEL_MESSAGE
@@ -110,7 +110,7 @@ async def ask_user_choice(question: str, choices: list[str], multi_select: bool 
 
         other_res = await _ask_with_cross_session_relay(thread_id, _factory_other, timeout)
         if other_res is None:
-            return "Error: there was no response from the user (timeout)."
+            return ASK_TIMEOUT_MESSAGE
         if _is_text_ask_cancelled(other_res):
             return _ASK_CHOICE_CANCEL_MESSAGE
         return other_res.get("output", "")

@@ -238,6 +238,24 @@ MESSAGES: dict[str, dict[str, str]] = {
     "ask.cancel": {"ja": "❌ キャンセル", "en": "❌ Cancel"},
     "ask.other": {"ja": "✏️ その他（自由入力）", "en": "✏️ Other (free text)"},
     "ask.none_selected": {"ja": "(選択なし)", "en": "(nothing selected)"},
+    # --- 大量のファイルを読む前の確認（src/tools/_read_volume_guard.py） ---
+    "read_volume.question": {
+        "ja": "作業ディレクトリに、読み取りの対象になるファイルが {total} 件あります（{breakdown}、{folders} フォルダ）。"
+        "全部読むと約 {all_minutes} 分かかります。どうしますか？"
+        "（応答がない場合は全部読んで続けます）",
+        "en": "The working directory has {total} files to read ({breakdown}, in {folders} folders). "
+        "Reading all of them takes about {all_minutes} minutes. How should I proceed? "
+        "(If there is no answer, I will read all of them.)",
+    },
+    "read_volume.breakdown_images": {"ja": "画像 {n}", "en": "{n} images"},
+    "read_volume.breakdown_documents": {"ja": "文書 {n}", "en": "{n} documents"},
+    "read_volume.breakdown_text": {"ja": "テキスト {n}", "en": "{n} text files"},
+    "read_volume.choice_all": {"ja": "全部読む（約 {minutes} 分）", "en": "Read all (about {minutes} min)"},
+    "read_volume.choice_sample": {
+        "ja": "フォルダごとに代表 {per_folder} 件だけ読む（約 {minutes} 分）",
+        "en": "Read only {per_folder} representative files per folder (about {minutes} min)",
+    },
+    "read_volume.choice_stop": {"ja": "読まずに中止する", "en": "Stop without reading"},
     # --- サブエージェントの進捗（src/tools/_dispatch_agent_job.py・dispatch_agent_batch.py） ---
     "activity.thinking": {"ja": "思考中", "en": "Thinking"},
     "activity.tools": {"ja": "ツール: {names}", "en": "Tool: {names}"},

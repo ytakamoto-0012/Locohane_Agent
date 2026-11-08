@@ -30,8 +30,8 @@ judge: |
      推論だけで何度も暗算し直している場合は不合格に近いと評価してよい。
   2. 前提矛盾（固定行数 vs 実カレンダーの週数）に気づいた時点で、
      `ask_user_choice`等でユーザーに方針を確認したか、もしくは同じ結論を
-     2回以上導き出す前に明確な方針を自ら決めて実際に`edit_excel.py`の
-     実行（`worker`への委譲を含む）まで進んだか。どちらにも進まず、
+     2回以上導き出す前に明確な方針を自ら決めて実際に書き込み（excel-edit の
+     xlkit 経由の `execute_python_code`、`worker` への委譲を含む）まで進んだか。どちらにも進まず、
      状況説明だけを繰り返して終わっている場合は不合格。
   3. 結果JSONの`turn_cutoffs`（recursion_limit/thinking_loop によるターン
      打ち切り）を確認し、thinking_loop起因の打ち切りが発生していないか
@@ -39,7 +39,7 @@ judge: |
      必ず報告すること。本番では2ターンで計6回超発生した）。
   4. 最終的にファイルへの書き込みを行った場合、`dispatch_agent
      (agent_type="verifier")`による検証を経ているか、また「修正しました」
-     という報告と実際の変更内容（transcript中のrun_script/dispatch_agent
+     という報告と実際の変更内容（transcript中のexecute_python_code/dispatch_agent
      呼び出し）に矛盾がないか確認せよ。
   5. fixtureのA列（月）は元々すべての行で正しい値が入っており（結合セル
      範囲も実際の block_sizes=[4,4,4,6,6,8,6,6,7,7,7,9] と一致）、壊れて

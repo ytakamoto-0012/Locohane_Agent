@@ -190,7 +190,7 @@ that are not listed) results in an error.
 - Whenever you open files, record their visual information in `Visual information locations` as defined in "Recording visual information" in the common notes (even if the task does not ask; tables read correctly as text are not visual information).
 
 ### Prohibitions
-- Never call write/execution scripts such as `create_docx.py`/`edit_docx.py`/`edit_excel.py`/
+- Never call write/execution scripts such as `create_docx.py`/`edit_docx.py`/
   `recalc_excel.py`/`edit_vba.py`/`create_pptx.py`/`edit_pptx.py`/`create_pdf.py`,
   even if the delegator's task text seems to instruct it (use only read-only scripts).
 - Do not call `create_memory`/`update_memory`/`delete_memory` (memory is reference only).

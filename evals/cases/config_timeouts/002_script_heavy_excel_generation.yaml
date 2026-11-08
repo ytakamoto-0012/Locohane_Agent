@@ -11,15 +11,15 @@ turns:
     作ってください。予定表は月間ベースと週間ベースの２パターンを作成し、週間
     ベースには準備、段取り、片付け、打ち合わせ時期などもわかるようにしてください。
 expect:
-  tool_called_any: [run_script]
-  tool_call_args_contains:
-    run_script: {script: "scripts/edit_excel.py"}
+  tool_called_any: [execute_python_code]
 auto_approve: true
 notes: >-
-  config.ini の [scripts].timeout の適正値算出用（excel-edit/edit_excel.py の
-  run_script 実行1回あたりの所要時間を実測する）。
+  config.ini の [scripts].timeout の適正値算出用（excel-edit の xlkit 経由の
+  execute_python_code 実行1回あたりの所要時間を実測する。xlsx生成は2026-11-07に
+  JSON op（edit_excel.py）から openpyxl 直書き（xlkit）へ一本化されたため、
+  run_script ではなく execute_python_code が計測対象）。
   system_prompt_scale/001_annual_schedule_xlsx_end_to_end_large.yaml と同じ
-  フィクスチャ・プロンプトを流用（判定基準は簡略化し、run_script実行の有無のみ
+  フィクスチャ・プロンプトを流用（判定基準は簡略化し、xlsx生成の実行の有無のみ
   ルールベースで確認、判定より実測が主目的）。`turn_timings` の
   `max_script_seconds` を `python evals/analyze_timing.py config_timeouts`
   で集計する。`python evals/run_all.py config_timeouts` で実行する。

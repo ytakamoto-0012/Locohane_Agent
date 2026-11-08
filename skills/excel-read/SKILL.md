@@ -87,9 +87,9 @@ When in doubt, read `text_path`; use `result_path` only for the last four rows o
 3. When there are many rows or columns, use the arguments appropriately:
    - `--offset`/`--limit`: use them to read cell values in order from the top. Each call returns `--limit` rows in `rows`. Look at `total_rows` to decide whether you need more, and pass the previous `end_row` as the next `--offset` to read on.
    - `--columns`: use it when you know which columns you want to see (you want to check the values of specific columns only, you do not want to read all columns of a wide table at once, etc.). For tables where `total_columns` exceeds about 20, first understand the content of the columns from the list without `--sheet` or by reading just the one header row, then read only the columns you need; that is safer than reading all columns at once with a large `--limit` (reading a lot at once leads to overlooking content).
-   - `--query-json`: use it when you want to know the row ranges per column value (checking the ranges of grouping columns, verifying after `insert_rows`/`merge_cells`, etc.) (the "Structured queries" section below). Do not count the raw `rows` by eye to calculate row ranges by hand. It is not affected by the values of `--offset`/`--limit`/`--columns` and always covers the whole sheet (row 1 to `total_rows`). If you do not need the `rows` body, `--limit` can stay at the default `200` (`query_results` returns everything regardless of `--limit`).
+   - `--query-json`: use it when you want to know the row ranges per column value (checking the ranges of grouping columns, verifying after `write_table`/`merge_same` in the excel-edit skill, etc.) (the "Structured queries" section below). Do not count the raw `rows` by eye to calculate row ranges by hand. It is not affected by the values of `--offset`/`--limit`/`--columns` and always covers the whole sheet (row 1 to `total_rows`). If you do not need the `rows` body, `--limit` can stay at the default `200` (`query_results` returns everything regardless of `--limit`).
 4. Formula cells return formula strings (`"=SUM(A1:A10)"`) by default. If you want the value Excel last calculated, use `--data-only` (xlsx only; it affects the value display of both `rows` and `query_results`). If you want the latest values right after writing formulas, first run `recalc_excel.py` of the excel-recalc skill and then read again.
-5. For `.xlsx`/`.xlsm` with `--sheet`, only `value` and the number format are returned by default. When you want to verify that formatting written with `edit_excel.py` of the excel-edit skill (bold, background color, merges, tables) was applied correctly, **or when you want to check whether the table data has anything wrong**, add `--style` (it reads the whole file with `read_only=False`, so it is slower than `.xls` or the default mode). By default (without `--style`), structural anomalies such as circular references in formulas and text exceeding column widths are not detected at all. These are put in `warnings` automatically only with `--style`, so when asked "check whether anything is wrong", always read with `--style`. `query_results` of `--query-json` does not include style information (only the `rows` side does).
+5. For `.xlsx`/`.xlsm` with `--sheet`, only `value` and the number format are returned by default. When you want to verify that formatting written by the excel-edit skill (openpyxl via `xlkit`: bold, background color, merges, tables) was applied correctly, **or when you want to check whether the table data has anything wrong**, add `--style` (it reads the whole file with `read_only=False`, so it is slower than `.xls` or the default mode). By default (without `--style`), structural anomalies such as circular references in formulas and text exceeding column widths are not detected at all. These are put in `warnings` automatically only with `--style`, so when asked "check whether anything is wrong", always read with `--style`. `query_results` of `--query-json` does not include style information (only the `rows` side does).
 
 ## Output
 
@@ -99,7 +99,7 @@ The top-level keys of `result_path` (a JSON file) include `path` (the file read)
 
 **Sheet list mode** (`--sheet` omitted): only `sheets` = a list of elements `{"name","max_row","max_column","print_area"}`. `print_area` is the print area set on each sheet (e.g. `"'Sheet1'!$A$1:$B$20"`; for sheets with several ranges, a comma-joined string), `null` if not set. Values are filled only for `.xlsx`/`.xlsm`; for `.xls` the `print_area` key itself does not exist (xlrd cannot get print areas, so it is not supported).
 
-**Cell data mode** (`--sheet` given) common keys: `sheet` (the resolved sheet name), `total_rows`/`total_columns` (the numbers of rows and columns of the whole sheet; they do not change even when narrowed with `--columns`), `start_row`/`end_row` (the range of 1-based row numbers included in `rows` this time; both `null` if no rows are returned; this `end_row` can be passed as is as the next `--offset`), `columns` (the array of column letters included in `rows` this time, e.g. `["A","C","E"]`; all columns if `--columns` is omitted), `rows` (a list of one array per row, only within the range of `--offset`/`--limit`/`--columns`). **The `j`-th element of each row of `rows` is always the value of column `columns[j]`** (even when columns are thinned out with `--columns`, this correspondence tells you the original column. Do not count columns by position within the row alone). For `.xlsx`/`.xlsm`, **each cell also carries its address in `ref`** (e.g. `"D3"`), so use `ref` instead of computing row/column numbers from array positions, and include `ref` when you extract fields with `json_query` (e.g. `rows[*][*].{ref: ref, v: value, wrap: style.wrap_text}`) so that the result keeps the address even where a field is missing.
+**Cell data mode** (`--sheet` given) common keys: `sheet` (the resolved sheet name), `total_rows`/`total_columns` (the numbers of rows and columns of the whole sheet; they do not change even when narrowed with `--columns`), `start_row`/`end_row` (the range of 1-based row numbers included in `rows` this time; both `null` if no rows are returned; this `end_row` can be passed as is as the next `--offset`), `columns` (the array of column letters included in `rows` this time, e.g. `["A","C","E"]`; all columns if `--columns` is omitted), `rows` (a list of one array per row, only within the range of `--offset`/`--limit`/`--columns`). **The `j`-th element of each row of `rows` is always the value of column `columns[j]`** (even when columns are thinned out with `--columns`, this correspondence tells you the original column. Do not count columns by position within the row alone). For `.xlsx`/`.xlsm`, **each cell also carries its address in `ref`** (e.g. `"D3"`), so use `ref` instead of computing row/column numbers from array positions, and include `ref` when you extract fields with `json_query` so that the result keeps the address even where a field is missing. Flatten the rows with `[]` first: `rows[].{ref: ref, v: value, wrap: style.wrap_text}` (all cells), `rows[2:36][].{ref: ref, v: value}` (a slice already projects, so do not add `[*][*]` after it), `rows[] | [?value == null].ref` (filter cells: flatten, then pipe into the filter).
 
 - For `.xls`: cell values in `rows` are ISO8601 strings for dates/times and `null` for empty cells (style information is not supported).
 - For `.xlsx`/`.xlsm`: each cell of `rows` is `{"ref":"D3", "value":..., "merged":"D3:D9", "style":{...}}` (`merged` only for cells inside a merged range, including its top-left anchor; the value of a merged range is in the anchor and the other cells are `null`. The `style` key only when there is a value). `value` is an ISO8601 string for dates/times, `null` for empty cells, and for formula cells the formula string by default (e.g. `"=SUM(A1:A10)"`); with `--data-only` it becomes the cached value Excel last calculated (e.g. `15`). In addition, `merged_cells` (the whole sheet, all of them regardless of the offset/limit range) and `tables` (the list of structured tables) are added at the top level.
@@ -117,9 +117,27 @@ The top-level keys of `result_path` (a JSON file) include `path` (the file read)
     - `warnings`: an array of warnings about structural problems (the key is omitted if there are none). Points out possible cut-off text in cells without `wrap_text` whose estimated display width exceeds the column width. It also points out possible circular reference errors in Excel when the reference range of a formula cell (can be judged only without `--data-only`) includes its own cell (e.g. `=SUM(B8:N8)` in cell `N8`) (sheet-qualified references such as `Sheet2!A1:B2` are not checked).
 - With `--query-json`: in addition to the `rows` set above, `query_results` is added at the top level. **`query_results` covers the whole sheet regardless of the `--offset`/`--limit` range** (details and examples in the next section, "Structured queries"). `query_results` does not include style information (with or without `--style`).
 
+## Checking every row against a rule in code (`read_table`)
+
+To check every row of a table with your own code in `execute_python_code_readonly` (recomputing weeks, dates, counts, colors), read the table with `read_table` instead of walking openpyxl cells:
+
+```python
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.environ["AGENT_SRC_DIR"]), "skills", "excel-read", "scripts"))
+from xlread import read_table
+rows = read_table(path, "Weekly")          # or header_row=2 when the header is not the first row with 2+ values
+for r in rows:
+    print(r["_row"], r["Month"], r["Week"], r["_fill"])
+```
+
+- Each body row is a dict keyed by the header text, plus `_row` (the row number, for the report) and `_fill` (the fill of the first cell, `"RRGGBB"` or `None`).
+- The value of a merged cell (a month or category column) is on every row it covers, so it is never `None` there. A real empty cell is still `None`: guard with `if r["Notes"]:` before using it as text.
+- The header row is found automatically (the first row with two or more values that is not one merged title line). The table ends at the first row that is empty in every table column or that is one merged line across the table (a note); read notes separately.
+- `data_only=True` returns the values Excel last calculated for formula cells.
+
 ## Structured queries (`--query-json`, a mandatory rule)
 
-**When verifying after `insert_rows`/`merge_cells`, or checking the ranges of grouped columns (month, category, etc., columns that become merged cells), do not count the raw `rows` by eye to calculate row ranges by hand.** Instead, passing queries with `--query-json` returns, in one call, the result grouped into ranges of consecutive rows per column value.
+**When verifying after `write_table`/`merge_same` in the excel-edit skill, or checking the ranges of grouped columns (month, category, etc., columns that become merged cells), do not count the raw `rows` by eye to calculate row ranges by hand.** Instead, passing queries with `--query-json` returns, in one call, the result grouped into ranges of consecutive rows per column value.
 
 ```bash
 python read_excel.py "C:\Users\me\book.xlsx" --sheet MonthlySchedule --query-json '[{"op": "group_by", "column": "A"}]'
@@ -137,7 +155,7 @@ Output (inside `result_path`, the `query_results` key):
 - **Header rows are not excluded either.** If the header cell (e.g. "Month" in `A1`) has a value, it is itself mixed in at the start of `items` as an independent item with `start_row:1,end_row:1`. In the output example above, `start_row` starts at `2` only because the header cell happened to be empty; in general you need to tell whether the first item is the header by its `start_row` and exclude it.
 - `queries` is an array, so several queries can be put in one call, like `[{"op":"group_by","column":"A"}, {"op":"group_by","column":"C"}]` (no need to repeat separate calls to check ranges of different columns).
 - `--sheet` is required (omitting it or a `.xls` extension is an error). Unsupported op names are also errors with exit code 1 (the message includes the list of supported ops).
-- It can also be used as is to check the `anchor` (before/after which value to insert) when using `insert_row_group` of the excel-edit skill.
+- It can also be used as is to check which group a new row belongs to (the `start_row`/`end_row` of that value), which is where the excel-edit skill writes the row when it rebuilds the table with `write_table`.
 
 ### `list_images` (list of images)
 
@@ -153,10 +171,10 @@ Output (inside `result_path`, the `query_results` key):
 ]
 ```
 `image_index` is the 0-based sequence number of the image within the sheet (in the order added) and exactly matches
-the `image_index` of `set_image_position` of excel-edit. When `anchor_type` is other than `"absolute"`
-(images originally in the template, placed so as to follow cells),
-`left_cm` etc. are `null` (once moved with `set_image_position`, they are replaced with absolute coordinates,
-and the coordinates can be obtained from then on).
+the order of `ws._images` that the excel-edit skill sees when it edits images with openpyxl. When `anchor_type` is
+other than `"absolute"` (images originally in the template, placed so as to follow cells),
+`left_cm` etc. are `null` (once the excel-edit skill replaces the anchor with a `OneCellAnchor`, they are replaced
+with absolute coordinates, and the coordinates can be obtained from then on).
 
 ### `list_charts` (list of charts)
 
@@ -172,8 +190,8 @@ Output (inside `result_path`, the `query_results` key):
    "items": [{"chart_index": 0, "type": "line", "title": "Monthly income and expenses", "anchor": "F1"}]}
 ]
 ```
-`chart_index` is the 0-based sequence number of the chart within the sheet and exactly matches the `chart_index` of
-`update_chart`/`delete_chart` of excel-edit. `type` is one of
+`chart_index` is the 0-based sequence number of the chart within the sheet and exactly matches the order of
+`ws._charts` that the excel-edit skill sees when it adds or removes charts with openpyxl. `type` is one of
 `line`/`bar`/`pie`/`scatter` (unsupported types return openpyxl's class name
 as is). `title` is `null` if not set. If you just want to check whether a chart exists and whether its title
 is as intended, this is faster than rendering images with excel-render.

@@ -17,7 +17,7 @@ Runs `recalc_excel.py`.
 ```bash
 python recalc_excel.py "C:\Users\me\book.xlsx"
 ```
-Formulas written with `edit_excel.py` of the excel-edit skill are not evaluated by openpyxl, so to check the results, run this script and then read the file again with `read_excel.py --data-only` of the excel-read skill. It starts Excel in the background, actually calculates and overwrites the file.
+Formulas written by the excel-edit skill (openpyxl) are not evaluated by openpyxl, so to check the results, run this script and then read the file again with `read_excel.py --data-only` of the excel-read skill. It starts Excel in the background, actually calculates and overwrites the file.
 
 ## Input/output types
 
@@ -25,7 +25,7 @@ Success = exit code 0 + one line of JSON on stdout. Failure = non-zero exit code
 
 ## Output
 
-`{"path":..., "recalculated": true, "errors": [{"sheet":"Sheet1","cell":"B5","value":"#DIV/0!"}]}`. If `errors` is empty, there are no formula errors. If there is even one, report the sheet and cell to the user, and fix it with `set_cell` of the excel-edit skill if needed.
+`{"path":..., "recalculated": true, "errors": [{"sheet":"Sheet1","cell":"B5","value":"#DIV/0!"}]}`. If `errors` is empty, there are no formula errors. If there is even one, report the sheet and cell to the user, and fix the formula in the excel-edit skill (write the cell again with openpyxl) if needed.
 
 ## Constraints (information to tell the user before running)
 

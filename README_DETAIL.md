@@ -79,15 +79,18 @@
   実行をブロックする。任意コード実行が可能な `execute_python_code` でも
   git/npm/pip の起動とプロジェクト外への書き込みをガードで遮断し、最低限の
   破壊的操作を防いでいる。
-- **文書生成スキルの「ops JSON DSL」設計**（`skills/pptx-create`・`skills/excel-edit`・
-  `skills/docx-create` の `scripts/_*.py`）: 上記「bash/npm相当のツールを持たせない
-  設計」を xlsx/pptx/docx 生成にも一貫して適用したもの。`python-pptx`/`openpyxl`/
+- **文書生成スキルの「ops JSON DSL」設計**（`skills/pptx-create`・`skills/docx-create` の
+  `scripts/_*.py`）: 上記「bash/npm相当のツールを持たせない
+  設計」を pptx/docx 生成にも一貫して適用したもの。`python-pptx`/
   `python-docx` の生コードを LLM に書かせるのではなく、有限個の `op`（`set_range`/
   `add_chart`/`format_table` 等）と JSON スキーマへ閉じ込めることで、低パラメータ
   モデルでも構文エラーやファイル破損なく確実に動く操作だけに絞っている（Anthropic
   公式の `skills/pptx`・`skills/xlsx` 等は逆に、Claude自身の事前知識に頼って
   `python-pptx`/`openpyxl` の生コードを直接書かせる設計で、SKILL.md はライブラリ
   API そのものではなく「落とし穴」だけを補足する差分ドキュメントになっている）。
+  xlsx はこの設計の例外で、`skills/excel-edit` は openpyxl のコードを直接書かせる
+  （同じ内容が1セル1命令のop列より小さいpayloadになるため。見た目の統一と保存時の
+  点検は補助モジュール `xlkit` が引き受ける）。
   見た目の一貫性のため、`pptx-create`/`excel-edit`/`docx-create`/`pdf-tools` は
   同じ8色の配色テーマ（`charcoal`/`navy` 等、Anthropic公式pptxスキルのDesign
   Ideas準拠）を共有している。`pdf-tools`（`create_pdf.py`）だけは例外的に
@@ -271,6 +274,7 @@ LLM は `read_skill`/`read_skill_file`/`run_script` という**ビルトイン�
 | `get_tool_source` | `run_script` がエラーになった際、原因調査用にスクリプトの絶対パスを返す（中身は返さない） |
 | `check_work_dir_status` | 現在の作業ディレクトリの実際のアクセス状況を確認する |
 | `Read` / `Glob` / `Grep` | ローカルファイルシステム上の任意の絶対パスに対する読込・ファイル名検索・全文検索（ClaudeCode の同名ツールに合わせた名前。読み取り専用のため計画未承認でも常に呼べる。ロジックは `src/tools/read_tool.py`/`glob_tool.py`/`grep_tool.py`、共通処理は `_file_tools_common.py`） |
+| `Write` / `Edit` | テキストファイルの作成・部分置換（ClaudeCode の同名ツールに合わせた名前）。サブエージェント（`worker`）専用で、メインエージェントには渡さない。計画承認が必要で、書き込めるのは作業ディレクトリとそのセッションの `_tmp_` フォルダだけ（`execute_python_code` と同じ範囲）。相対パスは `execute_python_code` の cwd（`_tmp_`）基準。長いスクリプトを一度ファイルに置き、修正は該当箇所だけ置き換えることで、修正のたびに全文を出し直す時間とコンテキストを省く。Write は既存ファイルを `overwrite` なしでは上書きせず、Edit は一意に一致した箇所だけを置き換え、文字コードと改行を保って変更箇所を行番号付きで返す（`src/tools/file_edit_tools.py`） |
 | `json_query` | JSON/dict に対する JMESPath クエリ（読み取り専用） |
 | `search_path_memory` | 現在の会話のパスメモリー（`@N`）から、ファイル名等に似たパスを類似検索する（文字bigram＋コサイン類似度、読み取り専用）。パスを受け取る各ツールは `@N` 単体に加え、フォルダの `@N` に子パスを続けた `@N/ファイル名` も解決する |
 | `provide_download` | 既存のファイルをチャット画面にダウンロードボタンとして提示する |
@@ -491,7 +495,7 @@ Locohane/
 │   ├── docx-edit/           # 既存docxの編集（検索置換・Track Changes・段落追加削除）
 │   ├── docx-render/         # Word文書ページの画像化
 │   ├── excel-read/          # xlsx/xls/xlsm読込専用（シート一覧・セルデータ）
-│   ├── excel-edit/          # xlsx/xlsm新規作成・編集（セル/書式/行列/グラフ等）
+│   ├── excel-edit/          # xlsx/xlsm新規作成・編集（openpyxl直書き＋補助モジュールxlkit）
 │   ├── excel-recalc/        # xlsx/xlsm/xls数式再計算・エラーセル検出
 │   ├── excel-vba-read/      # xlsm/xls VBAマクロコード読込専用
 │   ├── excel-vba-edit/      # xlsm VBAマクロコード追加/上書き/削除・実行
@@ -880,7 +884,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 ^
 | `docx-edit` | `skills/` | スクリプト実行を伴う | 既存docxの編集（検索置換、画像挿入・サイズ変更、Track Changes/変更履歴の付与・確定・却下を含む。画像トリミングは非対応）。 |
 | `docx-render` | `skills/` | スクリプト実行を伴う | Word文書ページの画像化（レイアウト・表・画像配置・強調表現の視覚把握）。 |
 | `excel-read` | `skills/` | スクリプト実行を伴う | xlsx/xls/xlsmの読込専用（シート一覧・セルデータ・画像有無）。 |
-| `excel-edit` | `skills/` | スクリプト実行を伴う | xlsx/xlsmの新規作成・編集（セル/書式/行列/グラフ・画像追加と位置調整・条件付き書式・データ検証を含む。画像トリミングは非対応）。 |
+| `excel-edit` | `skills/` | コード実行を伴う | xlsx/xlsmの新規作成・編集。`execute_python_code` で openpyxl を直接書き、補助モジュール `xlkit`（見出し・罫線・縞模様・列幅・折り返し・グループ列の結合、保存時のフォント名と折返し行の高さ、バックアップと点検）を import する。グラフ・画像追加・条件付き書式・データ検証も openpyxl で書く（画像トリミングは非対応）。 |
 | `excel-recalc` | `skills/` | スクリプト実行を伴う | xlsx/xlsm/xlsの数式再計算・エラーセル検出。 |
 | `excel-vba-read` | `skills/` | スクリプト実行を伴う | xlsm/xlsのVBAマクロコードの読み込み専用。 |
 | `excel-vba-edit` | `skills/` | スクリプト実行を伴う | xlsmのVBAマクロコードの追加/上書き/削除・実行。 |
@@ -1819,6 +1823,10 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[thinking_loop_guard]` | `max_retries` | ループ検知後、注意メッセージを注入して再試行する最大回数 | `THINKING_LOOP_GUARD_MAX_RETRIES` |
 | `[thinking_loop_guard]` | `empty_response_max_retries` | メインエージェントの空応答（tool_callsもcontentも無い応答）を検知した際の再試行最大回数 | `THINKING_LOOP_GUARD_EMPTY_RESPONSE_MAX_RETRIES` |
 | `[thinking_loop_guard]` | `nudge_messages` | ループ検知後に注入する注意メッセージ（複数指定可） | `THINKING_LOOP_GUARD_NUDGE_MESSAGES` |
+| `[read_volume_guard]` | `enabled` | 作業ディレクトリに読み取り対象のファイル（画像・PDF・Office・md/txt/csv/json。セッションの一時フォルダ `_tmp_…` の下は除く）が多いとき、何も読む前に、所要時間の見積もりを添えて「全部読む／フォルダごとに代表だけ読む／中止」をユーザーに確認する（`src/tools/_read_volume_guard.py`）。聞くのは、構造調査の explore が終わった直後（その explore が Glob で調べたフォルダの下を数え、答えを結果に付けてメインへ返す）か、構造調査を経ずに読み取りの委譲（同じ応答に並んだ2本以上の explore/worker、または `dispatch_agent_batch`）が来たときの実行前の、早いほう。コードがセッションにつき1回だけ聞き、答えは使い回す。応答がタイムアウトしたら全部読んで続ける | `READ_VOLUME_GUARD_ENABLED` |
+| `[read_volume_guard]` | `threshold_files` | このファイル数を超えたら確認する（既定 30） | `READ_VOLUME_GUARD_THRESHOLD_FILES` |
+| `[read_volume_guard]` | `seconds_per_file` | 見積もりに使う1ファイルあたりの秒数（既定 15。`[subagent] max_parallel` で割る） | `READ_VOLUME_GUARD_SECONDS_PER_FILE` |
+| `[read_volume_guard]` | `sample_files_per_folder` | 「代表だけ読む」で1フォルダから読むファイル数（既定 2） | `READ_VOLUME_GUARD_SAMPLE_FILES_PER_FOLDER` |
 | `[tool_loop_guard]` | `enabled` | 全く同じ応答（本文とツール呼び出しの名前・引数）を連続で繰り返すループを検知する機能の有効/無効（`src/tool_loop_guard.py`）。ツールの結果やエラーかどうかは比べない。検知したら`[thinking_loop_guard]`と同じ仕組みで、繰り返した応答とその結果を会話履歴から取り除いたうえで（残すとモデルが同じ呼び出しを書き写し続けるため）、注意メッセージに「何を繰り返したか」を添えて再試行し、`max_retries`（思考のループと合算）で停止してユーザーに通知する。サブエージェントは上限でそこまでの経過を返して打ち切る。モデルにツール呼び出しを強制する`tool_choice`はQwen3.6では効かないため使わない | `TOOL_LOOP_GUARD_ENABLED` |
 | `[tool_loop_guard]` | `max_repeats` | 全く同じ応答が何回連続したらループとみなすか（1以下で無効） | `TOOL_LOOP_GUARD_MAX_REPEATS` |
 | `[tool_loop_guard]` | `nudge_messages` | ループ検知後に注入する注意メッセージ（複数指定可。思考のループとは別に数えた回数の順に使い、末尾に何を繰り返したかが自動で添えられる） | `TOOL_LOOP_GUARD_NUDGE_MESSAGES` |

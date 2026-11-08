@@ -115,4 +115,20 @@ def json_query(query: str, file_path: str = "", json_text: str = "") -> str:
         hint = suggest_from_path_memory(str(resolved_path)) if resolved_path and not resolved_path.exists() else ""
         return f"Error: {e}{hint}"
     logger.info("json_query: %s", query)
+    if _is_all_empty(result.get("result")):
+        result["note"] = _ALL_EMPTY_NOTE
     return json.dumps(result, ensure_ascii=False)
+
+
+# 結果の要素がすべて空のとき、射影の書き間違いを疑わせる注記（2026-11-07 evals xlkit: verifier が
+# excel-read の rows に `rows[2:36][*][*].{...}` と書き、スライスがすでに射影なので全行が [] になったのを
+# 「該当なし」と読んで、同じ確認を openpyxl のコードで書き直していた）。
+_ALL_EMPTY_NOTE = (
+    "Every element of the result is empty. If you expected values, the projection is probably off by one level: "
+    "a slice like rows[2:36] already projects, so write rows[2:36][].{ref: ref, v: value} (not [*][*]); "
+    "to filter cells, flatten first and pipe: rows[] | [?value == null].ref"
+)
+
+
+def _is_all_empty(value) -> bool:
+    return isinstance(value, list) and len(value) > 1 and all(item in (None, [], {}) for item in value)

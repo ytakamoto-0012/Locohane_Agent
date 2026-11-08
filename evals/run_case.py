@@ -55,6 +55,7 @@ from evals.case_schema import EvalCase, Expect, load_case  # noqa: E402
 from evals.headless_chainlit import install as install_headless_chainlit  # noqa: E402
 from evals.headless_chainlit import patch_ask_relay  # noqa: E402
 from evals.instance import apply_instance, llm_env_from_instance, resolve_instance_name  # noqa: E402
+from evals import output_inspect  # noqa: E402
 from evals.timing_callbacks import LatencyCallbackHandler  # noqa: E402
 
 
@@ -289,11 +290,51 @@ def _apply_config_patch(patch_path: Path) -> None:
             os.environ[env_name] = new_value
 
 
+# subagent_tool_calls に残す引数・委譲文の長さ（Write の content 等が長いため）
+_OBSERVED_ARG_CHARS = 1500
+_OBSERVED_TASK_CHARS = 200
+
+
+def _truncate_args(args: dict) -> dict:
+    return {k: (v[:_OBSERVED_ARG_CHARS] + "…" if isinstance(v, str) and len(v) > _OBSERVED_ARG_CHARS else v) for k, v in args.items()}
+
+
+def _subagent_call_recorder() -> tuple[list[dict], object]:
+    """サブエージェント内部のツール呼び出しを集めるリストと、src.subagent へ登録する観測者。
+
+    dispatch_agent はサブエージェントの最終回答だけを返すので、委譲先の read_skill・
+    execute_python_code は transcript に残らない（2026-11-07 evals xlkit: 判定項目
+    「read_skill(excel-edit) して xlkit を import したか」を直接確かめられなかった）。
+    """
+    calls: list[dict] = []
+    task_ids: dict[str, int] = {}
+
+    def observe(record: dict) -> None:
+        task = record["task"]
+        if task not in task_ids:
+            task_ids[task] = len(task_ids) + 1
+        calls.append(
+            {
+                "dispatch": task_ids[task],
+                "task": task[:_OBSERVED_TASK_CHARS],
+                "iteration": record["iteration"],
+                "name": record["name"],
+                "args": _truncate_args(record["args"]),
+                "is_error": record["is_error"],
+                "result": record["result"],
+                **({"result_tail": record["result_tail"]} if record.get("result_tail") else {}),
+            }
+        )
+
+    return calls, observe
+
+
 async def _run(
     case: EvalCase,
     skill_overlays: list[Path] | None = None,
     exclude_skills: list[str] | None = None,
     agent_overlays: list[Path] | None = None,
+    keep_outputs: Path | None = None,
 ) -> dict:
     """対象ファイルを現在の内容のまま読み込み、1ケースを実行する。
 
@@ -332,6 +373,7 @@ async def _run(
     from src.memory import MEMORY_INDEX_MARKER, rebuild_index, render_memory_block
     from src.tools.vector_db_tools import render_document_collections_block
     from src.skills import build_system_prompt, filter_skills_for_agent_type, render_skills_block, scan_skills
+    from src.subagent import add_tool_call_observer, remove_tool_call_observer
     from src.tools import get_all_tools, init_tools
 
     # メモリー系ツール（create_memory 等）を評価すると本番の永続メモリーストア
@@ -384,8 +426,12 @@ async def _run(
             dst_dir = Path(tmp_workdir) / src_dir.name
             shutil.copytree(src_dir, dst_dir)
             os.environ["DEFAULT_WORKDIR"] = str(dst_dir)
+            workdir_root: Path | None = dst_dir
+            workdir_before = output_inspect.snapshot(dst_dir)
         else:
             os.environ.pop("DEFAULT_WORKDIR", None)
+            workdir_root = None
+            workdir_before = {}
         # ケースが env（yaml の env: {KEY: value}）を指定していれば、
         # config.ini の値を上書きする環境変数として適用する。1プロセス=
         # 1ケースなので他ケースへの影響はない。
@@ -582,6 +628,8 @@ async def _run(
             checkpointer = AsyncSqliteSaver(conn)
             await checkpointer.setup()
             graph = await build_graph(config, system_prompt, checkpointer)
+            subagent_calls, observe_subagent_call = _subagent_call_recorder()
+            add_tool_call_observer(observe_subagent_call)
 
             try:
                 for turn_index, turn in enumerate(case.turns):
@@ -632,6 +680,8 @@ async def _run(
                 # ステップごとに残っているため、デバッグ用に部分的な transcript を拾う。
                 state = await graph.aget_state(run_config)
                 result = {"messages": state.values.get("messages", [])} if state else None
+            finally:
+                remove_tool_call_observer(observe_subagent_call)
 
             messages = result["messages"] if result else []
             transcript = _serialize_messages(messages)
@@ -662,6 +712,12 @@ async def _run(
                 "token_usage_max_per_call": token_usage_max_per_call,
                 "turn_timings": turn_timings,
             }
+            if subagent_calls:
+                out["subagent_tool_calls"] = subagent_calls
+            if workdir_root is not None:
+                out["output_files"] = output_inspect.describe_outputs(
+                    workdir_root, output_inspect.changed_files(workdir_root, workdir_before), keep_outputs
+                )
             if turn_cutoffs:
                 out["turn_cutoffs"] = turn_cutoffs
             if mid_turn_error is not None:
@@ -708,6 +764,11 @@ def main() -> int:
         "--llm-from-instance",
         help="LLM の接続先（[llm] main_url/sub_url 等）だけをこのインスタンス（スキル研究室）のものにする",
     )
+    parser.add_argument(
+        "--keep-outputs",
+        type=Path,
+        help="作業フォルダで新しく作られた・変わった文書ファイル（xlsx/docx/pptx/pdf・スクリプト）を、一時フォルダが消える前にここへ写す",
+    )
     args = parser.parse_args()
     for skill_dir in args.skill_overlay:
         if not (skill_dir / "SKILL.md").is_file():
@@ -738,6 +799,7 @@ def main() -> int:
                 [d.resolve() for d in args.skill_overlay],
                 args.exclude_skill,
                 [f.resolve() for f in args.agent_overlay],
+                args.keep_outputs.resolve() if args.keep_outputs else None,
             )
         )
     except Exception as e:  # noqa: BLE001 - モデルの幻覚呼び出し等も診断可能なJSONにする

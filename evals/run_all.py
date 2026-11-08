@@ -299,6 +299,11 @@ def main() -> int:
     parser.add_argument("--agent-overlay", action="append", default=[], help="run_case.py の --agent-overlay へ渡す（複数可）")
     parser.add_argument("--config-patch", type=Path, help="run_case.py の --config-patch へ渡す")
     parser.add_argument("--llm-from-instance", help="run_case.py の --llm-from-instance へ渡す")
+    parser.add_argument(
+        "--keep-outputs",
+        action="store_true",
+        help="各回の作業フォルダで作られた文書ファイルを結果フォルダの outputs/<ケース>[_r<回>]/ へ残す（run_case.py の --keep-outputs）",
+    )
     args = parser.parse_args()
     if not args.target and not args.cases_dir:
         parser.error("Specify either target or --cases-dir")
@@ -324,6 +329,8 @@ def main() -> int:
     source_cases_dir = case_paths[0].parent
 
     print(f"対象インスタンス: {instance_name}", file=sys.stderr)
+    # 結果フォルダ名（終了時刻）が決まるまで、残す生成物はここへ溜める（下の tmp は先に消える）
+    kept_outputs = Path(tempfile.mkdtemp(prefix="evals_outputs_")) if args.keep_outputs else None
     with tempfile.TemporaryDirectory(prefix="evals_run_all_", ignore_cleanup_errors=True) as tmp:
         # ケースと --skill-overlay のスキルを開始時点の内容で固定する。--repeat の
         # 途中でドラフトが編集されても、全回を同じ内容で評価するため。ケースは
@@ -384,8 +391,12 @@ def main() -> int:
             for path in run_paths:
                 label = f"（{repeat_index}/{args.repeat}回目）" if args.repeat > 1 else ""
                 print(f"実行中: {path.name}{label}", file=sys.stderr)
+                run_args = extra_args
+                if args.keep_outputs:
+                    kept_name = path.stem + (f"_r{repeat_index}" if args.repeat > 1 else "")
+                    run_args = [*extra_args, "--keep-outputs", str(kept_outputs / kept_name)]
                 try:
-                    result = _run_one(path, instance_name, extra_args)
+                    result = _run_one(path, instance_name, run_args)
                 except subprocess.TimeoutExpired as e:
                     result = {
                         # 集計キーを run_case.py の結果（yaml の id）と揃える。
@@ -402,6 +413,9 @@ def main() -> int:
     results_root = args.results_dir.resolve() if args.results_dir else PROJECT_ROOT / "evals" / "results" / target
     out_dir = results_root / timestamp
     out_dir.mkdir(parents=True, exist_ok=True)
+    if kept_outputs is not None and kept_outputs.is_dir():
+        shutil.copytree(kept_outputs, out_dir / "outputs", dirs_exist_ok=True)
+        shutil.rmtree(kept_outputs, ignore_errors=True)
     (out_dir / "results.json").write_text(
         json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
     )

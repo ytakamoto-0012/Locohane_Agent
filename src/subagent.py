@@ -44,6 +44,7 @@ from .context_compaction import (
 )
 from .context_trim import is_trigger_reached, trim_old_ai_messages, trim_old_tool_messages
 from .images import image_followup_message
+from .today import with_today
 from .tool_errors import looks_like_error
 from .tool_args_guard import find_unknown_tool_args, unknown_tool_args_error
 from .tool_loop_guard import detect_tool_call_loop, find_leaked_tool_markup, leaked_tool_markup_error
@@ -93,6 +94,55 @@ _POST_COMPACTION_SUSPICIOUS_RESPONSE_NUDGE_TEXT = (
     "conversation history compaction / a token usage warning, and looks unrelated to the original task. "
     "Based on the work so far (the results of your tool calls), answer the original task again]"
 )
+
+# サブエージェントが実行したツール呼び出しを1件ずつ受け取るコールバック（評価ハーネス用）。
+# dispatch_agent の戻り値はサブエージェントの最終回答だけなので、委譲先で何を呼んだか
+# （read_skill・execute_python_code の中身）は呼び出し元の会話に残らない。
+# evals/run_case.py がここへ登録して結果JSONに残す（2026-11-07 evals xlkit: 「read_skill して
+# xlkit を import したか」を transcript から直接確かめられなかった）。本番では誰も登録しない。
+_TOOL_CALL_OBSERVERS: list[Callable[[dict], None]] = []
+
+
+def add_tool_call_observer(observer: Callable[[dict], None]) -> None:
+    """サブエージェントのツール呼び出しの観測者を登録する。
+
+    observer は1件ごとに {"task", "iteration", "name", "args", "is_error", "result", "result_tail"} の
+    dict を受け取る（result はツール結果の先頭部分。エラーで長い結果は、原因の書かれた
+    Traceback の末尾を result_tail に入れる）。例外を送出しても無視される。
+    """
+    _TOOL_CALL_OBSERVERS.append(observer)
+
+
+def remove_tool_call_observer(observer: Callable[[dict], None]) -> None:
+    """add_tool_call_observer で登録した観測者を外す（登録されていなければ何もしない）。"""
+    if observer in _TOOL_CALL_OBSERVERS:
+        _TOOL_CALL_OBSERVERS.remove(observer)
+
+
+_OBSERVED_RESULT_CHARS = 500
+_OBSERVED_ERROR_TAIL_CHARS = 1000
+
+
+def _notify_tool_call_observers(task: str, iteration: int, tool_calls: list, results: list) -> None:
+    if not _TOOL_CALL_OBSERVERS:
+        return
+    for call, (tool_message, _followup) in zip(tool_calls, results, strict=False):
+        content = tool_message.content if isinstance(tool_message.content, str) else str(tool_message.content)
+        is_error = getattr(tool_message, "status", None) == "error" or looks_like_error(content)
+        record = {
+            "task": task,
+            "iteration": iteration,
+            "name": call.get("name"),
+            "args": call.get("args") or {},
+            "is_error": is_error,
+            "result": content[:_OBSERVED_RESULT_CHARS],
+            "result_tail": content[-_OBSERVED_ERROR_TAIL_CHARS:] if is_error and len(content) > _OBSERVED_RESULT_CHARS else "",
+        }
+        for observer in list(_TOOL_CALL_OBSERVERS):
+            try:
+                observer(record)
+            except Exception:  # noqa: BLE001 - 観測の失敗でサブエージェントを止めない
+                logger.exception("subagent: a tool call observer failed")
 
 
 async def _run_one_tool_call(call: dict, tools_by_name: dict[str, BaseTool]) -> tuple[ToolMessage, HumanMessage | None]:
@@ -619,7 +669,8 @@ async def run_subagent(
 
     tools = apply_session_tool_overrides(tools)
     tools_by_name = {t.name: t for t in tools}
-    messages: list = [SystemMessage(content=system_prompt), HumanMessage(content=task)]
+    # 今日の日付は末尾に付ける（src/today.py。メインエージェントと同じ）。
+    messages: list = [SystemMessage(content=with_today(system_prompt)), HumanMessage(content=task)]
 
     logger.info("dispatch_agent start: task=%r max_iterations=%d", task, max_iterations)
 
@@ -806,6 +857,7 @@ async def run_subagent(
             # 並列の同名呼び出しは1つにまとめる（dict.fromkeys で順序を保つ）。
             _set_activity(("tools", *dict.fromkeys(call["name"] for call in tool_calls)))
             results = await asyncio.gather(*(_run_one_tool_call(call, tools_by_name) for call in tool_calls))
+            _notify_tool_call_observers(task, iteration, tool_calls, results)
             for tool_message, followup in results:
                 messages.append(tool_message)
                 if followup is not None:

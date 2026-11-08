@@ -25,7 +25,7 @@ def test_error_results(content: str) -> None:
 @pytest.mark.parametrize(
     "content",
     [
-        "# excel-edit\n- Without `--new`: an error if it does not exist.",
+        "# excel-edit\n- `new=True`: an error if the file already exists.",
         "## Summary\nNo errors were found in the 8 files.",
         "[exit code] 0\n[stdout]\nok\n",
         "",
