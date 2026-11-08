@@ -18,6 +18,7 @@ from ..tool_loop_guard import find_leaked_tool_markup, leaked_tool_markup_error
 from . import _state
 from ._safe_path import _is_guard_exempt_script, _safe_path
 from ._duplicate_guard import _record_and_check_duplicate
+from ._read_volume_guard import ask_after_survey, guard_read_volume, survey_recorder
 from ._state import _IN_SUBAGENT, _tool_call_semaphore_wrap
 from .analyze_image import _with_image_followups
 
@@ -546,9 +547,26 @@ class ImageAwareToolNode(ToolNode):
             or _guard_awaiting_approve_plan(input)
             or _guard_main_agent_tool_limit(input)
         )
+        if blocked is None:
+            # 大量のファイルを読む委譲は、何も読む前にユーザーへ確認する（src/tools/_read_volume_guard.py）。
+            # ユーザーへの質問を待つため非同期版だけで行う（同期版 invoke は Chainlit の経路では使われない）。
+            blocked = await guard_read_volume(input)
         if blocked is not None:
             _log_tool_results_debug(blocked, call_args)
             return _with_image_followups(blocked)
-        result = await super().ainvoke(input, config, **kwargs)
+        # 構造調査の explore なら、Glob で調べたフォルダを観測し、終わった直後（結果をメインへ返す前）に
+        # 読む量をユーザーへ確認する（src/tools/_read_volume_guard.py の主経路）。
+        recorder = survey_recorder(input)
+        if recorder is None:
+            result = await super().ainvoke(input, config, **kwargs)
+        else:
+            from ..subagent import add_tool_call_observer, remove_tool_call_observer  # noqa: PLC0415 (循環 import を避ける)
+
+            add_tool_call_observer(recorder)
+            try:
+                result = await super().ainvoke(input, config, **kwargs)
+            finally:
+                remove_tool_call_observer(recorder)
+            result = await ask_after_survey(recorder, result)
         _log_tool_results_debug(result, call_args)
         return _with_image_followups(result)

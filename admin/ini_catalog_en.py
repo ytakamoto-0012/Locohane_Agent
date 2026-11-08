@@ -548,6 +548,22 @@ DESCRIPTIONS: dict[str, str] = {
         'Maximum number of retries, urging a final answer, when a silent end (an AIMessage with neither tool_calls nor a body) is detected (shared by the main graph and the eval harness; it used to be hard-coded in app.py, but it lives here as the sibling setting paired with max_retries above). Consumed independently of max_retries above (the total number of attempts is at most the sum of both + 1). Local models sporadically write the tool call XML into the body and end up with an empty response, and retrying often fixes it.\n'
         'Empty responses sometimes come several times in a row right after tool results that only check state, such as create_plan/approve_plan/update_task_progress, and each retry is cheap (retrying from an empty response completes immediately), so it has been increased to leave margin for consumption early on.'
     ),
+    'read_volume_guard.enabled': (
+        'When the working directory has many files to read (images, PDF, Office, md/txt/csv/json), asks the user "read all (about N min) / read only representative files per folder (about N min) / stop" before anything is read (src/tools/_read_volume_guard.py).\n'
+        'The code asks, not the LLM, once per session, and reuses the answer. It asks at whichever comes first:\n'
+        '  1. right after the survey explore returns (before its result reaches the main agent), counting the files under the folders it listed with Glob;\n'
+        '  2. without a survey, before a reading delegation runs (two or more explore/worker calls in one response, or dispatch_agent_batch).\n'
+        'Asking after a long read only interrupts the work, so it asks before. On timeout it reads all and continues (the question says so).'
+    ),
+    'read_volume_guard.threshold_files': (
+        'Ask when there are more files than this. Files under the session temp folders (_tmp_...) and hidden folders are not counted.'
+    ),
+    'read_volume_guard.seconds_per_file': (
+        'Seconds per file used for the estimate (one sub-agent reading and recording it), divided by [subagent] max_parallel. Measured in an eval in 2026-11: one explore read 8 files in about 2 minutes.'
+    ),
+    'read_volume_guard.sample_files_per_folder': (
+        'Files read per folder when the user chooses "representative files only".'
+    ),
     'tool_loop_guard.enabled': (
         'Settings of the feature that detects loops repeating exactly the same response (the body and the names/arguments of tool calls) consecutively (src/tool_loop_guard.py). Small local models sometimes repeat exactly the same response even after reading tool results (especially errors) (in an eval, one produced the same response 30 times in a row until it used up the token limit). Tool results and whether they are errors are not compared. Thinking varies every time, so it is not compared.\n'
         'When detected, it recovers with the same mechanism as [thinking_loop_guard]: it retries with a warning message from nudge_messages plus "what was repeated", and when max_retries (combined with thinking loops) is reached it stops and notifies the user. Sub-agents return their progress so far and stop when the limit is reached.\n'
