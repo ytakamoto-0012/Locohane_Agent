@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-10
+
 ### 修正
 
 - `xlkit` で既存ブックを保存すると、触っていない列の幅が既定の 8.43 から 13 に変わっていた不具合を直しました
@@ -1201,7 +1203,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.5.1...v0.5.2
