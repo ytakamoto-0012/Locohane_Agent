@@ -24,7 +24,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 
 from chainlit.context import ChainlitContextException
@@ -119,12 +121,32 @@ def remove_tool_call_observer(observer: Callable[[dict], None]) -> None:
         _TOOL_CALL_OBSERVERS.remove(observer)
 
 
+# この委譲（呼び出し元のコンテキスト）の中で動くサブエージェントだけを観測する観測者。
+# add_tool_call_observer は全セッション共通なので、本番で1本の委譲だけを見たいときはこちらを使う
+# （task 文の一致で見分けると、委譲側が task 文を書き換えたときに外れ、空の task では他のセッションまで拾う）。
+# dispatch_agent はジョブを asyncio.create_task で作るため、作った時点のコンテキスト（この値）を引き継ぐ。
+_CONTEXT_TOOL_CALL_OBSERVERS: ContextVar[tuple[Callable[[dict], None], ...]] = ContextVar(
+    "subagent_context_tool_call_observers", default=()
+)
+
+
+@contextmanager
+def observe_tool_calls(observer: Callable[[dict], None]) -> Iterator[None]:
+    """この with の中で始めたサブエージェントのツール呼び出しだけを observer に渡す（形は add_tool_call_observer と同じ）。"""
+    token = _CONTEXT_TOOL_CALL_OBSERVERS.set((*_CONTEXT_TOOL_CALL_OBSERVERS.get(), observer))
+    try:
+        yield
+    finally:
+        _CONTEXT_TOOL_CALL_OBSERVERS.reset(token)
+
+
 _OBSERVED_RESULT_CHARS = 500
 _OBSERVED_ERROR_TAIL_CHARS = 1000
 
 
 def _notify_tool_call_observers(task: str, iteration: int, tool_calls: list, results: list) -> None:
-    if not _TOOL_CALL_OBSERVERS:
+    observers = [*_TOOL_CALL_OBSERVERS, *_CONTEXT_TOOL_CALL_OBSERVERS.get()]
+    if not observers:
         return
     for call, (tool_message, _followup) in zip(tool_calls, results, strict=False):
         content = tool_message.content if isinstance(tool_message.content, str) else str(tool_message.content)
@@ -138,7 +160,7 @@ def _notify_tool_call_observers(task: str, iteration: int, tool_calls: list, res
             "result": content[:_OBSERVED_RESULT_CHARS],
             "result_tail": content[-_OBSERVED_ERROR_TAIL_CHARS:] if is_error and len(content) > _OBSERVED_RESULT_CHARS else "",
         }
-        for observer in list(_TOOL_CALL_OBSERVERS):
+        for observer in observers:
             try:
                 observer(record)
             except Exception:  # noqa: BLE001 - 観測の失敗でサブエージェントを止めない

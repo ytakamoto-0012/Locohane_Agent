@@ -66,3 +66,8 @@ def test_read_table_numbers_duplicate_headers(tmp_path):
     path = tmp_path / "d.xlsx"
     wb.save(path)
     assert read_table(path)[0] == {"備考": 1, "備考_2": 2, "x": 3, "_row": 2, "_fill": None}
+
+
+def test_read_table_returns_nothing_for_an_empty_header_row(tmp_path):
+    path = _book(tmp_path)
+    assert read_table(path, "週間", header_row=20) == []

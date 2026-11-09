@@ -17,7 +17,7 @@ from pathlib import Path
 _OFFICE_SHARED = Path(__file__).resolve().parent.parent.parent / "office_shared"
 if str(_OFFICE_SHARED) not in sys.path:
     sys.path.append(str(_OFFICE_SHARED))
-from excel_common import _display_width, cell_column_width, exceeds_column_width  # noqa: E402
+from excel_common import _display_width, cell_column_width, exceeds_column_width, existing_cells, existing_rows  # noqa: E402
 
 # 1種類の警告に並べる番地の最大数（多すぎると結果JSONが長くなり読み飛ばされるため）
 _MAX_ITEMS = 15
@@ -67,17 +67,16 @@ def lint_sheet(ws) -> list[str]:
 
     overflow: list[tuple[int, int]] = []
     numeric_cells: dict[int, list] = {}
-    for row in ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col):
-        for cell in row:
-            key = (cell.row, cell.column)
-            if key in in_merge and key not in merged_by_anchor:
-                continue
-            value = cell.value
-            if isinstance(value, str) and not cell.alignment.wrap_text:
-                if exceeds_column_width(value, cell_column_width(ws, cell.row, cell.column, merged_by_anchor.get(key))):
-                    overflow.append(key)
-            if _is_numeric_like(value):
-                numeric_cells.setdefault(cell.column, []).append(cell)
+    for cell in existing_cells(ws):
+        key = (cell.row, cell.column)
+        if key in in_merge and key not in merged_by_anchor:
+            continue
+        value = cell.value
+        if isinstance(value, str) and not cell.alignment.wrap_text:
+            if exceeds_column_width(value, cell_column_width(ws, cell.row, cell.column, merged_by_anchor.get(key))):
+                overflow.append(key)
+        if _is_numeric_like(value):
+            numeric_cells.setdefault(cell.column, []).append(cell)
 
     if overflow:
         warnings.append(
@@ -108,7 +107,8 @@ def lint_sheet(ws) -> list[str]:
         run_start = None
         prev_value = None
         for r in range(1, max_row + 2):
-            value = ws.cell(row=r, column=col).value if r <= max_row and (r, col) not in in_merge else None
+            existing = ws._cells.get((r, col))  # ws.cell() は無いセルを作るため使わない
+            value = existing.value if existing is not None and r <= max_row and (r, col) not in in_merge else None
             if isinstance(value, str) and value and value == prev_value:
                 continue
             if run_start is not None and r - run_start >= 2:
@@ -154,17 +154,16 @@ def _wrong_weekdays(ws) -> list[str]:
     from datetime import date
 
     found: list[str] = []
-    for row in ws.iter_rows():
-        for cell in row:
-            if not isinstance(cell.value, str):
+    for cell in existing_cells(ws):
+        if not isinstance(cell.value, str):
+            continue
+        for m in _DATED_WEEKDAY.finditer(cell.value):
+            try:
+                actual = _WEEKDAYS[date(int(m.group(1)), int(m.group(2)), int(m.group(3))).weekday()]
+            except ValueError:
                 continue
-            for m in _DATED_WEEKDAY.finditer(cell.value):
-                try:
-                    actual = _WEEKDAYS[date(int(m.group(1)), int(m.group(2)), int(m.group(3))).weekday()]
-                except ValueError:
-                    continue
-                if actual != m.group(4):
-                    found.append(f"{cell.coordinate} {m.group(0)!r} (is {actual})")
+            if actual != m.group(4):
+                found.append(f"{cell.coordinate} {m.group(0)!r} (is {actual})")
     return found
 
 
@@ -184,7 +183,7 @@ def _lone_tall_notes(ws, in_merge: set[tuple[int, int]]) -> list[str]:
 
     max_col = ws.max_column or 0
     found: list[str] = []
-    for row in ws.iter_rows(min_row=1, max_row=ws.max_row or 0, max_col=max_col):
+    for _r, row in existing_rows(ws):
         values = [c for c in row if c.value not in (None, "")]
         if len(values) != 1:
             continue
@@ -195,7 +194,8 @@ def _lone_tall_notes(ws, in_merge: set[tuple[int, int]]) -> list[str]:
             continue  # 罫線のある表の中のセル（他の列がたまたま空の行）は注記ではない
         if cell.column >= max_col:
             continue  # 右に列が無い（広げる先が無い）
-        width = cell_column_width(ws, cell.row, cell.column, None)
+        # 列幅が未設定なら None が返る（Excel の既定幅で数える。そのまま引くと TypeError になっていた）
+        width = cell_column_width(ws, cell.row, cell.column, None) or 8.43
         lines = sum(max(1, math.ceil(_display_width(part) / max(width - 1, 1))) for part in cell.value.split("\n"))
         if lines >= _TALL_NOTE_LINES:
             found.append(f"{get_column_letter(cell.column)}{cell.row} (about {lines} lines)")

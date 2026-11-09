@@ -467,6 +467,25 @@ def cell_column_width(ws, row: int, col: int, merged_range=None) -> float | None
     return ws.column_dimensions[get_column_letter(col)].width
 
 
+def existing_cells(ws) -> list:
+    """シートに実在するセルを (行, 列) の順で返す（空のセルを作らない）。
+
+    openpyxl の `ws.iter_rows()` は、範囲内でまだ無いセルも作って返す。離れたセル
+    （例: A1 と CV50000）だけのシートを全体走査すると数百万個の空セルができ、保存が
+    何十秒もかかり、空の `<c>` 要素でファイルも膨らむ（2セルのブックで 4.8KB → 136KB・50秒）。
+    走査だけの処理（点検・保存前の仕上げ）は、こちらで実在するセルだけを回す。
+    """
+    return [ws._cells[key] for key in sorted(ws._cells)]
+
+
+def existing_rows(ws) -> list[tuple[int, list]]:
+    """実在するセルを行ごとにまとめた [(行番号, [セル, ...]), ...]（行・列の順。空のセルを作らない）。"""
+    rows: dict[int, list] = {}
+    for cell in existing_cells(ws):
+        rows.setdefault(cell.row, []).append(cell)
+    return sorted(rows.items())
+
+
 def column_index(column: str) -> int:
     """列アルファベット（例"A"）または1始まりの列番号（数値文字列、例"3"）を列番号へ変換する。
 

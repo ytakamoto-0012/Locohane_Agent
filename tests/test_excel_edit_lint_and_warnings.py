@@ -120,3 +120,16 @@ def test_read_excel_cells_carry_ref_and_merged(tmp_path):
         [{"ref": "A2", "value": "11月", "merged": "A2:A3"}],
         [{"ref": "A3", "value": None, "merged": "A2:A3"}],
     ]
+
+
+def test_lint_does_not_fail_on_a_lone_wrapped_note_in_a_column_without_a_width():
+    """列幅が未設定の列の、1セルだけの折り返した長い文で TypeError にならない（既定幅で数える）。"""
+    from openpyxl.styles import Alignment
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "前提: " + "とても長い注記の文です。" * 6
+    ws["A1"].alignment = Alignment(wrap_text=True)
+    ws["C2"] = "右に列がある"
+    warnings = lint_sheet(ws)
+    assert any("A1 (about" in w for w in warnings)

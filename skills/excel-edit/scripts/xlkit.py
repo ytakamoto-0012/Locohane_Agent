@@ -32,7 +32,14 @@ _OFFICE_SHARED = _SKILLS_DIR / "office_shared"
 if str(_OFFICE_SHARED) not in sys.path:
     sys.path.append(str(_OFFICE_SHARED))
 
-from excel_common import _display_width, backup_before_overwrite, exceeds_column_width, register_output_path  # noqa: E402
+from excel_common import (  # noqa: E402
+    _display_width,
+    backup_before_overwrite,
+    exceeds_column_width,
+    existing_cells,
+    existing_rows,
+    register_output_path,
+)
 from office_theme import THEMES, resolve_theme  # noqa: E402
 
 _CJK_FONT = "Yu Gothic"
@@ -67,9 +74,18 @@ def new_workbook() -> Workbook:
 
 
 def open_workbook(path) -> Workbook:
-    """既存ファイルを開く。`.xlsm` はマクロを保ったまま開く（keep_vba=True）。"""
+    """既存ファイルを開く。`.xlsm` はマクロを保ったまま開く（keep_vba=True）。
+
+    開いた時点のセル（番地と配置の書式）を記録しておき、save() の仕上げ（フォント名・折返し行の
+    高さ）は、その後に書いたセル・配置を変えたセルの行だけに行う。元からあるセルのフォントや、
+    Excel が自動で合わせている行の高さを、触っていないシートまで書き換えないため。
+    """
     path = Path(path)
-    return load_workbook(path, keep_vba=path.suffix.lower() == ".xlsm")
+    wb = load_workbook(path, keep_vba=path.suffix.lower() == ".xlsm")
+    wb._xlkit_opened = True
+    for ws in wb.worksheets:
+        ws._xlkit_loaded = {key: cell._style.alignmentId for key, cell in ws._cells.items()}
+    return wb
 
 
 @dataclass
@@ -250,13 +266,21 @@ def save(wb, path, *, new: bool = False) -> dict:
         raise ValueError("Saving as .xlsm needs a workbook opened from an existing .xlsm with open_workbook() (keeps the macros)")
     if not wb.sheetnames:
         raise ValueError("The workbook has no sheets. Create one with wb.create_sheet(name)")
+    warnings: list[str] = []
+    if path.suffix.lower() != ".xlsm" and getattr(wb, "vba_archive", None) is not None:
+        # マクロ付きのまま .xlsx へ保存すると、中身はマクロ有効ブックの形式になり Excel で開けない。
+        # Excel の「マクロなしのブックとして保存」と同じく、マクロを外して保存する。
+        wb.vba_archive = None
+        warnings.append(
+            f"{path.name}: the macros (VBA) of the .xlsm were not saved because the file is not .xlsm. "
+            "To keep them, save to a .xlsm path"
+        )
     backup = None if new or replaced_own_output else backup_before_overwrite(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     finalize_sheets(wb, new=new)
     wb.save(path)
     _remember_own_output(path)
 
-    warnings: list[str] = []
     for ws in wb.worksheets:
         warnings.extend(lint_sheet(ws))
     result: dict = {"path": str(path), "sheets": [sheet_summary(ws) for ws in wb.worksheets]}
@@ -286,6 +310,10 @@ def finalize_sheets(wb, *, new: bool) -> None:
     既存ブックでも名前の付いたフォントが1つも無い（openpyxl 等で作られ、誰もフォントを
     選んでいない）ブックに日本語がある場合。既存ブックに名前の付いたフォントがあれば、
     シート（無ければブック）で一番多い名前に揃える（元ファイルの見た目を変えない）。
+
+    既存ブック（open_workbook() で開いたもの）では、開いた後に書いたセルのフォントと、それらの
+    セル・配置を変えたセルがある行の高さだけを整える。元からあるセル・触っていないシートは変えない。
+    open_workbook() を通さずに load_workbook() で開いたブックは、write_table で表を書いたシートだけを整える。
     """
     built_new = new or bool(getattr(wb, "_xlkit_built_new", False))
     has_cjk = _workbook_has_cjk(wb)
@@ -296,10 +324,34 @@ def finalize_sheets(wb, *, new: bool) -> None:
         fallback = max(set(workbook_names), key=workbook_names.count)
     else:
         fallback = _CJK_FONT if has_cjk else "Calibri"
+    opened = bool(getattr(wb, "_xlkit_opened", False))
     for ws in wb.worksheets:
-        _finalize_fonts(ws, _CJK_FONT if built_new and has_cjk else None, fallback)
-        _fit_wrapped_row_heights(ws)
+        font_keys, height_rows = _finalize_targets(ws, built_new=built_new, opened=opened)
+        if font_keys is not _SKIP:
+            _finalize_fonts(ws, _CJK_FONT if built_new and has_cjk else None, fallback, font_keys)
+            _fit_wrapped_row_heights(ws, height_rows)
         _fit_print_setup(ws)
+
+
+# _finalize_targets が「このシートは整えない」を表す印
+_SKIP = object()
+
+
+def _finalize_targets(ws, *, built_new: bool, opened: bool):
+    """(フォント名を付けるセルの番地の集合, 高さを合わせる行の集合) を返す。None は「すべて」、_SKIP は「整えない」。"""
+    if built_new:
+        return None, None
+    loaded = getattr(ws, "_xlkit_loaded", None)
+    if loaded is None:
+        # open_workbook() の後に作ったシートはすべて新しい。load_workbook() で開いたブックは表を書いたシートだけ。
+        if opened or getattr(ws, "_xlkit_tables", None):
+            return None, None
+        return _SKIP, _SKIP
+    font_keys = {key for key in ws._cells if key not in loaded}
+    height_rows = {
+        key[0] for key, cell in ws._cells.items() if key not in loaded or loaded[key] != cell._style.alignmentId
+    }
+    return font_keys, height_rows
 
 
 def _own_outputs_file() -> Path | None:
@@ -445,10 +497,9 @@ def _fit_title_height(ws, row: int, min_col: int, max_col: int, text: str) -> No
 
 def _workbook_has_cjk(wb) -> bool:
     for ws in wb.worksheets:
-        for row in ws.iter_rows():
-            for cell in row:
-                if isinstance(cell.value, str) and _CJK_RE.search(cell.value):
-                    return True
+        for cell in existing_cells(ws):
+            if isinstance(cell.value, str) and _CJK_RE.search(cell.value):
+                return True
     return False
 
 
@@ -456,41 +507,44 @@ def _named_fonts(ws) -> list[str]:
     """シートのセルに明示的に付いたフォント名（既定の Calibri・名前なしを除く）。"""
     return [
         cell.font.name
-        for row in ws.iter_rows()
-        for cell in row
+        for cell in existing_cells(ws)
         if cell.font is not None and cell.font.name not in _DEFAULT_LATIN_FONTS
     ]
 
 
-def _finalize_fonts(ws, cjk_font: str | None, fallback: str | None) -> None:
+def _finalize_fonts(ws, cjk_font: str | None, fallback: str | None, keys: set | None = None) -> None:
     """openpyxl が名前を書かなかったフォント（既定の Calibri）に名前を付ける。
 
     cjk_font（xlkit で組み立てた日本語のブック）があればそれへ、無ければそのシートで明示的に
     名前の付いたフォントの中で一番多い名前に、それも無ければ fallback（finalize_sheets が
     ブック全体から決めた名前）に揃える。名前の付いたフォント（元ファイル由来のもの）は変えない。
     既定フォントはモデルが選んだ名前ではないため、Calibri のまま残るとシート内でそのセルだけ
-    違う名前に見える。
+    違う名前に見える。keys を渡したら、その番地のセル（開いた後に書いたセル）だけを変える。
     """
     from copy import copy
 
     names = _named_fonts(ws)
     target = cjk_font or (max(set(names), key=names.count) if names else (fallback or "Calibri"))
-    for row in ws.iter_rows():
-        for cell in row:
-            font = cell.font
-            if font is None or font.name not in _DEFAULT_LATIN_FONTS or font.name == target:
-                continue
-            if cell.value is None and not cell.has_style:
-                continue
-            new_font = copy(font)
-            new_font.name = target
-            if new_font.size is None:
-                new_font.size = 11
-            cell.font = new_font
+    for cell in existing_cells(ws):
+        if keys is not None and (cell.row, cell.column) not in keys:
+            continue
+        font = cell.font
+        if font is None or font.name not in _DEFAULT_LATIN_FONTS or font.name == target:
+            continue
+        if cell.value is None and not cell.has_style:
+            continue
+        new_font = copy(font)
+        new_font.name = target
+        if new_font.size is None:
+            new_font.size = 11
+        cell.font = new_font
 
 
-def _fit_wrapped_row_heights(ws) -> None:
-    """高さ未設定の行のうち、折り返すセルがある行に、収まる行数分の高さを付ける（明示した高さは変えない）。"""
+def _fit_wrapped_row_heights(ws, rows: set | None = None) -> None:
+    """高さ未設定の行のうち、折り返すセルがある行に、収まる行数分の高さを付ける（明示した高さは変えない）。
+
+    rows を渡したら、その行（開いた後に書いた・配置を変えたセルがある行）だけを見る。
+    """
     import math
 
     merged_width: dict[tuple[int, int], int] = {}
@@ -509,10 +563,9 @@ def _fit_wrapped_row_heights(ws) -> None:
     def col_width(col: int) -> float:
         return ws.column_dimensions[get_column_letter(col)].width or 8.43
 
-    for row in ws.iter_rows():
-        if not row:
+    for r, row in existing_rows(ws):
+        if rows is not None and r not in rows:
             continue
-        r = row[0].row
         if ws.row_dimensions[r].height is not None:
             continue
         lines_needed = 1

@@ -258,6 +258,14 @@ def _edit_locked(path: Path, old_string: str, new_string: str, replace_all: bool
     updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
     try:
         _write_text(path, updated, encoding, newline)
+    except UnicodeEncodeError as e:
+        # 元の文字コード（cp932 等）で表せない文字を new_string に入れた。一時ファイルに書くため元のファイルは無事。
+        bad = e.object[e.start : e.end] if isinstance(e.object, str) else ""
+        return (
+            f"Error: the file is {encoding} and new_string has characters it cannot hold ({bad!r}). "
+            "The file was not changed. Use characters that exist in that encoding, or rewrite the whole file "
+            "as UTF-8 with Write(overwrite=true) if the file may change its encoding."
+        )
     except OSError as e:
         return f"Error: could not write the file: {e}"
     logger.info("Edit: %s (%d replacement(s))", path, count if replace_all else 1)

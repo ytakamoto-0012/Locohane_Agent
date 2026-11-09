@@ -62,6 +62,8 @@ def read_table(path, sheet: str | int = 0, header_row: int | None = None, *, dat
             return []
 
     columns = [c for c in range(1, max_col + 1) if ws.cell(row=header_row, column=c).value not in (None, "")]
+    if not columns:
+        return []  # 指定した見出し行が空（表が無い）。columns[0] で IndexError にしない
     names: list[str] = []
     for c in columns:
         name = str(ws.cell(row=header_row, column=c).value).strip()

@@ -747,6 +747,7 @@ def build_router(
                     "repeat_index": r.get("repeat_index", 1),
                     "outcome": v.get("outcome", evaluation.classify(r)),
                     "ai_judge": v.get("ai_judge"),
+                    "rule_review": v.get("rule_review"),
                     "failed_rules": {k: d for k, d in (r.get("rule_results") or {}).items() if not d.get("pass")},
                     "error": r.get("error"),
                     "detail": r.get("detail"),

@@ -2569,7 +2569,18 @@ One theme is a bundle of several skills and sub-agents and the cases spanning th
 
 **Skill tuning loop** ("Start skill tuning loop"): the skill tuning worker layers all assets of the theme (`--skill-overlay`, `--agent-overlay`) and the settings patch (`--config-patch`)
 on the target instance's setup (including the company's own skills and guard settings), switches only the LLM endpoints to the lab's
-(`--llm-from-instance`), and evaluates all cases. Cases with judge are judged by the AI judge from the viewpoint of the spec and the judge.
+(`--llm-from-instance`), and evaluates all cases. Cases with judge are judged by the AI judge from the viewpoint of the spec and the judge
+(a different wording or notation is not a reason to fail; it fails when a fact, number or action the viewpoint asks for is missing or wrong).
+
+The text and argument checks of a case's `expect` (`response_contains`, `response_not_contains`, `tool_call_args_contains`) compare exactly,
+so a run could fail only because of notation, such as "1,234円" against "1234円". The lab reviews runs that failed only these checks,
+in this order (`admin/skill_lab/judge.py`; the verdicts of `evals/run_all.py` itself do not change).
+
+- First it compares again after normalizing full/half width, spaces, thousands separators, path separators (`/` and `\`) and case. If they match, the run passes.
+- If they still differ, the lab's LLM judges whether the content is the same despite the notation. If the LLM cannot be used, the run stays failed.
+- Runs that failed on which tools were called or not called (`tool_called_any`, `tool_not_called`) are not reviewed.
+
+The result appears as "Review of mechanical checks" on each run. Runs the LLM accepted are, like the AI judge, reviewed by a person when approving the promotion.
 
 1. If there are failures, the AI reads the failure records (unmet checks, tool calls and results, final answer) and the spec, analyzes the cause,
    fixes the assets (SKILL.md, scripts/, references/, sub-agent definitions), cases and settings patch, and evaluates again.

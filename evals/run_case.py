@@ -215,6 +215,9 @@ def _evaluate_expect(expect: Expect, transcript: list[dict], final_answer: str) 
         results[f"tool_call_args_contains:{tool_name}"] = {
             "pass": ok,
             "detail": f"expected {partial} in one of {calls}",
+            # 機械判定を見直す側（admin/skill_lab/judge.py）が表記ゆれを照合し直すための元の値
+            "expected": partial,
+            "calls": calls,
         }
 
     if expect.response_contains:
@@ -222,6 +225,7 @@ def _evaluate_expect(expect: Expect, transcript: list[dict], final_answer: str) 
         results["response_contains"] = {
             "pass": not missing,
             "detail": f"missing: {missing}" if missing else "ok",
+            "missing": missing,
         }
 
     if expect.response_not_contains:
@@ -229,6 +233,7 @@ def _evaluate_expect(expect: Expect, transcript: list[dict], final_answer: str) 
         results["response_not_contains"] = {
             "pass": not found,
             "detail": f"unexpectedly present: {found}" if found else "ok",
+            "found": found,
         }
 
     return results

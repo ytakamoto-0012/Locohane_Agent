@@ -108,3 +108,58 @@ def test_run_checks_separates_failed_requirements_from_broken_checks(tmp_path, m
     assert result["checks"] == 3 and result["passed"] == 1
     assert result["failed"] == [{"check": "every record has a row", "problems": ["missing 11月 不明"]}]
     assert result["errors"][0]["check"] == "broken check" and "KeyError" in result["errors"][0]["error"]
+
+
+def test_records_keeps_identical_records_written_in_different_topics(tmp_path, capsys):
+    """同じ日・同じ金額の取引のように、別の調査（トピック）に同じ内容があれば別の記録として残す。"""
+    line = '{"date": "2021-05-01", "item": "文具", "amount": 1234}'
+    head_a = "## 2021 receipts A\n<!-- 2026-11-07 08:55:00 by explore -->\n```records\n"
+    head_b = "## 2021 receipts B\n<!-- 2026-11-07 08:56:00 by explore -->\n```records\n"
+    text = head_a + line + "\n```\n\n" + head_b + line + "\n" + line + "\n```\n"
+    rows = records(notes_path=_notes(tmp_path, text))
+    assert [r["_topic"] for r in rows] == ["2021 receipts A", "2021 receipts B"]
+    assert '"duplicate_lines_merged": 1' in capsys.readouterr().out  # B の中の重複だけをまとめる
+
+
+def test_run_checks_treats_a_returned_string_as_one_problem(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_SRC_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    wb = new_workbook()
+    write_table(wb.create_sheet("S"), [["a", "b"], [1, 2]])
+    out = tmp_path / "c.xlsx"
+    save(wb, out, new=True)
+    (tmp_path / "checks.py").write_text(
+        textwrap.dedent(
+            """
+            from xlspec import check
+
+            @check("one string")
+            def _(book):
+                return "B7: expected 2026/12, got 2027/1"
+
+            @check("empty string passes")
+            def _(book):
+                return ""
+            """
+        ),
+        encoding="utf-8",
+    )
+    result = run_checks(out, "checks.py")
+    assert result["failed"] == [{"check": "one string", "problems": ["B7: expected 2026/12, got 2027/1"]}]
+    assert result["passed"] == 1
+
+
+def test_book_reads_formula_values_with_data_only(tmp_path):
+    import openpyxl
+    from xlspec import Book
+
+    path = tmp_path / "f.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "S"
+    ws.append(["a", "b"])
+    ws.append([1, "=A2*2"])
+    wb.save(path)
+    assert Book(path).table("S")[0]["b"] == "=A2*2"
+    # openpyxl で作っただけのファイルには計算済みの値が無い（Excel で保存すれば入る）
+    assert Book(path, data_only=True).table("S")[0]["b"] is None

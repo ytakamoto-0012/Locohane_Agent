@@ -1422,10 +1422,23 @@ def _collect_usage() -> tuple[list[dict], list[dict]]:
             errors.append({"name": name, "error": str(exc)})
         items.append({"name": name, "display_name": meta.display_name, "usage": usage})
     # 残り: 管理アシスタントと、削除済みのスキル調整ワーカーの分（使った事実は消えないため残す）。
+    # どちらも実体のインスタンスが無いので virtual を付ける（画面でインスタンス詳細へのリンクにしない）。
+    # 削除済みの研究室と同じ名前の通常インスタンスが後から作られていても行が重ならないよう、名前を分ける。
+    taken = {it["name"] for it in items}
     for source, usage in sorted(admin_usage.items()):
-        label = _t("管理アシスタント（AIに相談）") if source == ai_usage.ASSISTANT_SOURCE else _t("{0}（スキル研究室・削除済み）", source)
-        items.append({"name": source, "display_name": label, "usage": usage})
+        if source == ai_usage.ASSISTANT_SOURCE:
+            item_name, label = source, _t("管理アシスタント（AIに相談）")
+        else:
+            item_name, label = source, _t("{0}（スキル研究室・削除済み）", source)
+            if item_name in taken:
+                item_name = f"{source}{_DELETED_LAB_SUFFIX}"
+        taken.add(item_name)
+        items.append({"name": item_name, "display_name": label, "usage": usage, "virtual": True})
     return items, errors
+
+
+# 削除済みのスキル調整ワーカーの行の名前に付ける接尾辞（同名の通常インスタンスと区別する。インスタンス名に使えない文字を含む）
+_DELETED_LAB_SUFFIX = " (deleted skill lab)"
 
 
 def _read_cost_settings() -> dict:
@@ -1439,7 +1452,10 @@ def _usage_overview_view(settings: dict) -> dict[str, Any]:
     items, errors = _collect_usage()
     return {
         **usage_cost.overview(items, settings),
-        "instances": [{"name": it["name"], "display_name": it["display_name"], "source": it["usage"]["source"]} for it in items],
+        "instances": [
+            {"name": it["name"], "display_name": it["display_name"], "source": it["usage"]["source"], "virtual": bool(it.get("virtual"))}
+            for it in items
+        ],
         "errors": errors,
         "settings": settings,
     }

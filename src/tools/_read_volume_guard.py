@@ -105,21 +105,53 @@ def _last_ai_message(state) -> AIMessage | None:
     return None
 
 
-def _files_to_read(call: dict, ai: AIMessage | None, inventory_total: int) -> int:
-    """この委譲（と同じ応答の兄弟）が大量読みなら読むファイル数を、そうでなければ0を返す。"""
+def _ai_key(ai: AIMessage | None) -> str | None:
+    """同じ応答（AIMessage）の委譲を見分けるキー。id が無ければツール呼び出しの id の並びで代える。
+
+    None（見分けられない）は、どの答えとも一致しないものとして扱う。id が None 同士で一致させると、
+    構造調査の答え（ai_id=None）が「代表だけ」「中止」のとき、以後の委譲がすべて止まっていた。
+    """
+    if ai is None:
+        return None
+    if ai.id:
+        return ai.id
+    call_ids = [c.get("id") for c in ai.tool_calls if c.get("id")]
+    return "calls:" + ",".join(call_ids) if call_ids else None
+
+
+def _read_scope(call: dict, ai: AIMessage | None) -> int | str | None:
+    """この委譲が大量読みになりうるか（作業ディレクトリを数える前に、呼び出しだけで決める）。
+
+    Returns:
+        None: 大量読みではない（数えない）。"inventory": 作業ディレクトリの件数で決める。
+        int: 読むファイル数が呼び出しから分かる（dispatch_agent_batch の files）。
+    """
     name = call.get("name")
     args = call.get("args") or {}
     if name == "dispatch_agent_batch":
         files = args.get("files")
-        return len(files) if files else inventory_total
+        return len(files) if files else "inventory"
     if name != "dispatch_agent" or args.get("agent_type") not in _READ_AGENT_TYPES:
-        return 0
+        return None
     siblings = [
         c
         for c in (ai.tool_calls if ai is not None else [])
         if c.get("name") == "dispatch_agent" and (c.get("args") or {}).get("agent_type") in _READ_AGENT_TYPES
     ]
-    return inventory_total if len(siblings) >= 2 else 0
+    return "inventory" if len(siblings) >= 2 else None
+
+
+def _files_to_read(call: dict, ai: AIMessage | None, inventory_total: int) -> int:
+    """この委譲（と同じ応答の兄弟）が大量読みなら読むファイル数を、そうでなければ0を返す。"""
+    scope = _read_scope(call, ai)
+    if scope is None:
+        return 0
+    return inventory_total if scope == "inventory" else scope
+
+
+def _total_text(total: int, truncated: bool) -> str:
+    """質問に出す件数。走査を打ち切ったときは実際はそれ以上あるので「N+」にする。"""
+    return f"{total}+" if truncated else str(total)
 
 
 def _decision_note(decision: dict) -> str:
@@ -153,7 +185,7 @@ def _survey_note(decision: dict) -> str:
     )
 
 
-async def _ask(total: int, inventory: dict, per_folder: int) -> dict:
+async def _ask(total: int, inventory: dict, per_folder: int, *, truncated: bool = False) -> dict:
     """ユーザーに確認し、{"kind": all|sample|stop|other, "answer": 文字列} を返す。
 
     所要時間の見積もりは出さない（読む中身で大きく変わり、数字はいつも短すぎた）。
@@ -172,7 +204,9 @@ async def _ask(total: int, inventory: dict, per_folder: int) -> dict:
     choice_all = t("read_volume.choice_all")
     choice_sample = t("read_volume.choice_sample", per_folder=per_folder)
     choice_stop = t("read_volume.choice_stop")
-    question = t("read_volume.question", total=total, breakdown=breakdown, folders=inventory["folders"])
+    question = t(
+        "read_volume.question", total=_total_text(total, truncated), breakdown=breakdown, folders=inventory["folders"]
+    )
     answer = await ask_module.ask_choice(
         question,
         [choice_all, choice_sample, choice_stop],
@@ -212,10 +246,14 @@ async def guard_read_volume(input) -> dict | None:  # noqa: A002
     if call.get("name") not in ("dispatch_agent", "dispatch_agent_batch"):
         return None
     ai = _last_ai_message(input.get("state") or {})
-    ai_id = getattr(ai, "id", None)
+    ai_id = _ai_key(ai)
     decision = cl.user_session.get(_DECISION_KEY)
-    if decision is not None and decision.get("ai_id") != ai_id:
+    if decision is not None and (ai_id is None or decision.get("ai_id") != ai_id):
         return None  # このセッションでは確認済み。後の委譲は通す。
+    scope = _read_scope(call, ai)
+    if decision is None and scope is None:
+        return None  # 大量読みになりえない委譲（単発の verifier 等）。作業ディレクトリを数えない。
+    asked_here = False
     async with _session_lock():
         decision = cl.user_session.get(_DECISION_KEY)
         if decision is None:
@@ -231,10 +269,15 @@ async def guard_read_volume(input) -> dict | None:  # noqa: A002
             if total <= threshold:
                 return None  # 大量読みではない（この応答ではまだ聞かない）。
             per_folder = int(_setting("read_volume_guard_sample_files_per_folder", 2))
-            decision = {**await _ask(total, inventory, per_folder), "ai_id": ai_id, "total": total}
+            truncated = scope == "inventory" and inventory["truncated"]
+            decision = {**await _ask(total, inventory, per_folder, truncated=truncated), "ai_id": ai_id, "total": total}
             decision["per_folder"] = per_folder
             cl.user_session.set(_DECISION_KEY, decision)
-    if decision.get("ai_id") != ai_id or decision["kind"] == "all":
+            asked_here = True
+    if decision["kind"] == "all":
+        return None
+    # 質問した当の呼び出しは答えどおりに止める。兄弟（同じ応答の委譲）は応答のキーが一致したときだけ止める。
+    if not asked_here and (ai_id is None or decision.get("ai_id") != ai_id):
         return None
     content = _blocked_message(decision)
     return {
@@ -252,18 +295,17 @@ _GLOB_BASE_RE = re.compile(r'"base":\s*"((?:[^"\\]|\\.)*)"')
 class SurveyRecorder:
     """1本の explore が Glob で調べたフォルダ（Glob 結果の base）を集める観測者。
 
-    src.subagent.add_tool_call_observer に登録する。観測者は全セッション共通なので、
-    記録の task にこの委譲の task 文が含まれるものだけを拾う。
+    src.subagent.observe_tool_calls で、この委譲の呼び出しの中で始まったサブエージェントだけに
+    登録する（task 文の一致では見分けない。dispatch_agent が `@N` の解決などで task 文を書き換えると
+    外れ、空の task 文では他のセッションの委譲まで拾っていた）。
     """
 
-    def __init__(self, task: str) -> None:
+    def __init__(self, task: str = "") -> None:
         self.task = task
         self.bases: set[str] = set()
 
     def __call__(self, record: dict) -> None:
         if record.get("name") != "Glob" or record.get("is_error"):
-            return
-        if self.task and self.task not in (record.get("task") or ""):
             return
         match = _GLOB_BASE_RE.search(record.get("result") or "")
         if match:
@@ -300,7 +342,7 @@ def survey_recorder(input) -> SurveyRecorder | None:  # noqa: A002
         return None
     if cl.user_session.get(_DECISION_KEY) is not None:
         return None
-    return SurveyRecorder(str(args.get("task") or ""))
+    return SurveyRecorder(str(args.get("task") or ""))  # 観測の範囲は observe_tool_calls で絞る
 
 
 async def ask_after_survey(recorder: SurveyRecorder, result):
@@ -314,7 +356,7 @@ async def ask_after_survey(recorder: SurveyRecorder, result):
         if inventory["total"] <= int(_setting("read_volume_guard_threshold_files", 30)):
             return result
         per_folder = int(_setting("read_volume_guard_sample_files_per_folder", 2))
-        decision = {**await _ask(inventory["total"], inventory, per_folder), "ai_id": None}
+        decision = {**await _ask(inventory["total"], inventory, per_folder, truncated=inventory["truncated"]), "ai_id": None}
         decision.update(total=inventory["total"], per_folder=per_folder)
         cl.user_session.set(_DECISION_KEY, decision)
     note = _survey_note(decision)

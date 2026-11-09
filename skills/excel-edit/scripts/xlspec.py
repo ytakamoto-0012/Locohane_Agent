@@ -6,7 +6,7 @@
 ここでは次の3つを1か所にする:
 
 - 記録: スレッドノートの ```records ブロック（1行1件の JSON）を `records()` で読む（手で写さない）。
-  読めない行は飛ばして報告し、1行に複数の JSON があれば分け、全く同じ行は1件にまとめる
+  読めない行は飛ばして報告し、1行に複数の JSON があれば分け、同じトピックの中の全く同じ行は1件にまとめる
   （不正な1行で全体がエラーになり、worker がノートファイルを手で読み直して膨らぶ実測がある）。
 - ルール: 作り手が `rules.py` に関数として1回だけ書き、build スクリプトもチェックも import する。
 - 合格基準: `checks.py` に要件1つにつき1つの `@check` を書き、`run_checks()` で両者が同じ判定をする。
@@ -93,7 +93,7 @@ def records(topic: str | None = None, *, notes_path=None) -> list[dict]:
     Notes:
         読めない行は例外にするのではなく飛ばして続けます（1行の誤りで全体が読めないと、
         呼び出し側がノートファイルを手で読み直して往復を増やす実測がある）。1行に複数の
-        JSON が並ぶ書き方でも読め、全く同じ行は1件にまとめます。飛ばした・まとめた行が
+        JSON が並ぶ書き方でも読め、同じトピックの中の全く同じ行は1件にまとめます。飛ばした・まとめた行が
         あるときだけ、標準出力に1行の JSON で報告します（件数の違いを最終回答へ写すため）。
 
     Raises:
@@ -122,7 +122,10 @@ def records(topic: str | None = None, *, notes_path=None) -> list[dict]:
                     skipped.append({"topic": name, "line": line_no, "problem": str(e), "text": line.strip()[:120]})
                     continue
                 for value in values:
-                    key = json.dumps(value, sort_keys=True, ensure_ascii=False)
+                    # まとめるのは同じトピックの中の全く同じ行だけ（同じ調査が同じ行を書き直した重複）。
+                    # 別のトピック（別の年・別のフォルダの調査）に同じ内容の記録があれば、別の記録として残す
+                    # （同じ日・同じ金額の取引が2件あるような、本当に別々の記録を消さないため）。
+                    key = name + "\x00" + json.dumps(value, sort_keys=True, ensure_ascii=False)
                     if key in seen:
                         merged += 1
                         continue
@@ -161,13 +164,19 @@ def check(name: str):
 
 
 class Book:
-    """チェックに渡すブック。表は結合セルの値を埋めた dict の行で読める。"""
+    """チェックに渡すブック。表は結合セルの値を埋めた dict の行で読める。
 
-    def __init__(self, path):
+    既定（data_only=False）では数式セルは "=SUM(...)" の数式の文字列で読める。data_only=True なら
+    Excel が最後に計算して保存した値で読む（openpyxl で作っただけで Excel で開いて保存していない
+    ファイルには計算済みの値が無く None になる。その場合は excel-recalc で再計算してから読む）。
+    """
+
+    def __init__(self, path, *, data_only: bool = False):
         from openpyxl import load_workbook
 
         self.path = Path(path)
-        self.wb = load_workbook(self.path)
+        self.data_only = data_only
+        self.wb = load_workbook(self.path, data_only=data_only)
         self._tables: dict[tuple, list[dict]] = {}
 
     def table(self, sheet, header_row: int | None = None) -> list[dict]:
@@ -178,20 +187,40 @@ class Book:
                 sys.path.insert(0, str(_EXCEL_READ_SCRIPTS))
             from xlread import read_table
 
-            self._tables[key] = read_table(self.path, sheet, header_row)
+            self._tables[key] = read_table(self.path, sheet, header_row, data_only=self.data_only)
         return self._tables[key]
 
     def texts(self, sheet) -> list[tuple[str, str]]:
         """シートの文字列セルを (番地, 文字列) で返す（注記・凡例の確認用）。"""
         ws = self.wb[sheet] if isinstance(sheet, str) else self.wb.worksheets[sheet]
-        return [(c.coordinate, c.value) for row in ws.iter_rows() for c in row if isinstance(c.value, str)]
+        # iter_rows() は範囲内の無いセルまで作るため、実在するセルだけを回す
+        cells = (ws._cells[key] for key in sorted(ws._cells))
+        return [(c.coordinate, c.value) for c in cells if isinstance(c.value, str)]
 
 
-def run_checks(xlsx_path, checks_file: str = "checks.py") -> dict:
+def _problems_of(outcome) -> list[str]:
+    """チェック関数の戻り値を問題の一覧にする（True/None/空 → 合格、False → "failed"）。
+
+    文字列1つ（"B7: expected ..."）は問題1件として扱う。そのまま反復すると1文字ずつの
+    問題に分かれていた。
+    """
+    if outcome is True or outcome is None:
+        return []
+    if outcome is False:
+        return ["failed"]
+    if isinstance(outcome, str):
+        return [outcome] if outcome.strip() else []
+    if isinstance(outcome, dict):
+        return [f"{k}: {v}" for k, v in outcome.items()]
+    return [str(p) for p in outcome]
+
+
+def run_checks(xlsx_path, checks_file: str = "checks.py", *, data_only: bool = False) -> dict:
     """checks.py の @check をすべて実行し、結果を1行の JSON で表示して返す。
 
     要件を満たさない（問題を返した）チェックは `failed`、チェック自体が例外で落ちたものは `errors`
     として分ける（後者はチェックのコードの誤りで、ファイルの不備とは限らない）。
+    data_only=True なら、数式セルを Excel が最後に計算した値で読む（Book 参照）。
 
     Returns:
         {"file", "checks", "passed", "failed": [{"check", "problems", "more"?}], "errors": [{"check", "error"}]}
@@ -203,7 +232,7 @@ def run_checks(xlsx_path, checks_file: str = "checks.py") -> dict:
     runpy.run_path(str(checks_path))
     if not _CHECKS:
         raise ValueError(f"{checks_path} defines no @check functions")
-    book = Book(xlsx_path)
+    book = Book(xlsx_path, data_only=data_only)
     passed, failed, errors = [], [], []
     for name, func in _CHECKS:
         try:
@@ -212,7 +241,7 @@ def run_checks(xlsx_path, checks_file: str = "checks.py") -> dict:
             frame = traceback.extract_tb(e.__traceback__)[-1]
             errors.append({"check": name, "error": f"{type(e).__name__}: {e} (line {frame.lineno}: {frame.line})"})
             continue
-        problems = [] if outcome is True or outcome is None else (["failed"] if outcome is False else [str(p) for p in outcome])
+        problems = _problems_of(outcome)
         if problems:
             entry = {"check": name, "problems": problems[:_MAX_PROBLEMS]}
             if len(problems) > _MAX_PROBLEMS:

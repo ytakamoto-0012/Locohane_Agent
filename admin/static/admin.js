@@ -4226,10 +4226,13 @@ function drawUsageOverview(box, data) {
     const cost = data.months.reduce((s, m) => { const c = (m.instances[i.name] || {}).cost; return c === null || c === undefined ? s : (s || 0) + c; }, null);
     const jpy = data.months.reduce((s, m) => { const c = (m.instances[i.name] || {}).cost_jpy; return c === null || c === undefined ? s : (s || 0) + c; }, null);
     return [
-      linkBtn(labelOf[i.name], () => {
-        $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === "instances"));
-        renderInstanceDetail(i.name, "usage");
-      }),
+      // 管理アシスタント・削除済みのスキル調整ワーカーの行（virtual）は、開けるインスタンスが無いのでリンクにしない。
+      i.virtual
+        ? labelOf[i.name]
+        : linkBtn(labelOf[i.name], () => {
+            $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === "instances"));
+            renderInstanceDetail(i.name, "usage");
+          }),
       fmtNum(total),
       fmtPct(allTotal ? total / allTotal : null),
       fmtUsd(cost),

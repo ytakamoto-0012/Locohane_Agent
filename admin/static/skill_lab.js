@@ -1194,6 +1194,17 @@ async function openCaseEditor(state, caseId) {
   });
 }
 
+// 機械判定（文字列・引数の完全一致）で落ちた回を見直した結果（admin/skill_lab/judge.py の review_rules）。
+function ruleReviewNote(review) {
+  if (!review) return null;
+  const how = review.how === "normalized" ? _t("表記をそろえて照合") : _t("AI が中身を判定");
+  const verdict = review.pass ? _t("合格扱い") : _t("不合格");
+  return el("p", { class: "hint" }, [
+    el("strong", { text: _t(`機械判定の見直し（{0}）: {1} `, how, verdict) }),
+    `${(review.rules || []).join(", ")} — ${review.reason || ""}`,
+  ]);
+}
+
 function showTrialResult(r) {
   if (!r) return;
   const outcome = { pass: _t("合格"), fail: _t("不合格"), error: _t("エラー") }[r.outcome] || r.outcome;
@@ -1201,6 +1212,7 @@ function showTrialResult(r) {
     _t(`1回試行: {0}（{1}）`, r.case_id, outcome),
     [
       r.ai_judge ? el("p", {}, [el("strong", { text: `AI judge: ${r.ai_judge.pass ? _t("合格") : _t("不合格")} ` }), r.ai_judge.reason]) : null,
+      ruleReviewNote(r.rule_review),
       r.error ? el("p", { class: "error", text: `${r.error}: ${r.detail || ""}` }) : null,
       el("h4", { text: _t("満たさなかった判定") }),
       el("pre", { class: "lab-pre", text: JSON.stringify(Object.fromEntries(Object.entries(r.rule_results || {}).filter(([, v]) => !v.pass)), null, 2) }),
@@ -1245,6 +1257,7 @@ async function openIterationDetail(state, n) {
     nodes.push(
       el("details", { class: `run-detail run-${r.outcome}` }, [
         el("summary", { text: _t(`{0}（{1}回目）: {2}{3}`, r.case_id, r.repeat_index, outcome, r.ai_judge ? ` ／ AI judge: ${r.ai_judge.reason}` : "") }),
+        ruleReviewNote(r.rule_review),
         Object.keys(r.failed_rules || {}).length ? el("pre", { class: "lab-pre", text: JSON.stringify(r.failed_rules, null, 2) }) : null,
         r.error ? el("p", { class: "error", text: `${r.error}: ${r.detail || ""}` }) : null,
         el("div", { class: "hint", text: _t("最終回答") }),
@@ -1267,7 +1280,7 @@ async function renderThemeReview(state, body) {
       el("h4", { text: _t("トライアウト") }),
       el("p", {}, [
         _t(`各ケース {0} 回、全回合格（{1}、反復 {2}）。`, t.repeat, fmtTime(t.at), t.iteration),
-        t.ai_judged ? el("strong", { text: _t(" judge 付きのケースは AI が判定しています。昇格の承認は、その判定を人が確認したことを意味します。") }) : "",
+        t.ai_judged ? el("strong", { text: _t(" judge 付きのケースと、機械判定を見直したケースは AI が判定しています。昇格の承認は、その判定を人が確認したことを意味します。") }) : "",
       ]),
     );
     if (d.tryout_problems && d.tryout_problems.length) body.append(el("p", { class: "error", text: d.tryout_problems.join(" / ") }));

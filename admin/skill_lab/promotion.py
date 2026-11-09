@@ -199,12 +199,13 @@ def check(instances_root: Path, directory: Path, *, distribute_to: list[str] | N
     placed_before = previously_placed(data)
 
     def _placed_unchanged(path: Path) -> bool:
-        """path がこのテーマの前の昇格で置いたもので、その後に変わっていない。"""
+        """path がこのテーマの前の昇格で置いたもので、その後に変わっていない。
+
+        置いた時点のハッシュが無い古い記録は、変わっていないと確かめられないため False（置き換えない）。
+        """
         key = str(path.resolve())
-        if key not in placed_before:
-            return False
-        expected = placed_before[key]
-        return expected is None or _path_sha256(path) == expected
+        expected = placed_before.get(key)
+        return expected is not None and _path_sha256(path) == expected
 
     # 取り込み元・複製元
     for asset_type in themes.ASSET_TYPES:
@@ -256,8 +257,15 @@ def check(instances_root: Path, directory: Path, *, distribute_to: list[str] | N
                         # このテーマの前の昇格で置いたもの（再開して直したもの）を置き換える。
                         placement["replaces"].append(f"{asset_type}/{asset}")
                     elif str(target.resolve()) in placed_before:
+                        if placed_before[str(target.resolve())] is None:
+                            reason = (
+                                "but that promotion did not record its content, so it cannot be confirmed that it has not "
+                                "been changed since then"
+                            )
+                        else:
+                            reason = "but has been changed since then"
                         result.problems.append(
-                            f"{target} was placed by the previous promotion of this theme but has been changed since then. "
+                            f"{target} was placed by the previous promotion of this theme {reason}. "
                             "Check the change, then move it away by hand or make a theme that copies and improves it"
                         )
                     else:

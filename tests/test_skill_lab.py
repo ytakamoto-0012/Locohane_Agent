@@ -1118,3 +1118,117 @@ def test_lab_llm_passes_usage_metadata_to_the_sink(monkeypatch):
         assert lab_llm.ask_json(None, "sys", "user") == {"ok": True}
     assert lab_llm.ask_text(None, "sys", "user")  # sink の外では記録しない
     assert seen == [{"input_tokens": 11, "output_tokens": 4, "total_tokens": 15}]
+
+
+def test_old_promotion_record_without_hashes_does_not_replace_the_placed_assets(lab_env, client, monkeypatch):
+    """置いた時点のハッシュが無い古い昇格の記録では、変わっていないと確かめられないため置き換えない。"""
+    monkeypatch.setattr(promotion, "PROMOTION_LOG", lab_env["tmp"] / "promotion_log.md")
+    monkeypatch.setattr(promotion, "PROMOTE_HISTORY_DIR", lab_env["tmp"] / "history")
+    directory, _draft_dir = _ready_theme(lab_env)
+    _promote(lab_env, directory)
+
+    def _drop_hashes(d):
+        for placement in d["promotion"]["placements"].values():
+            placement.pop("placed_sha256", None)
+
+    themes.update(directory, _drop_hashes)  # この機能より前の昇格の記録と同じ形
+    base = f"/api/instances/org_a/skill-lab/themes/{directory.name}"
+    assert client.post(f"{base}/reopen").status_code == 200
+    themes.update(directory, lambda d: d.update({"tryout": _tryout_for(directory), "status": themes.STATUS_REVIEW}))
+    problems = promotion.check(lab_env["root"], directory).problems
+    assert any("cannot be confirmed" in p for p in problems)
+
+
+# --- 機械判定の見直し（admin/skill_lab/judge.py の review_rules。LLM は差し替える） ----------------
+
+
+def _rule_result(rule_results, final_answer="", judge_text=None):
+    return {
+        "case_id": "c1",
+        "repeat_index": 1,
+        "rule_results": rule_results,
+        "rules_pass": all(v["pass"] for v in rule_results.values()),
+        "final_answer": final_answer,
+        "judge": judge_text,
+        "transcript": [],
+    }
+
+
+def test_rule_review_passes_notation_differences_without_the_llm(monkeypatch):
+    from admin.skill_lab import judge
+
+    monkeypatch.setattr(judge, "ask_json", lambda *a, **k: pytest.fail("the LLM must not be called"))
+    r = _rule_result(
+        {
+            "response_contains": {"pass": False, "detail": "missing", "missing": ["合計 1234円", "ＡＢＣ"]},
+            "tool_call_args_contains:Read": {
+                "pass": False,
+                "detail": "x",
+                "expected": {"file_path": "C:/work/a.xlsx", "limit": 10},
+                "calls": [{"file_path": r"C:\work\a.xlsx", "limit": "10"}],
+            },
+        },
+        final_answer="合計 1,234 円です。abc も確認しました。",
+    )
+    [verdict] = judge.judge_results(None, spec="", results=[r], excerpt_chars=1000)
+    assert verdict["outcome"] == "pass"
+    assert verdict["rule_review"]["how"] == "normalized" and verdict["rule_review"]["pass"] is True
+
+
+def test_rule_review_asks_the_llm_for_wording_differences_then_runs_the_judge(monkeypatch):
+    from admin.skill_lab import judge
+
+    prompts = []
+
+    def fake_ask(_config, system, user):
+        prompts.append(system)
+        return {"pass": True, "reason": "same date written differently"}
+
+    monkeypatch.setattr(judge, "ask_json", fake_ask)
+    r = _rule_result(
+        {"response_contains": {"pass": False, "detail": "missing", "missing": ["2027/1/1"]}},
+        final_answer="2027年1月1日（金）に設定しました。",
+        judge_text="日付を正しく設定している",
+    )
+    [verdict] = judge.judge_results(None, spec="", results=[r], excerpt_chars=1000)
+    assert verdict["rule_review"]["how"] == "ai" and verdict["rule_review"]["pass"] is True
+    assert "ai_judge" in verdict and verdict["outcome"] == "pass"
+    assert len(prompts) == 2 and "exactly" in prompts[0]  # 見直し → judge の順
+
+
+def test_rule_review_keeps_tool_choice_failures_and_llm_failures_as_fail(monkeypatch):
+    from admin.skill_lab import judge
+    from admin.skill_lab.llm import LabLLMError
+
+    monkeypatch.setattr(judge, "ask_json", lambda *a, **k: pytest.fail("the LLM must not be called"))
+    hard = _rule_result(
+        {
+            "tool_not_called": {"pass": False, "detail": "unexpectedly called: ['execute_python_code']"},
+            "response_contains": {"pass": False, "detail": "missing", "missing": ["x"]},
+        }
+    )
+    [verdict] = judge.judge_results(None, spec="", results=[hard], excerpt_chars=1000)
+    assert verdict["outcome"] == "fail" and "rule_review" not in verdict
+
+    def broken(*a, **k):
+        raise LabLLMError("down")
+
+    monkeypatch.setattr(judge, "ask_json", broken)
+    wrong = _rule_result({"response_contains": {"pass": False, "detail": "missing", "missing": ["1234円"]}}, final_answer="5678円")
+    [verdict] = judge.judge_results(None, spec="", results=[wrong], excerpt_chars=1000)
+    assert verdict["outcome"] == "fail" and verdict["rule_review"]["pass"] is False
+
+
+def test_fixer_does_not_show_accepted_notation_differences_as_unmet():
+    from admin.skill_lab import fixer
+
+    r = _rule_result({"response_contains": {"pass": False, "detail": "missing", "missing": ["x"]}}, judge_text="j")
+    verdict = {
+        "case_id": "c1",
+        "repeat_index": 1,
+        "outcome": "fail",
+        "rule_review": {"pass": True, "how": "ai", "rules": ["response_contains"], "reason": "ok"},
+        "ai_judge": {"pass": False, "reason": "the summary is missing"},
+    }
+    text = fixer.failures_text([r], [verdict], excerpt_chars=1000)
+    assert "Unmet checks" not in text and "accepted" in text and "the summary is missing" in text

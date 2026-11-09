@@ -93,8 +93,14 @@ def failures_text(results: list[dict], verdicts: list[dict], excerpt_chars: int,
         shown[cid] = shown.get(cid, 0) + 1
         failed_rules = {k: d for k, d in (r.get("rule_results") or {}).items() if not d.get("pass")}
         lines = [f"### Case {cid} (run {r.get('repeat_index', 1)}): {v['outcome']}"]
-        if failed_rules:
+        review = v.get("rule_review") or {}
+        if failed_rules and review.get("pass"):
+            # 表記の違いだけだった（judge.review_rules が合格扱いにした）。直す対象として見せない。
+            lines.append("Exact text checks differed only in wording/notation and were accepted: " + ", ".join(sorted(failed_rules)))
+        elif failed_rules:
             lines.append("Unmet checks: " + json.dumps(failed_rules, ensure_ascii=False)[:1500])
+            if review.get("reason"):
+                lines.append(f"Reviewer's reason the checks are not met in substance: {review['reason']}")
         if v.get("ai_judge"):
             lines.append(f"AI judge's reason for failing: {v['ai_judge'].get('reason', '')}")
         lines.append(evaluation.transcript_excerpt(r, excerpt_chars))

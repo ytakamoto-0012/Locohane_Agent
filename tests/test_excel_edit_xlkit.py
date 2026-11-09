@@ -186,7 +186,7 @@ def test_rebuilt_new_workbook_saved_over_existing_file_still_gets_cjk_font(tmp_p
     assert saved["B2"].font.name == "Yu Gothic"
 
 
-def test_existing_workbook_without_any_named_font_gets_cjk_font(tmp_path):
+def test_existing_workbook_without_any_named_font_gets_cjk_font_on_new_cells_only(tmp_path):
     path = tmp_path / "plain.xlsx"
     wb = openpyxl.Workbook()
     wb.active.title = "S"
@@ -198,8 +198,88 @@ def test_existing_workbook_without_any_named_font_gets_cjk_font(tmp_path):
     save(wb2, path)
 
     saved = openpyxl.load_workbook(path)["S"]
-    assert saved["A1"].font.name == "Yu Gothic"
+    # 元からあるセルのフォントは変えない（開いた後に書いたセルだけに名前を付ける）
+    assert saved["A1"].font.name == "Calibri"
     assert saved["A2"].font.name == "Yu Gothic"
+
+
+def test_save_of_an_existing_workbook_leaves_untouched_cells_sheets_and_rows_alone(tmp_path):
+    from openpyxl.styles import Alignment, Font
+
+    path = tmp_path / "user.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "編集する"
+    ws["A1"] = "見出し"
+    ws["A1"].font = Font(name="Meiryo")
+    ws["B1"] = 1234
+    ws["B1"].font = Font(name="Calibri")  # 日本語のブックで、数字だけ意図して Calibri にしたセル
+    other = wb.create_sheet("触らない")
+    other["A1"] = "とても長い説明の文がここに入っていて、折り返して表示される"
+    other["A1"].alignment = Alignment(wrap_text=True)  # 高さは Excel の自動調整（未設定）
+    wb.save(path)
+
+    wb2 = open_workbook(path)
+    wb2["編集する"]["A2"] = "追記した行"
+    save(wb2, path)
+
+    saved = openpyxl.load_workbook(path)
+    assert saved["編集する"]["B1"].font.name == "Calibri"
+    assert saved["編集する"]["A2"].font.name == "Meiryo"
+    assert saved["触らない"]["A1"].font.name == "Calibri"
+    assert saved["触らない"].row_dimensions[1].height is None
+
+
+def test_save_sets_the_height_of_an_existing_row_whose_alignment_was_changed(tmp_path):
+    from openpyxl.styles import Alignment
+
+    path = tmp_path / "user.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "S"
+    ws.column_dimensions["A"].width = 10
+    ws["A1"] = "とても長い説明の文がここに入っていて、折り返して表示される"
+    wb.save(path)
+
+    wb2 = open_workbook(path)
+    wb2["S"]["A1"].alignment = Alignment(wrap_text=True)
+    save(wb2, path)
+
+    assert openpyxl.load_workbook(path)["S"].row_dimensions[1].height is not None
+
+
+def test_save_of_a_sparse_existing_sheet_does_not_create_empty_cells(tmp_path):
+    path = tmp_path / "sparse.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "見出し"
+    ws["CV50000"] = "x"
+    wb.save(path)
+
+    wb2 = open_workbook(path)
+    save(wb2, path)
+
+    # 範囲内の全セル（約500万）を作っていれば、ここが数百万になり、保存に数十秒かかっていた
+    assert len(wb2.active._cells) == 2
+
+
+def test_save_as_xlsx_drops_the_macros_of_a_workbook_opened_with_keep_vba(tmp_path):
+    import zipfile
+
+    source = tmp_path / "book.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "x"
+    wb.save(source)
+    wb2 = openpyxl.load_workbook(source, keep_vba=True)  # .xlsm を open_workbook した状態と同じ
+    assert wb2.vba_archive is not None
+
+    out = tmp_path / "out.xlsx"
+    result = save(wb2, out, new=True)
+
+    with zipfile.ZipFile(out) as z:
+        content_types = z.read("[Content_Types].xml").decode("utf-8")
+    assert "macroEnabled" not in content_types
+    assert any("macros" in w for w in result["warnings"])
 
 
 def test_save_new_overwrites_its_own_output_of_this_conversation(tmp_path, monkeypatch):

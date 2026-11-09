@@ -178,7 +178,6 @@ def test_survey_explore_asks_right_after_it_returns_and_appends_the_answer(monke
     assert recorder is not None
     recorder(_glob_record("Survey the Datas folder", tmp_path / "Datas"))
     recorder(_glob_record("Survey the Datas folder", tmp_path / "Datas" / "2021"))  # 入れ子は親だけ数える
-    recorder(_glob_record("another session's task", tmp_path))  # 別の委譲の記録は拾わない
     result = {"messages": [ToolMessage(content="5 year folders, 60 files", tool_call_id="s")]}
     result = asyncio.run(guard.ask_after_survey(recorder, result))
     assert len(asked) == 1 and "60" in asked[0][0]
@@ -202,3 +201,72 @@ def test_survey_without_glob_or_with_few_files_does_not_ask(monkeypatch, tmp_pat
         result = {"messages": [ToolMessage(content="ok", tool_call_id="s")]}
         assert asyncio.run(guard.ask_after_survey(recorder, result))["messages"][0].content == "ok"
     assert asked == []
+
+
+def test_recorder_sees_only_subagents_started_inside_observe_tool_calls(tmp_path):
+    """観測の範囲は task 文ではなくコンテキストで決まる（task 文が書き換わっても・空でも外れない）。"""
+    from langchain_core.messages import ToolMessage
+
+    from src import subagent
+
+    recorder = guard.SurveyRecorder("")
+    glob = {"name": "Glob", "id": "g1", "args": {}}
+
+    def result(base):
+        return [(ToolMessage(content='{"base": "%s", "files": []}' % str(base).replace("\\", "\\\\"), tool_call_id="g1"), None)]
+
+    async def inside():
+        with subagent.observe_tool_calls(recorder):
+            # dispatch_agent はジョブを create_task で作る。作った時点のコンテキストを引き継ぐ
+            await asyncio.create_task(_notify("[Work dir hint] rewritten task @1 resolved", tmp_path / "mine"))
+
+    async def _notify(task, base):
+        subagent._notify_tool_call_observers(task, 1, [glob], result(base))
+
+    asyncio.run(inside())
+    asyncio.run(_notify("another session", tmp_path / "other"))  # 範囲の外（別のセッション・別の委譲）
+    assert recorder.bases == {str(tmp_path / "mine")}
+
+
+def test_ai_message_without_id_does_not_block_every_later_delegation(monkeypatch, tmp_path):
+    """構造調査の答え（ai_id=None）と、id の無い AIMessage が一致して以後の委譲が全部止まらない。"""
+    _make_tree(tmp_path)
+    session, asked = _setup(monkeypatch, tmp_path, lambda c: c[2])
+    session[guard._DECISION_KEY] = {"kind": "stop", "answer": "stop", "ai_id": None, "total": 60, "per_folder": 2}
+    ai = _ai("explore", "explore", msg_id=None)
+    ai.id = None
+    ai.tool_calls[0]["id"] = None
+    ai.tool_calls[1]["id"] = None
+    assert asyncio.run(guard.guard_read_volume(_input(ai))) is None
+    assert asked == []
+
+
+def test_ai_message_without_id_still_blocks_the_siblings_of_its_own_question(monkeypatch, tmp_path):
+    _make_tree(tmp_path)
+    _, asked = _setup(monkeypatch, tmp_path, lambda c: c[2])  # 中止
+    ai = _ai("explore", "explore", msg_id=None)
+    ai.id = None
+    first = asyncio.run(guard.guard_read_volume(_input(ai, 0)))
+    second = asyncio.run(guard.guard_read_volume(_input(ai, 1)))
+    assert len(asked) == 1
+    assert first is not None and second is not None  # ツール呼び出しの id の並びで同じ応答と分かる
+
+
+def test_delegation_that_cannot_read_much_does_not_scan_the_work_dir(monkeypatch, tmp_path):
+    _make_tree(tmp_path)
+    _setup(monkeypatch, tmp_path, lambda c: c[0])
+    scanned = []
+    monkeypatch.setattr(guard, "count_source_files", lambda root, *a, **k: scanned.append(root) or {})
+    single = {"name": "dispatch_agent", "args": {"agent_type": "verifier", "task": "check"}, "id": "v1"}
+    ai = AIMessage(content="", tool_calls=[single], id="ai-v")
+    assert asyncio.run(guard.guard_read_volume(_input(ai))) is None
+    assert scanned == []
+
+
+def test_question_marks_a_truncated_count(monkeypatch, tmp_path):
+    _make_tree(tmp_path)
+    _, asked = _setup(monkeypatch, tmp_path, lambda c: c[0])
+    real = guard.count_source_files
+    monkeypatch.setattr(guard, "count_source_files", lambda root, *a, **k: {**real(root), "truncated": True})
+    asyncio.run(guard.guard_read_volume(_input(_ai("explore", "explore"))))
+    assert "60+" in asked[0][0]

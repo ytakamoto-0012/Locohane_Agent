@@ -560,13 +560,11 @@ class ImageAwareToolNode(ToolNode):
         if recorder is None:
             result = await super().ainvoke(input, config, **kwargs)
         else:
-            from ..subagent import add_tool_call_observer, remove_tool_call_observer  # noqa: PLC0415 (循環 import を避ける)
+            from ..subagent import observe_tool_calls  # noqa: PLC0415 (循環 import を避ける)
 
-            add_tool_call_observer(recorder)
-            try:
+            # この呼び出しの中で始まる explore だけを観測する（他のセッション・並列の兄弟の委譲は拾わない）。
+            with observe_tool_calls(recorder):
                 result = await super().ainvoke(input, config, **kwargs)
-            finally:
-                remove_tool_call_observer(recorder)
             result = await ask_after_survey(recorder, result)
         _log_tool_results_debug(result, call_args)
         return _with_image_followups(result)

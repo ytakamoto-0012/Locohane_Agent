@@ -278,6 +278,7 @@ class Worker:
             "case_id": case_id,
             "outcome": verdicts[0]["outcome"] if verdicts else "error",
             "ai_judge": verdicts[0].get("ai_judge") if verdicts else None,
+            "rule_review": verdicts[0].get("rule_review") if verdicts else None,
             "rule_results": r.get("rule_results"),
             "error": r.get("error"),
             "detail": r.get("detail"),
@@ -429,7 +430,10 @@ class Worker:
                     "out_dir": run["out_dir"],
                     "at": themes.now_iso(),
                     "ai_verdict": "pass",
-                    "ai_judged": any(v.get("ai_judge") for v in verdicts),
+                    # 機械判定を LLM が見直して合格にした回も、人が確認する対象（AI の判定）に数える
+                    "ai_judged": any(
+                        v.get("ai_judge") or (v.get("rule_review") or {}).get("how") == "ai" for v in verdicts
+                    ),
                     "iteration": n,
                 }
 

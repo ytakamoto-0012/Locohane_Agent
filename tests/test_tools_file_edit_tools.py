@@ -162,3 +162,14 @@ def test_parallel_edits_of_one_file_all_apply_and_keep_utf8(env):
     text = (tools._workdir._resolve_exec_workdir() / "p.py").read_bytes().decode("utf-8")
     assert all(f'print("確認{i} -> 月曜日")' in text for i in range(40))
     assert not list(tools._workdir._resolve_exec_workdir().glob(".p.py.*.tmp"))
+
+
+def test_edit_of_a_cp932_file_with_a_character_cp932_cannot_hold_leaves_the_file_unchanged(env):
+    target = tools._workdir._resolve_exec_workdir() / "sjis_emoji.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = "一行目\r\n二行目\r\n".encode("cp932")
+    target.write_bytes(original)
+    result = _edit(file_path=str(target), old_string="二行目", new_string="二行目😀")
+    assert result.startswith("Error:") and "cp932" in result and "not changed" in result
+    assert target.read_bytes() == original
+    assert not list(target.parent.glob(".sjis_emoji.txt.*.tmp"))

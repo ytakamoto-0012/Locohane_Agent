@@ -290,3 +290,25 @@ def test_admin_ai_usage_is_counted_as_lab_and_assistant_rows(tmp_path, monkeypat
     lab_oct = {m["month"]: m for m in lab["costs"]["months"]}["2026-10"]
     assert lab["usage"]["months"][0]["calls"] == 3
     assert lab_oct["share_of_all"] == pytest.approx(1 / 7) and lab_oct["cost"] == pytest.approx(10)
+
+
+def test_rows_without_an_instance_are_virtual_and_do_not_clash_with_an_instance_name(tmp_path, monkeypatch) -> None:
+    """管理アシスタント・削除済みワーカーの行は virtual（画面でリンクにしない）。同名の通常インスタンスとは行を分ける。"""
+    from datetime import datetime
+
+    from fastapi.testclient import TestClient
+
+    from admin import ai_usage
+
+    root, server = _api_setup(tmp_path, monkeypatch)
+    when = datetime(2026, 10, 15, 12, 0)
+    ai_usage.record(root, ai_usage.ASSISTANT_SOURCE, "admin", {"total": 1_000_000}, when=when)
+    ai_usage.record(root, "inst_a", "dev", {"total": 1_000_000}, when=when)  # 削除したワーカーと同名の通常インスタンス
+
+    data = TestClient(server.app).get("/api/usage/overview").json()
+    rows = {i["name"]: i for i in data["instances"]}
+    assert rows["inst_a"]["virtual"] is False and rows["inst_a"]["display_name"] != "inst_a（スキル研究室・削除済み）"
+    deleted = [i for i in data["instances"] if i["display_name"] == "inst_a（スキル研究室・削除済み）"]
+    assert len(deleted) == 1 and deleted[0]["name"] != "inst_a" and deleted[0]["virtual"] is True
+    assert rows[ai_usage.ASSISTANT_SOURCE]["virtual"] is True
+    assert len({i["name"] for i in data["instances"]}) == len(data["instances"])
