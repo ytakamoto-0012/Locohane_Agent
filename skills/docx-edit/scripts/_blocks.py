@@ -37,28 +37,51 @@ if str(_OFFICE_SHARED) not in sys.path:
 from office_theme import DEFAULT_THEME, THEMES, resolve_theme  # noqa: E402
 
 
-def _set_cell_shading(cell, color_hex: str) -> None:
+# スキーマで w:shd / w:pBdr より後ろに来る兄弟要素。末尾に足すと、既存の段落・セルの w:jc・w:spacing・
+# w:vAlign 等より後ろになりスキーマ違反になる（Word は開けても他のアプリ・検証で壊れる）。
+_TC_SHD_SUCCESSORS = ("w:noWrap", "w:tcMar", "w:textDirection", "w:tcFitText", "w:vAlign", "w:hideMark",
+                      "w:headers", "w:cellIns", "w:cellDel", "w:cellMerge", "w:tcPrChange")
+_P_SHD_SUCCESSORS = ("w:tabs", "w:suppressAutoHyphens", "w:kinsoku", "w:wordWrap", "w:overflowPunct",
+                     "w:topLinePunct", "w:autoSpaceDE", "w:autoSpaceDN", "w:bidi", "w:adjustRightInd",
+                     "w:snapToGrid", "w:spacing", "w:ind", "w:contextualSpacing", "w:mirrorIndents",
+                     "w:suppressOverlap", "w:jc", "w:textDirection", "w:textAlignment", "w:textboxTightWrap",
+                     "w:outlineLvl", "w:divId", "w:cnfStyle", "w:rPr", "w:sectPr", "w:pPrChange")
+_P_BDR_SUCCESSORS = ("w:shd",) + _P_SHD_SUCCESSORS
+
+
+def _put_child(parent, child, successors: tuple) -> None:
+    """同じ名前の既存要素を置き換え、無ければスキーマの順を守って入れる（2回当てても重複しない）。"""
+    existing = parent.find(child.tag)
+    if existing is not None:
+        existing.addprevious(child)
+        parent.remove(existing)
+        return
+    from docx.oxml.ns import qn
+
+    following = next((parent.find(qn(tag)) for tag in successors if parent.find(qn(tag)) is not None), None)
+    if following is not None:
+        following.addprevious(child)
+    else:
+        parent.append(child)
+
+
+def _shd(color_hex: str):
     from docx.oxml.ns import qn
     from docx.oxml.shared import OxmlElement
 
-    tcPr = cell._tc.get_or_add_tcPr()
     shd = OxmlElement("w:shd")
     shd.set(qn("w:val"), "clear")
     shd.set(qn("w:color"), "auto")
     shd.set(qn("w:fill"), color_hex)
-    tcPr.append(shd)
+    return shd
+
+
+def _set_cell_shading(cell, color_hex: str) -> None:
+    _put_child(cell._tc.get_or_add_tcPr(), _shd(color_hex), _TC_SHD_SUCCESSORS)
 
 
 def _set_paragraph_shading(paragraph, color_hex: str) -> None:
-    from docx.oxml.ns import qn
-    from docx.oxml.shared import OxmlElement
-
-    pPr = paragraph._p.get_or_add_pPr()
-    shd = OxmlElement("w:shd")
-    shd.set(qn("w:val"), "clear")
-    shd.set(qn("w:color"), "auto")
-    shd.set(qn("w:fill"), color_hex)
-    pPr.append(shd)
+    _put_child(paragraph._p.get_or_add_pPr(), _shd(color_hex), _P_SHD_SUCCESSORS)
 
 
 def _set_paragraph_left_border(paragraph, color_hex: str) -> None:
@@ -66,14 +89,26 @@ def _set_paragraph_left_border(paragraph, color_hex: str) -> None:
     from docx.oxml.shared import OxmlElement
 
     pPr = paragraph._p.get_or_add_pPr()
-    pBdr = OxmlElement("w:pBdr")
+    pBdr = pPr.find(qn("w:pBdr"))
+    if pBdr is None:
+        pBdr = OxmlElement("w:pBdr")
+        _put_child(pPr, pBdr, _P_BDR_SUCCESSORS)
     left = OxmlElement("w:left")
     left.set(qn("w:val"), "single")
     left.set(qn("w:sz"), "24")
     left.set(qn("w:space"), "8")
     left.set(qn("w:color"), color_hex)
-    pBdr.append(left)
-    pPr.append(pBdr)
+    # pBdr の子の順は top, left, bottom, right, ...
+    old = pBdr.find(qn("w:left"))
+    if old is not None:
+        old.addprevious(left)
+        pBdr.remove(old)
+    else:
+        top = pBdr.find(qn("w:top"))
+        if top is not None:
+            top.addnext(left)
+        else:
+            pBdr.insert(0, left)
 
 
 def _set_east_asian_font(font_obj, element, font_name: str) -> None:

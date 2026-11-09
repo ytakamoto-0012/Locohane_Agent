@@ -111,15 +111,11 @@ def test_docx_find_replace_not_found_points_to_where_text_appears(tmp_path):
     path = tmp_path / "doc.docx"
     _make_docx(path)
 
-    ops = [{"op": "find_replace", "old_text": "表の中", "new_text": "x"}]
-    proc = subprocess.run(
-        [sys.executable, str(_EDIT_DOCX), str(path), "--ops-json", json.dumps(ops, ensure_ascii=False)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    assert proc.returncode == 1
-    assert "table(s) [0]" in proc.stderr
+    # 表のセルの中も置換する（以前は本文の段落だけで、表の中の文字列は "not found" になっていた）
+    ops = [{"op": "find_replace", "old_text": "表の中", "new_text": "表の外"}]
+    result = _run([str(_EDIT_DOCX), str(path), "--ops-json", json.dumps(ops, ensure_ascii=False)])
+    assert result["op_results"][0]["replaced_count"] == 1
+    assert "表の外" in Document(str(path)).tables[0].cell(0, 0).text
 
     ops = [{"op": "find_replace", "old_text": "株式会社A", "new_text": "x", "track_changes": True, "occurrence": "first"}]
     proc = subprocess.run(

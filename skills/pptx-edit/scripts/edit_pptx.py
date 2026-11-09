@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import io
 import json
 import sys
 import traceback
@@ -63,6 +62,11 @@ UNSUPPORTED_DUPLICATE_TYPES = {
     MSO_SHAPE_TYPE.IGX_GRAPHIC,
     MSO_SHAPE_TYPE.GROUP,
 }
+
+
+def _text(value) -> str:
+    """null を "None" と書かないための文字列化。"""
+    return "" if value is None else str(value)
 
 
 def _require(op: dict, key: str):
@@ -179,15 +183,20 @@ def _set_text_keep_format(text_frame, text: str) -> None:
 
 def _set_bullets(text_frame, bullets: list) -> None:
     tf = text_frame
+    if isinstance(bullets, str):
+        # 文字列をそのまま回すと1文字ずつの段落になるため、行ごとの段落として扱う
+        bullets = bullets.splitlines()
+    elif not isinstance(bullets, list):
+        raise ValueError(f"bullets must be a list of strings or {{\"text\", \"level\"}} objects: {bullets!r}")
     formats = _capture_text_formats(tf)
     tf.clear()
     first = True
     for item in bullets:
         if isinstance(item, dict):
-            text = str(item.get("text", ""))
+            text = _text(item.get("text"))
             level = int(item.get("level", 0))
         else:
-            text = str(item)
+            text = _text(item)
             level = 0
         p = tf.paragraphs[0] if first else tf.add_paragraph()
         first = False
@@ -200,7 +209,7 @@ def op_set_title(ctx: EditContext, op: dict) -> None:
     slide = ctx.get_slide(_require(op, "slide"))
     if slide.shapes.title is None:
         raise ValueError("This slide has no title placeholder")
-    _set_text_keep_format(slide.shapes.title.text_frame, str(op.get("text", "")))
+    _set_text_keep_format(slide.shapes.title.text_frame, _text(op.get("text")))
 
 
 def op_set_text(ctx: EditContext, op: dict) -> None:
@@ -222,7 +231,7 @@ def op_set_table_cell(ctx: EditContext, op: dict) -> None:
     col = int(_require(op, "col"))
     if row < 0 or row >= len(table.rows) or col < 0 or col >= len(table.columns):
         raise ValueError(f"Out of the table's range (the existing table has {len(table.rows)} rows and {len(table.columns)} columns; specified row={row}, col={col})")
-    _set_text_keep_format(table.cell(row, col).text_frame, str(op.get("text", "")))
+    _set_text_keep_format(table.cell(row, col).text_frame, _text(op.get("text")))
 
 
 def op_set_table(ctx: EditContext, op: dict) -> None:
@@ -248,17 +257,17 @@ def op_set_table(ctx: EditContext, op: dict) -> None:
     r = 0
     if headers:
         for c, h in enumerate(headers):
-            _set_text_keep_format(table.cell(0, c).text_frame, str(h))
+            _set_text_keep_format(table.cell(0, c).text_frame, _text(h))
         r = 1
     for row_values in rows:
         for c, val in enumerate(row_values):
-            _set_text_keep_format(table.cell(r, c).text_frame, str(val))
+            _set_text_keep_format(table.cell(r, c).text_frame, _text(val))
         r += 1
 
 
 def op_set_notes(ctx: EditContext, op: dict) -> None:
     slide = ctx.get_slide(_require(op, "slide"))
-    _set_text_keep_format(slide.notes_slide.notes_text_frame, str(op.get("text", "")))
+    _set_text_keep_format(slide.notes_slide.notes_text_frame, _text(op.get("text")))
 
 
 def op_replace_picture(ctx: EditContext, op: dict) -> None:
@@ -404,7 +413,20 @@ def _set_run_font_name(run, font_name: str) -> None:
     ea = rPr.find(qn("a:ea"))
     if ea is None:
         ea = OxmlElement("a:ea")
-        rPr.append(ea)
+        # スキーマの順（latin, ea, cs, sym, hlinkClick, ...）を守る。末尾に足すと a:cs やハイパーリンクの
+        # 後ろに来て、PowerPoint が修復を求めることがある
+        latin = rPr.find(qn("a:latin"))
+        if latin is not None:
+            latin.addnext(ea)
+        else:
+            following = next(
+                (rPr.find(qn(t)) for t in ("a:cs", "a:sym", "a:hlinkClick", "a:hlinkMouseOver", "a:rtl", "a:extLst") if rPr.find(qn(t)) is not None),
+                None,
+            )
+            if following is not None:
+                following.addprevious(ea)
+            else:
+                rPr.append(ea)
     ea.set("typeface", font_name)
 
 
@@ -546,13 +568,31 @@ def op_set_shape_position(ctx: EditContext, op: dict) -> None:
         shape.height = Cm(float(height))
 
 
-def _copy_picture_into(new_slide, shape) -> None:
-    image = shape.image
-    _, rid = new_slide.part.get_or_add_image_part(io.BytesIO(image.blob))
+_R_NS_PREFIX = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+
+def _copy_shape_into(new_slide, source_slide, shape, rid_map: dict) -> None:
+    """shape の XML をコピーし、中の関係の参照（r:id / r:embed 等）を新しいスライドの関係へ張り直す。
+
+    XML だけをコピーすると、文字のハイパーリンク（a:hlinkClick r:id）・画像（a:blip r:embed）・図形の
+    画像塗りつぶしが、新しいスライドに無い rId を指したままになり、PowerPoint が修復を求める壊れた
+    ファイルになっていた。同じ画像・リンク先は元のスライドと共有する。
+    """
     new_el = copy.deepcopy(shape._element)
-    blip = new_el.find(f".//{qn('a:blip')}")
-    if blip is not None:
-        blip.set(qn("r:embed"), rid)
+    src_part, dst_part = source_slide.part, new_slide.part
+    for node in new_el.iter():
+        for attr, value in list(node.attrib.items()):
+            if not attr.startswith(_R_NS_PREFIX):
+                continue
+            if value not in rid_map:
+                rel = src_part.rels.get(value)
+                if rel is None:
+                    continue
+                if rel.is_external:
+                    rid_map[value] = dst_part.relate_to(rel.target_ref, rel.reltype, is_external=True)
+                else:
+                    rid_map[value] = dst_part.relate_to(rel.target_part, rel.reltype)
+            node.set(attr, rid_map[value])
     new_slide.shapes._spTree.append(new_el)
 
 
@@ -575,18 +615,16 @@ def _duplicate_slide_once(prs: Presentation, source_slide):
     for shape in list(new_slide.shapes):
         shape._element.getparent().remove(shape._element)
 
+    rid_map: dict[str, str] = {}
     for shape in source_slide.shapes:
-        if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-            _copy_picture_into(new_slide, shape)
-        elif shape.shape_type in UNSUPPORTED_DUPLICATE_TYPES:
+        if shape.shape_type in UNSUPPORTED_DUPLICATE_TYPES:
             raise ValueError(
                 f"The source slide contains an unsupported shape type ({shape.shape_type}, name={shape.name!r})"
                 ", so it cannot be duplicated (charts/OLE/video/SmartArt/groups are not supported)"
             )
-        else:
-            # プレースホルダ・表・テキストボックス等はXML要素をそのままdeep copyすれば
-            # 書式・placeholder紐付け（layout側のidx/type一致）ともに維持される。
-            new_slide.shapes._spTree.append(copy.deepcopy(shape._element))
+        # プレースホルダ・表・テキストボックス・画像はXML要素をdeep copyすれば
+        # 書式・placeholder紐付け（layout側のidx/type一致）ともに維持される。
+        _copy_shape_into(new_slide, source_slide, shape, rid_map)
 
     if source_slide.has_notes_slide:
         notes_text = source_slide.notes_slide.notes_text_frame.text
@@ -795,7 +833,7 @@ def main() -> int:
             return 1
         try:
             handler(ctx, op)
-        except ValueError as e:
+        except (ValueError, TypeError, KeyError, AttributeError) as e:
             print(f"Failed to apply operation {i + 1} ({op_name}): {e}", file=sys.stderr)
             return 1
         if op_name in _SLIDE_CONTENT_OPS:

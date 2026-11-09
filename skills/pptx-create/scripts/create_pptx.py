@@ -133,16 +133,24 @@ def add_stat_row(slide, prs: Presentation, stats: list, theme: dict, top) -> Non
         lrun.font.color.rgb = RGBColor.from_string(MUTED_GRAY)
 
 
+def _text(value) -> str:
+    """null を "None" と書かないための文字列化。"""
+    return "" if value is None else str(value)
+
+
 def set_bullets(placeholder, bullets: list) -> None:
+    if isinstance(bullets, str):
+        # 文字列をそのまま回すと1文字ずつの段落になるため、行ごとの段落として扱う
+        bullets = bullets.splitlines()
     tf = placeholder.text_frame
     tf.clear()
     first = True
     for item in bullets:
         if isinstance(item, dict):
-            text = str(item.get("text", ""))
+            text = _text(item.get("text"))
             level = int(item.get("level", 0))
         else:
-            text = str(item)
+            text = _text(item)
             level = 0
         p = tf.paragraphs[0] if first else tf.add_paragraph()
         first = False
@@ -166,13 +174,18 @@ def add_table(slide, table_def: dict, left, top, width, height) -> None:
     r = 0
     if headers:
         for c, h in enumerate(headers):
-            table.cell(0, c).text = str(h)
+            table.cell(0, c).text = _text(h)
         r = 1
     for row in rows:
         for c, val in enumerate(row):
-            table.cell(r, c).text = str(val)
+            table.cell(r, c).text = _text(val)
         r += 1
     return table
+
+
+def _remove_shape(shape) -> None:
+    """位置を借りただけの空の本文プレースホルダーを消す（残すと編集画面で表・画像の下に「テキストを入力」が重なる）。"""
+    shape._element.getparent().remove(shape._element)
 
 
 def apply_slide(prs: Presentation, slide_def: dict, theme: dict) -> None:
@@ -233,6 +246,7 @@ def apply_slide(prs: Presentation, slide_def: dict, theme: dict) -> None:
         body = slide.placeholders[1] if len(slide.placeholders) > 1 else None
         if body is not None:
             left, top, width, height = body.left, body.top, body.width, body.height
+            _remove_shape(body)
         else:
             left, top, width, height = Inches(0.5), Inches(1.8), Inches(9.0), Inches(4.5)
         table = add_table(slide, table_def, left, top, width, height)
@@ -249,6 +263,7 @@ def apply_slide(prs: Presentation, slide_def: dict, theme: dict) -> None:
         body = slide.placeholders[1] if len(slide.placeholders) > 1 else None
         if body is not None:
             left, top, width = body.left, body.top, body.width
+            _remove_shape(body)
         else:
             left, top, width = Inches(1.0), Inches(1.8), Inches(8.0)
         slide.shapes.add_picture(str(image_file), left, top, width=width)

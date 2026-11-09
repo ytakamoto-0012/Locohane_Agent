@@ -145,8 +145,42 @@ def _not_found_hint(ctx: DocEditContext, old_text: str, track: bool) -> str:
                 "or existing tracked changes, which cannot be replaced"
             )
     if table_hits:
-        hints.append(f"it appears in table(s) {table_hits[:10]}, but find_replace searches only body paragraphs, not table cells")
+        hints.append(f"it appears in table(s) {table_hits[:10]} but crosses a tab/line break/field or existing tracked changes")
     return ("; " + "; ".join(hints)) if hints else ""
+
+
+def _all_paragraphs(doc) -> list:
+    """本文の段落、表のセル（入れ子の表も）、ヘッダー・フッターの段落を、重複なく文書順に返す。
+
+    本文の段落だけを見ていたため、表の中・ヘッダーの社名などが置換されずに残っていた。
+    結合セルは同じセルが何度も返るため、段落の要素で重複を除く。
+    """
+    found: list = []
+    seen: set[int] = set()
+
+    def add_paragraphs(paragraphs) -> None:
+        for para in paragraphs:
+            if id(para._p) not in seen:
+                seen.add(id(para._p))
+                found.append(para)
+
+    def add_tables(tables) -> None:
+        for table in tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    add_paragraphs(cell.paragraphs)
+                    add_tables(cell.tables)
+
+    add_paragraphs(doc.paragraphs)
+    add_tables(doc.tables)
+    for section in doc.sections:
+        for part in (section.header, section.first_page_header, section.even_page_header,
+                     section.footer, section.first_page_footer, section.even_page_footer):
+            if part.is_linked_to_previous:
+                continue
+            add_paragraphs(part.paragraphs)
+            add_tables(part.tables)
+    return found
 
 
 def op_find_replace(ctx: DocEditContext, op: dict) -> dict:
@@ -165,7 +199,7 @@ def op_find_replace(ctx: DocEditContext, op: dict) -> dict:
     if op.get("paragraph_index") is not None:
         targets = [ctx.get_paragraph(op["paragraph_index"])]
     else:
-        targets = doc.paragraphs
+        targets = _all_paragraphs(doc)
 
     replaced = crossed = 0
     for para in targets:
@@ -351,16 +385,15 @@ def op_insert_image(ctx: DocEditContext, op: dict) -> dict:
         anchor_para = ctx.get_paragraph(before_index)
         new_para = anchor_para.insert_paragraph_before()
     else:
+        from docx.oxml import OxmlElement
+        from docx.text.paragraph import Paragraph
+
         anchor_para = ctx.get_paragraph(after_index)
-        live_paragraphs = ctx.doc.paragraphs
-        # Paragraphはdoc.paragraphsアクセスの度に新規ラッパーが生成されるため、
-        # オブジェクト同一性ではなく内部XML要素(_p)で比較する
-        # （DocEditContext.get_paragraphと同じ理由）。
-        live_idx = [p._p for p in live_paragraphs].index(anchor_para._p)
-        if live_idx + 1 < len(live_paragraphs):
-            new_para = live_paragraphs[live_idx + 1].insert_paragraph_before()
-        else:
-            new_para = ctx.doc.add_paragraph()
+        # 段落要素の直後に置く。以前は「次の段落の前」に入れていたため、直後に表がある段落だと
+        # 画像が表の後ろに入っていた。
+        new_p = OxmlElement("w:p")
+        anchor_para._p.addnext(new_p)
+        new_para = Paragraph(new_p, anchor_para._parent)
 
     run = new_para.add_run()
     kwargs = {}

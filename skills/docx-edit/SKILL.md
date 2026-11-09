@@ -55,7 +55,7 @@ The top level is the `ops` array itself (several ops can be put together in one 
 
 | op | Required keys | Main optional keys | Description |
 |---|---|---|---|
-| `find_replace` | `old_text` | `new_text` (default `""`), `track_changes` (default `false`), `paragraph_index` (default = all paragraphs), `occurrence` (`"all"` default / `"first"`), `author`, `date` | Find and replace text within body paragraphs (matches spanning several runs are also replaced unless `track_changes`; see "Constraints of find_replace") |
+| `find_replace` | `old_text` | `new_text` (default `""`), `track_changes` (default `false`), `paragraph_index` (default = all paragraphs), `occurrence` (`"all"` default / `"first"`), `author`, `date` | Find and replace text in body paragraphs, table cells and headers/footers (matches spanning several runs are also replaced unless `track_changes`; see "Constraints of find_replace") |
 | `append_block` | `block` (same format as the `blocks` elements of `docx-create`) | `theme` (used only for `callout`; default `charcoal`) | Add a block at the end of the document (always untracked) |
 | `insert_image` | `image_path`, one of `before_index`/`after_index` | `width_cm`/`height_cm` (original size if omitted; specifying only one keeps the aspect ratio) | Create a new paragraph right before/after the specified paragraph and insert an image (see below) |
 | `set_image_size` | `image_index` | `width_cm`/`height_cm` (at least one required; specifying only one keeps the aspect ratio) | Resize an existing image (see below) |
@@ -158,7 +158,7 @@ see below).
 - **With `track_changes: true`, `old_text` must fit within "one run"** (a match spanning runs is not detected).
 - Text inside existing unresolved Track Changes (`w:ins`/`w:del`) is not searched, and a match that crosses a tab,
   line break or field is not replaced.
-- Only body paragraphs are searched (not table cells).
+- Without `paragraph_index`, body paragraphs, table cells (nested too) and headers/footers are searched; `paragraph_index` targets one body paragraph.
 - When nothing matches, the error tells where the string does appear (the paragraph indices whose text contains it,
   or the table indices), so fix the op from that instead of retrying blindly.
 - Unless `occurrence: "first"` is specified, all matches in the target paragraphs are
