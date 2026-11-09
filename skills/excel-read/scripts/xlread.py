@@ -52,21 +52,28 @@ def read_table(path, sheet: str | int = 0, header_row: int | None = None, *, dat
         if rng.min_row == rng.max_row:
             single_row_spans.setdefault(rng.min_row, []).append((rng.min_col, rng.max_col))
 
-    def value_at(r: int, c: int):
-        return merged_value.get((r, c), ws.cell(row=r, column=c).value)
+    # ws.cell() は無いセルを作り、疎なシート（A1 と XFD1048576 だけ等）で全行×全列を回すことになるため、実在するセルを引く
+    cells = ws._cells
 
-    max_row, max_col = ws.max_row or 0, ws.max_column or 0
+    def raw_value(r: int, c: int):
+        cell = cells.get((r, c))
+        return cell.value if cell is not None else None
+
+    def value_at(r: int, c: int):
+        return merged_value.get((r, c), raw_value(r, c))
+
+    max_row = ws.max_row or 0
     if header_row is None:
-        header_row = _find_header_row(ws, max_row, max_col, single_row_spans)
+        header_row = _find_header_row(ws, single_row_spans)
         if header_row is None:
             return []
 
-    columns = [c for c in range(1, max_col + 1) if ws.cell(row=header_row, column=c).value not in (None, "")]
+    columns = sorted(c for (r, c), cell in cells.items() if r == header_row and cell.value not in (None, ""))
     if not columns:
         return []  # 指定した見出し行が空（表が無い）。columns[0] で IndexError にしない
     names: list[str] = []
     for c in columns:
-        name = str(ws.cell(row=header_row, column=c).value).strip()
+        name = str(raw_value(header_row, c)).strip()
         base, n = name, 2
         while name in names:
             name = f"{base}_{n}"
@@ -88,9 +95,13 @@ def read_table(path, sheet: str | int = 0, header_row: int | None = None, *, dat
     return records
 
 
-def _find_header_row(ws, max_row: int, max_col: int, single_row_spans: dict[int, list[tuple[int, int]]]) -> int | None:
-    for r in range(1, max_row + 1):
-        filled = [c for c in range(1, max_col + 1) if ws.cell(row=r, column=c).value not in (None, "")]
+def _find_header_row(ws, single_row_spans: dict[int, list[tuple[int, int]]]) -> int | None:
+    rows: dict[int, list[int]] = {}
+    for (r, c), cell in ws._cells.items():
+        if cell.value not in (None, ""):
+            rows.setdefault(r, []).append(c)
+    for r in sorted(rows):
+        filled = sorted(rows[r])
         if len(filled) < 2:
             continue
         if any(start <= filled[0] and end >= filled[-1] for start, end in single_row_spans.get(r, [])):

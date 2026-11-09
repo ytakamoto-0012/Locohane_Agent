@@ -400,3 +400,43 @@ def test_save_warns_about_a_typed_weekday_that_does_not_match_the_date(tmp_path)
     assert len(weekday_warnings) == 1
     assert "2027/1/1(日)" in weekday_warnings[0] and "is 金" in weekday_warnings[0]
     assert "2026-12-28" not in weekday_warnings[0] and "2月3日" not in weekday_warnings[0]
+
+
+def test_save_existing_book_keeps_untouched_column_widths(tmp_path):
+    """列の幅を読んだだけで、未設定の列が幅13で保存されていた（openpyxl の column_dimensions[...] の既定）。"""
+    from openpyxl.styles import Alignment
+
+    path = tmp_path / "user.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for r in range(1, 4):
+        ws.cell(r, 1, f"v{r}")
+    ws.column_dimensions["D"].width = 30
+    wb.save(path)
+
+    wb = open_workbook(path)
+    ws = wb.active
+    ws["A6"] = "これは長い注記の文章でありセルの幅を超えて折り返されるはずのテキストです"
+    ws["A6"].alignment = Alignment(wrap_text=True)
+    ws.merge_cells("A6:C6")
+    save(wb, path)
+
+    saved = openpyxl.load_workbook(path).active
+    assert {k: d.width for k, d in saved.column_dimensions.items()} == {"D": 30.0}
+    assert saved.row_dimensions[6].height and saved.row_dimensions[6].height > 15
+
+
+def test_write_table_freezes_rows_only_and_first_table_wins(tmp_path):
+    wb = new_workbook()
+    ws = wb.create_sheet("S")
+    write_table(ws, [["h1", "h2"], [1, 2]], "C2")
+    assert ws.freeze_panes == "A3"
+    write_table(ws, [["h1", "h2"], [1, 2]], "C10")
+    assert ws.freeze_panes == "A3"
+
+
+def test_write_table_number_column_is_wide_enough_for_separators(tmp_path):
+    wb = new_workbook()
+    ws = wb.create_sheet("S")
+    write_table(ws, [["n"], [123456789]], "A1", number_formats={0: "#,##0"})
+    assert ws.column_dimensions["A"].width >= len("123,456,789") + 1

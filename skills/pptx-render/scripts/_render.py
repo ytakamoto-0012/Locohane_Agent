@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import uuid
 from pathlib import Path
 
 import pypdfium2 as pdfium
@@ -78,6 +79,12 @@ def _convert_office_to_pdf(path: Path, tool: str, thread_id: str) -> Path:
         if tool != "pptx":
             app.Visible = False
         app.DisplayAlerts = 0  # wdAlertsNone
+        # COM で起動した Office の既定はマクロ有効（msoAutomationSecurityLow）で、開いただけで
+        # Document_Open 等が走る（MsgBox ならここでハングする）。描画には不要なので止める。
+        try:
+            app.AutomationSecurity = 3  # msoAutomationSecurityForceDisable
+        except Exception:
+            pass
 
         abs_path = os.path.abspath(path)
 
@@ -86,15 +93,17 @@ def _convert_office_to_pdf(path: Path, tool: str, thread_id: str) -> Path:
         # 保存する。基準は run_script の cwd（ユーザー指定 work_dir になりうり
         # 自動削除対象外）ではなく、常に default_workdir（AGENT_DEFAULT_WORKDIR）。
         # default_workdir の保持日数ベースの自動削除で確実に消える。
-        base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp")
+        base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp").resolve()  # 返すパス・Office に渡すパスを絶対にする（MCP 経由では AGENT_DEFAULT_WORKDIR が無い）
         out_dir = base_dir / f"_tmp_{thread_id}" / "pdf_export"
         out_dir.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha1(abs_path.encode("utf-8")).hexdigest()[:8]
-        pdf_path = str(out_dir / f"{tool}_{digest}_export.pdf")
+        # 実行ごとに別の名前にする（画像名はこの PDF のパスから作るため、同じ名前だと編集前に描画した画像が
+        # 編集後の描画で上書きされ、前後を比べられなかった）
+        pdf_path = str(out_dir / f"{tool}_{digest}_{uuid.uuid4().hex[:8]}_export.pdf")
 
         if tool == "excel":
             # Workbook → PDF (xlTypePDF = 0)
-            doc = app.Workbooks.Open(abs_path)
+            doc = app.Workbooks.Open(abs_path, UpdateLinks=0, ReadOnly=True)
             # Quality は XlFixedFormatQuality（xlQualityStandard=0）の整数指定が必要
             doc.ExportAsFixedFormat(0, pdf_path, Quality=0, IncludeDocProperties=True, IgnorePrintAreas=False, OpenAfterPublish=False)
             doc.Close(SaveChanges=False)
@@ -107,7 +116,8 @@ def _convert_office_to_pdf(path: Path, tool: str, thread_id: str) -> Path:
 
         elif tool == "docx":
             # Document → PDF (wdFormatPDF = 17)
-            doc = app.Documents.Open(abs_path, ReadOnly=False, Revert=True)
+            # 読み取り専用で開く（ユーザーが Word で開いている文書でも「使用中」の確認で止まらないため）
+            doc = app.Documents.Open(abs_path, ReadOnly=True, AddToRecentFiles=False, Revert=True)
             doc.SaveAs2(pdf_path, 17)
             doc.Close(SaveChanges=False)
 
@@ -141,7 +151,7 @@ def _convert_office_to_pdf(path: Path, tool: str, thread_id: str) -> Path:
 
 def _render_pdf_to_images(pdf_path: Path, dpi: int, thread_id: str) -> list[dict]:
     """PDFファイルの全ページを pypdfium2 で画像化し、リストとして返す。"""
-    base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp")
+    base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp").resolve()  # 返すパス・Office に渡すパスを絶対にする（MCP 経由では AGENT_DEFAULT_WORKDIR が無い）
     rendered_dir = base_dir / f"_tmp_{thread_id}" / "rendered"
     rendered_dir.mkdir(parents=True, exist_ok=True)
 
@@ -150,6 +160,14 @@ def _render_pdf_to_images(pdf_path: Path, dpi: int, thread_id: str) -> list[dict
     except Exception:
         return []
 
+    try:
+        return _render_pages(pdf, pdf_path, dpi, rendered_dir)
+    finally:
+        # 開いたままだと Windows では一時 PDF を削除できない（WinError 32）
+        pdf.close()
+
+
+def _render_pages(pdf, pdf_path: Path, dpi: int, rendered_dir: Path) -> list[dict]:
     total_pages = len(pdf)
     scale = dpi / 72
 
@@ -215,11 +233,18 @@ def render_office_file(
     try:
         tmp_pdf = pdfium.PdfDocument(str(pdf_path))
         total_pages = len(tmp_pdf)
+        tmp_pdf.close()
     except Exception:
         total_pages = 0
 
     # 2. PDF → 画像化（全ページ）
     images = _render_pdf_to_images(pdf_path, _CAPTURE_DPI, thread_id)
+
+    # 一時PDFを削除
+    try:
+        pdf_path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
     if not images:
         return {
@@ -232,12 +257,6 @@ def render_office_file(
             "images": [],
             "crop_applied": False,
         }
-
-    # 一時PDFを削除
-    try:
-        pdf_path.unlink(missing_ok=True)
-    except Exception:
-        pass
 
     first_page = images[0]["page"]
     last_page = images[-1]["page"]

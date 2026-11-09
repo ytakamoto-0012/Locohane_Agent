@@ -79,7 +79,7 @@ def write_json_result(result: dict, category: str, source_path) -> dict:
     なりうるが、その場合は自動削除対象外のため、cwd基準だと消えずに溜まり続ける。
     """
     thread_id = os.environ.get("AGENT_EXEC_TMP_NAME") or os.environ.get("AGENT_THREAD_ID") or "_no_session"
-    base = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp")
+    base = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp").resolve()  # 返すパス・Office に渡すパスを絶対にする（MCP 経由では AGENT_DEFAULT_WORKDIR が無い）
     out_dir = base / f"_tmp_{thread_id}" / category
     out_dir.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha1(str(Path(source_path).resolve()).encode("utf-8")).hexdigest()[:8]

@@ -129,7 +129,8 @@ def main() -> int:
         print("usage: recalc_excel.py <path> (or --recover-locks)", file=sys.stderr)
         return 1
 
-    path = Path(args.path)
+    # Excel は相対パスを自分のカレント（通常は「ドキュメント」）基準で解決するため、絶対パスにして渡す
+    path = Path(args.path).resolve()
     if not path.is_file():
         print(f"File not found: {args.path}", file=sys.stderr)
         return 1

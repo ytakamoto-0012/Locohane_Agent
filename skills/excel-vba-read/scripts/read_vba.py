@@ -33,18 +33,39 @@ if str(_OFFICE_SHARED) not in sys.path:
 from excel_common import setup_utf8_stdio, summarize_result, write_json_result  # noqa: E402
 
 _SHEET_CODENAME_RE = re.compile(r"^Sheet\d+$")
+_VB_BASE_RE = re.compile(r'^Attribute VB_Base = "0(\{[0-9A-Fa-f-]+\})(\{[0-9A-Fa-f-]+\})?"', re.MULTILINE)
+# ThisWorkbook / ワークシート / グラフシートのモジュールの VB_Base（コード名を変えても同じ）
+_DOCUMENT_BASES = {
+    "{00020819-0000-0000-C000-000000000046}",
+    "{00020820-0000-0000-C000-000000000046}",
+    "{00020821-0000-0000-C000-000000000046}",
+}
 
 
 def _classify_module_type(vba_filename: str, vba_code: str) -> str:
-    stem = Path(vba_filename).stem
-    if stem == "ThisWorkbook":
-        return "document"
-    if _SHEET_CODENAME_RE.match(stem) or "Private Sub Worksheet_" in vba_code:
-        return "document"
-    if "Attribute VB_Base = \"0{" in vba_code or "Attribute VB_Exposed" in vba_code:
-        return "class"
-    if "Attribute VB_Base = \"0000" in vba_code and "Begin {" in vba_code:
+    """olevba の拡張子（.bas/.cls/.frm）と VB_Base の GUID で種別を決める。
+
+    VB_Base はシート・ThisWorkbook・クラス・UserForm のどれにも付くため、有無だけでは
+    区別できない（以前はコード名を変えたシートや UserForm が "class" になっていた）。
+    UserForm の VB_Base は GUID が2つ続く。
+    """
+    ext = Path(vba_filename).suffix.lower()
+    if ext == ".frm":
         return "form"
+    if ext == ".bas":
+        return "standard"
+    m = _VB_BASE_RE.search(vba_code or "")
+    if m:
+        if m.group(2):
+            return "form"
+        if m.group(1).upper() in _DOCUMENT_BASES:
+            return "document"
+        return "class"
+    stem = Path(vba_filename).stem
+    if stem == "ThisWorkbook" or _SHEET_CODENAME_RE.match(stem):
+        return "document"
+    if ext == ".cls" or "Attribute VB_Exposed" in (vba_code or ""):
+        return "class"
     return "standard"
 
 

@@ -18,6 +18,7 @@ import hashlib
 import os
 import re
 import sys
+import uuid
 from pathlib import Path
 
 import pypdfium2 as pdfium
@@ -166,6 +167,12 @@ def _convert_office_to_pdf(
         if tool != "pptx":
             app.Visible = False
         app.DisplayAlerts = 0  # wdAlertsNone
+        # COM で起動した Office の既定はマクロ有効（msoAutomationSecurityLow）で、開いただけで
+        # Workbook_Open / Document_Open 等が走る（MsgBox ならここでハングする）。描画には不要なので止める。
+        try:
+            app.AutomationSecurity = 3  # msoAutomationSecurityForceDisable
+        except Exception:
+            pass
 
         abs_path = os.path.abspath(path)
 
@@ -174,17 +181,20 @@ def _convert_office_to_pdf(
         # 保存する。基準は run_script の cwd（ユーザー指定 work_dir になりうり
         # 自動削除対象外）ではなく、常に default_workdir（AGENT_DEFAULT_WORKDIR）。
         # default_workdir の保持日数ベースの自動削除で確実に消える。
-        base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp")
+        base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp").resolve()  # 返すパス・Office に渡すパスを絶対にする（MCP 経由では AGENT_DEFAULT_WORKDIR が無い）
         out_dir = base_dir / f"_tmp_{thread_id}" / "pdf_export"
         out_dir.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha1(abs_path.encode("utf-8")).hexdigest()[:8]
+        # 実行ごとに別の名前にする（画像名はこの PDF のパスから作るため、同じ名前だと編集前に描画した画像が
+        # 編集後の描画で上書きされ、前後を比べられなかった）
+        digest = hashlib.sha1(abs_path.encode("utf-8")).hexdigest()[:8] + "_" + uuid.uuid4().hex[:8]
 
         if tool == "excel":
             # シートごとに個別PDFへエクスポートする（xlTypePDF = 0）。
             # ワークブック一括エクスポートだとPDFページとシートの対応が
             # 複数ページ分割時に取れなくなるため、Worksheet.ExportAsFixedFormat
             # で1シート=1PDFにし、出力画像ファイル名にシート名をそのまま使えるようにする。
-            doc = app.Workbooks.Open(abs_path)
+            # 読み取り専用・リンク更新なし（印刷設定は一時的に変えるだけで保存しない）
+            doc = app.Workbooks.Open(abs_path, UpdateLinks=0, ReadOnly=True)
             for idx, ws in enumerate(doc.Worksheets):
                 try:
                     if ws.Visible != -1:  # xlSheetVisible以外（非表示/最非表示）は印刷対象外
@@ -226,7 +236,8 @@ def _convert_office_to_pdf(
         elif tool == "docx":
             # Document → PDF (wdFormatPDF = 17)
             pdf_path = out_dir / f"{tool}_{digest}_export.pdf"
-            doc = app.Documents.Open(abs_path, ReadOnly=False, Revert=True)
+            # 読み取り専用で開く（ユーザーが Word で開いている文書でも「使用中」の確認で止まらないため）
+            doc = app.Documents.Open(abs_path, ReadOnly=True, AddToRecentFiles=False, Revert=True)
             doc.SaveAs2(str(pdf_path), 17)
             doc.Close(SaveChanges=False)
             doc = None
@@ -335,7 +346,7 @@ def _render_pdf_to_images(pdf_entries: list[tuple[str | None, Path]], dpi: int, 
     シートが複数ページに分割された場合のみ`_p{ローカルページ番号}`を付与）。
     シート名が無い場合（pptx/docx）は従来通り`{digest}_p{通し番号}.png`。
     """
-    base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp")
+    base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp").resolve()  # 返すパス・Office に渡すパスを絶対にする（MCP 経由では AGENT_DEFAULT_WORKDIR が無い）
     rendered_dir = base_dir / f"_tmp_{thread_id}" / "rendered"
     rendered_dir.mkdir(parents=True, exist_ok=True)
 
@@ -349,31 +360,35 @@ def _render_pdf_to_images(pdf_entries: list[tuple[str | None, Path]], dpi: int, 
         except Exception:
             continue
 
-        total_pages = len(pdf)
-        digest = hashlib.sha1(os.path.abspath(str(pdf_path)).encode("utf-8")).hexdigest()[:8]
-        safe_name = _sanitize_sheet_filename(sheet_name) if sheet_name else None
+        try:
+            total_pages = len(pdf)
+            digest = hashlib.sha1(os.path.abspath(str(pdf_path)).encode("utf-8")).hexdigest()[:8]
+            safe_name = _sanitize_sheet_filename(sheet_name) if sheet_name else None
 
-        for i in range(total_pages):
-            global_page += 1
-            local_page = i + 1
-            if safe_name:
-                filename = f"{digest}_{safe_name}.png" if total_pages == 1 else f"{digest}_{safe_name}_p{local_page}.png"
-            else:
-                filename = f"{digest}_p{global_page}.png"
-            out_path = rendered_dir / filename
-            try:
-                bitmap = pdf[i].render(scale=scale)
-                bitmap.to_pil().save(out_path)
-            except Exception:
-                continue
-            img_info = {
-                "page": global_page,
-                "image_path": str(out_path),
-                "original_dpi": dpi,
-            }
-            if sheet_name:
-                img_info["sheet"] = sheet_name
-            images.append(img_info)
+            for i in range(total_pages):
+                global_page += 1
+                local_page = i + 1
+                if safe_name:
+                    filename = f"{digest}_{safe_name}.png" if total_pages == 1 else f"{digest}_{safe_name}_p{local_page}.png"
+                else:
+                    filename = f"{digest}_p{global_page}.png"
+                out_path = rendered_dir / filename
+                try:
+                    bitmap = pdf[i].render(scale=scale)
+                    bitmap.to_pil().save(out_path)
+                except Exception:
+                    continue
+                img_info = {
+                    "page": global_page,
+                    "image_path": str(out_path),
+                    "original_dpi": dpi,
+                }
+                if sheet_name:
+                    img_info["sheet"] = sheet_name
+                images.append(img_info)
+        finally:
+            # 開いたままだと Windows では一時 PDF を削除できない（WinError 32）
+            pdf.close()
 
     return images
 
@@ -447,6 +462,7 @@ def render_office_file(
         try:
             tmp_pdf = pdfium.PdfDocument(str(pdf_path))
             total_pages += len(tmp_pdf)
+            tmp_pdf.close()
         except Exception:
             continue
 

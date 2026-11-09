@@ -126,3 +126,27 @@ class TestReadXlsColumnsWithoutSheetRaises:
         missing_path = tmp_path / "does_not_exist.xls"
         with pytest.raises(ValueError, match="--sheet"):
             _read_xls(missing_path, sheet_arg=None, offset=0, limit=200, columns="A")
+
+
+def test_sparse_sheet_reads_only_columns_with_values(tmp_path):
+    """A1 と XFD1048576 だけのシートで 200行×16384列を返し、221MB・40秒かかっていた。"""
+    import json as _json
+    import subprocess
+
+    import openpyxl as _openpyxl
+
+    path = tmp_path / "sparse.xlsx"
+    wb = _openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = 1
+    ws["C2"] = "x"
+    ws["XFD1048576"] = "end"
+    wb.save(path)
+    script = Path(__file__).resolve().parent.parent / "skills" / "excel-read" / "scripts" / "read_excel.py"
+    out = subprocess.run([sys.executable, str(script), str(path), "--sheet", "0"], capture_output=True, text=True, encoding="utf-8", cwd=tmp_path, timeout=60)
+    assert out.returncode == 0, out.stderr
+    summary = _json.loads(out.stdout)
+    assert summary["columns"] == ["A", "B", "C"]
+    assert summary["empty_columns_omitted"] == 16384 - 3
+    full = _json.loads((tmp_path / summary["result_path"]).read_text(encoding="utf-8"))
+    assert full["rows"][1][2] == {"ref": "C2", "value": "x"}

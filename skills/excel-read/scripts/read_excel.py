@@ -43,6 +43,7 @@ from excel_common import (  # noqa: E402
     _display_width,
     cell_column_width,
     cell_to_json,
+    column_width,
     exceeds_column_width,
     group_column_values,
     parse_column_selection,
@@ -250,6 +251,32 @@ def _merged_lookup(ws, min_row: int, max_row: int) -> dict[tuple[int, int], str]
     return lookup
 
 
+# 値のある列がこれより疎なら、間の空の列も省く（例: A1 と XFD1 だけのシート）
+_SPARSE_MIN_COLUMNS = 64
+
+
+def _window_columns(ws, min_row: int, max_row: int, total_columns: int) -> list[int]:
+    """返す行の範囲で値か結合のある列（1始まり）。--columns が無いときの列。
+
+    max_column は書式だけのセル（遠く離れた列の空セル）も数えるため、そのまま全列を返すと
+    A1 と XFD1048576 だけのシートで 200行×16384列になり、11KB のブックから 221MB の結果・40秒かかった。
+    最後の値のある列までに詰め、それでも値のある列が全体の半分未満なら、値のある列だけにする
+    （各セルに ref が付くので、列を省いても位置は取り違えない）。
+    """
+    if max_row < min_row:
+        return list(range(1, total_columns + 1))
+    used = {col for (row, col), cell in ws._cells.items() if min_row <= row <= max_row and cell.value is not None}
+    for rng in ws.merged_cells.ranges:
+        if rng.min_row <= max_row and rng.max_row >= min_row:
+            used.update(range(rng.min_col, rng.max_col + 1))
+    if not used:
+        return [1] if total_columns else []
+    last = max(used)
+    if last <= _SPARSE_MIN_COLUMNS or len(used) * 2 >= last:
+        return list(range(1, last + 1))
+    return sorted(used)
+
+
 def _is_chartsheet(ws) -> bool:
     """グラフだけのシート（Chartsheet）か。セル・行・print_area を持たない。"""
     return not hasattr(ws, "iter_rows")
@@ -303,15 +330,16 @@ def _read_xlsx(
                 if _is_chartsheet(sheet):
                     sheets.append({"name": name, "chartsheet": True, "max_row": 0, "max_column": 0, "print_area": None})
                     continue
-                sheets.append(
-                    {
-                        "name": name,
-                        "max_row": sheet.max_row or 0,
-                        "max_column": sheet.max_column or 0,
-                        # openpyxlのprint_areaは未設定時Noneではなく空文字列""を返すためNoneに正規化する
-                        "print_area": sheet.print_area or None,
-                    }
-                )
+                entry = {
+                    "name": name,
+                    "max_row": sheet.max_row or 0,
+                    "max_column": sheet.max_column or 0,
+                    # openpyxlのprint_areaは未設定時Noneではなく空文字列""を返すためNoneに正規化する
+                    "print_area": sheet.print_area or None,
+                }
+                if sheet.sheet_state != "visible":
+                    entry["state"] = sheet.sheet_state  # "hidden" / "veryHidden"（Excel の画面では見えないシート）
+                sheets.append(entry)
             return {"path": str(path), "mode": "sheets", "sheets": sheets}
 
         resolved = resolve_sheet_name(names, sheet_arg)
@@ -322,25 +350,30 @@ def _read_xlsx(
             return _chartsheet_rows_result(path, resolved)
         total_rows = ws.max_row or 0
         total_columns = ws.max_column or 0
-        selected_indices = parse_column_selection(columns, total_columns) or list(range(1, total_columns + 1))
+        max_row = min(total_rows, offset + limit)
+        omitted_columns = 0
+        selected_indices = parse_column_selection(columns, total_columns)
+        if selected_indices is None:
+            selected_indices = _window_columns(ws, offset + 1, max_row, total_columns)
+            omitted_columns = total_columns - len(selected_indices) if max_row > offset else 0
         columns_out = [get_column_letter(idx) for idx in selected_indices]
         rows: list[list[object]] = []
-        if total_rows:
-            max_row = min(total_rows, offset + limit)
-            if offset < max_row:
-                merged = _merged_lookup(ws, offset + 1, max_row)
-                for row_num, row in enumerate(ws.iter_rows(min_row=offset + 1, max_row=max_row), start=offset + 1):
-                    rows.append(
-                        [
-                            _cell_json(
-                                row[idx - 1],
-                                no_style,
-                                ref=f"{get_column_letter(idx)}{row_num}",
-                                merged=merged.get((row_num, idx)),
-                            )
-                            for idx in selected_indices
-                        ]
-                    )
+        if total_rows and offset < max_row:
+            merged = _merged_lookup(ws, offset + 1, max_row)
+            cells = ws._cells  # ws.cell()/iter_rows() は無いセルを作るため、実在するセルだけを引く
+            for row_num in range(offset + 1, max_row + 1):
+                row_out = []
+                for idx in selected_indices:
+                    ref = f"{get_column_letter(idx)}{row_num}"
+                    cell = cells.get((row_num, idx))
+                    if cell is None:
+                        entry: dict = {"ref": ref, "value": None}
+                        if (row_num, idx) in merged:
+                            entry["merged"] = merged[(row_num, idx)]
+                        row_out.append(entry)
+                    else:
+                        row_out.append(_cell_json(cell, no_style, ref=ref, merged=merged.get((row_num, idx))))
+                rows.append(row_out)
         result = {
             "path": str(path),
             "mode": "rows",
@@ -352,6 +385,8 @@ def _read_xlsx(
             "columns": columns_out,
             "rows": rows,
         }
+        if omitted_columns:
+            result["empty_columns_omitted"] = omitted_columns
         result["merged_cells"] = [str(r) for r in ws.merged_cells.ranges]
         result["tables"] = [
             {
@@ -366,7 +401,7 @@ def _read_xlsx(
                 result["query_results"] = _run_queries(ws, queries, total_rows)
             return result
         # 列幅を取得（返却範囲の列のみ）
-        column_widths = {letter: ws.column_dimensions[letter].width for letter in columns_out} if rows else {}
+        column_widths = {letter: column_width(ws, letter) for letter in columns_out} if rows else {}
         result["column_widths"] = column_widths
 
         # 行の高さを取得（返却範囲のみ）
@@ -439,7 +474,10 @@ def _read_xls(
         sheets = []
         for name in names:
             sh = book.sheet_by_name(name)
-            sheets.append({"name": name, "max_row": sh.nrows, "max_column": sh.ncols})
+            entry = {"name": name, "max_row": sh.nrows, "max_column": sh.ncols}
+            if sh.visibility:
+                entry["state"] = "hidden" if sh.visibility == 1 else "veryHidden"
+            sheets.append(entry)
         return {"path": str(path), "mode": "sheets", "sheets": sheets}
 
     resolved = resolve_sheet_name(names, sheet_arg)
@@ -643,8 +681,8 @@ def main() -> int:
         except json.JSONDecodeError as e:
             print(f"Failed to parse the --query-json JSON: {e}", file=sys.stderr)
             return 1
-        if not isinstance(queries, list):
-            print("Specify --query-json as a JSON array", file=sys.stderr)
+        if not isinstance(queries, list) or not all(isinstance(q, dict) for q in queries):
+            print('Specify --query-json as a JSON array of objects (e.g. [{"op": "list_charts"}])', file=sys.stderr)
             return 1
 
     if args.all_sheets and (args.sheet is not None or args.columns):

@@ -72,3 +72,13 @@ class TestReplaceCodeDoesNotDuplicateAttributeLine:
         assert code_module.deleted == (1, 5)
         assert "Attribute VB_Name" not in code_module.added
         assert code_module.added == "Option Explicit\r\nSub Foo()\r\nEnd Sub"
+
+
+class TestStripAttributeLinesInsideProcedures:
+    def test_strips_procedure_attribute_lines(self):
+        code = 'Function B()\r\nAttribute B.VB_Description = "d"\r\n  B = 1\r\nEnd Function'
+        assert _strip_leading_attribute_lines(code) == "Function B()\r\n  B = 1\r\nEnd Function"
+
+    def test_variable_named_attribute_is_kept(self):
+        code = "Sub A()\n  Attribute = 5\nEnd Sub"
+        assert _strip_leading_attribute_lines(code) == code

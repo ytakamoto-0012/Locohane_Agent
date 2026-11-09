@@ -65,8 +65,7 @@ def _check_dangerous_code(code: str) -> None:
 # 実コンパイルチェック（ダミーSub実行、CommandBars経由のCompile実行、保存後の
 # 再オープン等）はいずれも実効性が確認できなかったため、機械的に判定できる
 # 範囲（Sub/End Sub、If/End If等のブロック構文の対応関係）だけを正規表現で
-# 検証する。取りこぼし（#If等の条件付きコンパイル、1行に複数ステートメントを
-# 並べるコロン複文、未宣言変数の重複宣言や型不一致等の意味的エラー）はあるが、
+# 検証する。取りこぼし（#If等の条件付きコンパイル、未宣言変数の重複宣言や型不一致等の意味的エラー）はあるが、
 # 正しいコードを誤って拒否する方向のリスクを避けることを優先した設計。
 _STRING_LITERAL_RE = re.compile(r'"(?:[^"]|"")*"')
 _LINE_CONTINUATION_RE = re.compile(r"[ \t]_[ \t]*$")
@@ -144,12 +143,25 @@ def _syntax_error_message(detail: str) -> str:
         "Check that blocks such as Sub/End Sub, If/End If and For/Next still match up, "
         "review the whole code you plan to write with read_vba.py, and send it again. "
         "Note that this check is a simple one that looks only at matching block syntax "
-        "(conditional compilation such as #If, and several statements on one line separated by colons, "
-        "are not covered)."
+        "(conditional compilation such as #If is not covered)."
     )
 
 
 _INVALID_CONTINUE_RE = re.compile(r"\bContinue\s+(Do|For|While)\b", re.IGNORECASE)
+_STATEMENT_SEPARATOR_RE = re.compile(r":(?!=)")
+_SINGLE_LINE_IF_RE = re.compile(r"^If\b.*\bThen\b\s*\S", re.IGNORECASE)
+
+
+def _split_statements(text: str) -> list[str]:
+    """判定用テキスト（文字列・コメント除去済み）をコロン区切りの文に分ける。
+
+    `For i = 1 To 3: s = s + i: Next` のような1行の複文を、For だけ開いたままと誤判定しないため。
+    名前付き引数の `:=` は区切りではない。1行 If（`If x Then a: b`）は Then 以降も If の中で
+    ブロックを開閉しないので、行全体を1文として扱う。
+    """
+    if _SINGLE_LINE_IF_RE.match(text):
+        return [text]
+    return [part.strip() for part in _STATEMENT_SEPARATOR_RE.split(text) if part.strip()]
 
 
 def _lint_vba_syntax(code: str) -> None:
@@ -161,34 +173,38 @@ def _lint_vba_syntax(code: str) -> None:
     if not code:
         return
     stack: list[tuple[str, str, int]] = []
-    for line_no, text in _iter_logical_lines(code):
-        if not text:
+    for line_no, line_text in _iter_logical_lines(code):
+        if not line_text:
             continue
-        if _INVALID_CONTINUE_RE.search(text):
+        if _INVALID_CONTINUE_RE.search(line_text):
             raise ValueError(
                 f"Line {line_no}: 'Continue Do/For/While' is not VBA syntax "
                 "(confused with VB.NET etc.). To skip the rest of a loop, wrap the rest of the processing in an If "
                 "with the condition inverted, or use GoTo and a label."
             )
-        closer = next((c for c in _BLOCK_CLOSERS if c[0].search(text)), None)
-        if closer is not None:
-            _, expected_tag, closer_label = closer
-            if not stack:
-                raise ValueError(_syntax_error_message(
-                    f"There is a '{closer_label}' with no matching opening block near line {line_no}"
-                ))
-            top_tag, _, top_line = stack[-1]
-            if top_tag != expected_tag:
-                raise ValueError(_syntax_error_message(
-                    f"The '{_TAG_DISPLAY_NAMES[top_tag]}' block started near line {top_line} "
-                    f"was not closed before '{closer_label}' appeared near line {line_no}"
-                ))
-            stack.pop()
-            continue
-        opener = next((o for o in _BLOCK_OPENERS if o[0].search(text)), None)
-        if opener is not None:
-            _, tag, closer_label = opener
-            stack.append((tag, closer_label, line_no))
+        for text in _split_statements(line_text):
+            closer = next((c for c in _BLOCK_CLOSERS if c[0].search(text)), None)
+            if closer is not None:
+                _, expected_tag, closer_label = closer
+                # `Next j, i` は For を2つ閉じる
+                repeat = text.count(",") + 1 if expected_tag == "For" else 1
+                for _ in range(repeat):
+                    if not stack:
+                        raise ValueError(_syntax_error_message(
+                            f"There is a '{closer_label}' with no matching opening block near line {line_no}"
+                        ))
+                    top_tag, _, top_line = stack[-1]
+                    if top_tag != expected_tag:
+                        raise ValueError(_syntax_error_message(
+                            f"The '{_TAG_DISPLAY_NAMES[top_tag]}' block started near line {top_line} "
+                            f"was not closed before '{closer_label}' appeared near line {line_no}"
+                        ))
+                    stack.pop()
+                continue
+            opener = next((o for o in _BLOCK_OPENERS if o[0].search(text)), None)
+            if opener is not None:
+                _, tag, closer_label = opener
+                stack.append((tag, closer_label, line_no))
 
     if stack:
         top_tag, _, top_line = stack[-1]
@@ -230,18 +246,18 @@ def _find_component(vb_project, name: str):
     raise KeyError(f"Module not found: {name!r} (existing modules: {names})")
 
 
-_LEADING_ATTRIBUTE_RE = re.compile(r"^(?:Attribute\s+\S+\s*=.*\r?\n)+")
+_ATTRIBUTE_LINE_RE = re.compile(r"^[ \t]*Attribute[ \t]+[\w.]+[ \t]*=[^\r\n]*(?:\r?\n|\Z)", re.MULTILINE)
 
 
 def _strip_leading_attribute_lines(code: str) -> str:
-    """モジュール冒頭の`Attribute VB_Name = "..."`等の宣言行を取り除く。
+    """`Attribute VB_Name = "..."`・`Attribute Proc.VB_Description = "..."` 等の行を取り除く。
 
-    read_vba.py（oletools）はこの行を`code`に含めて返すが、AddFromStringは
-    Attribute行を特別扱いせず生テキストとして挿入するため、そのまま書き戻すと
-    VBEが自動生成するAttribute（comp.Name由来）と重複してしまう
-    （例: `Attribute VB_Name = "X"`が2行になる）。
+    read_vba.py（oletools）はこの行を`code`に含めて返すが、AddFromString/InsertLinesは
+    Attribute行を特別扱いせず生テキストとして挿入する。冒頭の行はVBEが自動生成する
+    Attribute（comp.Name由来）と重複し、プロシージャ内の行（`Attribute Foo.VB_Description`）は
+    VBE上でコンパイルエラーの行として残る（実機で確認）。どちらもVBEのコード上では書けない行のため全て除く。
     """
-    return _LEADING_ATTRIBUTE_RE.sub("", code, count=1)
+    return _ATTRIBUTE_LINE_RE.sub("", code)
 
 
 def _replace_code(code_module, new_code: str) -> None:
@@ -368,8 +384,13 @@ def op_replace_procedure(workbook, vb_project, op: dict):
     count_lines = None
     for kind in kinds_to_try:
         try:
-            start_line = code_module.ProcStartLine(proc_name, kind)
-            count_lines = code_module.ProcCountLines(proc_name, kind)
+            # ProcStartLine/ProcCountLines は宣言行より前の空行・コメント行も含む（実機で確認）。
+            # そのまま消すと、プロシージャの上に書かれた説明コメントと区切りの空行まで失われるため、
+            # 宣言行（ProcBodyLine）から End までを置き換える。
+            proc_start = code_module.ProcStartLine(proc_name, kind)
+            proc_count = code_module.ProcCountLines(proc_name, kind)
+            start_line = code_module.ProcBodyLine(proc_name, kind)
+            count_lines = proc_start + proc_count - start_line
             break
         except Exception:
             continue
@@ -378,11 +399,18 @@ def op_replace_procedure(workbook, vb_project, op: dict):
             f"Procedure '{proc_name}' not found in module '{op['name']}'"
             " (for Property Get/Let/Set, specify it explicitly with kind)"
         )
-    _check_dangerous_code(op["code"])
-    assembled = _project_replacement(code_module, start_line, count_lines, op["code"])
+    new_code = _strip_leading_attribute_lines(str(op["code"])).rstrip("\r\n")
+    _check_dangerous_code(new_code)
+    assembled = _project_replacement(code_module, start_line, count_lines, new_code)
     _lint_vba_syntax(assembled)
-    code_module.DeleteLines(start_line, count_lines)
-    code_module.InsertLines(start_line, op["code"])
+    # ProcCountLines は最後のプロシージャだと後ろの空行も含むため、置き換え範囲の末尾にあった空行は残す
+    old_lines = code_module.Lines(start_line, count_lines).replace("\r\n", "\n").split("\n")
+    trailing_blank = 0
+    while len(old_lines) > 1 and not old_lines[-1].strip():
+        old_lines.pop()
+        trailing_blank += 1
+    code_module.DeleteLines(start_line, count_lines - trailing_blank)
+    code_module.InsertLines(start_line, new_code)
     return None
 
 
@@ -405,10 +433,13 @@ def op_insert_code(workbook, vb_project, op: dict):
         line = position
     else:
         raise ValueError(f"position must be 'end'/'start' or a line number (integer) of 1 or more: {position!r}")
-    _check_dangerous_code(op["code"])
-    assembled = _project_replacement(code_module, line, 0, op["code"])
+    if line > code_module.CountOfLines + 1:
+        raise ValueError(f"position {line} is past the end of module '{op['name']}' ({code_module.CountOfLines} lines). Use 'end'")
+    new_code = _strip_leading_attribute_lines(str(op["code"]))
+    _check_dangerous_code(new_code)
+    assembled = _project_replacement(code_module, line, 0, new_code)
     _lint_vba_syntax(assembled)
-    code_module.InsertLines(line, op["code"])
+    code_module.InsertLines(line, new_code)
     return None
 
 
@@ -474,13 +505,22 @@ def _check_blocking_ui(code: str, macro_name: str) -> None:
 
 def op_run_macro(workbook, vb_project, op: dict):
     name = op["name"]
-    call_args = op.get("args", [])
+    call_args = op.get("args")
+    if call_args is None:
+        call_args = []
+    elif not isinstance(call_args, list):
+        # 文字列を * で展開すると1文字ずつの引数になってしまうため、単一値は1引数として扱う
+        call_args = [call_args]
+    if len(call_args) > 30:
+        raise ValueError(f"run_macro accepts at most 30 args (Application.Run limit): {len(call_args)}")
     proc_code = _find_procedure_code(vb_project, name)
     if proc_code:
         _check_blocking_ui(proc_code, name)
     excel = workbook.Application
     try:
-        result = excel.Run(f"'{workbook.Name}'!{name}", *call_args)
+        # ブック名の ' は '' と重ねないと Application.Run が別名として解釈して失敗する
+        book = str(workbook.Name).replace("'", "''")
+        result = excel.Run(f"'{book}'!{name}", *call_args)
     except Exception as e:  # noqa: BLE001 - COMエラーはマクロ側のエラー内容により多様なため丸めて報告する
         raise ValueError(f"Failed to run macro '{name}': {e}")
     return _to_json_safe(result)

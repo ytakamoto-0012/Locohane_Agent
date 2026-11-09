@@ -33,8 +33,10 @@ if str(_OFFICE_SHARED) not in sys.path:
     sys.path.append(str(_OFFICE_SHARED))
 
 from excel_common import (  # noqa: E402
+    _DEFAULT_COLUMN_WIDTH,
     _display_width,
     backup_before_overwrite,
+    column_width,
     exceeds_column_width,
     existing_cells,
     existing_rows,
@@ -133,6 +135,7 @@ def write_table(
     """
     from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 
+    rows = [list(r) if r is not None else [] for r in rows]
     col_letter, start_row = coordinate_from_string(top_left)
     first_col = column_index_from_string(col_letter)
     width = max((len(r) for r in rows), default=1)
@@ -187,8 +190,10 @@ def write_table(
     _wrap_overflowing(ws, header_row or first_row, last_row, first_col, last_col)
     if title_row is not None:
         _fit_title_height(ws, title_row, first_col, last_col, title)
-    if freeze and header_row is not None:
-        ws.freeze_panes = ws.cell(row=first_row, column=first_col).coordinate
+    if freeze and header_row is not None and not ws.freeze_panes:
+        # 行だけを固定する（表が B 列以降から始まっても左の列は固定しない）。同じシートに表を縦に
+        # 並べたとき、後の表の見出しで固定し直すと上の表まで丸ごと固定されてスクロールできないため、最初の表で決める。
+        ws.freeze_panes = f"A{first_row}"
     table = Table(title_row, header_row, first_row, last_row, first_col, last_col)
     tables = getattr(ws, "_xlkit_tables", None)
     if tables is None:
@@ -448,7 +453,7 @@ def _fit_print_setup(ws) -> None:
 
 
 def _print_width(ws, first_col: int, last_col: int) -> float:
-    return sum(ws.column_dimensions[get_column_letter(c)].width or 8.43 for c in range(first_col, last_col + 1))
+    return sum(column_width(ws, c) or _DEFAULT_COLUMN_WIDTH for c in range(first_col, last_col + 1))
 
 
 def _column_index(letter: str) -> int:
@@ -458,23 +463,35 @@ def _column_index(letter: str) -> int:
 
 
 def _autofit(ws, rows: list[list[object]], first_col: int) -> None:
-    """全角を2文字と数えた幅に合わせて列幅を広げる（狭めない・上限60）。"""
+    """全角を2文字と数えた幅に合わせて列幅を広げる（狭めない・上限60）。
+
+    数値は桁区切り・通貨記号の分を足した幅で数える（そのままの桁数だと "#,##0" で ### になる）。
+    """
     widths: dict[str, float] = {}
     for values in rows:
         for offset, value in enumerate(values):
             letter = get_column_letter(first_col + offset)
-            widths[letter] = max(widths.get(letter, 0.0), _display_width(value))
+            widths[letter] = max(widths.get(letter, 0.0), _value_width(value))
     for letter, width in widths.items():
         target = min(max(width + 2, 8), _MAX_AUTO_WIDTH)
-        current = ws.column_dimensions[letter].width
-        if current is None or target > current:
+        current = column_width(ws, letter)
+        if current is None:
+            ws.column_dimensions[letter].width = max(target, _DEFAULT_COLUMN_WIDTH)
+        elif target > current:
             ws.column_dimensions[letter].width = target
+
+
+def _value_width(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return _display_width(value)
+    text = f"{value:,.2f}" if isinstance(value, float) and not value.is_integer() else f"{int(value):,}"
+    return len(text) + 1
 
 
 def _wrap_overflowing(ws, min_row: int, max_row: int, min_col: int, max_col: int) -> None:
     """列幅の上限でも収まらない文字列のセルに折り返しを付ける。"""
     for col in range(min_col, max_col + 1):
-        width = ws.column_dimensions[get_column_letter(col)].width
+        width = column_width(ws, col)
         for r in range(min_row, max_row + 1):
             cell = ws.cell(row=r, column=col)
             if isinstance(cell.value, str) and not cell.alignment.wrap_text and exceeds_column_width(cell.value, width):
@@ -487,7 +504,7 @@ def _fit_title_height(ws, row: int, min_col: int, max_col: int, text: str) -> No
     """折り返したタイトルが隠れない行の高さにする（縮めない）。"""
     import math
 
-    total = sum(ws.column_dimensions[get_column_letter(c)].width or 8.43 for c in range(min_col, max_col + 1))
+    total = sum(column_width(ws, c) or _DEFAULT_COLUMN_WIDTH for c in range(min_col, max_col + 1))
     lines = max(1, math.ceil(_display_width(text) / max(total, 1)))
     height = min(15.0 * lines + 4, 409)
     current = ws.row_dimensions[row].height
@@ -561,7 +578,7 @@ def _fit_wrapped_row_heights(ws, rows: set | None = None) -> None:
             covered.add((rng.min_row, c))
 
     def col_width(col: int) -> float:
-        return ws.column_dimensions[get_column_letter(col)].width or 8.43
+        return column_width(ws, col) or _DEFAULT_COLUMN_WIDTH
 
     for r, row in existing_rows(ws):
         if rows is not None and r not in rows:

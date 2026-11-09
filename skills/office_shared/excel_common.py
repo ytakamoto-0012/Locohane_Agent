@@ -138,14 +138,23 @@ def is_process_running(pid: int) -> bool:
     **安全側＝「生存している」扱い**でTrueを返す。誤って記録を消して
     追跡不能にしてしまうより、記録が残り続ける（次回`terminate_tracked_processes`
     実行時に再判定される）副作用の方が軽微なため。
+
+    ただし OpenProcess が ERROR_INVALID_PARAMETER（87）で失敗するのは、その PID の
+    プロセスが存在しない（終了済みで誰もハンドルを持っていない）ときなので False を返す。
+    COM で起動した EXCEL.EXE は自プロセスがハンドルを持たないため、Quit() 後はこの経路になる
+    （以前は True を返し、毎回 3 秒待った末に PID 記録が残り続けていた）。
     """
+    if not isinstance(pid, int) or pid <= 0:
+        return False
     try:
         import win32api
         import win32con
         import win32process
 
         handle = win32api.OpenProcess(win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    except Exception:
+    except Exception as e:
+        if getattr(e, "winerror", None) == 87:
+            return False
         return True
     try:
         exit_code = win32process.GetExitCodeProcess(handle)
@@ -362,7 +371,7 @@ def write_json_result(result: dict, category: str, source_path) -> dict:
     溜まり続ける。
     """
     thread_id = os.environ.get("AGENT_EXEC_TMP_NAME") or os.environ.get("AGENT_THREAD_ID") or "_no_session"
-    base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp")
+    base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp").resolve()  # 返すパス・Office に渡すパスを絶対にする（MCP 経由では AGENT_DEFAULT_WORKDIR が無い）
     out_dir = base_dir / f"_tmp_{thread_id}" / category
     out_dir.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha1(str(Path(source_path).resolve()).encode("utf-8")).hexdigest()[:8]
@@ -387,7 +396,7 @@ def write_text_result(text: str, category: str, source_path) -> dict:
     置き場所・命名は write_json_result と同じ規約。
     """
     thread_id = os.environ.get("AGENT_EXEC_TMP_NAME") or os.environ.get("AGENT_THREAD_ID") or "_no_session"
-    base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp")
+    base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp").resolve()  # 返すパス・Office に渡すパスを絶対にする（MCP 経由では AGENT_DEFAULT_WORKDIR が無い）
     out_dir = base_dir / f"_tmp_{thread_id}" / category
     out_dir.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha1(str(Path(source_path).resolve()).encode("utf-8")).hexdigest()[:8]
@@ -451,20 +460,38 @@ def exceeds_column_width(value: object, column_width: float | None) -> bool:
 _DEFAULT_COLUMN_WIDTH = 8.43
 
 
+def column_width(ws, col) -> float | None:
+    """列の幅（列アルファベットか1始まりの番号）。設定が無ければ None。
+
+    `ws.column_dimensions[letter]` は、無い列の定義を幅13（customWidth 付き）で作って返す
+    （openpyxl 3.1）。読むだけのつもりでも、保存すると触っていない列が既定の 8.43 から 13 に
+    広がり、未設定の判定（None）も働かなかった。ここでは定義を作らずに読む。
+    読み込んだブックの `<col min="1" max="3">` は先頭列の文字にだけ入るため、範囲でも探す。
+    """
+    from openpyxl.utils import column_index_from_string, get_column_letter
+
+    idx = col if isinstance(col, int) else column_index_from_string(str(col).upper())
+    dims = ws.column_dimensions
+    dim = dims.get(get_column_letter(idx))
+    if dim is None:
+        dim = next((d for d in dims.values() if d.min and d.max and d.min <= idx <= d.max), None)
+    if dim is None or not dim.width:
+        return None
+    return dim.width
+
+
 def cell_column_width(ws, row: int, col: int, merged_range=None) -> float | None:
     """セルの表示に使える列幅。横方向に結合されたアンカーは結合範囲の列幅の合計を返す。
 
     列幅が1列も設定されていなければ None（`exceeds_column_width` が判定しない）を返す。
     結合の合計では未設定の列を Excel の既定幅として数える。
     """
-    from openpyxl.utils import get_column_letter
-
     if merged_range is not None and merged_range.max_col > merged_range.min_col:
-        widths = [ws.column_dimensions[get_column_letter(c)].width for c in range(merged_range.min_col, merged_range.max_col + 1)]
+        widths = [column_width(ws, c) for c in range(merged_range.min_col, merged_range.max_col + 1)]
         if all(w is None for w in widths):
             return None
         return sum(w if w is not None else _DEFAULT_COLUMN_WIDTH for w in widths)
-    return ws.column_dimensions[get_column_letter(col)].width
+    return column_width(ws, col)
 
 
 def existing_cells(ws) -> list:

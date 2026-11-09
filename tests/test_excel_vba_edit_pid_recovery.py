@@ -25,6 +25,8 @@ Pythonプロセスごと強制終了されると、edit_vba.py側のtry/finally�
 
 import json
 import sys
+
+import pytest
 from pathlib import Path
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "skills" / "office_shared"
@@ -251,6 +253,36 @@ class TestIsProcessRunning:
 
         # 確認自体に失敗した場合は安全側（生存扱い）でTrue
         assert excel_common.is_process_running(12345) is True
+
+    def test_nonexistent_pid_returns_false(self, monkeypatch):
+        """OpenProcess が ERROR_INVALID_PARAMETER(87) で失敗するのはプロセスが無いとき。"""
+
+        class _Err(Exception):
+            winerror = 87
+
+        class _RaisingWin32Api:
+            def OpenProcess(self, access, inherit, pid):
+                raise _Err("The parameter is incorrect.")
+
+        monkeypatch.setitem(sys.modules, "win32api", _RaisingWin32Api())
+        assert excel_common.is_process_running(12345) is False
+
+    def test_invalid_pid_returns_false(self):
+        assert excel_common.is_process_running(None) is False
+        assert excel_common.is_process_running(0) is False
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+    def test_real_exited_process_without_handles_returns_false(self):
+        import gc
+        import subprocess
+
+        pytest.importorskip("win32api")
+        proc = subprocess.Popen(["cmd", "/c", "exit"])
+        proc.wait()
+        pid = proc.pid
+        del proc
+        gc.collect()
+        assert excel_common.is_process_running(pid) is False
 
 
 class TestTerminateTrackedProcesses:

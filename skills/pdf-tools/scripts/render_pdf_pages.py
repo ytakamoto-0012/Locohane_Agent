@@ -56,7 +56,7 @@ def main() -> int:
     scale = dpi / 72
 
     thread_id = os.environ.get("AGENT_EXEC_TMP_NAME") or os.environ.get("AGENT_THREAD_ID") or "_no_session"
-    base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp")
+    base_dir = Path(os.environ.get("AGENT_DEFAULT_WORKDIR") or "./data/temp").resolve()  # 返すパス・Office に渡すパスを絶対にする（MCP 経由では AGENT_DEFAULT_WORKDIR が無い）
     rendered_dir = base_dir / f"_tmp_{thread_id}" / "pdf_rendered"
     rendered_dir.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()[:8]

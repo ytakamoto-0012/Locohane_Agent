@@ -105,7 +105,13 @@ def _edit_vba(path: Path, output_path: Path, ops: list, is_new: bool, overwrite:
         else:
             if not path.is_file():
                 raise FileNotFoundError(f"File to edit not found (specify --new to create a new one): {path}")
-            workbook = excel.Workbooks.Open(str(path), UpdateLinks=0, IgnoreReadOnlyRecommended=True)
+            # run_macro のためにマクロを許可すると、開いた時点で Workbook_Open が走ってしまう
+            # （MsgBox を含めばここでハングする）。開く間だけイベントを止める。
+            excel.EnableEvents = False
+            try:
+                workbook = excel.Workbooks.Open(str(path), UpdateLinks=0, IgnoreReadOnlyRecommended=True)
+            finally:
+                excel.EnableEvents = True
 
         try:
             vb_project = workbook.VBProject
@@ -214,13 +220,14 @@ def main() -> int:
         print("Either --ops-json or --ops-file is required (except with --new)", file=sys.stderr)
         return 1
 
-    path = Path(args.path)
+    # Excel は相対パスを自分のカレント（通常は「ドキュメント」）基準で解決するため、絶対パスにして渡す
+    path = Path(args.path).resolve()
     ext = path.suffix.lower()
     if ext != ".xlsm":
         print(f"Writing and running VBA supports only .xlsm: {ext}", file=sys.stderr)
         return 1
 
-    output_path = Path(args.output) if args.output else path
+    output_path = Path(args.output).resolve() if args.output else path
     if output_path.suffix.lower() != ".xlsm":
         print(f"The extension of the output must be .xlsm: {output_path.suffix}", file=sys.stderr)
         return 1

@@ -57,3 +57,25 @@ class TestLintDetectsInvalidContinueStatement:
     def test_normal_code_without_continue_does_not_raise(self):
         code = "Sub Foo()\r\n    Do While True\r\n        Exit Do\r\n    Loop\r\nEnd Sub"
         _lint_vba_syntax(code)  # should not raise
+
+
+class TestLintColonStatementsAndMultiNext:
+    """1行のコロン複文や `Next j, i` を、ブロックの開きっぱなしと誤判定しない。"""
+
+    def test_colon_separated_for_next_on_one_line(self):
+        _lint_vba_syntax("Sub A()\n  For i = 1 To 3: s = s + i: Next\nEnd Sub")
+
+    def test_next_closing_two_fors(self):
+        _lint_vba_syntax("Sub A()\nFor i = 1 To 2\nFor j = 1 To 2\nNext j, i\nEnd Sub")
+
+    def test_named_argument_is_not_a_separator(self):
+        _lint_vba_syntax('Sub A()\n  Foo Bar:=1: If x Then y\nEnd Sub')
+
+    def test_single_line_if_with_colon(self):
+        _lint_vba_syntax("Sub A()\n  If x Then a = 1: b = 2\nEnd Sub")
+
+    def test_unclosed_for_still_detected(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            _lint_vba_syntax("Sub A()\n  For i = 1 To 3: s = s + i\nEnd Sub")
