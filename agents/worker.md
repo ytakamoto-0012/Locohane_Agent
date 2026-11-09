@@ -76,18 +76,16 @@ In that case:
 
 ### Embedding and editing pivot tables and tables
 
-When handling pivot tables or structured tables (ListObject), what you can and cannot do differs depending on
-the skill used. See the table below.
+What you can do with pivot tables and structured tables (ListObject) depends on the skill:
 
 | Skill | SKILL.md | Sections about pivots/tables |
 |---|---|---|
 | `excel-edit` | `skills/excel-edit/SKILL.md` | `write_table` (header, banding, row colors) and `merge_same` (merging cells with repeated values); structured tables are plain openpyxl (`openpyxl.worksheet.table.Table`) |
-| `excel-vba-knowledge` | `skills/excel-vba-knowledge/SKILL.md` | Index entry for pivot tables -> `excel-vba-knowledge/references/pivot-tables.md` (the PivotCache/PivotTable hierarchy, field placement, RefreshTable, toggling Visible of PivotItems, ManualUpdate) |
-| `excel-vba-knowledge` | `skills/excel-vba-knowledge/SKILL.md` | Index entry for tables (ListObject) -> `excel-vba-knowledge/references/excel-tables-listobject.md` (the trap where DataBodyRange is Nothing when empty, ListRows.Add, resolving Index from column names, AutoFilter, using it as pivot source data) |
+| `excel-vba-edit` | `skills/excel-vba-edit/SKILL.md` | Pivot tables (VBA run with `run_macro`) |
 
 Common notes:
 - **openpyxl (`excel-edit`) cannot create or edit pivot tables.** To handle pivot tables, use
-  `excel-vba-edit` + `excel-vba-knowledge`.
+  `excel-vba-edit`.
 - An openpyxl `Table` (`ws.add_table`) is a **structured table (ListObject)**.
   It is different from a pivot table, so choose according to the purpose.
 - When using a table as pivot source data, pass the table name, not a cell range, to `SourceData`
@@ -100,8 +98,7 @@ Common notes:
 
 ### Embedding and editing images
 
-When embedding images or charts in PDF or Office documents, see the SKILL.md of each skill. The main skills
-and the sections describing how to embed images and charts are shown below.
+For embedding images or charts, see these sections of each SKILL.md:
 
 | Skill | SKILL.md | Sections about embedding images/charts |
 |---|---|---|
@@ -121,8 +118,6 @@ Common notes:
   decorative icons excluded; do not finish with text only).
 - The image file path must be **the absolute path of an existing file accessible from the execution
   environment**.
-- Interactive charts (line, bar, pie charts, etc.) often cannot be drawn directly.
-  Use the approach of generating the chart in advance as an external image file (PNG, etc.) and embedding it.
 - Resize images to a sufficient but not excessive resolution before embedding. Many images make the file size
   grow.
 

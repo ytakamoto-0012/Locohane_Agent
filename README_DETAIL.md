@@ -500,7 +500,6 @@ Locohane/
 │   ├── excel-vba-read/      # xlsm/xls VBAマクロコード読込専用
 │   ├── excel-vba-edit/      # xlsm VBAマクロコード追加/上書き/削除・実行
 │   ├── excel-render/        # Excelシートの画像化
-│   ├── excel-vba-knowledge/ # Excel VBAのコーディング作法・落とし穴のローカル知識ベース
 │   ├── pdf-tools/           # PDF読込・ページ画像化・PDF生成
 │   ├── pptx-read/           # pptx読込専用（テキスト・表・発表者ノート抽出）
 │   ├── pptx-create/         # pptx新規生成（16:9テンプレート方式）
@@ -889,7 +888,6 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 ^
 | `excel-vba-read` | `skills/` | スクリプト実行を伴う | xlsm/xlsのVBAマクロコードの読み込み専用。 |
 | `excel-vba-edit` | `skills/` | スクリプト実行を伴う | xlsmのVBAマクロコードの追加/上書き/削除・実行。 |
 | `excel-render` | `skills/` | スクリプト実行を伴う | Excelシートの画像化（罫線・書式・グラフ・レイアウトの視覚把握）。 |
-| `excel-vba-knowledge` | `skills/` | 参照のみ | Excel VBAのコーディング作法・定石・落とし穴を蓄積したローカル知識ベース（`references/`参照）。 |
 | `pptx-read` | `skills/` | スクリプト実行を伴う | pptxの読込専用（スライドのタイトル・本文・表・発表者ノートの抽出）。 |
 | `pptx-create` | `skills/` | スクリプト実行を伴う | pptxの新規生成（16:9テンプレート方式）。 |
 | `pptx-inspect` | `skills/` | スクリプト実行を伴う | 既存pptxテンプレートの構造読取専用（`pptx-edit`前の`shape_index`把握）。 |
