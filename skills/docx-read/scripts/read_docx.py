@@ -111,16 +111,22 @@ def main() -> int:
     # セクション（ページ設定）情報を取得
     sections_info = []
     for section in doc.sections:
-        sections_info.append(
-            {
-                "page_width_cm": _length_cm(section.page_width),
-                "page_height_cm": _length_cm(section.page_height),
-                "left_margin_cm": _length_cm(section.left_margin),
-                "right_margin_cm": _length_cm(section.right_margin),
-                "top_margin_cm": _length_cm(section.top_margin),
-                "bottom_margin_cm": _length_cm(section.bottom_margin),
-            }
-        )
+        info = {
+            "page_width_cm": _length_cm(section.page_width),
+            "page_height_cm": _length_cm(section.page_height),
+            "left_margin_cm": _length_cm(section.left_margin),
+            "right_margin_cm": _length_cm(section.right_margin),
+            "top_margin_cm": _length_cm(section.top_margin),
+            "bottom_margin_cm": _length_cm(section.bottom_margin),
+        }
+        # ヘッダー・フッターの文字列（docx-edit の find_replace はここも置換する）。前のセクションと同じものは省く
+        for key, part in (("header_text", section.header), ("footer_text", section.footer)):
+            if part.is_linked_to_previous:
+                continue
+            text = "\n".join(p.text for p in part.paragraphs if p.text.strip())
+            if text:
+                info[key] = text
+        sections_info.append(info)
 
     # 表の列幅を取得
     table_column_widths_list = []

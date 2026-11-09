@@ -56,7 +56,7 @@ as above and included only in the JSON file that `result_path` points to.
 Read `result_path` to check the content.
 
 The following fields are also returned at the top level (for detecting structural problems):
-- `sections`: the dimensions and margins of each section (page setup) in the document.
+- `sections`: the dimensions and margins of each section (page setup) in the document, plus `header_text`/`footer_text` when the section has its own non-empty header/footer.
   `{"page_width_cm", "page_height_cm", "left_margin_cm", "right_margin_cm", "top_margin_cm", "bottom_margin_cm"}`.
 - `table_column_widths`: for each table, an array of column widths (`[[12.3, null, 8.5], [15.2, 10.0]]`).
   Columns not set because of automatic layout are `null`. Only tables in the body (tables inside text boxes are not included).
