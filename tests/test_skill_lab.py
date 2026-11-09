@@ -989,3 +989,132 @@ def test_api_delete_theme_restores_folder_on_any_unmark_error(client, lab_env, m
     monkeypatch.setattr(promotion, "unmark_imported", broken)
     assert client.delete(url).status_code == 409
     assert directory.is_dir()
+
+
+# --- 終わったテーマの再開（reopen） ------------------------------------------------------
+
+
+def test_api_reopen_cancelled_theme_remarks_draft_and_allows_editing(client, lab_env):
+    draft = _draft(lab_env)
+    theme = client.post("/api/instances/org_a/skill-lab/themes", json={"title": "A", "lab": "lab1"}).json()
+    base = f"/api/instances/org_a/skill-lab/themes/{theme['id']}"
+    assert client.post(f"{base}/assets", json={"mode": "draft", "asset_type": "skills", "name": "my-skill", "origin": str(draft)}).status_code == 200
+    # 終わっていないテーマは再開できない
+    assert client.post(f"{base}/reopen").status_code == 409
+    assert client.post(f"{base}/cancel").status_code == 200
+    assert "lab" not in json.loads((draft / "_draft_meta.json").read_text(encoding="utf-8"))
+    # 取りやめたままでは編集できない
+    assert client.put(f"{base}/files", json={"path": "spec.md", "content": "## Purpose\nx\n"}).status_code == 409
+
+    res = client.post(f"{base}/reopen")
+    assert res.status_code == 200 and res.json()["previous_status"] == themes.STATUS_CANCELLED
+    data = client.get(base).json()
+    assert data["status"] == themes.STATUS_DRAFT
+    assert data["history"][-1]["action"] == "reopen"
+    # 取り込みの印が付き直し、編集できる
+    assert json.loads((draft / "_draft_meta.json").read_text(encoding="utf-8"))["lab"]["theme_id"] == theme["id"]
+    assert client.put(f"{base}/files", json={"path": "spec.md", "content": "## Purpose\nx\n"}).status_code == 200
+    actions = [json.loads(line)["action"] for line in (lab_env["tmp"] / "audit.log").read_text(encoding="utf-8").splitlines()]
+    assert actions[-2] == "skill_lab_reopen"
+
+
+def test_api_reopen_refuses_when_draft_is_taken_by_another_theme(client, lab_env):
+    draft = _draft(lab_env)
+    themes_api = "/api/instances/org_a/skill-lab/themes"
+    first = client.post(themes_api, json={"title": "A", "lab": "lab1"}).json()
+    body = {"mode": "draft", "asset_type": "skills", "name": "my-skill", "origin": str(draft)}
+    assert client.post(f"{themes_api}/{first['id']}/assets", json=body).status_code == 200
+    assert client.post(f"{themes_api}/{first['id']}/cancel").status_code == 200
+    second = client.post(themes_api, json={"title": "B", "lab": "lab1"}).json()
+    assert client.post(f"{themes_api}/{second['id']}/assets", json=body).status_code == 200
+    res = client.post(f"{themes_api}/{first['id']}/reopen")
+    assert res.status_code == 409 and second["id"] in res.json()["detail"]
+    assert client.get(f"{themes_api}/{first['id']}").json()["status"] == themes.STATUS_CANCELLED
+
+
+def test_reopened_promoted_theme_can_be_promoted_again_replacing_its_own_assets(lab_env, client, monkeypatch):
+    monkeypatch.setattr(promotion, "PROMOTION_LOG", lab_env["tmp"] / "promotion_log.md")
+    monkeypatch.setattr(promotion, "PROMOTE_HISTORY_DIR", lab_env["tmp"] / "history")
+    directory, _draft_dir = _ready_theme(lab_env)
+    first = _promote(lab_env, directory, distribute_to=["org_b"])
+    dest = _cfg(lab_env, "org_a").instance_locohane_dir / "skills" / "my-skill" / "SKILL.md"
+    assert first["placements"]["org_a"]["placed_sha256"]
+
+    base = f"/api/instances/org_a/skill-lab/themes/{directory.name}"
+    assert client.post(f"{base}/reopen").status_code == 200
+    data = themes.read(directory)
+    assert data["status"] == themes.STATUS_DRAFT and "promotion" not in data and len(data["previous_promotions"]) == 1
+
+    # 直して、もう一度トライアウトに合格したことにする
+    themes.write_text(directory, "assets/skills/my-skill/SKILL.md", _skill_md("my-skill", "直したスキル。"), actor="admin")
+    themes.update(directory, lambda d: d.update({"tryout": _tryout_for(directory), "status": themes.STATUS_REVIEW}))
+    check = promotion.check(lab_env["root"], directory, distribute_to=["org_b"])
+    assert check.problems == []
+    assert check.placements["org_a"]["replaces"] and check.placements["org_b"]["replaces"]
+    _promote(lab_env, directory, distribute_to=["org_b"])
+    assert "直したスキル。" in dest.read_text(encoding="utf-8")
+    assert themes.read(directory)["status"] == themes.STATUS_PROMOTED
+
+    # 前の昇格の後に別のところで変えられたものは置き換えない
+    assert client.post(f"{base}/reopen").status_code == 200
+    dest.write_text(_skill_md("my-skill", "誰かが直接直した。"), encoding="utf-8")
+    themes.update(directory, lambda d: d.update({"tryout": _tryout_for(directory), "status": themes.STATUS_REVIEW}))
+    problems = promotion.check(lab_env["root"], directory).problems
+    assert any("changed since then" in p for p in problems)
+
+
+# --- トークン使用量（「利用量・料金」の台帳） -------------------------------------------------
+
+
+def test_worker_records_eval_and_ai_token_usage(lab_env, monkeypatch):
+    from admin import ai_usage
+    from admin.skill_lab import evaluation, judge, llm as lab_llm
+
+    w, _calls = _make_worker(monkeypatch, lab_env, [])
+    directory = _theme(lab_env)
+    _add_skill(directory)
+    themes.write_text(directory, "cases/001.yaml", _CASE.format(id="001"), actor="admin")
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_RUNNING, "loop": {"mode": "loop", "by": "alice"}}))
+    results = [
+        {"case_id": "001", "token_usage_total": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}, "token_usage_max_per_call": {"calls": 2}},
+        {"case_id": "001", "token_usage_total": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}, "token_usage_max_per_call": {"calls": 1}},
+    ]
+    assert evaluation.token_usage(results) == ({"input_tokens": 150, "output_tokens": 30, "total_tokens": 180}, 3)
+    monkeypatch.setattr(evaluation, "run", lambda *a, **k: {"out_dir": str(directory), "results": results, "tryout": {}})
+
+    def fake_judge(cfg, **kw):
+        # judge の LLM 呼び出しの usage が sink（usage_sink）経由で記録される
+        sink = lab_llm._USAGE_SINK.get()
+        sink({"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
+        return [{"case_id": "001", "repeat_index": 1, "outcome": "pass"}]
+
+    monkeypatch.setattr(judge, "judge_results", fake_judge)
+    monkeypatch.setattr(w, "_llm_config", lambda *a, **k: None)
+    owner = w._usage_owner(themes.read(directory))
+    with lab_llm.usage_sink(lambda usage: w._record_usage(owner, usage)):
+        type(w)._evaluate(w, "org_a", directory, 1, "eval")
+    usage = ai_usage.monthly_usage_by_source(lab_env["root"])["lab1"]
+    month = usage["months"][-1]
+    assert month["total"] == 190 and month["calls"] == 4
+    assert list(month["users"]) == ["alice"]
+
+
+def test_lab_llm_passes_usage_metadata_to_the_sink(monkeypatch):
+    from langchain_core.messages import AIMessage
+
+    import src.llm
+    from admin.skill_lab import llm as lab_llm
+
+    class _Model:
+        async def ainvoke(self, messages):
+            return AIMessage(content='{"ok": true}', usage_metadata={"input_tokens": 11, "output_tokens": 4, "total_tokens": 15})
+
+    async def _build(_cfg):
+        return _Model()
+
+    monkeypatch.setattr(src.llm, "build_model", _build)
+    seen = []
+    with lab_llm.usage_sink(seen.append):
+        assert lab_llm.ask_json(None, "sys", "user") == {"ok": True}
+    assert lab_llm.ask_text(None, "sys", "user")  # sink の外では記録しない
+    assert seen == [{"input_tokens": 11, "output_tokens": 4, "total_tokens": 15}]

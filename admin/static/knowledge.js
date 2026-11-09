@@ -875,11 +875,13 @@ function buildReferencesSection(container, name, references) {
     }),
   ]);
   section.append(dataTable([_t("参照名"), _t("参照元（インスタンス / コレクション）"), _t("説明"), _t("文書"), _t("最終取り込み"), _t("状態"), _t("操作")], rows, _t("参照はありません。")));
-  section.append(buildAddReferenceForm(container, name));
+  section.append(buildAddReferenceForm(container, name, references || []));
   return section;
 }
 
-function buildAddReferenceForm(container, name) {
+// references: このインスタンスに既にある参照。同じ参照元のコレクションは候補に出さない（二重に参照しても検索結果が重なるだけ）。
+function buildAddReferenceForm(container, name, references) {
+  const referenced = new Set(references.map((r) => `${r.source_instance}\u0000${r.source_collection}`));
   const instanceSelect = el("select", {});
   const collectionSelect = el("select", {});
   const nameInput = el("input", { type: "text", maxlength: "48", placeholder: _t("例: org_a_manuals（半角英数字・_・- の48文字以内）") });
@@ -905,9 +907,16 @@ function buildAddReferenceForm(container, name) {
   collectionSelect.addEventListener("change", suggestName);
   api("/api/knowledge/sources")
     .then((data) => {
-      instances = data.instances.filter((i) => i.name !== name && i.collections.length);
+      instances = data.instances
+        .filter((i) => i.name !== name)
+        .map((i) => ({ ...i, collections: i.collections.filter((c) => !referenced.has(`${i.name}\u0000${c.name}`)) }))
+        .filter((i) => i.collections.length);
       for (const i of instances) instanceSelect.append(el("option", { value: i.name, text: knowledgeInstanceLabel(i) }));
-      if (!instances.length) error.textContent = _t("参照できるコレクションを持つ他のインスタンスがありません。");
+      if (!instances.length) {
+        error.textContent = referenced.size
+          ? _t("参照できるコレクションはすべて参照済みです。")
+          : _t("参照できるコレクションを持つ他のインスタンスがありません。");
+      }
       fillCollections();
     })
     .catch((e) => {

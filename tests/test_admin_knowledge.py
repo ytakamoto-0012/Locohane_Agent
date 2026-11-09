@@ -424,6 +424,7 @@ def test_references_between_instances(multi):
         {"name": "x", "source_instance": "lab1", "source_collection": "docs"},  # スキル研究室
         {"name": "x", "source_instance": "org_a", "source_collection": "none"},  # 無いコレクション
         {"name": "a_docs", "source_instance": "org_a", "source_collection": "docs"},  # 名前の重複
+        {"name": "a_docs2", "source_instance": "org_a", "source_collection": "docs"},  # 同じコレクションを別名で二重に参照
         {"name": "bad name", "source_instance": "org_a", "source_collection": "docs"},
     ):
         assert client.post("/api/instances/org_b/knowledge/references", json=body).status_code == 400, body

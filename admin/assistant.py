@@ -285,6 +285,16 @@ class ChatBody(BaseModel):
     view: dict[str, str | None] | None = None
 
 
+async def _usage_tracked(chunks, usage: dict[str, int]):
+    """astream の各チャンクの usage_metadata（stream_usage=True のとき最後のチャンク等に付く）を usage へ足しながら流す。"""
+    async for chunk in chunks:
+        meta = getattr(chunk, "usage_metadata", None)
+        if isinstance(meta, dict):
+            for k in usage:
+                usage[k] += int(meta.get(k, 0) or 0)
+        yield chunk
+
+
 def _ndjson(obj: dict[str, Any]) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
@@ -304,6 +314,7 @@ def build_router(
     model_factory: Callable[[Config], Any] | None = None,
     guide_path: Path = GUIDE_PATH,
     llm_instance_setting: Callable[[], str] | None = None,
+    usage_recorder: Callable[[str, dict, int], None] | None = None,
 ) -> APIRouter:
     """管理アシスタント API の router を作る。
 
@@ -321,6 +332,9 @@ def build_router(
         guide_path: 画面ガイドの md（毎回読み直す）。
         llm_instance_setting: 回答に使う LLM のインスタンス（[admin] assistant_llm_instance）を返す関数。相談のたびに
             呼ぶ（設定ダッシュボードの「管理者設定」で変えたら再起動なしで効かせるため）。省略時は admin_config の値。
+        usage_recorder: (相談した管理者, トークン使用量 {"input_tokens","output_tokens","total_tokens"}, 呼び出し回数) を
+            受け取り、「利用量・料金」の台帳（admin/ai_usage.py）へ記録する関数。途中で止めた・失敗した相談も、
+            それまでに LLM が返した分を記録する。
     """
     router = APIRouter()
     enabled = admin_config.admin_assistant_enabled
@@ -414,9 +428,10 @@ def build_router(
             ]
             think = ThinkFilter()
             answer: list[str] = []
+            usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
             try:
                 model = await _build_model(config_loader(llm_instance))
-                async for chunk in model.astream(lc_messages):
+                async for chunk in _usage_tracked(model.astream(lc_messages), usage):
                     text = think.feed(_chunk_text(chunk))
                     if text:
                         answer.append(text)
@@ -435,6 +450,13 @@ def build_router(
                     }
                 )
                 return
+            finally:
+                # 停止（接続を切られた）・失敗でも、それまでに使った分は記録する。
+                if usage_recorder is not None and any(usage.values()):
+                    try:
+                        usage_recorder(user, dict(usage), 1)
+                    except Exception:  # noqa: BLE001 - 集計の失敗で相談を止めない
+                        logger.warning("Could not record the admin assistant token usage.", exc_info=True)
             full = "".join(answer).strip()
             if not full:
                 yield _ndjson({"type": "error", "message": _t("LLM の応答が空でした。")})

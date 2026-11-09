@@ -603,7 +603,8 @@ def build_router(
             changed["ok"] = True
             d["status"] = themes.STATUS_QUEUED
             d["lab"] = lab
-            d["loop"] = {"mode": body.mode, "queued_at": themes.now_iso(), "stop_requested": False}
+            # by: 「利用量・料金」でこのループの AI 利用を誰の分として数えるか（worker.py の _usage_owner）。
+            d["loop"] = {"mode": body.mode, "queued_at": themes.now_iso(), "stop_requested": False, "by": user}
             themes.add_history(d, user, "start", body.mode)
 
         themes.update(directory, _apply)
@@ -652,6 +653,61 @@ def build_router(
         promotion.unmark_imported(directory)
         _audit(request, user, name, "skill_lab_cancel", theme=theme_id)
         return {"success": True}
+
+    @router.post("/api/instances/{name}/skill-lab/themes/{theme_id}/reopen")
+    def reopen(name: str, theme_id: str, request: Request, user: str = Depends(require_login), _c=Depends(require_csrf)):
+        """終わったテーマ（取りやめ・差し戻し・昇格済み）を「準備中」に戻し、編集・ループの再実行をできるようにする。
+
+        - 取り込み元のドラフトが残っていれば、研究室の印を付け直す（別の終わっていないテーマが取り込んでいれば断る）。
+        - 昇格済みなら、前の昇格の記録を previous_promotions へ移す。もう一度昇格するときは、このテーマが前に置いた
+          スキル・サブエージェントを（その後に変わっていなければ）置き換える（promotion.previously_placed）。
+        - 差し戻しの記録は previous_returns へ移す。
+        """
+        directory = _theme(name, theme_id)
+        data = themes.read(directory)
+        if data.get("status") not in themes.CLOSED_STATUSES:
+            raise HTTPException(status_code=409, detail=_t("このテーマは終わっていないため、再開する必要はありません。"))
+        drafts = []
+        imported = sources.imported_drafts(_root(name))
+        for skill, src in (data.get("sources") or {}).get("skills", {}).items():
+            if src.get("kind") != "draft" or not src.get("origin"):
+                continue
+            origin = Path(src["origin"])
+            if not (origin / "SKILL.md").is_file():
+                continue  # 昇格でアーカイブ済み・作成者が消した（研究対象のコピーはテーマに残っている）
+            other = imported.get(str(origin.resolve()))
+            if other and other != theme_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=_t("取り込み元のドラフト {0}/{1} は別のテーマ（{2}）に取り込まれているため、再開できません。そのテーマで続けるか、そのテーマを取りやめてから再開してください。", src.get("owner"), skill, other),
+                )
+            drafts.append(origin)
+        changed = {"ok": False, "from": data.get("status")}
+
+        def _apply(d: dict) -> None:
+            if d.get("status") not in themes.CLOSED_STATUSES:
+                return
+            changed["ok"] = True
+            changed["from"] = d.get("status")
+            if d.get("promotion"):
+                d.setdefault("previous_promotions", []).append(d.pop("promotion"))
+            if d.get("returned"):
+                d.setdefault("previous_returns", []).append(d.pop("returned"))
+            d["status"] = themes.STATUS_DRAFT
+            if d.get("loop"):
+                d["loop"].update({"deadline": None, "stop_requested": False, "message": None})
+            themes.add_history(d, user, "reopen", changed["from"])
+
+        themes.update(directory, _apply)
+        if not changed["ok"]:
+            raise HTTPException(status_code=409, detail=_t("テーマの状態が変わったため再開できませんでした。画面を更新してください。"))
+        for origin in drafts:
+            try:
+                promotion.mark_imported(origin, theme_id)
+            except (OSError, ValueError):
+                logger.warning("Could not mark the source draft as imported: %s", origin, exc_info=True)
+        _audit(request, user, name, "skill_lab_reopen", theme=theme_id, previous_status=changed["from"])
+        return {"success": True, "previous_status": changed["from"]}
 
     # --- 実行結果・差分 -----------------------------------------------------------
 

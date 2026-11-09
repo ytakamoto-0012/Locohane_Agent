@@ -11,10 +11,27 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Callable, Iterator
 
 from src.config import Config
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+
+# 呼び出しごとのトークン使用量（usage_metadata）を受け取る関数。ワーカーが「利用量・料金」の台帳へ
+# 記録するために、タスク・テーマの処理の間だけ設定する（usage_sink()）。
+_USAGE_SINK: ContextVar[Callable[[dict], None] | None] = ContextVar("skill_lab_usage_sink", default=None)
+
+
+@contextmanager
+def usage_sink(fn: Callable[[dict], None]) -> Iterator[None]:
+    """この with の中で行う LLM 呼び出しの usage_metadata を fn に渡す。"""
+    token = _USAGE_SINK.set(fn)
+    try:
+        yield
+    finally:
+        _USAGE_SINK.reset(token)
 
 
 class LabLLMError(RuntimeError):
@@ -31,6 +48,13 @@ async def _ainvoke(config: Config, system: str, user_messages: list[tuple[str, s
     for role, text in user_messages:
         messages.append(HumanMessage(content=text) if role == "user" else AIMessage(content=text))
     response = await model.ainvoke(messages)
+    sink = _USAGE_SINK.get()
+    meta = getattr(response, "usage_metadata", None)
+    if sink is not None and isinstance(meta, dict):
+        try:
+            sink(dict(meta))
+        except Exception:  # noqa: BLE001 - 集計の失敗で研究室の処理を止めない
+            pass
     return response.content if isinstance(response.content, str) else str(response.content)
 
 

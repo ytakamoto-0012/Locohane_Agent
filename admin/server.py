@@ -40,7 +40,7 @@ from src.config import (
 from src.version import __version__
 
 from . import api_docs, assistant, assistant_index, audit, auth, env_files, env_overrides, monitor, overrides, settings_files, supervisor
-from . import ini_catalog_en, usage_cost
+from . import ai_usage, ini_catalog_en, usage_cost
 from . import instances as inst
 from . import admin_settings as admin_settings_api
 from . import data_backup as data_backup_api
@@ -1382,13 +1382,27 @@ def get_monitor_endpoints(name: str, user: str = Depends(require_login)):
 _EMPTY_USAGE = {"source": None, "months": [], "users": []}
 
 
+def _admin_ai_usage() -> tuple[dict[str, dict], str | None]:
+    """管理ツール側の AI 利用（スキル研究室・AIに相談）の台帳（admin/ai_usage.py）。読めなければ空と理由。"""
+    try:
+        return ai_usage.monthly_usage_by_source(INSTANCES_ROOT), None
+    except sqlite3.Error as exc:
+        return {}, str(exc)
+
+
 def _collect_usage() -> tuple[list[dict], list[dict]]:
-    """料金の按分の対象にする全インスタンス（スキル調整ワーカーを除く）の月別使用量。
+    """料金の按分の対象にする全インスタンスの月別使用量。
+
+    本体インスタンスはスレッドDBの台帳、スキル調整ワーカーは管理ツール側の台帳（評価・AI 修正・judge・下書き）、
+    管理アシスタント（AIに相談）は同じ台帳の ASSISTANT_SOURCE を、それぞれ1つのインスタンスとして並べる。
 
     Returns: (items, errors)。items は [{"name", "display_name", "usage"}, ...]。
     スレッドDB・設定を読めないインスタンスは使用量0として items に入れ、errors にも載せる。
     """
     items, errors = [], []
+    admin_usage, admin_error = _admin_ai_usage()
+    if admin_error:
+        errors.append({"name": ai_usage.DB_FILENAME, "error": admin_error})
     for name in inst.list_instance_names(INSTANCES_ROOT):
         try:
             meta = inst.read_instance(INSTANCES_ROOT, name)
@@ -1396,6 +1410,9 @@ def _collect_usage() -> tuple[list[dict], list[dict]]:
             errors.append({"name": name, "error": _t("instance.json を読めません。")})
             continue
         if meta.kind == inst.KIND_SKILL_LAB:
+            usage = admin_usage.pop(name, None)
+            if usage is not None:
+                items.append({"name": name, "display_name": _t("{0}（スキル研究室）", meta.display_name), "usage": usage})
             continue
         usage = _EMPTY_USAGE
         try:
@@ -1404,6 +1421,10 @@ def _collect_usage() -> tuple[list[dict], list[dict]]:
         except (monitor.MonitorError, sqlite3.Error) as exc:
             errors.append({"name": name, "error": str(exc)})
         items.append({"name": name, "display_name": meta.display_name, "usage": usage})
+    # 残り: 管理アシスタントと、削除済みのスキル調整ワーカーの分（使った事実は消えないため残す）。
+    for source, usage in sorted(admin_usage.items()):
+        label = _t("管理アシスタント（AIに相談）") if source == ai_usage.ASSISTANT_SOURCE else _t("{0}（スキル研究室・削除済み）", source)
+        items.append({"name": source, "display_name": label, "usage": usage})
     return items, errors
 
 
@@ -1461,9 +1482,18 @@ def get_usage(name: str, user: str = Depends(require_login)):
     cfg = _monitor_config(name)
     settings = _read_cost_settings()
     try:
-        usage, usage_error = usage_cost.monthly_usage(cfg.thread_store_db), None
-    except (monitor.MonitorError, sqlite3.Error) as exc:
-        usage, usage_error = _EMPTY_USAGE, str(exc)
+        is_lab = inst.read_instance(INSTANCES_ROOT, name).kind == inst.KIND_SKILL_LAB
+    except Exception:  # noqa: BLE001
+        is_lab = False
+    if is_lab:
+        # スキル調整ワーカーはスレッドDBを持たない。管理ツール側の台帳に記録した研究室の AI 利用を出す。
+        admin_usage, usage_error = _admin_ai_usage()
+        usage = admin_usage.get(name, _EMPTY_USAGE)
+    else:
+        try:
+            usage, usage_error = usage_cost.monthly_usage(cfg.thread_store_db), None
+        except (monitor.MonitorError, sqlite3.Error) as exc:
+            usage, usage_error = _EMPTY_USAGE, str(exc)
     items, _errors = _collect_usage()
     # 全体集計の対象外（スキル調整ワーカー等）でも、按分の分母にこのインスタンス自身を含める。
     # 含めないと、他のインスタンスに使用量がある月の割合が 100% を超える。
@@ -1679,6 +1709,7 @@ app.include_router(
         config_loader=lambda name: monitor.instance_config(INSTANCES_ROOT, CONFIG_INI_PATH, name),
         index=_assistant_index,
         llm_instance_setting=lambda: admin_settings_api.current_admin_config(CONFIG_INI_PATH).admin_assistant_llm_instance,
+        usage_recorder=lambda actor, usage, calls: ai_usage.record_safely(INSTANCES_ROOT, ai_usage.ASSISTANT_SOURCE, actor, usage, calls=calls),
         embedding_provider=_assistant_embedding,
     )
 )

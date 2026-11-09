@@ -355,4 +355,11 @@ EN: dict[str, str] = {
     '{0} の稼働時間が1か月の時間数を超えています。': 'The running hours for {0} exceed the hours in a month.',
     '{0} を読めません: {1}': 'Cannot read {0}: {1}',
     'instance.json を読めません。': 'Cannot read instance.json.',
+    'インスタンス {0} のコレクション {1} は既に参照 {2} として参照しています。': 'Collection {1} of instance {0} is already referenced as {2}.',
+    'このテーマは終わっていないため、再開する必要はありません。': 'This theme has not ended, so there is no need to reopen it.',
+    '取り込み元のドラフト {0}/{1} は別のテーマ（{2}）に取り込まれているため、再開できません。そのテーマで続けるか、そのテーマを取りやめてから再開してください。': 'Cannot reopen because the source draft {0}/{1} is imported into another theme ({2}). Continue in that theme, or cancel that theme and then reopen.',
+    'テーマの状態が変わったため再開できませんでした。画面を更新してください。': "Could not reopen because the theme's state changed. Refresh the screen.",
+    '{0}（スキル研究室）': '{0} (Skill Lab)',
+    '管理アシスタント（AIに相談）': 'Admin assistant (Ask AI)',
+    '{0}（スキル研究室・削除済み）': '{0} (Skill Lab, deleted)',
 }

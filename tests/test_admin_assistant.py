@@ -220,8 +220,9 @@ def test_config_defaults():
 
 
 class _Chunk:
-    def __init__(self, content):
+    def __init__(self, content, usage_metadata=None):
         self.content = content
+        self.usage_metadata = usage_metadata
 
 
 class FakeModel:
@@ -233,12 +234,12 @@ class FakeModel:
     async def astream(self, messages):
         self.calls.append(messages)
         for c in self.chunks:
-            yield _Chunk(c)
+            yield c if isinstance(c, _Chunk) else _Chunk(c)
         if self.error:
             raise self.error
 
 
-def _make_client(tmp_path, model, *, enabled=True, llm_instance="", max_history=20, embedding_provider=None):
+def _make_client(tmp_path, model, *, enabled=True, llm_instance="", max_history=20, embedding_provider=None, usage_recorder=None):
     guide = tmp_path / "guide.md"
     guide.write_text("# 画面ガイド\n- モニターを見る", encoding="utf-8")
     admin_config = dataclasses.replace(
@@ -275,6 +276,7 @@ def _make_client(tmp_path, model, *, enabled=True, llm_instance="", max_history=
             embedding_provider=embedding_provider or (lambda target, llm: None),
             model_factory=lambda cfg: model,
             guide_path=guide,
+            usage_recorder=usage_recorder,
         )
     )
     return TestClient(app), loaded
@@ -380,3 +382,21 @@ def test_disabled_assistant(tmp_path):
     assert client.get("/api/assistant/status").json() == {"enabled": False, "llm_instance": None}
     res = client.post("/api/assistant/chat", json={"instance": "org_a", "messages": [{"role": "user", "content": "x"}]})
     assert res.status_code == 404
+
+
+def test_chat_records_token_usage_even_when_the_stream_fails(tmp_path):
+    recorded = []
+    model = FakeModel(
+        ["回答", _Chunk("", {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150})],
+        error=RuntimeError("connection reset"),
+    )
+    client, _ = _make_client(tmp_path, model, usage_recorder=lambda user, usage, calls: recorded.append((user, usage, calls)))
+    res = client.post("/api/assistant/chat", json={"instance": "org_a", "messages": [{"role": "user", "content": "質問"}]})
+    assert [e["type"] for e in _events(res)][-1] == "error"
+    assert recorded == [("admin", {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150}, 1)]
+
+    # usage が返らないモデル（track_token_usage=false 等）では記録しない
+    recorded.clear()
+    client, _ = _make_client(tmp_path, FakeModel(["回答"]), usage_recorder=lambda *a: recorded.append(a))
+    client.post("/api/assistant/chat", json={"instance": "org_a", "messages": [{"role": "user", "content": "質問"}]})
+    assert recorded == []

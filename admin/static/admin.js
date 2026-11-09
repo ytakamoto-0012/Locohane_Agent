@@ -7,6 +7,118 @@
 const $ = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 
+/* ---------------------------------------------------- ボタンの処理中表示
+ * ボタンのクリック（フォームの送信）で動く処理が非同期（Promise を返す・api() を呼ぶ）なら、終わるまで
+ * そのボタンを「保存中…」「追加中…」等の表示にし、二重に押せないようにする。画面ごとに書かなくても
+ * 全ボタンに効くよう、ボタンの click・フォームの submit のリスナー登録（addEventListener）を包む。
+ * - 処理が自分でボタンの文言・disabled を変えた（独自に処理中を表示している）ときは何もしない。
+ * - 処理中に処理側がボタンを書き換えたら、その表示を優先して処理中表示をやめる（押せるようにも戻す）。
+ * - .onclick への代入には効かないため、その場合は withBusy(btn, fn) で包む。
+ */
+const BUSY_LABEL_RULES = [
+  [/保存|Save/i, "保存中…"],
+  [/追加|作成|Add|Create/i, "追加中…"],
+  [/削除|やめる|Delete|Remove/i, "削除中…"],
+  [/更新|再読み込み|読み直|Refresh|Reload|Update/i, "更新中…"],
+  [/開始|起動|実行|Start|Run/i, "実行中…"],
+  [/停止|Stop/i, "停止中…"],
+  [/再起動|Restart/i, "再起動中…"],
+  [/確認|テスト|Check|Test/i, "確認中…"],
+  [/取り込|Ingest|Import/i, "取り込み中…"],
+  [/コピー|複製|Copy|Clone/i, "コピー中…"],
+  [/ログイン|Log in|Sign in/i, "ログイン中…"],
+  [/送信|相談|Send/i, "送信中…"],
+];
+let busyClickButton = null; // クリックのリスナーを同期的に実行している間のボタン（api() が拾う）
+let busyClickPromises = null;
+
+function busyLabelFor(text) {
+  // 「再起動」は「起動」より先に判定する。
+  if (/再起動|Restart/i.test(text)) return _t("再起動中…");
+  for (const [re, label] of BUSY_LABEL_RULES) if (re.test(text)) return _t(label);
+  return _t("処理中…");
+}
+
+function beginButtonBusy(btn) {
+  btn._busyCount = (btn._busyCount || 0) + 1;
+  if (btn._busyCount > 1) return;
+  const text = btn.textContent.trim();
+  // 文字だけのボタン（アイコン等の子要素を持たない）なら文言を差し替える。子要素があれば印（CSS）だけ。
+  // 画面の切り替え（タブ・リンク風のボタン）は読み込み中でも文言を変えない（どこを開いたか分からなくなるため）。
+  const navigation = btn.closest("nav") || btn.matches(".tab-btn, .subtab-btn, .link-btn, .inline-link, .back-btn, .lab-instance-item, [role=tab]");
+  const textOnly = !navigation && text && [...btn.childNodes].every((n) => n.nodeType === Node.TEXT_NODE);
+  btn._busyOriginal = textOnly ? btn.textContent : null;
+  btn._busyLabel = textOnly ? busyLabelFor(text) : null;
+  btn._busyObserver = new MutationObserver(() => endButtonBusy(btn, true));
+  btn.classList.add("is-busy");
+  btn.setAttribute("aria-busy", "true");
+  if (btn._busyLabel) btn.textContent = btn._busyLabel;
+  btn._busyObserver.observe(btn, { childList: true, characterData: true, subtree: true, attributeFilter: ["disabled"] });
+  btn._busyObserver.takeRecords(); // 自分で変えた分は数えない
+}
+
+// force: 処理側がボタンを書き換えた（その表示を残し、文言は戻さない）。
+function endButtonBusy(btn, force) {
+  if (!btn._busyCount) return;
+  btn._busyCount = force ? 0 : btn._busyCount - 1;
+  if (btn._busyCount > 0) return;
+  if (btn._busyObserver) btn._busyObserver.disconnect();
+  btn._busyObserver = null;
+  btn.classList.remove("is-busy");
+  btn.removeAttribute("aria-busy");
+  if (!force && btn._busyLabel && btn.textContent === btn._busyLabel) btn.textContent = btn._busyOriginal;
+}
+
+function trackButtonBusy(btn, promises) {
+  beginButtonBusy(btn);
+  Promise.allSettled(promises).then(() => endButtonBusy(btn, false));
+}
+
+// .onclick への代入など、addEventListener を通らないボタンの処理を包む。
+function withBusy(btn, fn) {
+  if (btn._busyCount) return undefined;
+  const result = fn();
+  if (result && typeof result.then === "function") trackButtonBusy(btn, [result]);
+  return result;
+}
+
+(function installBusyButtons() {
+  const original = EventTarget.prototype.addEventListener;
+  const isButton = (node) => node instanceof HTMLButtonElement || (node instanceof HTMLInputElement && ["button", "submit"].includes(node.type));
+  EventTarget.prototype.addEventListener = function (type, listener, options) {
+    const isClick = type === "click" && isButton(this);
+    const isSubmit = type === "submit" && this instanceof HTMLFormElement;
+    if (typeof listener !== "function" || (!isClick && !isSubmit)) return original.call(this, type, listener, options);
+    const target = this;
+    const wrapped = function (ev) {
+      const btn = isSubmit ? ev.submitter || target.querySelector("button[type=submit], button:not([type])") : target;
+      if (btn && btn._busyCount) {
+        // 処理中の二度押し（フォームは既定の送信＝画面の再読み込みも止める）。
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        return undefined;
+      }
+      const before = btn ? { text: btn.textContent, disabled: btn.disabled } : null;
+      const prev = [busyClickButton, busyClickPromises];
+      busyClickButton = btn;
+      busyClickPromises = [];
+      let result;
+      let started;
+      try {
+        result = listener.call(this, ev);
+      } finally {
+        started = busyClickPromises;
+        [busyClickButton, busyClickPromises] = prev;
+      }
+      if (result && typeof result.then === "function") started.push(result);
+      const selfManaged = !btn || !btn.isConnected || btn.textContent !== before.text || btn.disabled !== before.disabled;
+      if (started.length && !selfManaged) trackButtonBusy(btn, started);
+      return result;
+    };
+    return original.call(this, type, wrapped, options);
+  };
+})();
+
 function clone(tplId) {
   const tpl = document.getElementById(tplId);
   const fragment = tpl.content.cloneNode(true);
@@ -14,7 +126,14 @@ function clone(tplId) {
   return fragment;
 }
 
-async function api(path, opts) {
+function api(path, opts) {
+  const promise = apiRequest(path, opts);
+  // ボタンのクリックから直接呼ばれたら、そのボタンを終わるまで処理中にする（上の installBusyButtons）。
+  if (busyClickPromises) busyClickPromises.push(promise);
+  return promise;
+}
+
+async function apiRequest(path, opts) {
   opts = opts || {};
   const method = opts.method || "GET";
   // X-Locohane-Lang: サーバーのエラーメッセージ・管理アシスタントの回答の言語（admin/i18n.py）。
@@ -942,10 +1061,12 @@ async function openConfigCopyModal() {
       if (result.needs_restart) {
         const banner = $("#restart-banner");
         banner.classList.remove("hidden");
-        $("#restart-now-btn").onclick = async () => {
-          await runInstanceAction(target, "restart");
-          banner.classList.add("hidden");
-        };
+        const restartBtn = $("#restart-now-btn");
+        restartBtn.onclick = () =>
+          withBusy(restartBtn, async () => {
+            await runInstanceAction(target, "restart");
+            banner.classList.add("hidden");
+          });
       }
       alert(_t("{0} 件の設定をコピーしました。", result.changes.length));
     } catch (e) {
@@ -2448,10 +2569,11 @@ async function doSave() {
     if (result.needs_restart) {
       banner.classList.remove("hidden");
       const btn = $("#restart-now-btn");
-      btn.onclick = async () => {
-        await runInstanceAction(currentInstanceName, "restart");
-        banner.classList.add("hidden");
-      };
+      btn.onclick = () =>
+        withBusy(btn, async () => {
+          await runInstanceAction(currentInstanceName, "restart");
+          banner.classList.add("hidden");
+        });
     } else {
       banner.classList.add("hidden");
     }
@@ -4147,7 +4269,7 @@ function drawUsageOverview(box, data) {
       statTile(_t("料金の合計"), data.total_cost !== null ? fmtUsd(data.total_cost) : "-", data.total_cost_jpy !== null ? fmtJpy(data.total_cost_jpy) : PRICING_MODEL_LABELS[data.pricing_model]),
     ]),
     ...data.errors.map((e) => el("div", { class: "error", text: `${labelOf[e.name] || e.name}: ${e.error}` })),
-    el("p", { class: "hint", text: _t("スキル調整ワーカーを除く全インスタンスの合計です。料金は全インスタンス共通の料金設定（このページの下）から計算し、インスタンス別・ユーザー別には使用量の割合で按分しています（トークン課金なら使用量×単価）。") }),
+    el("p", { class: "hint", text: _t("全インスタンスの合計です（スキル研究室の評価・AI 修正・判定・下書きはスキル調整ワーカーの行、「AIに相談」は管理アシスタントの行に入ります）。料金は全インスタンス共通の料金設定（このページの下）から計算し、インスタンス別・ユーザー別には使用量の割合で按分しています（トークン課金なら使用量×単価）。") }),
     ...(data.unallocated_cost > 0
       ? [el("p", { class: "hint", text: _t("うち {0} は、トークン使用量が0の月の料金のため、どのインスタンス・ユーザーにも按分していません（未配分）。インスタンス別・ユーザー別の合計は、その分だけ料金の合計より少なくなります。", fmtUsd(data.unallocated_cost)) })]
       : []),

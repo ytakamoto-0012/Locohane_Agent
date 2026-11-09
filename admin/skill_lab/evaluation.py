@@ -187,6 +187,19 @@ def transcript_excerpt(result: dict, max_chars: int) -> str:
     return f"{text[:head]}\n… (snip) …\n{text[-(max_chars - head):]}"
 
 
+def token_usage(results: list[dict]) -> tuple[dict, int]:
+    """評価の全ケース（各回）のトークン使用量の合計と LLM 呼び出し回数（evals/run_case.py の
+    token_usage_total・token_usage_max_per_call.calls。サブエージェントの分を含む）。"""
+    total = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    calls = 0
+    for r in results:
+        usage = r.get("token_usage_total") or {}
+        for k in total:
+            total[k] += int(usage.get(k, 0) or 0)
+        calls += int((r.get("token_usage_max_per_call") or {}).get("calls", 0) or 0)
+    return total, calls
+
+
 def summarize(results: list[dict]) -> dict[str, dict[str, int]]:
     """ケースごとの分類別の件数。"""
     cases: dict[str, dict[str, int]] = {}

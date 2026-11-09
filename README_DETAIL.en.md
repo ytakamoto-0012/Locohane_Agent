@@ -1575,7 +1575,8 @@ To use the same documents in another instance without re-ingesting them, use one
     the files copied so far (the rest is filled in by "Ingest (diff)" in the destination). It is recorded in the change history as `knowledge_collection_copy`.
 - **Reference** ("Reference knowledge of other instances" at the bottom of the Knowledge screen): adds a collection of another instance to the
   search targets of this instance without copying it. The reference name (the collection name in this instance, also shown to the LLM) cannot
-  be the same as a collection or another reference in this instance. The reference is stored in the `collection_refs` table of this instance's
+  be the same as a collection or another reference in this instance. The same source collection cannot be referenced twice under different
+  names either (the search results would only overlap; already referenced collections are not offered in the add form). The reference is stored in the `collection_refs` table of this instance's
   `catalog.sqlite`, and every search reads the backend and keyword index of the source instance's settings (config.ini +
   `instances/<source>/config_overrides.json`) directly (`src/vector_db/references.py`, `src/vector_db/search.py`).
   - Ingestion and updates are done in the source instance; the referencing side only reads. Re-ingestion in the source is reflected as is.
@@ -2248,6 +2249,7 @@ instances/
 ├── <other instance name>/
 │   └── ... (same as above)
 ├── aws_cost.json                # AWS cost settings shared by all instances, entered in "Usage & cost" of the settings dashboard (see "Usage & cost")
+├── admin_ai_usage.sqlite        # monthly token usage of the admin tool's AI use (Skill Lab, Ask AI) (see \"Usage & cost\")
 ├── admin_settings.json          # settings shared by all instances saved in "Admin settings" of the settings dashboard (see "Admin settings")
 ├── data_backup.json             # data backup settings saved on the settings dashboard (see "Data backup")
 ├── _admin_logs/                 # admin tool log (admin_*.log: progress of knowledge ingestion/deletion, etc.; rotated every [log] max_lines lines)
@@ -2375,8 +2377,8 @@ for sharing an authentication secret between the admin tool and the main app (th
 Shows cumulative token usage per month, and calculates amounts from AWS charges entered by hand (`admin/usage_cost.py`).
 There are two screens.
 
-- **The "Usage & cost" tab at the top (all instances)**: totals for all instances except skill tuning workers
-  (`GET /api/usage/overview`). Monthly token usage is shown as bar charts stacked by instance and by user, and the cost as
+- **The "Usage & cost" tab at the top (all instances)**: totals for all instances (`GET /api/usage/overview`).
+  The admin tool's own AI use is included as a row per skill tuning worker ("<worker name> (Skill Lab)") and an "Admin assistant (Ask AI)" row (see below). Monthly token usage is shown as bar charts stacked by instance and by user, and the cost as
   a bar chart stacked by instance, together with a monthly summary, a per-instance summary (all time) and per-user usage and cost.
   **The AWS cost settings (shared by all instances) are entered at the bottom of this screen.**
 - **The "Usage & cost" sub-tab of an instance**: that instance's monthly usage (stacked by user), the amount allocated to
@@ -2418,6 +2420,7 @@ Data sources and storage:
 |---|---|
 | Monthly usage | The `token_usage_monthly` table in `[thread_store] db`. The main app adds to the row for the current month (in the main app's local time) and user on every LLM call (`add_monthly_usage` in `src/thread_store.py`). Deleting a thread does not reduce it. Nothing is recorded with `[thread_store] enabled=false` or `[llm] track_token_usage=false` |
 | Usage from before the ledger | Once, on the first start that creates this table, the totals of existing threads (`token_usage_cumulative`) are counted in each thread's last-updated month. Conversations spanning months lean toward their last-updated month, so this is an estimate (shown as "includes estimate"). If the main app has not been started since the update, the same estimate is calculated on the fly |
+| AI use of the admin tool | The `ai_usage_monthly` table of `instances/admin_ai_usage.sqlite`, shared by all instances (`admin/ai_usage.py`). Adds up, per month, source and user, the Skill Lab (all evaluation cases, AI judge, AI fixes and drafting done by a skill tuning worker; the source is the worker's instance name and the user is whoever started the loop/tryout or made the AI request) and the admin assistant (source `_admin_assistant`, the user is the administrator who asked). Evaluation usage comes from `token_usage_total` of `evals/run_case.py` (including sub-agents); the rest from `usage_metadata` of the LLM responses. If the LLM endpoint's settings have `[llm] track_token_usage = false`, no usage is returned and nothing is recorded. An evaluation stopped midway is not recorded (a consultation records what it used so far even when stopped or failed). Usage of deleted workers remains as "(Skill Lab, deleted)". Opening the "Usage & cost" sub-tab of a skill tuning worker shows what is recorded here |
 | Cost settings | `instances/aws_cost.json`, shared by all instances (directly under `[admin] instances_dir`; created on the first save in the admin tool) |
 
 ### Admin settings
@@ -2595,6 +2598,16 @@ The research targets themselves (skill folders, SKILL.md, agent definitions) can
 
 Changing even one place in the research targets, cases, settings patch or input files invalidates the tryouts so far (from 0 runs).
 
+**Reopening an ended theme** ("Reopen and edit" in the theme details): returns a cancelled, returned or promoted theme to "Preparing", so that
+you can fix the research content and run the skill tuning loop or tryout again (`reopen` in `admin/skill_lab/api.py`; recorded as `skill_lab_reopen`).
+
+- If the source drafts still exist, they are marked as imported again. If another theme that has not ended has imported such a draft, the theme
+  cannot be reopened (continue in that theme, or cancel it first). Drafts archived by a promotion are not brought back (the copy of the research targets remains in the theme).
+- The promotion record moves to `previous_promotions` and the return record to `previous_returns` (shown collapsed in "Review & promote").
+- When a reopened promoted theme is promoted again, the skills and sub-agents that this theme placed in its previous promotion (including the
+  distribution targets) are replaced instead of being refused as same-name assets (what is replaced is backed up to `evals/history/promote/` as usual).
+  The hashes of what was placed are recorded at promotion (`placed_sha256`); if something was changed elsewhere after that, the pre-check stops without replacing it.
+
 **Promotion** ("Approve and promote"): the whole theme that passes the prior checks (whether the tryout evaluated the current content the specified number of times and passed every run,
 whether the official assets copied from have changed, whether the source draft has been changed by its author, assets of the same name at the destination, whether registering the settings
 is blocked by environment variables) is placed in the target instance's dedicated location (`instances/<name>/skills/`, `agents/`).
@@ -2609,6 +2622,16 @@ is blocked by environment variables) is placed in the target instance's dedicate
 
 Deleting an instance also deletes `skills/` and `agents/` under `instances/<name>/`, so the delete dialog warns with a list of the dedicated skills and sub-agents.
 When creating an instance by copying, you can choose whether to also copy the dedicated location.
+
+### Busy state of buttons
+
+Dashboard buttons show "Saving…", "Adding…", "Deleting…" etc. with a spinning mark until the action finishes, and ignore repeated clicks
+(`installBusyButtons` in `admin/static/admin.js`). So that it works for every button without per-screen code, it wraps listener registration for
+button clicks and form submits, and keeps the button busy while the handler's Promise, or an `api()` call made directly from the click, is pending.
+
+- The label is chosen from the button's name ("Save" → "Saving…" etc.; "Working…" otherwise). Tabs and link-style buttons keep their label and only show the mark.
+- If the handler changes the button's label or `disabled` itself (shows its own busy state), nothing is done. If the handler rewrites the button while busy, its display wins.
+- Assigning `.onclick` is not covered; wrap such handlers with `withBusy(btn, fn)`.
 
 ### Change history (audit log)
 

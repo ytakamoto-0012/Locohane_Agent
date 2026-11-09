@@ -248,10 +248,45 @@ def test_usage_api_saves_shared_settings_and_allocates(tmp_path, monkeypatch) ->
     inst_oct = {m["month"]: m for m in detail["costs"]["months"]}["2026-10"]
     assert inst_oct["share_of_all"] == pytest.approx(1.0) and inst_oct["cost"] == pytest.approx(30)
 
-    # 全体集計の対象外（スキル調整ワーカー）でも、自分自身を分母に含めて按分する（割合が 100% を超えない）
+    # スキル調整ワーカーはスレッドDBを読まない（管理ツール側の台帳がまだ無いので使用量0）
     lab = client.get("/api/instances/lab1/usage").json()
-    lab_oct = {m["month"]: m for m in lab["costs"]["months"]}["2026-10"]
-    assert lab_oct["share_of_all"] == pytest.approx(0.5) and lab_oct["cost"] == pytest.approx(15)
+    assert lab["usage"]["months"] == [] and lab["costs"]["months"] == []
 
     assert client.put("/api/usage/cost-settings", json={"pricing_model": "x"}).status_code == 400
     assert json.loads((tmp_path / "audit.log").read_text(encoding="utf-8").splitlines()[0])["action"] == "usage_cost_settings_update"
+
+
+def test_admin_ai_usage_is_counted_as_lab_and_assistant_rows(tmp_path, monkeypatch) -> None:
+    """スキル研究室（ワーカー名）・AIに相談（_admin_assistant）・削除済みワーカーの使用量も按分の対象に入る。"""
+    from datetime import datetime
+
+    from fastapi.testclient import TestClient
+
+    from admin import ai_usage
+
+    root, server = _api_setup(tmp_path, monkeypatch)
+    when = datetime(2026, 10, 15, 12, 0)
+    # LangChain の usage_metadata の形でも台帳の形でも受け取れる
+    ai_usage.record(root, "lab1", "admin", {"input_tokens": 600_000, "output_tokens": 400_000, "total_tokens": 1_000_000}, calls=3, when=when)
+    ai_usage.record(root, ai_usage.ASSISTANT_SOURCE, "admin", {"input": 1_500_000, "output": 500_000}, when=when)
+    ai_usage.record(root, "old_lab", "dev", {"total": 1_000_000}, when=when)
+    ai_usage.record(root, "lab1", "admin", {"input_tokens": 0, "output_tokens": 0}, when=when)  # 0 は記録しない
+
+    client = TestClient(server.app)
+    assert client.put("/api/usage/cost-settings", json={"months": {"2026-10": {"bill": 70}}}).status_code == 200
+    data = client.get("/api/usage/overview").json()
+    names = [i["name"] for i in data["instances"]]
+    assert names == ["inst_a", "inst_b", "lab1", "_admin_assistant", "old_lab"]
+    labels = {i["name"]: i["display_name"] for i in data["instances"]}
+    assert labels["lab1"] == "LAB1（スキル研究室）" and labels["old_lab"] == "old_lab（スキル研究室・削除済み）"
+    oct_ = {m["month"]: m for m in data["months"]}["2026-10"]
+    # inst_a 3M + lab1 1M + assistant 2M + old_lab 1M = 7M → 請求額 70 を 10/M で按分
+    assert oct_["total"] == 7_000_000
+    assert oct_["instances"]["lab1"]["cost"] == pytest.approx(10)
+    assert oct_["instances"]["_admin_assistant"]["cost"] == pytest.approx(20)
+    assert oct_["users"]["dev"]["total"] == 1_000_000
+
+    lab = client.get("/api/instances/lab1/usage").json()
+    lab_oct = {m["month"]: m for m in lab["costs"]["months"]}["2026-10"]
+    assert lab["usage"]["months"][0]["calls"] == 3
+    assert lab_oct["share_of_all"] == pytest.approx(1 / 7) and lab_oct["cost"] == pytest.approx(10)

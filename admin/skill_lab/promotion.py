@@ -146,6 +146,30 @@ def compute_updates(instances_root: Path, name: str, register: dict[tuple[str, s
 # ---------------------------------------------------------------------------
 
 
+def _path_sha256(path: Path) -> str | None:
+    if path.is_dir():
+        return tree_sha256(path)
+    if path.is_file():
+        return file_sha256(path)
+    return None
+
+
+def previously_placed(data: dict) -> dict[str, str | None]:
+    """このテーマが前に昇格したときに置いたもの（解決済みのパス → 置いた時点のハッシュ。古い記録は None）。
+
+    昇格済みのテーマを再開して（reopen）もう一度昇格するとき、自分が置いたものは「同名の資産」ではなく
+    置き換えとして扱う。置いた後に別のところで変えられていれば、ハッシュが合わないため置き換えない。
+    """
+    result: dict[str, str | None] = {}
+    records = [*(data.get("previous_promotions") or []), *([data["promotion"]] if data.get("promotion") else [])]
+    for record in records:
+        for placement in (record.get("placements") or {}).values():
+            hashes = placement.get("placed_sha256") or {}
+            for path in [*placement.get("skills", []), *placement.get("agents", [])]:
+                result[str(Path(path).resolve())] = hashes.get(path)
+    return result
+
+
 def check(instances_root: Path, directory: Path, *, distribute_to: list[str] | None = None) -> CheckResult:
     data = themes.read(directory)
     instance = data["instance"]
@@ -172,6 +196,16 @@ def check(instances_root: Path, directory: Path, *, distribute_to: list[str] | N
         if tryout.get("instance") != instance:
             result.problems.append(f"The tryout was evaluated against a different instance: {tryout.get('instance')}")
 
+    placed_before = previously_placed(data)
+
+    def _placed_unchanged(path: Path) -> bool:
+        """path がこのテーマの前の昇格で置いたもので、その後に変わっていない。"""
+        key = str(path.resolve())
+        if key not in placed_before:
+            return False
+        expected = placed_before[key]
+        return expected is None or _path_sha256(path) == expected
+
     # 取り込み元・複製元
     for asset_type in themes.ASSET_TYPES:
         for name, src in (data.get("sources") or {}).get(asset_type, {}).items():
@@ -188,7 +222,8 @@ def check(instances_root: Path, directory: Path, *, distribute_to: list[str] | N
             elif kind == "official" and origin is not None:
                 exists = (origin / "SKILL.md").is_file() if asset_type == "skills" else origin.is_file()
                 now = (tree_sha256(origin) if asset_type == "skills" else file_sha256(origin)) if exists else None
-                if now is not None and now != src.get("origin_sha256"):
+                if now is not None and now != src.get("origin_sha256") and not _placed_unchanged(origin):
+                    # 複製元を、このテーマ自身の前の昇格で置き換えた場合（再開して直したもの）は変更とみなさない。
                     result.problems.append(
                         f"The official {name} ({origin}) it was copied from was changed after copying (overwriting would lose the changes, so copy it again)"
                     )
@@ -217,6 +252,14 @@ def check(instances_root: Path, directory: Path, *, distribute_to: list[str] | N
                 if target.exists():
                     if src.get("kind") == "official" and origin == target.resolve() and name == instance:
                         placement["replaces"].append(f"{asset_type}/{asset}")
+                    elif _placed_unchanged(target):
+                        # このテーマの前の昇格で置いたもの（再開して直したもの）を置き換える。
+                        placement["replaces"].append(f"{asset_type}/{asset}")
+                    elif str(target.resolve()) in placed_before:
+                        result.problems.append(
+                            f"{target} was placed by the previous promotion of this theme but has been changed since then. "
+                            "Check the change, then move it away by hand or make a theme that copies and improves it"
+                        )
                     else:
                         result.problems.append(
                             f"A {asset} with the same name already exists in the dedicated location of {name} ({target}). "
@@ -340,6 +383,7 @@ def _promote(
                     else:
                         shutil.copy2(src, target)
                     placed.append((target, backup))
+                    placement.setdefault("placed_sha256", {})[str(target)] = _path_sha256(target)
             # 回帰テスト用のケース一式
             cases_dest = dest / "evals" / data["id"]
             if cases_dest.exists():

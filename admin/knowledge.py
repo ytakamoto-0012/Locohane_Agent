@@ -1143,6 +1143,13 @@ def build_router(
             raise HTTPException(status_code=400, detail=_t("インスタンス {0} にコレクション {1} がありません。", body.source_instance, body.source_collection))
         try:
             with vcat.open_catalog(cfg.vector_db_dir) as catalog:
+                dup = next(
+                    (r for r in catalog.list_references() if r.source_instance == body.source_instance and r.source_collection == body.source_collection),
+                    None,
+                )
+                if dup is not None:
+                    # 同じコレクションを2つの名前で参照しても、検索結果が重なるだけ。
+                    raise vcat.CatalogError(_t("インスタンス {0} のコレクション {1} は既に参照 {2} として参照しています。", body.source_instance, body.source_collection, dup.name))
                 ref = catalog.add_reference(body.name.strip(), body.source_instance, body.source_collection)
         except vcat.CatalogError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

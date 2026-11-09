@@ -28,9 +28,10 @@ from pathlib import Path
 
 from src.config import PROJECT_ROOT
 
+from .. import ai_usage
 from .. import instances as inst
 from . import drafting, evaluation, fixer, judge, sources, themes
-from .llm import LabLLMError
+from .llm import LabLLMError, usage_sink
 
 logger = logging.getLogger("skill_lab.worker")
 
@@ -91,6 +92,19 @@ class Worker:
                 seen.add(directory.resolve())
                 result.append((name, directory))
         return result
+
+    # --- トークン使用量（「利用量・料金」の台帳。admin/ai_usage.py） ----------------
+
+    def _record_usage(self, owner: str | None, usage: dict, calls: int = 1) -> None:
+        ai_usage.record_safely(self.instances_root, self.lab, owner, usage, calls=calls)
+
+    def _record_eval_usage(self, owner: str | None, results: list[dict]) -> None:
+        usage, calls = evaluation.token_usage(results)
+        self._record_usage(owner, usage, calls)
+
+    def _usage_owner(self, data: dict) -> str | None:
+        """ループ・トライアウトを始めた人（無ければテーマの作成者）。"""
+        return (data.get("loop") or {}).get("by") or data.get("created_by")
 
     def _target_config(self, instance: str):
         from src.config import load_config
@@ -192,6 +206,11 @@ class Worker:
         themes.update(directory, _apply)
 
     def _run_task(self, instance: str, directory: Path, task: dict) -> None:
+        owner = task.get("by")
+        with usage_sink(lambda usage: self._record_usage(owner, usage)):
+            self._run_task_inner(instance, directory, task)
+
+    def _run_task_inner(self, instance: str, directory: Path, task: dict) -> None:
         self._set_task(directory, task["id"], status="running", started_at=themes.now_iso())
         params = task.get("params") or {}
         cfg = self.config
@@ -247,6 +266,8 @@ class Worker:
             base_env=self.base_env,
             should_stop=lambda: self.shutdown,
         )
+        task = next((t for t in themes.read(directory).get("tasks") or [] if t["id"] == task_id), {})
+        self._record_eval_usage(task.get("by"), run["results"])
         spec = (directory / themes.SPEC_FILENAME).read_text(encoding="utf-8")
         verdicts = judge.judge_results(
             self._llm_config(instance), spec=spec, results=run["results"], excerpt_chars=self.config.skill_lab_transcript_excerpt_chars
@@ -321,6 +342,11 @@ class Worker:
             return
         if not picked["ok"]:
             return
+        owner = self._usage_owner(themes.read(directory))
+        with usage_sink(lambda usage: self._record_usage(owner, usage)):
+            self._run_theme_body(instance, directory, mode)
+
+    def _run_theme_body(self, instance: str, directory: Path, mode: str) -> None:
         try:
             target_cfg = self._target_config(instance)
             if mode == "tryout":
@@ -372,6 +398,7 @@ class Worker:
             base_env=self.base_env,
             should_stop=lambda: self._stop_requested(directory),
         )
+        self._record_eval_usage(self._usage_owner(data), run["results"])
         spec = (directory / themes.SPEC_FILENAME).read_text(encoding="utf-8")
         verdicts = judge.judge_results(
             self._llm_config(instance), spec=spec, results=run["results"], excerpt_chars=self.config.skill_lab_transcript_excerpt_chars

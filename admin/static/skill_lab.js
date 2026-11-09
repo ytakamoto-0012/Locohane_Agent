@@ -257,11 +257,14 @@ function renderThemeHeader(state, header, container) {
       el("button", {
         text: _t("取りやめ"),
         onclick: async () => {
-          if (!confirm(_t("このテーマを取りやめます（ファイルは残ります）。よろしいですか？"))) return;
+          if (!confirm(_t("このテーマを取りやめます（ファイルは残り、後から「再開して編集」で再開できます）。よろしいですか？"))) return;
           if (await labAction(() => api(themePath(state.name, state.id, "/cancel"), { method: "POST" }))) renderSkillLabPanel(container, state.name);
         },
       }),
     );
+  }
+  if (LAB_CLOSED.includes(d.status)) {
+    buttons.push(el("button", { class: "primary", text: _t("再開して編集"), onclick: () => reopenTheme(state, container) }));
   }
   if (!LAB_ACTIVE.includes(d.status)) {
     buttons.push(el("button", { class: "btn-danger", text: _t("削除"), onclick: () => deleteTheme(state.name, d, () => renderSkillLabPanel(container, state.name)) }));
@@ -292,6 +295,9 @@ function renderThemeHeader(state, header, container) {
     );
   }
   if (loop.message) notes.push(el("p", { class: "hint", text: loop.message }));
+  if (LAB_CLOSED.includes(d.status)) {
+    notes.push(el("p", { class: "hint", text: _t("このテーマは終わっています。「再開して編集」を押すと準備中に戻り、研究内容を直してスキル調整ループをもう一度回せます。") }));
+  }
   if (editable && missing.length) notes.push(el("p", { class: "warn-box", text: _t(`開始に必要なもの（研究内容のページで入れてください）: {0}`, missing.join(_t("、"))) }));
   header.replaceChildren(
     el("div", { class: "theme-title-row" }, [el("h3", { text: d.title }), statusBadge(d.status)]),
@@ -299,6 +305,18 @@ function renderThemeHeader(state, header, container) {
     ...notes,
     el("div", { class: "theme-actions" }, buttons),
   );
+}
+
+// 終わったテーマ（取りやめ・差し戻し・昇格済み）を準備中に戻す（admin/skill_lab/api.py の reopen）。
+async function reopenTheme(state, container) {
+  const d = state.data;
+  let message = _t("テーマ「{0}」を再開して、準備中に戻します。研究内容を直してスキル調整ループ・トライアウトをもう一度実行できます。よろしいですか？", d.title);
+  if (d.status === "promoted") message += "\n" + _t("（昇格したスキル・サブエージェントはそのまま使われます。もう一度昇格すると、このテーマが置いたものを置き換えます）");
+  else message += "\n" + _t("（取り込み元のドラフトが残っていれば、もう一度このテーマに取り込んだ印を付けます）");
+  if (!confirm(message)) return;
+  if (await labAction(() => api(themePath(state.name, state.id, "/reopen"), { method: "POST" }))) {
+    renderThemeDetail(container, state.name, state.id, state.sub);
+  }
 }
 
 // テーマをフォルダごと削除する（元に戻せない。admin/skill_lab/api.py の delete_theme）。theme: {id, title, status}
@@ -1270,9 +1288,13 @@ async function renderThemeReview(state, body) {
     );
   }
 
+  // 再開（reopen）する前の記録は、再開後の編集中にも見られるよう折りたたんで出す。
+  if ((d.previous_promotions || []).length) body.append(el("details", {}, [el("summary", { text: _t("再開前の昇格の記録") }), el("pre", { class: "lab-pre", text: JSON.stringify(d.previous_promotions, null, 2) })]));
+  if ((d.previous_returns || []).length) body.append(el("details", {}, [el("summary", { text: _t("再開前の差し戻しの記録") }), el("pre", { class: "lab-pre", text: JSON.stringify(d.previous_returns, null, 2) })]));
   if (!themeEditable(state)) {
     if (d.promotion) body.append(el("h4", { text: _t("昇格の記録") }), el("pre", { class: "lab-pre", text: JSON.stringify(d.promotion, null, 2) }));
     if (d.returned) body.append(el("h4", { text: _t("差し戻しの記録") }), el("pre", { class: "lab-pre", text: JSON.stringify(d.returned, null, 2) }));
+    if (LAB_CLOSED.includes(d.status)) body.append(el("p", { class: "hint", text: _t("直してもう一度評価・昇格するには、上の「再開して編集」を押してください。") }));
     return;
   }
 
