@@ -117,8 +117,9 @@ basically save the body HTML file in UTF-8).
 
 | Tag/class | Use |
 |---|---|
-| `<h1>`-`<h4>` | Headings (bold sans-serif in the accent color; only `h1` is underlined) |
-| `<p>` | Paragraph |
+| `<h1>`-`<h6>` | Headings (bold sans-serif in the accent color; only `h1` is underlined; `h5`/`h6` look like `h4`) |
+| `<p>` | Paragraph (text outside any block tag also becomes a paragraph) |
+| `<pre>` | Preformatted text (spaces and line breaks kept) |
 | `<b>`/`<strong>`, `<i>`/`<em>` | Bold, italic |
 | `<table><tr><th>...</th></tr><tr><td>...</td></tr></table>` | Table (header row with `th`; an accent-colored header band + rules are added automatically) |
 | `<ul>`/`<ol>`+`<li>` | Bullets, numbered lists |

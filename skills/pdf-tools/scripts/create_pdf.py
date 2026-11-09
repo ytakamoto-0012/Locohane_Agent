@@ -244,6 +244,10 @@ def _build_styles(accent: colors.Color) -> dict[str, ParagraphStyle]:
         "td": ParagraphStyle(
             "td", fontName=JP_MINCHO, fontSize=9.5, leading=13, textColor=colors.HexColor("#1a1a1a"),
         ),
+        "pre": ParagraphStyle(
+            "pre", fontName=JP_GOTHIC, fontSize=9, leading=13, textColor=colors.HexColor("#1a1a1a"),
+            backColor=colors.HexColor("#F4F4F4"), borderPadding=4, spaceBefore=4, spaceAfter=10,
+        ),
         "callout": ParagraphStyle(
             "callout", fontName=JP_MINCHO, fontSize=10.5, leading=17.85, textColor=colors.HexColor("#1a1a1a"),
         ),
@@ -331,8 +335,8 @@ def _build_image(node: _Node, avail_width: float):
     except Exception:  # noqa: BLE001 - サイズ取得できなければ幅指定 or 既定値に委ねる
         natural_w, natural_h = None, None
 
-    width_attr = node.attrs.get("width")
-    width = float(width_attr) if width_attr else None
+    width_attr = re.match(r"\s*([0-9]+(?:\.[0-9]+)?)", node.attrs.get("width") or "")
+    width = float(width_attr.group(1)) if width_attr else None  # "300" / "300px" とも受ける
     if width and width > avail_width:
         width = avail_width
     if width is None:
@@ -344,24 +348,65 @@ def _build_image(node: _Node, avail_width: float):
     return Image(str(path), width=width, height=height)
 
 
-def _build_list(node: _Node, styles: dict[str, ParagraphStyle], ordered: bool) -> list:
+def _build_list(node: _Node, styles: dict[str, ParagraphStyle], ordered: bool, depth: int = 0) -> list:
+    """入れ子の ul/ol は1段深く字下げした別の段落にする（以前は親の項目と同じ行に連結されていた）。"""
+    style = styles["li"]
+    if depth:
+        style = ParagraphStyle(f"li{depth}", parent=style, leftIndent=style.leftIndent + 18 * depth, bulletIndent=style.bulletIndent + 18 * depth)
     flowables = []
     for i, li in enumerate([c for c in node.children if isinstance(c, _Node) and c.tag == "li"], start=1):
-        prefix = f"{i}. " if ordered else "•  "
-        text = prefix + _serialize_inline(li.children)
-        flowables.append(Paragraph(text, styles["li"]))
+        prefix = f"{i}. " if ordered else ("•  " if depth % 2 == 0 else "◦  ")
+        inline = [c for c in li.children if not (isinstance(c, _Node) and c.tag in ("ul", "ol"))]
+        flowables.append(Paragraph(prefix + _serialize_inline(inline).strip(), style))
+        for child in li.children:
+            if isinstance(child, _Node) and child.tag in ("ul", "ol"):
+                flowables.extend(_build_list(child, styles, ordered=(child.tag == "ol"), depth=depth + 1))
     return flowables
+
+
+# これ以外のタグ（b・span・a・u 等）と素のテキストは、続く分をまとめて1つの段落にする
+_BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "table", "ul", "ol", "hr", "div", "img", "pre",
+               "blockquote", "section", "article", "header", "footer", "main", "body", "html", "li", "tr", "td", "th"}
+
+
+def _has_block(node: _Node) -> bool:
+    return any(isinstance(c, _Node) and (c.tag in _BLOCK_TAGS or _has_block(c)) for c in node.children)
+
+
+def _pre_markup(node: _Node) -> str:
+    """<pre> の中身を、空白と改行を保った Paragraph の markup にする。"""
+    def text_of(n) -> str:
+        return n if isinstance(n, str) else "".join(text_of(c) for c in n.children)
+
+    text = xml_escape(text_of(node).strip("\n"))
+    return text.replace(" ", "&nbsp;").replace("\n", "<br/>")
 
 
 def _build_flowables(
     nodes: list[_Node | str], styles: dict[str, ParagraphStyle], accent: colors.Color, avail_width: float
 ) -> list:
     story: list = []
+    pending: list = []
+
+    def flush() -> None:
+        # タグの外の素のテキストや、段落で囲まれていない <b> 等を捨てずに段落にする
+        # （以前は黙って捨てていたため、"plain text" や <div>本文</div> の本文が PDF から消えていた）
+        markup = _serialize_inline(pending).strip()
+        pending.clear()
+        if markup:
+            story.append(Paragraph(markup, styles["p"]))
+
     for node in nodes:
-        if isinstance(node, str):
+        if isinstance(node, str) or (node.tag not in _BLOCK_TAGS and not _has_block(node)):
+            pending.append(node)
             continue
+        flush()
         tag = node.tag
-        if tag in ("h1", "h2", "h3", "h4"):
+        if tag in ("h5", "h6"):
+            story.append(Paragraph(_serialize_inline(node.children), styles["h4"]))
+        elif tag == "pre":
+            story.append(Paragraph(_pre_markup(node), styles["pre"]))
+        elif tag in ("h1", "h2", "h3", "h4"):
             story.append(Paragraph(_serialize_inline(node.children), styles[tag]))
             if tag == "h1":
                 story.append(HRFlowable(width="100%", thickness=1.4, color=accent, spaceBefore=0, spaceAfter=10))
@@ -394,6 +439,7 @@ def _build_flowables(
         else:
             # 未対応タグは透過して中身だけ処理する。
             story.extend(_build_flowables(node.children, styles, accent, avail_width))
+    flush()
     return story
 
 
@@ -510,6 +556,8 @@ def main() -> int:
             topMargin=margin,
             bottomMargin=margin,
             title=args.title or "",
+            author="",
+            subject="",
         )
         avail_width = page_size[0] - 2 * margin
         styles = _build_styles(accent)
