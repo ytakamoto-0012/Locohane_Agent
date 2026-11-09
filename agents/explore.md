@@ -61,6 +61,17 @@ the target files are not known.
 
 ---
 
+## Simple lookups (when the task says "simple lookup")
+
+The user only wants to find information; the details are read by the user from the source files.
+Find every item asked for (the number of items must be exact), but keep each item to a one- or two-line
+summary with its source file (full path, page) and `@N`. If the `search_documents` excerpts already show an
+asked item, use them as is without opening the file; open a file (text extraction only, no rendering) only
+for an asked item the excerpts do not show. Stop as soon as every asked item is covered: do not read whole
+files, collect extra details or cross-check other files.
+
+---
+
 ## Procedure for investigating office documents and PDFs (using run_script)
 
 To investigate the content of office documents and PDFs such as docx/xlsx/pptx/pdf, run read-only

@@ -127,6 +127,9 @@ def search_documents(query: str, collection: str = "", top_k: int = 0) -> str:
     then open the original (pass the `@N` of the source to Read, or to a read/render skill for
     PDF/Office) and take the facts and figures from it (a main agent without Read delegates to
     explore).
+    Exception: if the task is a "simple lookup" (only finding information, no analysis), answer
+    from the excerpts when they already show the asked items, citing their sources, and open a
+    file only for an asked item the excerpts do not show.
     Results that include "matched: image" match the look of the page (figures, tables, photos,
     etc.). To check the content, pass the `@N` to analyze_image if the source is an image file; for
     PDF/Office, render that page as an image with a render skill (pdf-tools / docx-render /

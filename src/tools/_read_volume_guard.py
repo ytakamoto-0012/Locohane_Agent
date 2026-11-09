@@ -1,4 +1,4 @@
-"""大量のファイルを読む前に、所要時間の見積もりを添えてユーザーへ確認するガード。
+"""大量のファイルを読む前に、時間がかかることを伝えてユーザーへ確認するガード。
 
 作業ディレクトリに年別フォルダの写真が数十〜数百枚あるようなタスクでは、メイン
 エージェントは全ファイルを読むサブエージェントを並べて委譲し、それだけで数十分〜
@@ -20,7 +20,7 @@
    - dispatch_agent_batch の対象（files 指定ならその件数、それ以外は作業ディレクトリの件数）が閾値を超える。
    並列の委譲（同じ AIMessage の兄弟）が同時に来ても質問は1回で、「代表だけ」「中止」
    「自由記述」の答えならその AIMessage の委譲はすべて実行せず、答えに沿って委譲し直すよう伝える。
-応答がタイムアウトしたら全部読んで続ける。
+応答がタイムアウト（[read_volume_guard] ask_timeout_seconds）したら全部読んで続ける。
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import os
 import re
 from pathlib import Path
@@ -94,13 +93,6 @@ def count_source_files(root: Path, max_entries: int = _MAX_SCAN_ENTRIES) -> dict
     return {**counts, "total": total, "folders": len(folders), "truncated": truncated}
 
 
-def estimate_minutes(files: int, seconds_per_file: float, max_parallel: int) -> int:
-    """files 件を読む所要時間（分、切り上げ、最低1）。"""
-    if files <= 0:
-        return 0
-    return max(1, math.ceil(files * seconds_per_file / max(1, max_parallel) / 60))
-
-
 def _setting(name: str, default):
     return getattr(_state._LLM_CONFIG, name, default)
 
@@ -156,35 +148,36 @@ def _blocked_message(decision: dict) -> str:
 def _survey_note(decision: dict) -> str:
     return (
         f"\n\n[Reading volume] The folders surveyed above hold {decision['total']} files to read "
-        f"(about {decision.get('all_minutes')} min to read them all). The code asked the user before any file "
+        "(reading them all takes a long time). The code asked the user before any file "
         "was read: " + _decision_note(decision) + " Do not ask the user about the reading volume again."
     )
 
 
 async def _ask(total: int, inventory: dict, per_folder: int) -> dict:
-    """ユーザーに確認し、{"kind": all|sample|stop|other, "answer": 文字列} を返す。"""
-    from .ask_user_choice import ask_user_choice  # noqa: PLC0415 (ツール登録順の循環を避ける)
+    """ユーザーに確認し、{"kind": all|sample|stop|other, "answer": 文字列} を返す。
 
-    seconds = float(_setting("read_volume_guard_seconds_per_file", 15))
-    parallel = int(_setting("subagent_max_parallel", 1))
-    sample_files = min(total, per_folder * max(1, inventory["folders"]))
-    all_minutes = estimate_minutes(total, seconds, parallel)
+    所要時間の見積もりは出さない（読む中身で大きく変わり、数字はいつも短すぎた）。
+    待ち時間は [read_volume_guard] ask_timeout_seconds（全体の ask_user_choice_seconds が
+    無期限でも、この質問は時間切れで「全部読む」に進む）。
+    """
+    import importlib  # noqa: PLC0415
+
+    # src.tools は同名のツールを公開しているため、モジュールは import_module で引く
+    # （ツール登録順の循環を避けるため関数内で読む）。
+    ask_module = importlib.import_module(f"{__package__}.ask_user_choice")
+
     breakdown = t("list.separator").join(
         t(f"read_volume.breakdown_{k}", n=inventory[k]) for k in ("images", "documents", "text") if inventory[k]
     )
-    choice_all = t("read_volume.choice_all", minutes=all_minutes)
-    choice_sample = t(
-        "read_volume.choice_sample", per_folder=per_folder, minutes=estimate_minutes(sample_files, seconds, parallel)
-    )
+    choice_all = t("read_volume.choice_all")
+    choice_sample = t("read_volume.choice_sample", per_folder=per_folder)
     choice_stop = t("read_volume.choice_stop")
-    question = t(
-        "read_volume.question",
-        total=total,
-        breakdown=breakdown,
-        folders=inventory["folders"],
-        all_minutes=all_minutes,
+    question = t("read_volume.question", total=total, breakdown=breakdown, folders=inventory["folders"])
+    answer = await ask_module.ask_choice(
+        question,
+        [choice_all, choice_sample, choice_stop],
+        timeout_seconds=int(_setting("read_volume_guard_ask_timeout_seconds", 30)),
     )
-    answer = await ask_user_choice.coroutine(question=question, choices=[choice_all, choice_sample, choice_stop])
     if answer in (choice_all, ASK_TIMEOUT_MESSAGE):
         kind = "all"
     elif answer == choice_sample:
@@ -194,7 +187,7 @@ async def _ask(total: int, inventory: dict, per_folder: int) -> dict:
     else:
         kind = "other"
     logger.info("read volume guard: total=%d answer=%r -> %s", total, answer, kind)
-    return {"kind": kind, "answer": answer, "all_minutes": all_minutes}
+    return {"kind": kind, "answer": answer}
 
 
 def _session_lock() -> asyncio.Lock:

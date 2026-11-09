@@ -943,12 +943,13 @@ class Config:
             添えられる。空リストなら組み込みの既定文言を使う。
         read_volume_guard_enabled: 作業ディレクトリの読み取り対象ファイルが多いとき、
             読み取りの委譲（同じ応答に並んだ2本以上の explore/worker、または
-            dispatch_agent_batch）を実行する前に、所要時間の見積もりを添えて
+            dispatch_agent_batch）を実行する前に、時間がかかることを伝えて
             ユーザーに「全部読む／代表だけ読む／中止」を確認する機能の有効/無効
             （src/tools/_read_volume_guard.py）。確認はセッションにつき1回。
         read_volume_guard_threshold_files: 確認を出すファイル数の閾値（これを超えたら確認）。
-        read_volume_guard_seconds_per_file: 見積もりに使う1ファイルあたりの秒数
-            （サブエージェント1本で読んで記録するまで。並列数 subagent_max_parallel で割る）。
+        read_volume_guard_ask_timeout_seconds: この確認の応答待ちの秒数。過ぎたら
+            「全部読む」で続ける。[user_response_timeouts] ask_user_choice_seconds が
+            0（無期限）でも、この確認だけはこの秒数で切る。0 以下なら無期限待ち。
         read_volume_guard_sample_files_per_folder: 「代表だけ読む」を選んだときに
             1フォルダから読むファイル数。
         thinking_control_enabled: ReActループの各ステップで、直前の履歴の形から
@@ -1410,7 +1411,7 @@ class Config:
     # --- 大量のファイルを読む前にユーザーへ確認する（src/tools/_read_volume_guard.py） ---
     read_volume_guard_enabled: bool
     read_volume_guard_threshold_files: int
-    read_volume_guard_seconds_per_file: float
+    read_volume_guard_ask_timeout_seconds: int
     read_volume_guard_sample_files_per_folder: int
 
     # --- ステップごとの思考レベル切り替え（src/llm/thinking_control.py） ---
@@ -4036,8 +4037,8 @@ def load_config(
         read_volume_guard_threshold_files=int(
             os.getenv("READ_VOLUME_GUARD_THRESHOLD_FILES", read_volume_guard.get("threshold_files", 30))
         ),
-        read_volume_guard_seconds_per_file=float(
-            os.getenv("READ_VOLUME_GUARD_SECONDS_PER_FILE", read_volume_guard.get("seconds_per_file", 15))
+        read_volume_guard_ask_timeout_seconds=int(
+            os.getenv("READ_VOLUME_GUARD_ASK_TIMEOUT_SECONDS", read_volume_guard.get("ask_timeout_seconds", 30))
         ),
         read_volume_guard_sample_files_per_folder=int(
             os.getenv(

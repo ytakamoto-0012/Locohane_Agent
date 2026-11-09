@@ -35,7 +35,7 @@ def _setup(monkeypatch, tmp_path, answers):
         SimpleNamespace(
             read_volume_guard_enabled=True,
             read_volume_guard_threshold_files=30,
-            read_volume_guard_seconds_per_file=15,
+            read_volume_guard_ask_timeout_seconds=30,
             read_volume_guard_sample_files_per_folder=2,
             subagent_max_parallel=1,
         ),
@@ -43,8 +43,8 @@ def _setup(monkeypatch, tmp_path, answers):
     monkeypatch.setattr("src.tools._workdir._resolve_workdir", lambda need_write=False: tmp_path)
     asked = []
 
-    async def fake_ask(question, choices):
-        asked.append((question, choices))
+    async def fake_ask(question, choices, multi_select=False, timeout_seconds=None):
+        asked.append((question, choices, timeout_seconds))
         return answers(choices)
 
     import sys
@@ -52,7 +52,7 @@ def _setup(monkeypatch, tmp_path, answers):
     import src.tools.ask_user_choice  # noqa: F401
 
     # src.tools は同名のツールを公開しているため、モジュールは sys.modules から引く。
-    monkeypatch.setattr(sys.modules["src.tools.ask_user_choice"].ask_user_choice, "coroutine", fake_ask)
+    monkeypatch.setattr(sys.modules["src.tools.ask_user_choice"], "ask_choice", fake_ask)
     return session, asked
 
 
@@ -74,11 +74,17 @@ def test_count_source_files_skips_session_tmp_and_unknown_types(tmp_path):
     assert inv == {"images": 40, "documents": 0, "text": 20, "total": 60, "folders": 10, "truncated": False}
 
 
-def test_estimate_minutes_divides_by_parallel_and_rounds_up():
-    assert guard.estimate_minutes(60, 15, 1) == 15
-    assert guard.estimate_minutes(60, 15, 4) == 4
-    assert guard.estimate_minutes(1, 15, 1) == 1
-    assert guard.estimate_minutes(0, 15, 1) == 0
+def test_question_uses_its_own_timeout_and_shows_no_minutes(monkeypatch, tmp_path):
+    _make_tree(tmp_path)
+    _, asked = _setup(monkeypatch, tmp_path, lambda choices: choices[0])
+    ai = _ai("explore", "explore")
+    assert asyncio.run(guard.guard_read_volume(_input(ai))) is None
+    question, choices, timeout_seconds = asked[0]
+    # 全体の ask_user_choice_seconds（無期限でも）ではなく、この確認専用の秒数で待つ
+    assert timeout_seconds == 30
+    # 所要時間の数字は出さない
+    for text in (question, *choices):
+        assert "分" not in text.replace("分かかります", "") and "min" not in text
 
 
 def test_parallel_read_delegations_ask_once_and_sample_blocks_all_siblings(monkeypatch, tmp_path):
@@ -91,9 +97,9 @@ def test_parallel_read_delegations_ask_once_and_sample_blocks_all_siblings(monke
 
     results = asyncio.run(run())
     assert len(asked) == 1
-    question, choices = asked[0]
-    assert "60" in question and "15" in question
-    assert "20" not in choices[0] and "5" in choices[1]  # 代表 2件×10フォルダ=20件 → 約5分
+    question, choices, _ = asked[0]
+    assert "60" in question
+    assert "2" in choices[1]  # フォルダごとに代表2件
     for i, result in enumerate(results):
         msg = result["messages"][0]
         assert msg.tool_call_id == f"c{i}" and "representative" in msg.content

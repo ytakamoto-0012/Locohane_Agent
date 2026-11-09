@@ -58,10 +58,22 @@ async def ask_user_choice(question: str, choices: list[str], multi_select: bool 
         If choices is empty or there is no response within the configured timeout,
         it returns an "Error: ..." string instead of raising.
     """
+    return await ask_choice(question, choices, multi_select)
+
+
+async def ask_choice(
+    question: str, choices: list[str], multi_select: bool = False, timeout_seconds: int | None = None
+) -> str:
+    """ask_user_choice の本体。コードから呼ぶときは timeout_seconds で待ち時間を指定できる。
+
+    timeout_seconds が None なら [user_response_timeouts] ask_user_choice_seconds を使う
+    （0 以下は無期限待ち）。
+    """
     if not choices:
         return "Error: choices is empty. Specify at least one choice."
     logger.info("ask_user_choice: %s choices=%s multi_select=%s", question, choices, multi_select)
-    timeout = _resolve_ask_timeout(_state._ASK_USER_CHOICE_TIMEOUT_SECONDS)
+    seconds = _state._ASK_USER_CHOICE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    timeout = _resolve_ask_timeout(seconds)
     thread_id = cl.user_session.get("thread_id") or "_no_session"
     if multi_select:
 
