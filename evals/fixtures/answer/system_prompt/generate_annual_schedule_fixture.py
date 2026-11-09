@@ -37,8 +37,19 @@ LARGE_FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "annual_schedule_larg
 # PILのデフォルトフォントはCJK非対応で日本語が豆腐文字になるため、Windows同梱の
 # 日本語フォントを明示指定する（021/022ケースがVLMに読めない画像でjudgeされていた
 # 不具合対応、evals/tuning_log.md iter24参照）。
+# 日本語フォントが無い環境で既定フォントに落とすと、行事名が「□□□」の画像が
+# 黙って作られる（annual_schedule_large が実際にこの状態のまま eval に使われていた）。
+# 読めない画像は作らず、ここで止める。
 _JP_FONT_PATH = Path(r"C:\Windows\Fonts\meiryo.ttc")
-_FONT = ImageFont.truetype(str(_JP_FONT_PATH), size=20) if _JP_FONT_PATH.exists() else ImageFont.load_default()
+
+
+def _load_font() -> ImageFont.FreeTypeFont:
+    if not _JP_FONT_PATH.exists():
+        raise SystemExit(f"日本語フォントが見つかりません: {_JP_FONT_PATH}（_JP_FONT_PATH を環境に合わせて変更してください）")
+    return ImageFont.truetype(str(_JP_FONT_PATH), size=20)
+
+
+_FONT = _load_font()
 
 # 年 -> [(ファイル名, 描画テキスト, OCR済みmdを別途作るか), ...]
 _EVENTS: dict[str, list[tuple[str, str, bool]]] = {

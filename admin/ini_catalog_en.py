@@ -129,6 +129,7 @@ DESCRIPTIONS: dict[str, str] = {
         '-1 = unlimited, N>0 = limit to that number of tokens.\n'
         'Sent to llama-server as reasoning_budget_tokens and to vLLM as thinking_token_budget (-1 is not sent). llama-server ignores 0 in requests (vLLM turns thinking off with 0), so to stop thinking on either, use reasoning_effort = none or enable_thinking = false.\n'
         'Note: when thinking is cut off by this limit, the rest of the thinking may leak into the body (content) (3 times out of 6 with llama-server b10437 / Qwen3.8; with vLLM 0.30.0 / Qwen3.5-9B-AWQ almost all thinking after the cutoff appeared in the body). Thinking leaked into the body is treated as the answer as is, so if you set this, use a sufficiently large value.\n'
+        'The default 4096 was chosen by comparing it with 1024 / 2048 in a large xlsx-creation eval (smaller values increased mistakes in the creation script and verify-fix round trips, which made runs slower). [thinking_control] budget_high (empty by default) also uses this value.\n'
         "If empty, not specified (left to llama-server's default -1 = unlimited)."
     ),
     'llm.reasoning_budget_message': (
