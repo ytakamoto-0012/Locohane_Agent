@@ -75,13 +75,37 @@ class MonitorError(Exception):
     """設定が読めない等で、モニター情報を取得できない。"""
 
 
-def instance_config(instances_root: Path, config_ini_path: Path, name: str):
+# instance_config の結果キャッシュ。ダッシュボードの 1 画面が同じ設定を何度も（全インスタンス分）読むため。
+# キー: (config.ini のパス, overrides のパス, インスタンス名)。値: (config.ini・overrides の (mtime_ns, size), 取得時刻, Config)。
+# Config は frozen なので共有してよい。load_config は環境変数・MCP 設定等も読むため、ファイルが変わらなくても
+# _CONFIG_CACHE_TTL_SECONDS を過ぎたら読み直す。
+_CONFIG_CACHE: dict[tuple[str, str, str], tuple[tuple, float, object]] = {}
+_CONFIG_CACHE_TTL_SECONDS = 30.0
+
+
+def _file_stamp(path: Path) -> tuple[int, int] | None:
     try:
-        return load_config(
-            config_path=config_ini_path, overrides_path=inst.overrides_path(instances_root, name), instance_name=name
-        )
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def instance_config(instances_root: Path, config_ini_path: Path, name: str):
+    overrides = inst.overrides_path(instances_root, name)
+    key = (str(config_ini_path), str(overrides), name)
+    stamp = (_file_stamp(config_ini_path), _file_stamp(overrides))
+    now = time.monotonic()
+    cached = _CONFIG_CACHE.get(key)
+    if cached is not None and cached[0] == stamp and now - cached[1] < _CONFIG_CACHE_TTL_SECONDS:
+        return cached[2]
+    try:
+        config = load_config(config_path=config_ini_path, overrides_path=overrides, instance_name=name)
     except Exception as exc:  # noqa: BLE001
+        _CONFIG_CACHE.pop(key, None)
         raise MonitorError(_t("インスタンス {0!r} の設定を読み込めません: {1}", name, exc)) from exc
+    _CONFIG_CACHE[key] = (stamp, now, config)
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -197,13 +221,29 @@ def list_threads(
     with closing(_connect(db_path)) as conn:
         total = conn.execute(f"SELECT COUNT(*) FROM threads {where_sql}", params).fetchone()[0]
         rows = conn.execute(
-            f"SELECT id, owner, name, created_at, updated_at, {_TOKEN_TOTAL_SQL} AS tokens_total, "
-            "(SELECT COUNT(*) FROM steps s WHERE s.thread_id = threads.id "
-            " AND json_extract(s.data_json, '$.type') = 'user_message') AS user_messages "
+            f"SELECT id, owner, name, created_at, updated_at, {_TOKEN_TOTAL_SQL} AS tokens_total "
             f"FROM threads {where_sql} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
-    return {"total": total, "threads": [dict(r) for r in rows]}
+        # ユーザー発言数は、表示する 1 ページ分のスレッドだけを 1 回の GROUP BY で数える
+        # （行ごとの相関サブクエリにすると、並べ替え前の全スレッド分の steps を数えることになりうる）。
+        counts: dict[str, int] = {}
+        if rows:
+            placeholders = ",".join("?" * len(rows))
+            counts = {
+                r[0]: r[1]
+                for r in conn.execute(
+                    f"SELECT thread_id, COUNT(*) FROM steps WHERE thread_id IN ({placeholders}) "
+                    "AND json_extract(data_json, '$.type') = 'user_message' GROUP BY thread_id",
+                    [r["id"] for r in rows],
+                ).fetchall()
+            }
+    threads = []
+    for r in rows:
+        d = dict(r)
+        d["user_messages"] = counts.get(d["id"], 0)
+        threads.append(d)
+    return {"total": total, "threads": threads}
 
 
 def user_summary(db_path: Path) -> list[dict]:
@@ -471,12 +511,40 @@ def token_history(log_dir: Path, thread_id: str) -> list[dict]:
     return points
 
 
+# _parse_log_entries の結果キャッシュ。稼働状況・ログ画面は数秒おきに同じログを全行パースし直していたため、
+# (path, admin) → ((mtime_ns, size), entries) を持ち、ファイルが変わっていなければ再利用する。
+# 返す entries は共有なので、呼び出し側は書き換えない（書き換えるなら dict() で複製する）。
+# ファイル数が増え続けないよう、最近使った _LOG_ENTRY_CACHE_MAX 件だけ残す。
+_LOG_ENTRY_CACHE: dict[tuple[str, bool], tuple[tuple[int, int], list[dict]]] = {}
+_LOG_ENTRY_CACHE_MAX = 12
+
+
 def _parse_log_entries(path: Path, *, admin: bool = False) -> list[dict]:
-    """1ファイル分のログを、複数行のエントリ（トレースバック等）をまとめた形で返す。
+    """1ファイル分のログを、複数行のエントリ（トレースバック等）をまとめた形で返す（結果は共有。書き換えない）。
 
     admin=True なら管理ツールのログの書式で読む（thread_id は常に None、
     [ ] 内の Python のスレッド名を thread_name に入れる）。
     """
+    try:
+        st = path.stat()
+        stamp: tuple[int, int] | None = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = None
+    key = (str(path), admin)
+    if stamp is not None:
+        hit = _LOG_ENTRY_CACHE.pop(key, None)
+        if hit is not None and hit[0] == stamp:
+            _LOG_ENTRY_CACHE[key] = hit  # 末尾へ（最近使った順）
+            return hit[1]
+    entries = _parse_log_entries_uncached(path, admin=admin)
+    if stamp is not None:
+        _LOG_ENTRY_CACHE[key] = (stamp, entries)
+        while len(_LOG_ENTRY_CACHE) > _LOG_ENTRY_CACHE_MAX:
+            _LOG_ENTRY_CACHE.pop(next(iter(_LOG_ENTRY_CACHE)))
+    return entries
+
+
+def _parse_log_entries_uncached(path: Path, *, admin: bool = False) -> list[dict]:
     entries: list[dict] = []
     line_re = _ADMIN_LOG_LINE_RE if admin else _LOG_LINE_RE
     for line in _read_lines(path):
@@ -523,6 +591,7 @@ def tail_log(
                 continue
             if query and query not in entry["message"]:
                 continue
+            entry = dict(entry)  # _parse_log_entries の結果は共有（キャッシュ）なので、書き換える前に複製する
             entry["message"], _ = _clip(entry["message"])
             result.append(entry)
             if len(result) >= limit:

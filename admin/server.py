@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -122,6 +123,19 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Locohane Settings Dashboard", version=__version__, lifespan=_lifespan)
+
+
+class _SelectiveGZipMiddleware(GZipMiddleware):
+    """GZip で静的ファイル・JSON を圧縮する。管理アシスタントの逐次応答（NDJSON）は圧縮のバッファで表示が遅れるため除く。"""
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path", "").startswith("/api/assistant/chat"):
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
+app.add_middleware(_SelectiveGZipMiddleware, minimum_size=1024)
 # X-Locohane-Lang ヘッダー（admin/static/admin.js の api()）でエラーメッセージ等の言語を決める。
 app.add_middleware(admin_i18n.LanguageMiddleware)
 

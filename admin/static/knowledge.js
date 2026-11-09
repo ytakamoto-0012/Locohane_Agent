@@ -324,7 +324,7 @@ async function renderKnowledgePanel(container, name) {
 }
 
 // 取り込み中に一覧（ファイル数の集計を含む重い API）を取り直す間隔（ミリ秒）。間のポーリングはジョブと枠の状態だけを取る。
-const KNOWLEDGE_FULL_REFRESH_MS = 10000;
+const KNOWLEDGE_FULL_REFRESH_MS = 20000;
 
 // 一覧（GET /api/instances/{name}/knowledge）に含まれるジョブ（このインスタンスをコピー元とするコピーを含む）。
 function knowledgeDataJobs(d) {

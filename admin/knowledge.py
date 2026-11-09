@@ -29,7 +29,7 @@ import os
 from pathlib import Path
 import threading
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -840,20 +840,43 @@ def build_router(
             d["status"] = "ok"
         return d
 
+    # _referenced_by の結果キャッシュ。全インスタンスの catalog.sqlite の (mtime_ns, size) が同じなら、
+    # 参照の逆引き表（参照元インスタンス → コレクション名 → ["インスタンス/参照名", ...]）を作り直さない。
+    # 画面を開くたびに全インスタンスのカタログを開いて参照を読んでいたのを避ける。ファイルが変わらなくても
+    # _REFERENCES_CACHE_TTL_SECONDS を過ぎたら作り直す。
+    references_cache: dict[str, Any] = {"stamp": None, "built_at": 0.0, "table": {}}
+    _REFERENCES_CACHE_TTL_SECONDS = 30.0
+
     def _referenced_by(name: str) -> dict[str, list[str]]:
         """name のコレクションを参照している他のインスタンスの参照（コレクション名 → ["インスタンス/参照名", ...]）。"""
-        result: dict[str, list[str]] = {}
+        sources: list[tuple[str, Config]] = []
         for other in _app_instances():
-            if other == name:
-                continue
             cfg = _try_cfg(other)
-            if cfg is None or not vcat.catalog_exists(cfg.vector_db_dir):
-                continue
-            with vcat.open_catalog(cfg.vector_db_dir) as catalog:
-                refs = catalog.list_references()
-            for r in refs:
-                if r.source_instance == name:
-                    result.setdefault(r.source_collection, []).append(f"{other}/{r.name}")
+            if cfg is not None and vcat.catalog_exists(cfg.vector_db_dir):
+                sources.append((other, cfg))
+        stamp = []
+        for other, cfg in sources:
+            try:
+                st = (cfg.vector_db_dir / vcat.CATALOG_FILENAME).stat()
+                stamp.append((other, st.st_mtime_ns, st.st_size))
+            except OSError:
+                stamp.append((other, None, None))
+        stamp_t = tuple(stamp)
+        now = time.monotonic()
+        if references_cache["stamp"] != stamp_t or now - references_cache["built_at"] >= _REFERENCES_CACHE_TTL_SECONDS:
+            table: dict[str, dict[str, list[tuple[str, str]]]] = {}
+            for other, cfg in sources:
+                with vcat.open_catalog(cfg.vector_db_dir) as catalog:
+                    refs = catalog.list_references()
+                for r in refs:
+                    table.setdefault(r.source_instance, {}).setdefault(r.source_collection, []).append((other, r.name))
+            references_cache.update(stamp=stamp_t, built_at=now, table=table)
+        result: dict[str, list[str]] = {}
+        for collection, refs in references_cache["table"].get(name, {}).items():
+            # 自分自身の参照は除く（_source_check でも自己参照は作れないが、従来どおり other == name を飛ばす）。
+            entries = [f"{other}/{ref_name}" for other, ref_name in refs if other != name]
+            if entries:
+                result[collection] = entries
         return result
 
     @router.get("/api/instances/{name}/knowledge")
@@ -901,7 +924,7 @@ def build_router(
 
         GET /api/instances/{name}/knowledge と違い、設定・カタログ（ファイル数の集計）・ほかのインスタンスの参照を読まない
         （大量の取り込みを同時に動かしている間も軽く返すため）。件数等は、ジョブが始まった・終わったときと、取り込み中は
-        10 秒ごと（admin/static/knowledge.js の KNOWLEDGE_FULL_REFRESH_MS）に画面が一覧を取り直す。
+        20 秒ごと（admin/static/knowledge.js の KNOWLEDGE_FULL_REFRESH_MS）に画面が一覧を取り直す。
         """
         _check_app_instance(name)
         return {

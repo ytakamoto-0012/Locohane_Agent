@@ -280,16 +280,54 @@ def _replace_frontmatter_name(skill_md: str, name: str, description: str) -> str
     return f"---\n{frontmatter}---\n\n{strip_frontmatter(skill_md)}\n"
 
 
-def _summary(m: mem_store.Memory) -> dict:
+def _summary(m: mem_store.Memory, mtime: float | None = None) -> dict:
     return {
         "name": m.name,
         "description": m.description,
         "type": m.memory_type,
         "owner": m.owner,
         "visibility": m.visibility,
-        "mtime": m.path.stat().st_mtime,
+        "mtime": mtime if mtime is not None else m.path.stat().st_mtime,
         "sources": len(m.sources),
     }
+
+
+# 一覧用の要約キャッシュ。キー: メモリーのルート → {ファイルパス: ((mtime_ns, size), 要約)}。
+# 一覧を開くたびに全 *.md を読んでパースしていたのを、(mtime, size) が変わったファイルだけ読み直す形にする
+# （保存・削除はファイルを書き換える・消すので、次の一覧に必ず反映される）。
+_SUMMARY_CACHE: dict[str, dict[str, tuple[tuple[int, int], dict]]] = {}
+
+
+def _memory_summaries(root: Path) -> list[dict]:
+    """mem_store.all_memories(root) と同じ順序で、各メモリーの要約（_summary）を返す（変化したファイルだけ読み直す）。"""
+    cache = _SUMMARY_CACHE.get(str(root), {})
+    fresh: dict[str, tuple[tuple[int, int], dict]] = {}
+    summaries: list[dict] = []
+    for owner in [None, *mem_store.list_owners(root)]:
+        scope = mem_store.scope_root(root, owner)
+        for memory_type in mem_store.MEMORY_TYPES:
+            type_dir = scope / memory_type
+            if not type_dir.is_dir():
+                continue
+            for entry in sorted(type_dir.glob("*.md")):
+                try:
+                    st = entry.stat()
+                except OSError:
+                    continue
+                key = str(entry)
+                stamp = (st.st_mtime_ns, st.st_size)
+                hit = cache.get(key)
+                if hit is not None and hit[0] == stamp:
+                    summary = hit[1]
+                else:
+                    mem = mem_store._load(entry, owner)
+                    if mem is None:
+                        continue
+                    summary = _summary(mem, st.st_mtime)
+                fresh[key] = (stamp, summary)
+                summaries.append(summary)
+    _SUMMARY_CACHE[str(root)] = fresh
+    return summaries
 
 
 def build_router(
@@ -397,7 +435,7 @@ def build_router(
             "types": list(mem_store.MEMORY_TYPES),
             "visibilities": list(mem_store.VISIBILITIES),
             "owners": mem_store.list_owners(root),
-            "memories": [_summary(m) for m in mem_store.all_memories(root)],
+            "memories": _memory_summaries(root),
         }
 
     # /memories/{memory_name} より前に登録する（同じ形のパスとして取られないように）。

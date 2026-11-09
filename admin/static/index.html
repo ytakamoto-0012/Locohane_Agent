@@ -453,10 +453,20 @@
 
 <!-- 表示言語: ui-config.js（既定言語）→ i18n_en.js（英訳）→ i18n.js（_t / applyI18n）の順に、ほかより先に読み込む -->
 <script src="/ui-config.js"></script>
-<script src="/i18n_en.js"></script>
+<!-- 英訳辞書（115KB）は英語表示のときだけ読む。言語の決め方は i18n.js の I18N_LANG と同じ。skill_lab.js は画面を開くとき admin.js が読む（loadScriptOnce） -->
+<script>
+  (function () {
+    var norm = function (v) {
+      if (typeof v !== "string") return null;
+      var c = v.trim().toLowerCase().split(/[-_]/)[0];
+      return c === "ja" || c === "en" ? c : null;
+    };
+    var lang = norm(localStorage.getItem("la-language")) || norm(window.LOCOHANE_DEFAULT_LANGUAGE) || (norm(navigator.language) === "en" ? "en" : "ja");
+    if (lang === "en") document.write('<script src="/i18n_en.js"><\/script>');
+  })();
+</script>
 <script src="/i18n.js"></script>
 <script src="/admin.js"></script>
-<script src="/skill_lab.js"></script>
 <script src="/knowledge.js"></script>
 <script src="/data_backup.js"></script>
 <script src="/admin_settings.js"></script>

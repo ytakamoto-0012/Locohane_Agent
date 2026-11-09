@@ -262,6 +262,24 @@ function showShell(username, version) {
   if (typeof initAssistant === "function") initAssistant(username);
 }
 
+// 初回表示に要らない画面のスクリプト（skill_lab.js）を、その画面を開くときに読み込む。同じファイルは 1 回だけ。
+const _loadedScripts = {};
+function loadScriptOnce(src) {
+  if (!_loadedScripts[src]) {
+    _loadedScripts[src] = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = src;
+      s.onload = () => resolve();
+      s.onerror = () => {
+        delete _loadedScripts[src];
+        reject(new Error(`failed to load ${src}`));
+      };
+      document.head.appendChild(s);
+    });
+  }
+  return _loadedScripts[src];
+}
+
 function navigate(view) {
   stopMonitorPolling();
   if (view === "instances") return renderInstances();
@@ -271,7 +289,7 @@ function navigate(view) {
   if (view === "admin-logs") return renderAdminLogs();
   if (view === "data-backup") return renderDataBackup();
   if (view === "admin-settings") return renderAdminSettings();
-  if (view === "skill-lab") return renderSkillLab();
+  if (view === "skill-lab") return loadScriptOnce("/skill_lab.js").then(() => renderSkillLab());
   if (view === "api-docs") return renderApiDocs();
 }
 
@@ -919,7 +937,7 @@ function renderInstanceSubview(view, opts) {
   if (view === "env") return renderEnvVars(container);
   if (view === "display") return renderSettingsPanel(container, currentInstanceName);
   if (view === "backups") return renderBackups(container);
-  if (view === "skill-lab") return renderSkillLabPanel(container, currentInstanceName);
+  if (view === "skill-lab") return loadScriptOnce("/skill_lab.js").then(() => renderSkillLabPanel(container, currentInstanceName));
   if (view === "knowledge") return renderKnowledgePanel(container, currentInstanceName);
   if (view === "memory") return renderMemories(container);
 }
@@ -3305,7 +3323,8 @@ function startMonitorPolling(container, fn) {
       if (monitorTimer === timer) monitorTimer = null;
       return;
     }
-    if (busy) return;
+    // 別のタブ・最小化で見えていないあいだは取りに行かない（戻ると次の周期ですぐ更新される）。
+    if (busy || document.hidden) return;
     busy = true;
     try {
       await fn();
