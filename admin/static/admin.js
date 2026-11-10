@@ -1179,6 +1179,7 @@ const CONFIG_PRESETS = [
       "memory.feedback_visibility",
       "memory.project_visibility",
       "memory.reference_visibility",
+      "memory.glossary_visibility",
       "memory.shared_criteria",
       "memory.private_criteria",
       "memory.force_private_checks",
@@ -2859,10 +2860,12 @@ async function renderMemories(container, open) {
   const deleteBtn = $("#delete-memories-btn", root);
   let checkboxes = []; // [{cb, m}]
   const draftBtn = $("#draft-skill-from-memories-btn", root);
+  const copyBtn = $("#copy-memories-btn", root);
   const syncSelection = () => {
     const checked = checkboxes.filter((c) => c.cb.checked).length;
     deleteBtn.disabled = checked === 0;
     draftBtn.disabled = checked === 0;
+    copyBtn.disabled = checked === 0;
     selectAll.checked = checkboxes.length > 0 && checked === checkboxes.length;
     selectAll.indeterminate = checked > 0 && checked < checkboxes.length;
   };
@@ -2885,6 +2888,72 @@ async function renderMemories(container, open) {
       return;
     }
     await reload();
+  });
+
+  // 選んだメモリーを別のインスタンスへコピーする（admin/memories.py の copy）。
+  const copyForm = $("#copy-memories-form", root);
+  let copyTargets = [];
+  copyBtn.addEventListener("click", async () => {
+    copyTargets = checkboxes.filter((c) => c.cb.checked).map((c) => c.m);
+    if (copyTargets.length === 0) return;
+    $("#copy-memories-error", root).textContent = "";
+    let instances;
+    try {
+      instances = (await api("/api/instances")).instances.filter((i) => i.name !== currentInstanceName);
+    } catch (e) {
+      $("#memories-error", root).textContent = e.message;
+      return;
+    }
+    if (instances.length === 0) {
+      $("#memories-error", root).textContent = _t("コピー先のインスタンスがありません。");
+      return;
+    }
+    const select = copyForm.elements.target_instance;
+    select.innerHTML = "";
+    for (const i of instances) select.appendChild(el("option", { value: i.name, text: i.name }));
+    const list = $("#copy-memories-list", root);
+    list.innerHTML = "";
+    list.appendChild(el("div", { text: _t("コピーするメモリー（{0} 件）:", copyTargets.length) }));
+    for (const m of copyTargets) list.appendChild(el("div", { text: `${memoryOwnerLabel(m.owner)} / ${m.name}: ${m.description}` }));
+    form.classList.add("hidden");
+    draftForm.classList.add("hidden");
+    copyForm.classList.remove("hidden");
+    copyForm.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  copyForm.elements.owner_mode.addEventListener("change", () => {
+    $("#copy-memories-owner-label", root).classList.toggle("hidden", copyForm.elements.owner_mode.value !== "user");
+  });
+  $("#copy-memories-cancel-btn", root).addEventListener("click", () => copyForm.classList.add("hidden"));
+  copyForm.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const submit = copyForm.querySelector("button[type=submit]");
+    const mode = copyForm.elements.owner_mode.value;
+    const targetOwner = mode === "same" ? null : mode === "common" ? "" : copyForm.elements.owner.value.trim();
+    $("#copy-memories-error", root).textContent = "";
+    if (mode === "user" && !targetOwner) {
+      $("#copy-memories-error", root).textContent = _t("ユーザー名（所有者）");
+      return;
+    }
+    submit.disabled = true;
+    try {
+      const result = await api(memoriesPath("/copy"), {
+        method: "POST",
+        body: {
+          items: copyTargets.map((m) => ({ name: m.name, owner: m.owner })),
+          target_instance: copyForm.elements.target_instance.value,
+          target_owner: targetOwner,
+          overwrite: copyForm.elements.overwrite.checked,
+        },
+      });
+      copyForm.classList.add("hidden");
+      let message = _t("コピーしました: 新規 {0} 件・置き換え {1} 件・飛ばした {2} 件", result.copied, result.overwritten, result.skipped);
+      if (result.skipped_items.length) message += "\n" + _t("同名のため飛ばしたメモリー: {0}", result.skipped_items.join(", "));
+      alert(message);
+    } catch (e) {
+      $("#copy-memories-error", root).textContent = e.message;
+    } finally {
+      submit.disabled = false;
+    }
   });
 
   // 選んだメモリーからドラフトスキルを作る（admin/memories.py の draft-skill）。
@@ -2912,6 +2981,7 @@ async function renderMemories(container, open) {
     list.appendChild(el("div", { text: _t("元にするメモリー（{0} 件）:", draftTargets.length) }));
     for (const m of draftTargets) list.appendChild(el("div", { text: `${memoryOwnerLabel(m.owner)} / ${m.name}: ${m.description}` }));
     form.classList.add("hidden");
+    copyForm.classList.add("hidden");
     draftForm.classList.remove("hidden");
     draftForm.scrollIntoView({ behavior: "smooth", block: "start" });
   });

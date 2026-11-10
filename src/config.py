@@ -2592,7 +2592,7 @@ def _parse_skill_draft_visibility(value: object) -> str:
 
 
 def _parse_memory_type_visibility(section: Mapping[str, str]) -> dict[str, str]:
-    """[memory].<type>_visibility（user/feedback/project/reference）を読む（環境変数 MEMORY_<TYPE>_VISIBILITY が優先）。
+    """[memory].<type>_visibility（user/feedback/project/reference/glossary）を読む（環境変数 MEMORY_<TYPE>_VISIBILITY が優先）。
 
     Raises:
         ValueError: private / shared 以外の値の場合。

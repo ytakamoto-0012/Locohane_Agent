@@ -419,7 +419,7 @@ Reads and writes the memories under `[paths] memory_dir` of the instance's effec
 specify the owner with the query `owner` (the login username, normalized into the folder name by the same rule as the
 app). If omitted or empty, it means the common memories (those from before memory became per user). The admin API can
 read and write all of them regardless of visibility.
-`type` is `user`/`feedback`/`project`/`reference`; `visibility` is `private`/`shared` (users' memories only; if omitted,
+`type` is `user`/`feedback`/`project`/`reference`/`glossary`; `visibility` is `private`/`shared` (users' memories only; if omitted,
 `shared` on create and the current value on edit; types set to `private` and content matching the checks turned on in
 `[memory]` of the instance become `private`). Editing cannot change `name` or the owner (the recorded source files `sources` are kept).
 The content before an edit or deletion is kept in `instances/<name>/backups/memory/<owner (_common for common)>/<memory name>/`.
@@ -445,6 +445,11 @@ $C -X DELETE "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H"
 # Delete several at once (nothing is deleted if any of them is not found; omit owner for common)
 $C -X POST $BASE/api/instances/default/memories/delete -H "$H" -H "$J" \
   -d '{"items":[{"name":"my-note","owner":"alice"},{"name":"old-note"}]}'
+# Copy to another instance (the source is unchanged; if any is not found, nothing is copied).
+# Omit target_owner to keep each memory's owner, "" for common, or a user name to put them all under that user.
+# overwrite=true replaces a same-named memory (the old one is backed up); false (default) skips it. Response: copied/overwritten/skipped/skipped_items
+$C -X POST $BASE/api/instances/default/memories/copy -H "$H" -H "$J" \
+  -d '{"items":[{"name":"my-note","owner":"alice"}],"target_instance":"other","target_owner":null,"overwrite":false}'
 # Translate (into English; not saved; the response has description/content/language/llm_instance)
 $C -X POST $BASE/api/instances/default/memories/translate -H "$H" -H "$J" -H "X-Locohane-Lang: en" \
   -d '{"description":"(one-line description in another language)","content":"(content in another language)"}'

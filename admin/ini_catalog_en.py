@@ -792,6 +792,7 @@ DESCRIPTIONS: dict[str, str] = {
     'memory.feedback_visibility': 'feedback: corrections and approaches that worked.',
     'memory.project_visibility': 'project: the background of ongoing work (who, why, by when).',
     'memory.reference_visibility': 'reference: where external documents and files are, and values read from files.',
+    'memory.glossary_visibility': 'glossary: company-specific terms (jargon, abbreviations, internal names) and their meanings.',
     'memory.shared_criteria': (
         'Criteria given to the LLM (put, indented, under "- "shared" for:" and "- "private" for:" in the Memory System section of the system prompt).\n'
         'Any language is fine, and several conditions can be written on separate lines (when writing directly in config.ini, indent the second and later lines with spaces). "Polish with AI" on the settings dashboard turns a draft into a bullet list in the dashboard\'s display language. If empty, the default wording is used.\n'

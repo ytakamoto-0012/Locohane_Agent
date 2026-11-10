@@ -44,8 +44,8 @@ from .skills import _split_frontmatter_text
 
 logger = logging.getLogger(__name__)
 
-# 4種類のメモリータイプ（サブディレクトリ名でもある）。
-MEMORY_TYPES = ("user", "feedback", "project", "reference")
+# 5種類のメモリータイプ（サブディレクトリ名でもある）。
+MEMORY_TYPES = ("user", "feedback", "project", "reference", "glossary")
 
 # ユーザー別のメモリーを置く memory_dir 直下のフォルダ名（type 名と重ならない）。
 USERS_DIRNAME = "users"
@@ -60,6 +60,7 @@ DEFAULT_TYPE_VISIBILITY: dict[str, Visibility] = {
     "feedback": "shared",
     "project": "shared",
     "reference": "shared",
+    "glossary": "shared",
 }
 
 # name 検証ルール: ASCII の英数字・ハイフン・アンダースコアのみ、1〜64文字（ファイル名として安全にするため）。
@@ -234,7 +235,7 @@ class Memory:
     Attributes:
         name: メモリーの名前（同じ所有者の中で4type横断でユニーク、拡張子を除くファイル名）。
         description: 一行の説明文（索引 MEMORY.md にもそのまま載る）。
-        memory_type: "user" | "feedback" | "project" | "reference"。
+        memory_type: "user" | "feedback" | "project" | "reference" | "glossary"。
         content: frontmatter を除いた本文（Markdown）。
         path: このメモリーの実ファイルパス。
         sources: 内容の元になったファイルの指紋（frontmatter の sources。無ければ空）。
@@ -311,7 +312,7 @@ def _safe_memory_path(memory_root: Path, memory_type: str, name: str, owner: str
 
     Args:
         memory_root: メモリーストアのルートディレクトリ。
-        memory_type: "user" | "feedback" | "project" | "reference"。
+        memory_type: "user" | "feedback" | "project" | "reference" | "glossary"。
         name: メモリーの名前。
         owner: 所有者。None なら共通。
 
@@ -727,7 +728,7 @@ def create_memory(
         memory_root: メモリーストアのルートディレクトリ。
         name: 所有者の中で一意な名前（英数字・ハイフン・アンダースコアのみ）。
         description: 一行の説明文。
-        memory_type: "user" | "feedback" | "project" | "reference"。
+        memory_type: "user" | "feedback" | "project" | "reference" | "glossary"。
         content: メモリー本文。
         source_files: 本文の元になったファイルの絶対パス。指定すると今の sha256 を記録する
             （本文は SOURCED_CONTENT_MAX_CHARS 文字まで）。
@@ -922,6 +923,69 @@ def _rewrite(
     rebuild_index(memory_root, mem.owner)
     logger.info("rewrite memory: name=%s type=%s owner=%s visibility=%s", mem.name, memory_type, mem.owner, final_visibility)
     return path
+
+
+def copy_memory(
+    memory_root: Path,
+    mem: Memory,
+    *,
+    owner: str | None,
+    overwrite: bool = False,
+    copied_by: str | None = None,
+) -> Literal["copied", "overwritten", "skipped"]:
+    """別のメモリーストア（別インスタンス等）の mem を、memory_root の owner のメモリーとして複製する。
+
+    説明・種類・本文・元ファイルの指紋（sources）・作成者（author）はそのまま引き継ぎ、公開範囲は
+    memory_root 側の規則（policy_for）で決め直す（共通のメモリーは書かない）。
+
+    Args:
+        memory_root: コピー先のメモリーストアのルート。
+        mem: コピー元のメモリー。
+        owner: コピー先の所有者。None なら共通のメモリー。
+        overwrite: 同じ名前のメモリー（種類は問わない）が既にあるとき、置き換えるか（False なら何もしない）。
+        copied_by: 最後に書き換えたユーザー（updated_by）として残す名前。
+
+    Returns:
+        "copied"（新規）| "overwritten"（置き換えた）| "skipped"（同名があり overwrite=False）。
+
+    Raises:
+        ValueError: name/memory_type/owner が不正な場合。
+    """
+    path = _safe_memory_path(memory_root, mem.memory_type, mem.name, owner)
+    existing = _find_memory(memory_root, mem.name, owner)
+    if existing is not None and not overwrite:
+        return "skipped"
+    final_visibility = (
+        None
+        if owner is None
+        else resolve_visibility(mem.memory_type, mem.visibility, mem.description, mem.content, mem.sources, policy_for(memory_root))[0]
+    )
+    ensure_dirs(memory_root, owner)
+    now = _now()
+    created = now
+    if existing is not None:
+        frontmatter, _ = _split_frontmatter(existing.path.read_text(encoding="utf-8"))
+        created = (frontmatter or {}).get("created") or now
+        if existing.path != path:
+            existing.path.unlink()
+    path.write_text(
+        _serialize(
+            mem.name,
+            mem.description,
+            mem.memory_type,
+            mem.content,
+            created=created,
+            updated=now,
+            sources=mem.sources,
+            visibility=final_visibility,
+            author=mem.author if mem.author is not None else mem.owner,
+            updated_by=copied_by,
+        ),
+        encoding="utf-8",
+    )
+    rebuild_index(memory_root, owner)
+    logger.info("copy_memory: name=%s type=%s owner=%s existing=%s", mem.name, mem.memory_type, owner, existing is not None)
+    return "overwritten" if existing is not None else "copied"
 
 
 def delete_memory(memory_root: Path, name: str, owner: str | None = None) -> Path:

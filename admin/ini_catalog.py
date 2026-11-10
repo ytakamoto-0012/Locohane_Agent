@@ -82,6 +82,7 @@ _KEY_CHOICES: dict[tuple[str, str], tuple[str, ...]] = {
     ("memory", "feedback_visibility"): ("private", "shared"),
     ("memory", "project_visibility"): ("private", "shared"),
     ("memory", "reference_visibility"): ("private", "shared"),
+    ("memory", "glossary_visibility"): ("private", "shared"),
     ("log", "level"): ("info", "debug", "none"),
     # src/config.py の UI_DEFAULT_LANGUAGES と同じ値。
     ("ui", "default_language"): ("auto", "ja", "en"),

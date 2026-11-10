@@ -1063,8 +1063,10 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
 に集約し、`src/tools/memory_tools.py` の6ツール（`create_memory`/`update_memory`/`delete_memory`/
 `read_memory`/`search_memory`/`list_memories`）が薄いラッパーとして公開する。
 
-- **4種類の type**: `user`（ユーザーの役割・選好）／`feedback`（訂正・確認済みの
-  アプローチ）／`project`（進行中の作業の背景）／`reference`（外部リソースの所在）。
+- **5種類の type**: `user`（ユーザーの役割・選好）／`feedback`（訂正・確認済みの
+  アプローチ）／`project`（進行中の作業の背景）／`reference`（外部リソースの所在）／
+  `glossary`（専門用語辞書。社内の専門用語・略語・社内名称を知ったときに、1語1メモリーで意味・使われる場面・出典を残す。
+  用語と読み・別名は `description` に書くので `search_memory` で引ける。既定は `shared` で、`[memory] glossary_visibility` で変えられる）。
   それぞれ `<name>.md` として1ファイル保存される（置き場所は次の「ユーザー別のメモリー」）。
   `name` はファイル名になるため ASCII のスラッグ（英数字・`-`・`_`、64文字まで）に限る。日本語は `description` に書く。
   説明・本文は会話の表示言語で書かせる（`src/i18n.py` の `response_language_directive`。プロンプトが英語のため、
@@ -1154,6 +1156,13 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   空欄なら LLM が決める（正式スキル・既存のドラフトと同じ名前は拒否）。ドラフトはそのユーザーの次のメッセージから
   会話で使え、正式化はほかのドラフトと同じくスキル研究室で行う。他のユーザーの個人用のメモリーを選ぶと、その内容が
   作成先ユーザーのドラフトに入る（作成後に件名を表示する）。変更履歴には `memory_draft_skill` で残る。
+  同じく選んだメモリーを**別のインスタンスへコピー**できる（「選択したメモリーを別のインスタンスへコピー」。
+  `admin/memories.py` の `copy`、書き込みは `src/memory.py` の `copy_memory`）。コピー先の所有者は「コピー元と同じ」・
+  「共通」・「指定したユーザー」から選ぶ。説明・種類・本文・元ファイルの指紋（`sources`）・作成者は引き継ぎ、公開範囲は
+  コピー先インスタンスの `[memory]` の規則で決め直す。コピー先に同名のメモリー（種類は問わない）があるときは、既定では
+  飛ばし、「置き換える」を選ぶと置き換える（置き換え前の内容はコピー先の `backups/memory/` に残る）。コピー元は変わらず、
+  1件でも見つからなければ何もコピーしない。コピー先の変更履歴に `memory_copy`（`source_instance` 付き）で残り、
+  コピー先は再起動しなくても次の会話から使える。
   編集画面の「AIで翻訳」は、説明と本文をダッシュボードの表示言語（日本語 / English）へ LLM に訳させて入力欄へ
   入れるだけで、保存はしない（確かめてから「保存」を押す）。LLM は「AIに相談」と同じく「管理者設定」の「回答に使う LLM」
   （空なら対象インスタンス自身）の `[llm]` 接続先を使う。編集・削除の前の内容は
@@ -1858,7 +1867,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[context_compaction]` | `pre_note_warning_text` | 上記閾値到達時に注入する注意メッセージの文言 | `CONTEXT_COMPACTION_PRE_NOTE_WARNING_TEXT` |
 | `[token_ratio]` | `enabled` | 設定ダッシュボード専用（アプリ本体は読まない）。基準値`[graph] token_guard_soft_threshold`や比率を変更したときに、各閾値へ「基準値×比率」を自動入力するか | - |
 | `[token_ratio]` | `<セクション>.<キー>`（例: `subagent.token_guard_soft_threshold`） | 自動入力先の閾値の、基準値に対する比率（空欄なら連動させない） | - |
-| `[memory]` | `user_visibility` / `feedback_visibility` / `project_visibility` / `reference_visibility` | 種類ごとの永続メモリーの公開範囲。`private` の種類は常に個人用、`shared` の種類は LLM が振り分け基準で選ぶ（既定は `user` だけ `private`。「永続メモリー」参照） | `MEMORY_<TYPE>_VISIBILITY` |
+| `[memory]` | `user_visibility` / `feedback_visibility` / `project_visibility` / `reference_visibility` / `glossary_visibility` | 種類ごとの永続メモリーの公開範囲。`private` の種類は常に個人用、`shared` の種類は LLM が振り分け基準で選ぶ（既定は `user` だけ `private`。「永続メモリー」参照） | `MEMORY_<TYPE>_VISIBILITY` |
 | `[memory]` | `shared_criteria` / `private_criteria` | LLM に渡す振り分け基準（言語は問わず、改行可。空欄なら既定の文言。設定ダッシュボードの「AIで清書」で表示言語の箇条書きに整えられる） | `MEMORY_SHARED_CRITERIA` / `MEMORY_PRIVATE_CRITERIA` |
 | `[memory]` | `user_ranks` / `default_rank` | メモリーの優先順位に使うユーザーのランク（`{"ユーザー名": ランク}`。0以上の整数で大きいほど上位。食い違うメモリーはランクの高い方に従う。設定ダッシュボードの「ユーザー」画面でも設定できる）と、未設定のユーザー・共通のメモリーのランク（既定1）。「永続メモリー」参照 | `MEMORY_USER_RANKS` / `MEMORY_DEFAULT_RANK` |
 | `[memory]` | `force_private_checks` | 指定に関係なく `private` にする目印のリスト（`email`／`phone`／`card_id`／`credential`／`confidential_label`／`personal_path`。既定 `["card_id", "credential"]`） | `MEMORY_FORCE_PRIVATE_CHECKS` |

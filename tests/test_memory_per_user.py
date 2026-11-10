@@ -331,3 +331,9 @@ def test_description_with_triple_dash_still_loads(tmp_path):
     mem = memory.read_memory(tmp_path, "m", "alice")
     assert mem.description == "before --- after"
     assert mem.content == "line1\n---\nline2"
+
+
+def test_glossary_type_saved_and_searchable(tmp_path):
+    memory.create_memory(tmp_path, "term-abc", "ABC（エービーシー）: 社内の受発注システム", "glossary", "受発注を管理する社内システム。", owner="alice")
+    assert (tmp_path / "users" / "alice" / "glossary" / "term-abc.md").exists()
+    assert memory.DEFAULT_TYPE_VISIBILITY["glossary"] == "shared"

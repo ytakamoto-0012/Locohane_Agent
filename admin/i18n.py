@@ -339,6 +339,8 @@ EN: dict[str, str] = {
     'AI への依頼を処理中のテーマは削除できません。終わってから削除してください。': 'A theme with AI requests in progress cannot be deleted. Delete it after they finish.',
     '取り込み元のドラフトから研究室の印を外せませんでした: {0}': 'Could not remove the lab mark from the source draft: {0}',
     'テーマのファイルが使用中のため削除できません（少し待ってからやり直してください）: {0}': 'The theme cannot be deleted because its files are in use (wait a moment and try again): {0}',
+    'コピー先にはコピー元と別のインスタンスを指定してください。': 'Specify an instance other than the source as the copy destination.',
+    'コピーするメモリーを選択してください。': 'Select the memories to copy.',
     'ドラフトスキルにするメモリーを選択してください。': 'Select the memories to turn into a draft skill.',
     '一度に選べるメモリーは {0} 件までです（{1} 件選択されています）。': 'You can select up to {0} memories at a time ({1} selected).',
     'スキル名が不正です（{0}）: {1!r}': 'Invalid skill name ({0}): {1!r}',

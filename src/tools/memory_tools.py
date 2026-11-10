@@ -159,7 +159,7 @@ def create_memory(
             up to 64 characters. Do not write Japanese letters in the name (put them in
             description instead).
         description: A one-line description (shown as is in the index MEMORY.md).
-        memory_type: One of "user" | "feedback" | "project" | "reference".
+        memory_type: One of "user" | "feedback" | "project" | "reference" | "glossary".
         content: The memory body. For the feedback/project types, it is best to include
             "**Why:**" and "**How to apply:**" lines after the rule/fact.
         source_files: When the content records what was read from files (values, table rows,
@@ -339,7 +339,7 @@ def search_memory(query: str, memory_type: str | None = None) -> str:
 
     Args:
         query: The search keyword (case-insensitive).
-        memory_type: If given, narrow to one of "user"|"feedback"|"project"|"reference"
+        memory_type: If given, narrow to one of "user"|"feedback"|"project"|"reference"|"glossary"
             (all types if omitted).
 
     Returns:
@@ -367,7 +367,7 @@ def list_memories(memory_type: str | None = None) -> str:
     own first, then common, then other users'.
 
     Args:
-        memory_type: If given, narrow to one of "user"|"feedback"|"project"|"reference"
+        memory_type: If given, narrow to one of "user"|"feedback"|"project"|"reference"|"glossary"
             (all types if omitted).
 
     Returns:

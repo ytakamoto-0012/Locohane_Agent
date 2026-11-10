@@ -316,9 +316,30 @@
     </table>
     <div class="inline-actions">
       <button type="button" id="draft-skill-from-memories-btn" disabled title="選んだメモリーの内容をもとに、AI にスキル（SKILL.md）を下書きさせ、指定したユーザーのドラフトスキルとして保存します">選択したメモリーからドラフトスキルを作成</button>
+      <button type="button" id="copy-memories-btn" disabled title="選んだメモリーを、別のインスタンスの永続メモリーへ複製します（コピー元は変わりません）">選択したメモリーを別のインスタンスへコピー</button>
       <button type="button" id="delete-memories-btn" class="btn-danger" disabled>選択したメモリーを削除</button>
     </div>
     <div class="error" id="memories-error"></div>
+    <form id="copy-memories-form" class="memory-form hidden">
+      <h3>メモリーを別のインスタンスへコピー</h3>
+      <p class="hint">選んだメモリーを、コピー先インスタンスの永続メモリーとして複製します。公開範囲はコピー先の [memory] の規則で決め直されます。コピー先のインスタンスは再起動しなくても、次の会話から使えます。</p>
+      <div class="hint" id="copy-memories-list"></div>
+      <label>コピー先インスタンス<select name="target_instance"></select></label>
+      <label>コピー先の所有者
+        <select name="owner_mode">
+          <option value="same">コピー元と同じ所有者</option>
+          <option value="common">共通のメモリーにする</option>
+          <option value="user">次のユーザーのメモリーにする</option>
+        </select>
+      </label>
+      <label class="hidden" id="copy-memories-owner-label">ユーザー名（所有者）<input type="text" name="owner" list="memory-owner-list" /></label>
+      <label><input type="checkbox" name="overwrite" /> コピー先に同じ名前のメモリーがあるときは置き換える（置き換え前の内容はバックアップに残ります。チェックなしなら飛ばします）</label>
+      <div class="error" id="copy-memories-error"></div>
+      <div class="modal-actions">
+        <button type="button" id="copy-memories-cancel-btn" class="btn-cancel">閉じる</button>
+        <button type="submit" class="primary">コピー</button>
+      </div>
+    </form>
     <form id="draft-skill-form" class="memory-form hidden">
       <h3>メモリーからドラフトスキルを作成</h3>
       <p class="hint">選んだメモリーをもとに AI がスキル（SKILL.md）を下書きし、作成先ユーザーのドラフト置き場へ保存します。ドラフトはそのユーザーの次のメッセージから会話で使え、正式化はスキル研究室で行います。AI は「管理者設定」の「回答に使う LLM」の接続先を使います。</p>

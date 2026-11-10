@@ -416,7 +416,7 @@ rem 削除
 そのインスタンスの実効設定の `[paths] memory_dir` 配下のメモリーを読み書きする。メモリーはユーザー別で、
 所有者はクエリ `owner`（ログインユーザー名。本体と同じ規則でフォルダ名へ整える）で指定する。省略・空なら共通の
 メモリー（ユーザー別になる前からあるもの）。管理 API では公開範囲に関係なくすべて読み書きできる。
-`type` は `user`/`feedback`/`project`/`reference`、`visibility` は `private`/`shared`（ユーザーのメモリーだけ。
+`type` は `user`/`feedback`/`project`/`reference`/`glossary`、`visibility` は `private`/`shared`（ユーザーのメモリーだけ。
 省略時は作成なら `shared`、編集なら今の値のまま。そのインスタンスの `[memory]` で `private` にした種類と、有効にした目印に
 当たるものは `private` になる）。
 編集では `name`・所有者は変えられない（元ファイルの記録 `sources` は残る）。
@@ -442,6 +442,11 @@ $C -X DELETE "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H"
 # まとめて削除（1件でも見つからなければ何も削除しない。owner を省くと共通）
 $C -X POST $BASE/api/instances/default/memories/delete -H "$H" -H "$J" \
   -d '{"items":[{"name":"my-note","owner":"alice"},{"name":"old-note"}]}'
+# 別のインスタンスへコピー（コピー元は変わらない。1件でも見つからなければ何もコピーしない）。
+# target_owner を省くとメモリーごとにコピー元と同じ所有者、空文字なら共通、ユーザー名ならそのユーザーのメモリー。
+# overwrite が true なら同名をバックアップを残して置き換え、false（既定）なら飛ばす。応答は copied/overwritten/skipped/skipped_items
+$C -X POST $BASE/api/instances/default/memories/copy -H "$H" -H "$J" \
+  -d '{"items":[{"name":"my-note","owner":"alice"}],"target_instance":"other","target_owner":null,"overwrite":false}'
 # 翻訳（英語へ。保存はしない。応答は description/content/language/llm_instance）
 $C -X POST $BASE/api/instances/default/memories/translate -H "$H" -H "$J" -H "X-Locohane-Lang: en" \
   -d '{"description":"一行の説明","content":"本文"}'
