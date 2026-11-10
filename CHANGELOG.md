@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-11
+
 ### 追加
 
 - 設定ダッシュボードのメモリーに、選択したメモリーを別のインスタンスへコピーする機能を追加しました（所有者の引き継ぎ・共通化・ユーザー指定。個人用は同じ所有者へだけ、同名は飛ばし、失敗したものは理由付きで報告）。
@@ -1249,7 +1251,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.6.0...v0.7.0
