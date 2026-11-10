@@ -17,7 +17,10 @@ const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
  */
 const BUSY_LABEL_RULES = [
   [/保存|Save/i, "保存中…"],
-  [/追加|作成|Add|Create/i, "追加中…"],
+  [/翻訳|Translate/i, "翻訳中…"],
+  [/清書|Polish/i, "清書中…"],
+  [/作成|Create/i, "作成中…"],
+  [/追加|Add/i, "追加中…"],
   [/削除|やめる|Delete|Remove/i, "削除中…"],
   [/更新|再読み込み|読み直|Refresh|Reload|Update/i, "更新中…"],
   [/開始|起動|実行|Start|Run/i, "実行中…"],
@@ -1508,7 +1511,7 @@ function buildPolishCriteria(k, kind, inputWrap) {
       status.textContent = _t("清書する文章を入力してください。");
       return;
     }
-    btn.disabled = true;
+    beginButtonBusy(btn);
     status.textContent = _t("清書しています…");
     try {
       const result = await api(`/api/instances/${encodeURIComponent(currentInstanceName)}/memories/polish-criteria`, {
@@ -1521,7 +1524,7 @@ function buildPolishCriteria(k, kind, inputWrap) {
     } catch (e) {
       status.textContent = e.message;
     } finally {
-      btn.disabled = false;
+      endButtonBusy(btn, false);
     }
   });
   return el("div", { class: "polish-row" }, [btn, status]);
@@ -2931,10 +2934,10 @@ async function renderMemories(container, open) {
     const targetOwner = mode === "same" ? null : mode === "common" ? "" : copyForm.elements.owner.value.trim();
     $("#copy-memories-error", root).textContent = "";
     if (mode === "user" && !targetOwner) {
-      $("#copy-memories-error", root).textContent = _t("ユーザー名（所有者）");
+      $("#copy-memories-error", root).textContent = _t("コピー先のユーザー名を入力してください。");
       return;
     }
-    submit.disabled = true;
+    beginButtonBusy(submit);
     try {
       const result = await api(memoriesPath("/copy"), {
         method: "POST",
@@ -2942,17 +2945,17 @@ async function renderMemories(container, open) {
           items: copyTargets.map((m) => ({ name: m.name, owner: m.owner })),
           target_instance: copyForm.elements.target_instance.value,
           target_owner: targetOwner,
-          overwrite: copyForm.elements.overwrite.checked,
         },
       });
       copyForm.classList.add("hidden");
-      let message = _t("コピーしました: 新規 {0} 件・置き換え {1} 件・飛ばした {2} 件", result.copied, result.overwritten, result.skipped);
-      if (result.skipped_items.length) message += "\n" + _t("同名のため飛ばしたメモリー: {0}", result.skipped_items.join(", "));
+      let message = _t("コピーしました: {0} 件・飛ばした {1} 件・失敗 {2} 件", result.copied, result.skipped, result.failed);
+      if (result.skipped_items.length) message += "\n\n" + _t("同名のメモリーがコピー先にあるため飛ばしました: {0}", result.skipped_items.join(", "));
+      if (result.failed_items.length) message += "\n\n" + _t("コピーできなかったメモリー:") + "\n" + result.failed_items.join("\n");
       alert(message);
     } catch (e) {
       $("#copy-memories-error", root).textContent = e.message;
     } finally {
-      submit.disabled = false;
+      endButtonBusy(submit, false);
     }
   });
 
@@ -2991,7 +2994,9 @@ async function renderMemories(container, open) {
     const submit = draftForm.querySelector("button[type=submit]");
     const status = $("#draft-skill-status", root);
     $("#draft-skill-error", root).textContent = "";
-    submit.disabled = true;
+    // 自分で disabled を切り替えると共通の処理中表示（ボタンの「作成中…」）が働かず、押しても何も
+    // 起きていないように見えた。ボタンの処理中表示（二度押しも止まる）を明示的に使う。
+    beginButtonBusy(submit);
     status.textContent = _t("AI がスキルを下書きしています…（数分かかることがあります）");
     try {
       const result = await api(memoriesPath("/draft-skill"), {
@@ -3014,7 +3019,7 @@ async function renderMemories(container, open) {
       status.textContent = "";
       $("#draft-skill-error", root).textContent = e.message;
     } finally {
-      submit.disabled = false;
+      endButtonBusy(submit, false);
     }
   });
 
@@ -3114,7 +3119,7 @@ async function renderMemories(container, open) {
     const btn = ev.currentTarget;
     const status = $("#memory-translate-status", root);
     $("#memory-error", root).textContent = "";
-    btn.disabled = true;
+    beginButtonBusy(btn);
     status.textContent = _t("翻訳しています…");
     try {
       const result = await api(memoriesPath("/translate"), {
@@ -3131,7 +3136,7 @@ async function renderMemories(container, open) {
       status.textContent = "";
       $("#memory-error", root).textContent = e.message;
     } finally {
-      btn.disabled = false;
+      endButtonBusy(btn, false);
     }
   });
   $("#memory-delete-btn", root).addEventListener("click", async () => {

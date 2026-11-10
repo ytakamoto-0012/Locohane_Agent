@@ -145,7 +145,12 @@ def _convert_office_to_pdf(
     # 追加済み）から、Office COMプロセスのPID追跡ヘルパーをimportする。
     # 関数名はExcel由来だが、Hwnd取得の仕組み自体はWord/PowerPointのApplication
     # オブジェクトでも同様に動く（両方ともHwndプロパティを持つ）。
-    from excel_common import record_excel_pid, release_excel_pid, wait_for_process_exit
+    from excel_common import password_protected_error, record_excel_pid, release_excel_pid, wait_for_process_exit
+
+    # パスワード付きのファイルは Office がパスワード入力のダイアログで止まるため、起動する前に断る。
+    protected = password_protected_error(path)
+    if protected:
+        raise ValueError(protected)
 
     prog_id = _PROG_ID[tool]
     pythoncom.CoInitialize()

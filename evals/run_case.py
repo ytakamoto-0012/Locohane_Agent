@@ -395,7 +395,8 @@ async def _run(
     # 事故が実際に発生した）。使い捨ての一時ディレクトリへ内容をコピーして
     # からそちらを作業ディレクトリにすることで、フィクスチャを常に読み取り
     # 専用のまま保つ。
-    workdir_cm = tempfile.TemporaryDirectory(prefix="evals_workdir_") if case.work_dir else contextlib.nullcontext(None)
+    # work_dir の指定が無いケースも、空の一時ディレクトリを作業ディレクトリにする（生成物を記録するため）。
+    workdir_cm = tempfile.TemporaryDirectory(prefix="evals_workdir_")
     overlay_cm = tempfile.TemporaryDirectory(prefix="evals_skill_overlay_") if skill_overlays else contextlib.nullcontext(None)
     agent_overlay_cm = tempfile.TemporaryDirectory(prefix="evals_agent_overlay_") if agent_overlays else contextlib.nullcontext(None)
     with (
@@ -434,8 +435,13 @@ async def _run(
             workdir_root: Path | None = dst_dir
             workdir_before = output_inspect.snapshot(dst_dir)
         else:
-            os.environ.pop("DEFAULT_WORKDIR", None)
-            workdir_root = None
+            # 指定が無くても、空の一時フォルダを作業ディレクトリにして、作られたファイルを記録する
+            # （以前は本番の既定作業ディレクトリで動き、生成物が output_files に残らなかった。ファイルを作る
+            # スキルを、スキル研究室の AI judge が「記録で確認できない」として不合格にしていた）。
+            dst_dir = Path(tmp_workdir) / "work"
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            os.environ["DEFAULT_WORKDIR"] = str(dst_dir)
+            workdir_root = dst_dir
             workdir_before = {}
         # ケースが env（yaml の env: {KEY: value}）を指定していれば、
         # config.ini の値を上書きする環境変数として適用する。1プロセス=

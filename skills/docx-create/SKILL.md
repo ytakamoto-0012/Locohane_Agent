@@ -116,7 +116,7 @@ Elements with an unknown `type` are skipped without an error, and that is record
 
 1. Build the JSON spec above from the user's request.
 2. Run the command above.
-3. If the output already exists it is overwritten without confirmation, so when it might
+3. If the output already exists it is overwritten (the previous file is kept next to it as `<name>.bak_<date-time>.<ext>` (`backup_path` in the output)), so when it might
    overwrite an existing file, confirm with the user before running.
 4. On success, tell the user `output_path`. If `warnings` is not empty,
    also tell them its content (that an unknown type was skipped, etc.).
@@ -135,7 +135,7 @@ Elements with an unknown `type` are skipped without an error, and that is record
 - Specifying both `--data`/`--data-file`, or neither, unlike the above, is a usage error from the
   mutually exclusive required group of `argparse`, so the exit code is 2 (argparse's usage message
   is printed to stderr).
-- If the output already exists it is overwritten without confirmation (the same behavior as `pdf-tools`/`pptx-create`).
+- If the output already exists it is overwritten without confirmation; the previous file is kept next to it as `<name>.bak_<date-time>.<ext>` (`backup_path` in the output) (the same behavior as `pdf-tools`/`pptx-create`).
   It is good to confirm with the user beforehand whether overwriting is OK.
 - If the parent directory of the output does not exist, it is created automatically.
 - Page numbers (`page_number: true`) use Word's "field" feature, so unless converted to PDF etc.,

@@ -55,7 +55,9 @@ async def _ainvoke(config: Config, system: str, user_messages: list[tuple[str, s
             sink(dict(meta))
         except Exception:  # noqa: BLE001 - 集計の失敗で研究室の処理を止めない
             pass
-    return response.content if isinstance(response.content, str) else str(response.content)
+    content = response.content if isinstance(response.content, str) else str(response.content)
+    # 思考（<think>…</think>）を本文に混ぜて返す接続先でも、思考を答えとして扱わない。
+    return _THINK_BLOCK_RE.sub("", content)
 
 
 def ask_text(config: Config, system: str, user: str) -> str:
@@ -65,19 +67,42 @@ def ask_text(config: Config, system: str, user: str) -> str:
     return text
 
 
+_THINK_BLOCK_RE = re.compile(r"<think>.*?(?:</think>|$)", re.DOTALL)
+
+
 def extract_json(text: str):
-    """応答本文から JSON（オブジェクトまたは配列）を取り出す。"""
-    candidates = [m.group(1) for m in _FENCE_RE.finditer(text)]
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start, end = text.find(opener), text.rfind(closer)
-        if start != -1 and end > start:
-            candidates.append(text[start : end + 1])
+    """応答本文から JSON（オブジェクトまたは配列）を取り出す。
+
+    推論モデルの思考（<think>…</think>）が本文に混ざる接続先では、思考の中に指示の書き写し
+    （`{"pass": true or false, ...}` 等の JSON でない波かっこ）が入る。以前は「最初の { から最後の } まで」を
+    読んでいたため、思考の波かっこから切り出して毎回読めず、AI judge が常に不合格になりえた。
+    思考を除き、コードフェンスの中 → 本文中で読める JSON（最後に現れたもの。答えは末尾に来る）の順に探す。
+    """
+    text = _THINK_BLOCK_RE.sub("", text)
     last_error: Exception | None = None
-    for candidate in candidates:
+    for m in _FENCE_RE.finditer(text):
         try:
-            return json.loads(candidate)
+            return json.loads(m.group(1))
         except json.JSONDecodeError as e:
             last_error = e
+    decoder = json.JSONDecoder()
+    found = None
+    pos = 0
+    while True:
+        starts = [i for i in (text.find("{", pos), text.find("[", pos)) if i != -1]
+        if not starts:
+            break
+        start = min(starts)
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError as e:
+            last_error = e
+            pos = start + 1
+            continue
+        found = value
+        pos = end
+    if found is not None:
+        return found
     raise ValueError(f"Cannot read JSON: {last_error or 'there is no JSON in the text'}")
 
 

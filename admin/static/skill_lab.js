@@ -227,6 +227,7 @@ async function renderThemeDetail(container, name, id, sub) {
   state.reload = async () => {
     state.data = await api(themePath(name, id));
     renderThemeHeader(state, header, container);
+    syncAiTaskButtons(state);
   };
   state.sources = await api(labPath(name, "/sources"));
   await state.reload();
@@ -407,6 +408,46 @@ function themeEditable(state) {
   return !LAB_ACTIVE.includes(state.data.status) && !LAB_CLOSED.includes(state.data.status);
 }
 
+/* 同じ AI への依頼（type。match があれば params でさらに絞る）が処理待ち・処理中か。 */
+function aiTaskPending(state, type, match) {
+  return (state.data.tasks || []).some(
+    (t) => t.type === type && (t.status === "queued" || t.status === "running") && (!match || match(t.params || {})),
+  );
+}
+
+/*
+ * AI に依頼するボタン。依頼は積むだけで生成はワーカーが数分かけて行うため、押した直後に押せる状態へ
+ * 戻っていた（何度でも押せて同じ依頼が積み重なった）。同じ依頼が処理待ち・処理中の間は押せなくし、
+ * 文言を pendingText にする。状態を取り直すたび（state.reload）に syncAiTaskButtons で合わせ直すので、
+ * 入力途中で描き直されない節のボタンも、生成が終われば押せる状態に戻る。
+ */
+function aiTaskButton(state, type, match, props, pendingText) {
+  const btn = el("button", props);
+  btn._aiTask = { type, match, text: props.text, title: props.title || "", disabled: Boolean(props.disabled), pendingText: pendingText || _t("AI が処理中…") };
+  (state.aiTaskButtons ||= new Set()).add(btn);
+  syncAiTaskButton(state, btn);
+  return btn;
+}
+
+function syncAiTaskButton(state, btn) {
+  const spec = btn._aiTask;
+  const pending = aiTaskPending(state, spec.type, spec.match);
+  btn.disabled = spec.disabled || pending;
+  btn.textContent = pending ? spec.pendingText : spec.text;
+  btn.title = pending ? _t("AI が処理しています。終わると押せるようになります（下の「AI への依頼」で状態を確認できます）。") : spec.title;
+}
+
+function syncAiTaskButtons(state) {
+  for (const btn of state.aiTaskButtons || []) {
+    // 描き直しで画面から外れたボタンは追わない（描いた直後の、まだ画面に付く前のボタンは残す）。
+    if (!btn.isConnected && btn._aiTaskSeen) state.aiTaskButtons.delete(btn);
+    else {
+      btn._aiTaskSeen = btn.isConnected;
+      syncAiTaskButton(state, btn);
+    }
+  }
+}
+
 /* ② は ① を、③ は ① と ② をもとに AI が書くため、もとが足りなければ先に確かめる。 */
 async function draftWithCheck(state, type, params, errorBox) {
   const d = state.data;
@@ -543,7 +584,7 @@ async function renderThemeSpec(state, box) {
         },
       }),
       request,
-      el("button", {
+      aiTaskButton(state, "draft_spec", null, {
         text: _t("AI に下書きを頼む"),
         title: _t("① の研究対象の中身を読んで、AI が ② を書きます（人が書いた所は残し、空いている所を埋めます）"),
         disabled: editable ? null : "disabled",
@@ -712,7 +753,7 @@ function targetAddForms(state) {
       el("label", {}, [_t("名前"), newName]),
       el("label", {}, [_t("どんな仕事をさせたいか（AI に作ってもらうときの注文。下の ② やってほしいこと が書いてあれば、それも一緒に AI へ渡します）"), newRequest]),
       el("div", { class: "inline-form" }, [
-      el("button", {
+      aiTaskButton(state, "draft_asset", null, {
         class: "primary",
         text: _t("AI に作ってもらう"),
         onclick: async () => {
@@ -977,7 +1018,13 @@ function renderThemeCases(state, body) {
       " ",
       linkBtn("YAML", () => openFileEditor(state, c.path, true)),
       " ",
-      linkBtn(_t("1回試す"), () => addTask(state, "trial", { case_id: c.id }, err)),
+      aiTaskButton(
+        state,
+        "trial",
+        (p) => p.case_id === c.id,
+        { class: "link-btn inline-link", text: _t("1回試す"), onclick: () => addTask(state, "trial", { case_id: c.id }, err) },
+        _t("試行中…"),
+      ),
     ]),
   ]);
   body.append(
@@ -1003,7 +1050,10 @@ function renderThemeCases(state, body) {
         count,
         el("span", { class: "hint", text: _t("問 作ってもらう") }),
         request,
-        el("button", { text: _t("AI に作ってもらう"), onclick: () => draftWithCheck(state, "draft_cases", { count: Number(count.value) || 3, request: request.value }, err) }),
+        aiTaskButton(state, "draft_cases", null, {
+          text: _t("AI に作ってもらう"),
+          onclick: () => draftWithCheck(state, "draft_cases", { count: Number(count.value) || 3, request: request.value }, err),
+        }),
       ]),
     );
   }
@@ -1121,6 +1171,10 @@ async function openCaseEditor(state, caseId) {
       el("label", {}, [requiredLabel(_t("利用者の指示（AI に打つ文章）"), true), turns]),
       el("fieldset", { class: "case-expect" }, [
         el("legend", { text: _t("合格の決め方【必須】下のどれか1つ以上を入れる") }),
+        el("p", {
+          class: "hint",
+          text: _t("言葉の条件は、全角半角・空白・区切り記号の違い（例: ver_57 と ver.57）を同じとみなします。言い換え（例: revision:57）で落ちた回も、「AI が判断する点」を書いておけば、その観点で AI が判断して合否を決めます。"),
+        }),
         el("label", {}, [_t("回答に必ず入っているべき言葉（1行に1つ）"), contains]),
         el("label", {}, [_t("回答に入っていてはいけない言葉（1行に1つ）"), notContains]),
         el("label", {}, [_t("AI が判断する点（言葉では決めにくい良し悪し。例: 指摘が具体的で、根拠の箇所が示されている）"), judgeArea]),

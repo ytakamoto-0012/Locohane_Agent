@@ -637,6 +637,15 @@ def is_visible_to(mem: Memory, viewer: str | None, policy: MemoryPolicy = DEFAUL
     return not detect_sensitive(_sensitive_text(mem.description, mem.content, mem.sources), policy.checks)
 
 
+def is_private_to_owner(mem: Memory, policy: MemoryPolicy = DEFAULT_POLICY) -> bool:
+    """所有者本人にしか見せないメモリーか（共通のメモリーは False）。
+
+    他のユーザーから見えるかの判定（is_visible_to）と同じ基準: private の印・規則で private の種類・
+    有効な個人情報・機密の目印のどれかがあれば個人用。
+    """
+    return mem.owner is not None and not is_visible_to(mem, None, policy)
+
+
 def _viewer_rank(mem: Memory, viewer: str | None) -> int:
     """同じランクの中の並べ順: 自分（0）→ 共通（1）→ 他のユーザー（2）。似た内容があれば自分のものが先に目に入るようにする。"""
     if mem.owner is not None and mem.owner == viewer:
@@ -930,30 +939,33 @@ def copy_memory(
     mem: Memory,
     *,
     owner: str | None,
-    overwrite: bool = False,
     copied_by: str | None = None,
-) -> Literal["copied", "overwritten", "skipped"]:
+    source_policy: MemoryPolicy | None = None,
+) -> Literal["copied", "skipped"]:
     """別のメモリーストア（別インスタンス等）の mem を、memory_root の owner のメモリーとして複製する。
 
     説明・種類・本文・元ファイルの指紋（sources）・作成者（author）はそのまま引き継ぎ、公開範囲は
-    memory_root 側の規則（policy_for）で決め直す（共通のメモリーは書かない）。
+    memory_root 側の規則（policy_for）で決め直す（共通のメモリーは書かない）。同じ名前のメモリーが
+    コピー先に既にあれば置き換えずに飛ばす（置き換えたいときは、先にコピー先のものを削除する）。
 
     Args:
         memory_root: コピー先のメモリーストアのルート。
         mem: コピー元のメモリー。
         owner: コピー先の所有者。None なら共通のメモリー。
-        overwrite: 同じ名前のメモリー（種類は問わない）が既にあるとき、置き換えるか（False なら何もしない）。
         copied_by: 最後に書き換えたユーザー（updated_by）として残す名前。
+        source_policy: コピー元の公開範囲の規則（個人用かの判定に使う）。None なら DEFAULT_POLICY。
 
     Returns:
-        "copied"（新規）| "overwritten"（置き換えた）| "skipped"（同名があり overwrite=False）。
+        "copied"（新規）| "skipped"（同じ名前のメモリーがコピー先にある。種類は問わない）。
 
     Raises:
-        ValueError: name/memory_type/owner が不正な場合。
+        ValueError: name/memory_type/owner が不正な場合、または他のユーザーの個人用のメモリーを
+            別の所有者（共通を含む）へコピーしようとした場合。
     """
+    if owner != mem.owner and is_private_to_owner(mem, source_policy or DEFAULT_POLICY):
+        raise ValueError("a private memory can be copied only to the same owner")
     path = _safe_memory_path(memory_root, mem.memory_type, mem.name, owner)
-    existing = _find_memory(memory_root, mem.name, owner)
-    if existing is not None and not overwrite:
+    if _find_memory(memory_root, mem.name, owner) is not None:
         return "skipped"
     final_visibility = (
         None
@@ -962,19 +974,13 @@ def copy_memory(
     )
     ensure_dirs(memory_root, owner)
     now = _now()
-    created = now
-    if existing is not None:
-        frontmatter, _ = _split_frontmatter(existing.path.read_text(encoding="utf-8"))
-        created = (frontmatter or {}).get("created") or now
-        if existing.path != path:
-            existing.path.unlink()
     path.write_text(
         _serialize(
             mem.name,
             mem.description,
             mem.memory_type,
             mem.content,
-            created=created,
+            created=now,
             updated=now,
             sources=mem.sources,
             visibility=final_visibility,
@@ -984,8 +990,8 @@ def copy_memory(
         encoding="utf-8",
     )
     rebuild_index(memory_root, owner)
-    logger.info("copy_memory: name=%s type=%s owner=%s existing=%s", mem.name, mem.memory_type, owner, existing is not None)
-    return "overwritten" if existing is not None else "copied"
+    logger.info("copy_memory: name=%s type=%s owner=%s", mem.name, mem.memory_type, owner)
+    return "copied"
 
 
 def delete_memory(memory_root: Path, name: str, owner: str | None = None) -> Path:

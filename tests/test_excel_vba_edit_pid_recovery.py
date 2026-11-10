@@ -37,6 +37,12 @@ _SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 import excel_common  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _fake_process_identity(monkeypatch):
+    """架空の PID を、記録時から同じ Excel のプロセスとして扱う（使い回しの判定は test_office_pdf_skill_regressions で見る）。"""
+    monkeypatch.setattr(excel_common, "process_identity", lambda pid: {"image": "excel.exe", "created": 1})
+
+
 class _FakeWin32Process:
     def __init__(self, pid: int):
         self._pid = pid

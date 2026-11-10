@@ -193,6 +193,9 @@ SUBAGENT_MESSAGE_AUTHOR = "サブエージェント"
 # 内部でサブエージェント（run_subagent）を起動するツール名。これらの tool run_id
 # 配下のLLMイベントはサブエージェント由来として扱う（_is_subagent_call 参照）。
 _SUBAGENT_DISPATCH_TOOLS = frozenset({"dispatch_agent", "dispatch_agent_batch"})
+# ユーザーへ質問して応答を待つツール。孤立した（応答を受け取る前に中断した）ものは、次のユーザー発言が
+# その答えでありうると LLM へ伝える（_build_orphaned_placeholder_messages 参照）。
+_ASK_USER_TOOLS = frozenset({"ask_user_choice", "AskUserQuestion", "approve_plan"})
 
 
 def _tool_step_label(event: dict) -> str:
@@ -4024,6 +4027,14 @@ def _build_orphaned_placeholder_messages(tc: dict, base_reason: str) -> list:
         補完用のメッセージ列（dispatch_agent・dispatch_agent_batch以外はToolMessage1件のみ）。
     """
     content = f"Error: {base_reason}the execution of this tool call was interrupted."
+    if tc.get("name") in _ASK_USER_TOOLS:
+        # 質問への応答を受け取る前に止まった。ユーザーは画面に残った質問を見て、次の発言で答えることが多い
+        # （本番ログ 2026-11-11: 再起動後に選択肢の文言をそのまま送った）。
+        content = (
+            f"{content} The user's answer to this question was not received. "
+            "If the user's next message answers this question (for example, it repeats one of the choices), "
+            "take it as the answer and continue; ask again only if the answer is still needed and not given."
+        )
     if tc.get("name") not in _SUBAGENT_DISPATCH_TOOLS:
         return [ToolMessage(content=content, tool_call_id=tc["id"], name=tc.get("name", ""))]
     hint = _dispatch_agent_rescue_note_hint(tc)
@@ -4424,6 +4435,19 @@ async def _on_message_impl(message: cl.Message) -> None:
         cl.user_session.set("work_dir_notice_pending", False)
         work_dir_notice = _build_work_dir_notice()
     human_message = _build_human_message(processed_text, saved, work_dir_notice)
+
+    # 前回のプロセスがツールの実行中（質問の応答待ち等）に止まると、チェックポイント末尾に結果の無い
+    # tool_call が残る。そのまま新しい発言を足して流すと、langgraph が履歴の検証（INVALID_CHAT_HISTORY）で
+    # 失敗し、この発言はエラーで終わっていた（修復はその失敗の後でしか走らず、2回目の送信でやっと動いた。
+    # 本番ログ 2026-11-11: ask_user_choice の応答待ちでプロセスが止まり、再起動後の選択肢の回答がエラーに）。
+    # 流す前に修復しておく。
+    try:
+        repaired = await _repair_orphaned_tool_calls(graph, config)
+    except Exception:  # noqa: BLE001 - 修復できなくても発言の処理は続ける（失敗時の経路で再度修復する）
+        logging.getLogger(__name__).warning("Pre-turn repair of orphaned tool_calls failed", exc_info=True)
+    else:
+        if repaired:
+            logging.getLogger(__name__).warning("Repaired %d orphaned tool_calls before the turn", repaired)
 
     inputs = {"messages": [human_message]}
     turn_totals = {"input": 0, "output": 0, "total": 0}  # このターンのトークン使用量

@@ -24,7 +24,21 @@ if str(_OFFICE_SHARED) not in sys.path:
 from pptx_common import setup_utf8_stdio, summarize_result, write_json_result  # noqa: E402
 
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.exc import PackageNotFoundError
+
+
+def _iter_shapes(shapes):
+    """スライドの図形を、グループ化された図形の中まで（入れ子も）表示順にたどる。
+
+    slide.shapes はグループの中を含まないため、グループ化したテキストボックスや表の文字が
+    読み取り結果から抜けていた。
+    """
+    for shape in shapes:
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            yield from _iter_shapes(shape.shapes)
+        else:
+            yield shape
 
 
 def extract_slide(slide) -> dict:
@@ -36,14 +50,14 @@ def extract_slide(slide) -> dict:
 
     texts: list[str] = []
     tables: list[list[list[str]]] = []
-    for shape in slide.shapes:
+    for shape in _iter_shapes(slide.shapes):
         if title_id is not None and shape.shape_id == title_id:
             continue
-        if shape.has_text_frame:
+        if getattr(shape, "has_text_frame", False) and shape.has_text_frame:
             text = shape.text_frame.text
             if text.strip():
                 texts.append(text)
-        if shape.has_table:
+        if getattr(shape, "has_table", False) and shape.has_table:
             table_data = [[cell.text for cell in row.cells] for row in shape.table.rows]
             tables.append(table_data)
 

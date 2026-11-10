@@ -32,6 +32,10 @@ Judge the substance (the facts, numbers, files and actions the viewpoint asks fo
 a different phrasing, order, notation (full-width/half-width, thousands separators, date format) or extra explanation
 is not a reason to fail. Fail it when something the viewpoint requires is missing, wrong or contradicted,
 or when the record does not show that it was done.
+Lines starting with "[output file]" list the files the assistant created or changed in the working folder (path and size,
+and a summary for Excel files); they are evidence that those files exist. The contents of images and documents are not
+shown, so do not fail only because you cannot see inside a file: judge from the tool calls and results that produced it
+and from the final answer.
 Output only JSON in the following format: {"pass": true or false, "reason": "the grounds for the verdict (concrete)"}"""
 
 _RULE_REVIEW_SYSTEM = """You review mechanical checks of a business AI assistant that compare text exactly.
@@ -50,11 +54,26 @@ Output only JSON: {"pass": true or false, "reason": "for each check, why it pass
 _HARD_RULES = ("tool_called_any", "tool_not_called")
 
 
-def judge_run(config: Config, *, spec: str, judge_instruction: str, result: dict, excerpt_chars: int) -> dict:
-    """1回分の結果を判定する。{"pass": bool, "reason": str}（LLM が使えなければ不合格扱い）。"""
+def judge_run(
+    config: Config, *, spec: str, judge_instruction: str, result: dict, excerpt_chars: int, failed_checks: dict | None = None
+) -> dict:
+    """1回分の結果を判定する。{"pass": bool, "reason": str}（LLM が使えなければ不合格扱い）。
+
+    failed_checks: 完全一致の照合で落ちた条件（言葉・引数）。あれば判断の観点と合わせて見せ、
+        観点が許す違い（表記・言い換え等）なら合格にできるようにする。
+    """
+    checks_block = (
+        "## Exact-text checks that failed (expected words/values not found verbatim)\n"
+        f"{json.dumps(failed_checks, ensure_ascii=False, default=str)[:3000]}\n"
+        "Pass them if the answer gives the same information in substance (different notation, separators or wording), "
+        "unless the judging viewpoint requires the exact text.\n\n"
+        if failed_checks
+        else ""
+    )
     user = (
         f"## Spec of the skills and sub-agents\n{spec[:6000]}\n\n"
         f"## Judging viewpoint\n{judge_instruction}\n\n"
+        f"{checks_block}"
         f"## Execution record\n{evaluation.transcript_excerpt(result, excerpt_chars)}\n\n"
         f"## Final answer\n{(result.get('final_answer') or '')[:4000]}"
     )
@@ -99,14 +118,28 @@ def _normalized_value(value):
     return normalize_text(value)
 
 
+# 区切り記号（記号・空白・_）。数字どうしの間（1.5・2027/1/1 の区切り）は意味が変わるため残す。
+_LOOSE_SEPARATORS_RE = re.compile(r"(?<!\d)[\W_]+|[\W_]+(?!\d)")
+
+
+def loose_text(value) -> str:
+    """normalize_text に加えて、文字と数字の間などの区切りの違いもそろえた文字列。
+
+    「ver_57」と「ver.57」「ver: 57」「Ver-57」のような書き方の違いだけで、言葉の条件が
+    何度直しても合格しなかった（2026-11-11 ユーザー報告）。数字どうしの間の区切りは残すので、
+    「1.5」と「15」は別のままにする。
+    """
+    return _LOOSE_SEPARATORS_RE.sub("", normalize_text(value))
+
+
 def _passes_normalized(rule: str, detail: dict, final_answer: str) -> bool:
     """表記をそろえれば合う失敗か（照合し直すための値が結果に無ければ False）。"""
     if rule == "response_contains":
         missing = detail.get("missing")
         if not missing:
             return False
-        answer = normalize_text(final_answer)
-        return all(normalize_text(s) in answer for s in missing)
+        answer, loose_answer = normalize_text(final_answer), loose_text(final_answer)
+        return all(normalize_text(s) in answer or (loose_text(s) and loose_text(s) in loose_answer) for s in missing)
     if rule.startswith("tool_call_args_contains:"):
         expected, calls = detail.get("expected"), detail.get("calls")
         if not isinstance(expected, dict) or not isinstance(calls, list):
@@ -121,6 +154,9 @@ def _passes_normalized(rule: str, detail: dict, final_answer: str) -> bool:
 
 def review_rules(config: Config, result: dict, excerpt_chars: int) -> dict | None:
     """機械判定で落ちた回を見直す。見直しの対象外（ツールの呼び方で落ちた等）なら None。
+
+    ケースに「AI が判断する点」（judge）があれば、作成者の判定基準として LLM の見直しにも渡す
+    （以前は渡しておらず、「意味が同じなら合格」と書いても言葉の照合の見直しには効かなかった）。
 
     Returns:
         {"pass": bool, "how": "normalized" | "ai", "rules": [見直したルール名], "reason": str}
@@ -138,9 +174,15 @@ def review_rules(config: Config, result: dict, excerpt_chars: int) -> dict | Non
             "reason": "Only notation differed (full/half width, spaces, thousands separators, path separators or case).",
         }
     checks = {k: {key: v.get(key) for key in ("detail", "missing", "found", "expected") if v.get(key) is not None} for k, v in remaining.items()}
+    author_criteria = (result.get("judge") or "").strip()
     user = (
         f"## Failed exact checks\n{json.dumps(checks, ensure_ascii=False, default=str)[:4000]}\n\n"
-        f"## Execution record\n{evaluation.transcript_excerpt(result, excerpt_chars)}\n\n"
+        + (
+            f"## Judging criteria written by the case author (follow these when they say how strict to be)\n{author_criteria[:2000]}\n\n"
+            if author_criteria
+            else ""
+        )
+        + f"## Execution record\n{evaluation.transcript_excerpt(result, excerpt_chars)}\n\n"
         f"## Final answer\n{final_answer[:4000]}"
     )
     verdict = _ask_verdict(config, _RULE_REVIEW_SYSTEM, user, "rule review")
@@ -157,15 +199,33 @@ def judge_results(config: Config, *, spec: str, results: list[dict], excerpt_cha
     for r in results:
         outcome = evaluation.classify(r)
         entry = {"case_id": r.get("case_id"), "repeat_index": r.get("repeat_index", 1), "outcome": outcome}
+        failed_checks: dict = {}
         if outcome == "fail":
             review = review_rules(config, r, excerpt_chars)
             if review is not None:
                 entry["rule_review"] = review
                 if review["pass"]:
                     outcome = "judge" if r.get("judge") else "pass"
-                    entry["outcome"] = outcome
+                elif r.get("judge"):
+                    # 言葉・引数の照合（表記ゆれのありうる条件）だけで落ち、「AI が判断する点」が書かれているなら、
+                    # AI judge まで進めてその判断を優先する（落ちた照合も見せる）。以前はここで不合格が確定し、
+                    # 「意味が同じなら合格」等の判断の観点が一度も使われなかった。
+                    outcome = "judge"
+                    failed_checks = {
+                        k: {key: v.get(key) for key in ("detail", "missing", "found", "expected") if v.get(key) is not None}
+                        for k, v in (r.get("rule_results") or {}).items()
+                        if isinstance(v, dict) and not v.get("pass")
+                    }
+                entry["outcome"] = outcome
         if outcome == "judge":
-            ai = judge_run(config, spec=spec, judge_instruction=r.get("judge") or "", result=r, excerpt_chars=excerpt_chars)
+            ai = judge_run(
+                config,
+                spec=spec,
+                judge_instruction=r.get("judge") or "",
+                result=r,
+                excerpt_chars=excerpt_chars,
+                failed_checks=failed_checks,
+            )
             entry["ai_judge"] = ai
             entry["outcome"] = "pass" if ai["pass"] else "fail"
         verdicts.append(entry)

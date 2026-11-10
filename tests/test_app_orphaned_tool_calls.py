@@ -229,3 +229,62 @@ async def test_repair_after_stop_keeps_result_of_tool_that_completed() -> None:
     assert "開くべきファイル @16 @72" in by_id["call_fast"]
     assert by_id["call_slow"].startswith("Error: Because the user stopped it")
     assert _find_orphaned_tool_calls(committed) == []
+
+
+def test_build_orphaned_placeholder_messages_for_ask_tool_says_next_message_may_be_the_answer() -> None:
+    tc = {"name": "ask_user_choice", "args": {"question": "q", "choices": ["a", "b"]}, "id": "tc-ask", "type": "tool_call"}
+
+    messages = _build_orphaned_placeholder_messages(tc, "Because the previous session ended abnormally, ")
+
+    assert len(messages) == 1 and messages[0].tool_call_id == "tc-ask"
+    assert "answer to this question was not received" in messages[0].content
+    assert "next message" in messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_pre_turn_repair_lets_the_first_message_after_a_restart_run() -> None:
+    """プロセスが ask_user_choice の応答待ちで止まった会話へ、再起動後に送った1通目が失敗しないこと。
+
+    本番ログ 2026-11-11: チェックポイント末尾に結果の無い ask_user_choice が残り、再起動後の1通目が
+    INVALID_CHAT_HISTORY で失敗（修復はその後に走り、2通目でやっと動いた）。on_message は流す前に
+    _repair_orphaned_tool_calls を呼ぶ。
+    """
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.outputs import ChatGeneration, ChatResult
+    from langchain_core.tools import tool
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.prebuilt import create_react_agent
+
+    from app import _repair_orphaned_tool_calls
+
+    @tool
+    def ask_user_choice(question: str, choices: list[str]) -> str:
+        """ask"""
+        return choices[0]
+
+    class _AnswerModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "fake"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+    graph = create_react_agent(_AnswerModel(), [ask_user_choice], checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "t-restart"}}
+    orphan = AIMessage(
+        content="",
+        tool_calls=[{"name": "ask_user_choice", "args": {"question": "q", "choices": ["A", "B"]}, "id": "call_ask", "type": "tool_call"}],
+    )
+    await graph.aupdate_state(config, {"messages": [HumanMessage(content="start"), orphan]}, as_node="agent")
+
+    with pytest.raises(ValueError):
+        await graph.ainvoke({"messages": [HumanMessage(content="A")]}, config)
+
+    assert await _repair_orphaned_tool_calls(graph, config) == 1
+    result = await graph.ainvoke({"messages": [HumanMessage(content="A")]}, config)
+    assert result["messages"][-1].content == "ok"
+    assert await _repair_orphaned_tool_calls(graph, config) == 0

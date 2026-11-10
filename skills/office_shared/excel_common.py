@@ -71,6 +71,35 @@ def backup_before_overwrite(path: Path) -> Path | None:
     return backup_path
 
 
+# パスワード付き（暗号化）の Office ファイルの判定に使う、OLE 複合ファイルの先頭4バイト。
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0"
+_OOXML_SUFFIXES = frozenset({".xlsx", ".xlsm", ".docx", ".docm", ".pptx", ".pptm"})
+
+
+def password_protected_error(path) -> str | None:
+    """開くのにパスワードが要る Office ファイルなら、その旨のエラーメッセージ（そうでなければ None）。
+
+    COM で起動した Office にパスワード付きのファイルを開かせると、非表示のままパスワード入力（ダミーの
+    パスワードを渡しても「パスワードが違います」）のダイアログで止まり、run_script のタイムアウトまで
+    固まる。xlsx/docx/pptx 等は通常 ZIP だが、パスワードで暗号化すると OLE 複合ファイルになるため、
+    Office を起動する前に先頭のバイトで見分ける（.xls/.doc 等の旧形式は判定しない）。
+    """
+    p = Path(path)
+    if p.suffix.lower() not in _OOXML_SUFFIXES:
+        return None
+    try:
+        with p.open("rb") as f:
+            head = f.read(4)
+    except OSError:
+        return None
+    if head != _OLE_MAGIC:
+        return None
+    return (
+        f"The file is password-protected (encrypted), so it cannot be opened automatically: {p}. "
+        "Ask the user to remove the password (or save an unprotected copy) and try again."
+    )
+
+
 def _excel_locks_registry():
     """自セッション専用サンドボックス（`_tmp_<thread_id>/excel_locks/pids.json`）内の
     Excel COMプロセスPIDレジストリのパスと、それを操作するための`path_memory`
@@ -168,6 +197,63 @@ def is_process_running(pid: int) -> bool:
             pass
 
 
+# 自セッションが COM で起動しうる Office の実行ファイル名（小文字）。
+_OFFICE_IMAGE_NAMES = frozenset({"excel.exe", "winword.exe", "powerpnt.exe"})
+
+
+def process_identity(pid: int) -> dict | None:
+    """PID のプロセスの実行ファイル名（小文字のファイル名）と起動時刻（FILETIME の整数）。
+
+    記録した PID のプロセスが終わった後、同じ番号が別のプロセスに使い回されることがある。
+    強制終了する前に、記録したときと同じプロセスかをこの2つで確かめる（terminate_tracked_processes）。
+    取得できなければ None（Windows 以外・権限不足・終了済み等）。
+    """
+    if not isinstance(pid, int) or pid <= 0 or sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    process_query_limited_information = 0x1000
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return None
+        creation, exit_, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not kernel32.GetProcessTimes(
+            handle, ctypes.byref(creation), ctypes.byref(exit_), ctypes.byref(kernel), ctypes.byref(user)
+        ):
+            return None
+        return {
+            "image": Path(buffer.value).name.lower(),
+            "created": (creation.dwHighDateTime << 32) | creation.dwLowDateTime,
+        }
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _is_same_tracked_process(entry: dict) -> bool:
+    """記録した PID が、今も記録したときと同じ Office のプロセスか（使い回された別プロセスなら False）。
+
+    起動時刻を記録している（新しい記録）なら実行ファイル名と起動時刻の両方を、記録していない
+    （古い記録）なら実行ファイル名が Office であることだけを確かめる。今の状態を取得できなければ、
+    別のプロセスを誤って終了させないよう False（終了させない）。
+    """
+    current = process_identity(entry.get("pid"))
+    if current is None or current["image"] not in _OFFICE_IMAGE_NAMES:
+        return False
+    recorded_image = entry.get("image")
+    if recorded_image and recorded_image != current["image"]:
+        return False
+    recorded_created = entry.get("created")
+    return recorded_created is None or recorded_created == current["created"]
+
+
 def wait_for_process_exit(pid: int, timeout_seconds: float = 3.0, poll_interval: float = 0.2) -> bool:
     """指定PIDが`timeout_seconds`以内に終了するのを待つ。終了を確認できればTrue。
 
@@ -218,15 +304,17 @@ def record_excel_pid(target_path, excel) -> int | None:
     with pm._locked(lock_path) as acquired:
         if not acquired:
             return pid
-        entries = _load_json_list(registry_path)
-        if not any(e.get("pid") == pid for e in entries):
-            entries.append(
-                {
-                    "pid": pid,
-                    "target_path": str(Path(target_path).resolve()),
-                    "recorded_at": datetime.now().isoformat(timespec="seconds"),
-                }
-            )
+        # 同じ PID の古い記録（使い回される前の別プロセスのもの）は、今のプロセスの記録で置き換える。
+        entries = [e for e in _load_json_list(registry_path) if e.get("pid") != pid]
+        entry = {
+            "pid": pid,
+            "target_path": str(Path(target_path).resolve()),
+            "recorded_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        identity = process_identity(pid)
+        if identity is not None:
+            entry.update(identity)
+        entries.append(entry)
         _save_json_list(registry_path, entries)
     return pid
 
@@ -295,6 +383,11 @@ def terminate_tracked_processes() -> list[dict]:
             target_path = entry.get("target_path")
             if not is_process_running(pid):
                 results.append({"pid": pid, "target_path": target_path, "terminated": True})
+                continue
+            if not _is_same_tracked_process(entry):
+                # 記録したプロセスは終わり、同じ PID が別のプロセスに使い回されている（または確かめられない）。
+                # 無関係なプロセスを終了させないよう、触らずに記録だけ外す。
+                results.append({"pid": pid, "target_path": target_path, "terminated": False, "skipped": "pid reused by another process"})
                 continue
             try:
                 import win32api

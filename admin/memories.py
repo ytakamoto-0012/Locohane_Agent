@@ -119,10 +119,9 @@ class MemoriesCopyBody(BaseModel):
     # コピー先のインスタンス（コピー元と別のインスタンス）。
     target_instance: str
     # コピー先の所有者。None（省略）ならメモリーごとにコピー元と同じ所有者（共通は共通）、空文字なら共通、
-    # それ以外ならそのユーザーのメモリーとして全件を置く。
+    # それ以外ならそのユーザーのメモリーとして全件を置く。個人用のメモリーは同じ所有者へしかコピーしない。
+    # 同じ名前のメモリーがコピー先にあれば飛ばす（置き換えはしない。置き換えたいなら先に削除する）。
     target_owner: str | None = None
-    # 同名のメモリーがコピー先にあるとき、置き換えるか（False ならそのメモリーは飛ばす）。
-    overwrite: bool = False
 
 
 class MemoryEditBody(BaseModel):
@@ -726,7 +725,11 @@ def build_router(
         user: str = Depends(require_login),
         _csrf: None = Depends(require_csrf),
     ):
-        """選んだメモリーを別のインスタンスへコピーする。コピー元に1件でも見つからなければ何もコピーしない。"""
+        """選んだメモリーを別のインスタンスへコピーする。
+
+        1件ずつ処理し、コピー先に同じ名前があるものは飛ばし（skipped_items）、コピーできなかったもの
+        （コピー元に無い・個人用を別の所有者へ・書き込み失敗等）は理由を付けて failed_items に入れて続ける。
+        """
         if body.target_instance == name:
             raise HTTPException(status_code=400, detail=_t("コピー先にはコピー元と別のインスタンスを指定してください。"))
         root = _memory_root(name)
@@ -734,38 +737,37 @@ def build_router(
         targets = list(dict.fromkeys((item.name, _owner_scope(item.owner)) for item in body.items))
         if not targets:
             raise HTTPException(status_code=400, detail=_t("コピーするメモリーを選択してください。"))
-        found: list[mem_store.Memory] = []
-        missing: list[str] = []
-        for memory_name, owner in targets:
-            _validate_name(memory_name)
-            try:
-                mem = mem_store.find_memory(root, memory_name, owner)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if mem is None:
-                missing.append(f"{owner or _t('（共通）')} / {memory_name}")
-            else:
-                found.append(mem)
-        if missing:
-            raise HTTPException(status_code=404, detail=_t("メモリーが見つかりません: {0}", ", ".join(missing)))
+        source_policy = mem_store.policy_for(root)
         fixed_owner = None if body.target_owner is None else _owner_scope(body.target_owner)
-        results = {"copied": 0, "overwritten": 0, "skipped": 0}
+        copied = 0
         skipped: list[str] = []
-        for mem in found:
-            dest_owner = mem.owner if body.target_owner is None else fixed_owner
-            existing = mem_store.find_memory(target_root, mem.name, dest_owner)
-            if existing is not None and body.overwrite:
-                _backup(body.target_instance, existing)
+        failed: list[str] = []
+        for memory_name, owner in targets:
+            label = f"{owner or _t('（共通）')} / {memory_name}"
             try:
+                _validate_name(memory_name)
+                mem = mem_store.find_memory(root, memory_name, owner)
+                if mem is None:
+                    failed.append(_t("{0}: コピー元に見つかりません", label))
+                    continue
+                dest_owner = mem.owner if body.target_owner is None else fixed_owner
+                if dest_owner != mem.owner and mem_store.is_private_to_owner(mem, source_policy):
+                    failed.append(_t("{0}: 個人用のメモリーは同じ所有者へしかコピーできません", label))
+                    continue
                 outcome = mem_store.copy_memory(
-                    target_root, mem, owner=dest_owner, overwrite=body.overwrite, copied_by=_dashboard_editor(user)
+                    target_root, mem, owner=dest_owner, copied_by=_dashboard_editor(user), source_policy=source_policy
                 )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            results[outcome] += 1
+            except HTTPException as exc:
+                failed.append(f"{label}: {exc.detail}")
+                continue
+            except (ValueError, OSError) as exc:
+                logger.warning("Memory copy failed (%s -> %s): %s: %s", name, body.target_instance, label, exc)
+                failed.append(f"{label}: {exc}")
+                continue
             if outcome == "skipped":
                 skipped.append(f"{dest_owner or _t('（共通）')} / {mem.name}")
             else:
+                copied += 1
                 audit.append(
                     audit_log_path,
                     {
@@ -777,10 +779,15 @@ def build_router(
                         "memory_owner": dest_owner,
                         "source_instance": name,
                         "source_owner": mem.owner,
-                        "result": outcome,
                     },
                 )
-        return {**results, "skipped_items": skipped}
+        return {
+            "copied": copied,
+            "skipped": len(skipped),
+            "failed": len(failed),
+            "skipped_items": skipped,
+            "failed_items": failed,
+        }
 
     @router.put("/api/instances/{name}/memories/{memory_name}")
     def edit_memory(

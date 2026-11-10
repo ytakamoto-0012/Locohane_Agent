@@ -39,7 +39,7 @@ left out of stdout and included only in the JSON file that `result_path` points 
 Read it to check the content. The keys of each element mean the following.
 
 - `title`: the text of the slide's title placeholder (`null` if none).
-- `texts`: the list of texts of shapes with text other than the title (1 shape = 1 element; multiple lines stay separated by `\n`).
+- `texts`: the list of texts of shapes with text other than the title (1 shape = 1 element; multiple lines stay separated by `\n`). Shapes inside grouped shapes are included.
 - `tables`: if there are tables, stored as a list of 2D arrays (all rows including the first). `[]` if there are no tables.
 - `notes`: the text of the speaker notes (`null` if none).
 

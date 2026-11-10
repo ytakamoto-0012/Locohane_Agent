@@ -17,7 +17,7 @@ Runs `recalc_excel.py`.
 ```bash
 python recalc_excel.py "C:\Users\me\book.xlsx"
 ```
-Formulas written by the excel-edit skill (openpyxl) are not evaluated by openpyxl, so to check the results, run this script and then read the file again with `read_excel.py --data-only` of the excel-read skill. It starts Excel in the background, actually calculates and overwrites the file.
+Formulas written by the excel-edit skill (openpyxl) are not evaluated by openpyxl, so to check the results, run this script and then read the file again with `read_excel.py --data-only` of the excel-read skill. It starts Excel in the background, actually calculates and overwrites the file (the previous file is kept next to it as `<name>.bak_<date-time>.<ext>`, `backup_path` in the output). If the file is open in another program (opened read-only) or is password-protected, it ends with an error without saving.
 
 ## Input/output types
 

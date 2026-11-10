@@ -44,7 +44,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
-from _common import read_text_with_fallback, register_output_path, setup_utf8_stdio
+from _common import backup_before_overwrite, read_text_with_fallback, register_output_path, setup_utf8_stdio
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, LETTER, landscape
@@ -248,8 +248,12 @@ def _build_styles(accent: colors.Color) -> dict[str, ParagraphStyle]:
             "pre", fontName=JP_GOTHIC, fontSize=9, leading=13, textColor=colors.HexColor("#1a1a1a"),
             backColor=colors.HexColor("#F4F4F4"), borderPadding=4, spaceBefore=4, spaceAfter=10,
         ),
-        "callout": ParagraphStyle(
-            "callout", fontName=JP_MINCHO, fontSize=10.5, leading=17.85, textColor=colors.HexColor("#1a1a1a"),
+        "callout_p": ParagraphStyle(
+            "callout_p", fontName=JP_MINCHO, fontSize=10.5, leading=17.85, textColor=colors.HexColor("#1a1a1a"),
+            spaceAfter=4,
+        ),
+        "th_body": ParagraphStyle(
+            "th_body", fontName=JP_GOTHIC_BOLD, fontSize=9.5, leading=13, textColor=colors.HexColor("#1a1a1a"),
         ),
         "header": ParagraphStyle("header", fontName=JP_GOTHIC, fontSize=8, textColor=colors.HexColor("#888888")),
         "footer": ParagraphStyle(
@@ -258,32 +262,65 @@ def _build_styles(accent: colors.Color) -> dict[str, ParagraphStyle]:
     }
 
 
-def _build_table(node: _Node, styles: dict[str, ParagraphStyle], accent: colors.Color, avail_width: float):
-    rows: list[list] = []
-    has_header = False
-    for tr in node.children:
-        if not isinstance(tr, _Node) or tr.tag != "tr":
+def _table_rows(node: _Node) -> list[_Node]:
+    """<table> の行（<tr>）を、<thead>/<tbody>/<tfoot> の中のものも含めて文書順に返す。"""
+    rows: list[_Node] = []
+    for child in node.children:
+        if not isinstance(child, _Node):
             continue
-        row = []
-        for cell in tr.children:
-            if not isinstance(cell, _Node) or cell.tag not in ("th", "td"):
-                continue
-            style = styles["th"] if cell.tag == "th" else styles["td"]
-            row.append(Paragraph(_serialize_inline(cell.children) or "&nbsp;", style))
-            if cell.tag == "th":
-                has_header = True
-        if row:
-            rows.append(row)
-    if not rows:
-        return None
+        if child.tag == "tr":
+            rows.append(child)
+        elif child.tag in ("thead", "tbody", "tfoot"):
+            rows.extend(_table_rows(child))
+    return rows
 
-    n_cols = max(len(r) for r in rows)
-    for row in rows:
-        while len(row) < n_cols:
-            row.append(Paragraph("", styles["td"]))
+
+def _span_attr(cell: _Node, name: str) -> int:
+    match = re.match(r"\s*([0-9]+)", cell.attrs.get(name) or "")
+    return max(1, min(int(match.group(1)), 100)) if match else 1
+
+
+def _build_table(node: _Node, styles: dict[str, ParagraphStyle], accent: colors.Color, avail_width: float):
+    # colspan/rowspan を、結合で隠れるマスを空けた格子に置き、reportlab の SPAN で結合する。
+    grid: dict[tuple[int, int], Paragraph] = {}
+    occupied: set[tuple[int, int]] = set()
+    spans: list[tuple[int, int, int, int]] = []
+    # 先頭から続く「見出しだけの行」が見出し帯（アクセント色・白字）。それより下の th（行見出し）は、
+    # 白字だと白地で見えなくなるため、本文色の太字にする。
+    n_header = 0
+    n_rows = 0
+    for tr in _table_rows(node):
+        cells = [c for c in tr.children if isinstance(c, _Node) and c.tag in ("th", "td")]
+        if not cells:
+            continue
+        in_header = n_header == n_rows and all(cell.tag == "th" for cell in cells)
+        if in_header:
+            n_header += 1
+        c = 0
+        for cell in cells:
+            while (n_rows, c) in occupied:
+                c += 1
+            colspan, rowspan = _span_attr(cell, "colspan"), _span_attr(cell, "rowspan")
+            style = styles["td"] if cell.tag == "td" else styles["th"] if in_header else styles["th_body"]
+            grid[(n_rows, c)] = Paragraph(_serialize_inline(cell.children).strip() or "&nbsp;", style)
+            for dr in range(rowspan):
+                for dc in range(colspan):
+                    occupied.add((n_rows + dr, c + dc))
+            if colspan > 1 or rowspan > 1:
+                spans.append((c, n_rows, c + colspan - 1, n_rows + rowspan - 1))
+            c += colspan
+        n_rows += 1
+    if not grid:
+        return None
+    # 最後の行から下へはみ出した rowspan は、表の行数を増やさずに表の末尾で止める。
+    spans = [(c0, r0, c1, min(r1, n_rows - 1)) for c0, r0, c1, r1 in spans]
+    n_cols = max(c for _, c in occupied) + 1
+    rows = [[grid.get((r, c), Paragraph("", styles["td"])) for c in range(n_cols)] for r in range(n_rows)]
+    # 見出し帯の行はページをまたぐときに繰り返す。
+    has_header = n_header > 0
 
     col_width = avail_width / n_cols
-    table = Table(rows, colWidths=[col_width] * n_cols, repeatRows=1 if has_header else 0)
+    table = Table(rows, colWidths=[col_width] * n_cols, repeatRows=n_header)
     style_cmds = [
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CCCCCC")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -294,16 +331,21 @@ def _build_table(node: _Node, styles: dict[str, ParagraphStyle], accent: colors.
     ]
     if has_header:
         style_cmds += [
-            ("BACKGROUND", (0, 0), (-1, 0), accent),
-            ("GRID", (0, 0), (-1, 0), 0.5, accent),
+            ("BACKGROUND", (0, 0), (-1, n_header - 1), accent),
+            ("GRID", (0, 0), (-1, n_header - 1), 0.5, accent),
         ]
+    style_cmds += [("SPAN", (c0, r0), (c1, r1)) for c0, r0, c1, r1 in spans]
     table.setStyle(TableStyle(style_cmds))
     return table
 
 
-def _build_callout(node: _Node, styles: dict[str, ParagraphStyle], accent: colors.Color):
-    inner = Paragraph(_serialize_inline(node.children), styles["callout"])
-    table = Table([[inner]], colWidths=[None])
+def _build_callout(node: _Node, styles: dict[str, ParagraphStyle], accent: colors.Color, avail_width: float):
+    # 中の段落・箇条書き・表は、それぞれのブロックのまま枠に入れる（1つの段落に連結しない）。
+    callout_styles = {**styles, "p": styles["callout_p"]}
+    inner = _build_flowables(node.children, callout_styles, accent, avail_width - 20)
+    if not inner:
+        return None
+    table = Table([[inner]], colWidths=[avail_width])
     table.setStyle(
         TableStyle(
             [
@@ -318,6 +360,13 @@ def _build_callout(node: _Node, styles: dict[str, ParagraphStyle], accent: color
         )
     )
     return table
+
+
+# 本文の枠（SimpleDocTemplate の Frame）の高さ。main() が用紙と余白から決める。画像をこれより高くすると
+# reportlab が「too large」で PDF 全体の生成を止めるため、_build_image はこの高さに収める。
+_FRAME_HEIGHT: float = float("inf")
+# Frame は四辺に 6pt の内側余白を持つため、本文に使える幅・高さは用紙−余白からさらに 12pt 狭い。
+_FRAME_PADDING = 12
 
 
 def _build_image(node: _Node, avail_width: float):
@@ -345,6 +394,10 @@ def _build_image(node: _Node, avail_width: float):
         height = width * (natural_h / natural_w)
     else:
         height = width * 0.75
+    # 縦長の画像は、縦横比を保ったまま1ページの枠の高さに収める（少し余裕を残す）。
+    max_height = _FRAME_HEIGHT - 2
+    if height > max_height:
+        width, height = width * (max_height / height), max_height
     return Image(str(path), width=width, height=height)
 
 
@@ -425,8 +478,10 @@ def _build_flowables(
         elif tag == "div":
             classes = node.attrs.get("class", "").split()
             if "callout" in classes:
-                story.append(_build_callout(node, styles, accent))
-                story.append(Spacer(1, 8))
+                callout = _build_callout(node, styles, accent, avail_width)
+                if callout is not None:
+                    story.append(callout)
+                    story.append(Spacer(1, 8))
             elif "page-break" in classes:
                 story.append(PageBreak())
             else:
@@ -559,7 +614,9 @@ def main() -> int:
             author="",
             subject="",
         )
-        avail_width = page_size[0] - 2 * margin
+        global _FRAME_HEIGHT
+        avail_width = page_size[0] - 2 * margin - _FRAME_PADDING
+        _FRAME_HEIGHT = page_size[1] - 2 * margin - _FRAME_PADDING
         styles = _build_styles(accent)
         story = _build_flowables(builder.root.children, styles, accent, avail_width)
         if not story:
@@ -577,12 +634,18 @@ def main() -> int:
                 **c_kwargs,
             )
 
+        # 既存のファイルを上書きするときは、書き始める前に同じフォルダへ残す（書き込みに失敗しても元に戻せる）。
+        backup_path = backup_before_overwrite(output_path)
         doc.build(story, canvasmaker=_canvasmaker)
     except Exception as e:  # noqa: BLE001 - PDF生成失敗はすべてエラー扱いにする
         print(f"PDF generation failed: {e}\n{traceback.format_exc()}", file=sys.stderr)
         return 1
 
-    result_json = {"output_path": str(output_path), "size_bytes": output_path.stat().st_size}
+    result_json = {
+        "output_path": str(output_path),
+        "size_bytes": output_path.stat().st_size,
+        "backup_path": str(backup_path) if backup_path else None,
+    }
     path_memory = register_output_path(output_path, description="PDF generated by create_pdf")
     if path_memory:
         result_json["path_memory"] = path_memory

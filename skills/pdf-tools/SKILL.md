@@ -121,12 +121,12 @@ basically save the body HTML file in UTF-8).
 | `<p>` | Paragraph (text outside any block tag also becomes a paragraph) |
 | `<pre>` | Preformatted text (spaces and line breaks kept) |
 | `<b>`/`<strong>`, `<i>`/`<em>` | Bold, italic |
-| `<table><tr><th>...</th></tr><tr><td>...</td></tr></table>` | Table (header row with `th`; an accent-colored header band + rules are added automatically) |
+| `<table><tr><th>...</th></tr><tr><td>...</td></tr></table>` | Table (header row with `th`; an accent-colored header band + rules are added automatically). `<thead>`/`<tbody>`/`<tfoot>` and `colspan`/`rowspan` can be used; a `th` in a body row becomes a bold row heading |
 | `<ul>`/`<ol>`+`<li>` | Bullets, numbered lists |
-| `<div class="callout">...</div>` | An emphasis box with a colored band on the left (for supplements and cautions) |
+| `<div class="callout">...</div>` | An emphasis box with a colored band on the left (for supplements and cautions; paragraphs, lists and tables inside keep their layout) |
 | `<div class="page-break"></div>` | Explicit page break |
 | `<hr>` | Divider |
-| `<img src="C:\\...\\chart.png" width="300">` | Insert an image (`src` is an absolute path that exists) |
+| `<img src="C:\\...\\chart.png" width="300">` | Insert an image (`src` is an absolute path that exists; an image taller than one page is shrunk to fit the page) |
 
 **Tags other than the above (`<script>`, `<button>`, JS such as `onclick`, tab switching,
 interactive UI such as line charts) cannot be used** (as said above, no JS is
@@ -162,7 +162,7 @@ Edge cases:
 - If the file given to `--html-file` does not exist, it ends with an error.
 - If `--accent-color` is not a hexadecimal RRGGBB value, it ends with an error.
 - If the output directory does not exist, it is created automatically.
-- A file with the same name is overwritten (it is good to confirm with the user beforehand whether overwriting is OK).
+- A file with the same name is overwritten; the previous file is kept next to it as `<name>.bak_<date-time>.<ext>` (`backup_path` in the output) (it is good to confirm with the user beforehand whether overwriting is OK).
 - Japanese is drawn by embedding the actual glyphs of TTF fonts bundled with Windows (Yu Gothic = sans-serif headings, Yu Mincho = serif body;
   substituted with Meiryo/MS Gothic/MS Mincho if missing) into the PDF.
   It displays with the same glyphs regardless of the viewer. In environments where no standard Windows Japanese font

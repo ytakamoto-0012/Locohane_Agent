@@ -32,6 +32,26 @@ def _length_cm(value) -> float | None:
     return round(value.cm, 2) if value is not None else None
 
 
+def _cell_text(cell) -> str:
+    """表のセルの文字を、セルの中の表（入れ子の表）も含めて文書順に返す。
+
+    python-docx の cell.text はセル直下の段落だけを連結し、入れ子の表の文字を落とす。
+    入れ子の表は1行を「 | 」区切りの1行にして、段落と同じく改行で並べる。
+    """
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    lines: list[str] = []
+    for child in cell._tc.iterchildren():
+        tag = child.tag.rsplit("}", 1)[-1]
+        if tag == "p":
+            lines.append(Paragraph(child, cell).text)
+        elif tag == "tbl":
+            for row in Table(child, cell).rows:
+                lines.append(" | ".join(_cell_text(c).replace("\n", " ") for c in row.cells))
+    return "\n".join(lines)
+
+
 def main() -> int:
     setup_utf8_stdio()
     parser = argparse.ArgumentParser()
@@ -75,7 +95,7 @@ def main() -> int:
     offset = max(args.offset, 0)
     selected = all_paragraphs[offset : offset + args.limit]
 
-    tables = [[[cell.text for cell in row.cells] for row in table.rows] for table in doc.tables]
+    tables = [[[_cell_text(cell) for cell in row.cells] for row in table.rows] for table in doc.tables]
 
     # paragraphsとtablesは別々のフラットリストで返るため、両者の文書内での
     # 前後関係（どの段落とどの表が隣接しているか）が分からない。表の直前/直後に

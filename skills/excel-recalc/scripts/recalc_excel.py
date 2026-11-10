@@ -32,6 +32,8 @@ _OFFICE_SHARED = Path(__file__).resolve().parent.parent.parent / "office_shared"
 if str(_OFFICE_SHARED) not in sys.path:
     sys.path.append(str(_OFFICE_SHARED))
 from excel_common import (  # noqa: E402
+    backup_before_overwrite,
+    password_protected_error,
     record_excel_pid,
     register_output_path,
     release_excel_pid,
@@ -84,8 +86,19 @@ def _recalc(path: Path) -> dict:
         workbook = excel.Workbooks.Open(str(path), UpdateLinks=0, IgnoreReadOnlyRecommended=True)
         excel.CalculateFullRebuild()
         errors = _collect_errors(workbook)
+        if workbook.ReadOnly:
+            # 他のプロセス（ユーザーが開いている Excel 等）が使用中で、読み取り専用でしか開けなかった。
+            # Save() は失敗するか別名保存の確認を待つため、保存せずに知らせる。
+            raise RuntimeError(f"The file is open in another program, so it was opened read-only and cannot be saved. Close it and try again: {path}")
+        # 再計算の結果で元のファイルを上書きするので、保存前に同じフォルダへ残す。
+        backup_path = backup_before_overwrite(path)
         workbook.Save()
-        result = {"path": str(path), "recalculated": True, "errors": errors}
+        result = {
+            "path": str(path),
+            "recalculated": True,
+            "errors": errors,
+            "backup_path": str(backup_path) if backup_path else None,
+        }
         path_memory = register_output_path(path, description="file recalculated and saved by recalc_excel")
         if path_memory:
             result["path_memory"] = path_memory
@@ -136,6 +149,11 @@ def main() -> int:
         return 1
     if path.suffix.lower() not in (".xlsx", ".xlsm", ".xls"):
         print(f"Only the .xlsx/.xlsm/.xls extensions are supported: {path.suffix}", file=sys.stderr)
+        return 1
+
+    protected = password_protected_error(path)
+    if protected:
+        print(protected, file=sys.stderr)
         return 1
 
     try:

@@ -46,6 +46,23 @@ def read_text_with_fallback(path: Path) -> str:
     raise error or UnicodeDecodeError("utf-8", data, 0, len(data), "undecodable")
 
 
+def backup_before_overwrite(path: Path) -> Path | None:
+    """path が既に存在する場合、上書き直前に同じフォルダへタイムスタンプ付きでコピーする
+    （office_shared の同名関数と同じ。存在しなければ何もせず None）。"""
+    import shutil
+
+    if not path.exists():
+        return None
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = path.with_name(f"{path.stem}.bak_{timestamp}{path.suffix}")
+    suffix_n = 2
+    while backup_path.exists():
+        backup_path = path.with_name(f"{path.stem}.bak_{timestamp}_{suffix_n}{path.suffix}")
+        suffix_n += 1
+    shutil.copy2(path, backup_path)
+    return backup_path
+
+
 def register_output_path(path, description: str | None = None) -> dict[str, str] | None:
     """生成/更新したファイルをパスメモリーへ登録し、{"@N": 絶対パス} を返す。
 

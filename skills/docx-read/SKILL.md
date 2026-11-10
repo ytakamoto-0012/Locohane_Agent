@@ -31,7 +31,7 @@ Call example:
 python read_docx.py "C:\Users\me\report.docx" --offset 0 --limit 300
 ```
 `--offset`/`--limit` can be omitted (defaults offset=0, limit=300). Paging is per paragraph
-(the same idea as the line-number version of `read_file.py`). Tables (`tables`) are all returned by default.
+(the same idea as the line-number version of `read_file.py`). Tables (`tables`) are all returned by default. A table inside a table cell is included in that cell's text, one row per line with cells joined by ` | `.
 
 Output example:
 ```json

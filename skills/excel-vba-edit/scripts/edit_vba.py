@@ -38,6 +38,7 @@ if str(_OFFICE_SHARED) not in sys.path:
     sys.path.append(str(_OFFICE_SHARED))
 from excel_common import (  # noqa: E402
     backup_before_overwrite,
+    password_protected_error,
     read_text_with_fallback,
     record_excel_pid,
     register_output_path,
@@ -251,6 +252,11 @@ def main() -> int:
         return 1
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    protected = None if args.new else password_protected_error(path)
+    if protected:
+        print(protected, file=sys.stderr)
+        return 1
 
     try:
         result = _edit_vba(path, output_path, ops, args.new, args.overwrite)

@@ -445,11 +445,12 @@ $C -X DELETE "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H"
 # Delete several at once (nothing is deleted if any of them is not found; omit owner for common)
 $C -X POST $BASE/api/instances/default/memories/delete -H "$H" -H "$J" \
   -d '{"items":[{"name":"my-note","owner":"alice"},{"name":"old-note"}]}'
-# Copy to another instance (the source is unchanged; if any is not found, nothing is copied).
+# Copy to another instance (the source is unchanged; each memory is handled on its own, and failures are reported with a reason).
 # Omit target_owner to keep each memory's owner, "" for common, or a user name to put them all under that user.
-# overwrite=true replaces a same-named memory (the old one is backed up); false (default) skips it. Response: copied/overwritten/skipped/skipped_items
+# A private memory is copied only to the same owner. A memory whose name exists at the destination is skipped (never replaced).
+# Response: copied/skipped/failed/skipped_items/failed_items
 $C -X POST $BASE/api/instances/default/memories/copy -H "$H" -H "$J" \
-  -d '{"items":[{"name":"my-note","owner":"alice"}],"target_instance":"other","target_owner":null,"overwrite":false}'
+  -d '{"items":[{"name":"my-note","owner":"alice"}],"target_instance":"other","target_owner":null}'
 # Translate (into English; not saved; the response has description/content/language/llm_instance)
 $C -X POST $BASE/api/instances/default/memories/translate -H "$H" -H "$J" -H "X-Locohane-Lang: en" \
   -d '{"description":"(one-line description in another language)","content":"(content in another language)"}'

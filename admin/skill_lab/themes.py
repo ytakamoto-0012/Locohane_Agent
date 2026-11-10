@@ -756,12 +756,36 @@ def tryout_matches(directory: Path, tryout: dict | None) -> list[str]:
 TASK_TYPES = ("trial", "draft_spec", "draft_cases", "draft_asset")
 
 
+def pending_same_task(data: dict, task_type: str, params: dict) -> dict | None:
+    """同じ依頼（同じ種類。1回試行は同じ問題、研究対象の下書きは同じ名前）が処理待ち・処理中ならその依頼。
+
+    生成には数分かかり、その間にボタンを何度も押すと同じ依頼が積み重なっていた。
+    """
+    for task in data.get("tasks") or []:
+        if task.get("type") != task_type or task.get("status") not in ("queued", "running"):
+            continue
+        other = task.get("params") or {}
+        if task_type == "trial" and other.get("case_id") != params.get("case_id"):
+            continue
+        if task_type == "draft_asset" and (other.get("asset_type"), other.get("name")) != (params.get("asset_type"), params.get("name")):
+            continue
+        return task
+    return None
+
+
 def add_task(directory: Path, task_type: str, params: dict, *, actor: str) -> str:
+    """依頼を積む。
+
+    Raises:
+        ThemeError: 不明な種類、または同じ依頼が処理待ち・処理中（テーマのロックの中で確かめるので、同時に押しても1件だけ積む）。
+    """
     if task_type not in TASK_TYPES:
         raise ThemeError(_t("不明なタスクです: {0}", task_type))
     task_id = f"{datetime.now():%Y%m%d%H%M%S}_{secrets.token_hex(2)}"
 
     def _apply(data: dict) -> None:
+        if pending_same_task(data, task_type, params) is not None:
+            raise ThemeError(_t("同じ依頼を AI が処理しています。終わってから頼んでください。"))
         data.setdefault("tasks", []).append(
             {"id": task_id, "type": task_type, "params": params, "status": "queued", "created_at": now_iso(), "by": actor}
         )

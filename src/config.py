@@ -948,7 +948,7 @@ class Config:
             （src/tools/_read_volume_guard.py）。確認はセッションにつき1回。
         read_volume_guard_threshold_files: 確認を出すファイル数の閾値（これを超えたら確認）。
         read_volume_guard_ask_timeout_seconds: この確認の応答待ちの秒数。過ぎたら
-            「全部読む」で続ける。[user_response_timeouts] ask_user_choice_seconds が
+            「代表だけ読む（ラフ読み）」で続ける。[user_response_timeouts] ask_user_choice_seconds が
             0（無期限）でも、この確認だけはこの秒数で切る。0 以下なら無期限待ち。
         read_volume_guard_sample_files_per_folder: 「代表だけ読む」を選んだときに
             1フォルダから読むファイル数。

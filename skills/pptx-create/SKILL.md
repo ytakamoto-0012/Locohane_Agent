@@ -121,7 +121,7 @@ When generation is done, tell the user `output_path` and `total_slides`.
 - With `layout: stat`, empty `stats` (0 items) or 5 or more items end with an error (1-4 items are valid).
 - With `layout: picture`, a missing `image_path` or no file at the given path ends with an error.
 - If the output directory does not exist, it is created automatically.
-- A file with the same name is overwritten (it is good to confirm with the user beforehand whether overwriting is OK).
+- A file with the same name is overwritten; the previous file is kept next to it as `<name>.bak_<date-time>.<ext>` (`backup_path` in the output) (it is good to confirm with the user beforehand whether overwriting is OK).
 - Applying a company logo or a custom template (parts that `theme` cannot change) is out of scope for this skill. Use `pptx-edit`.
 - If the dependency `python-pptx` is not installed in the environment, it ends with `ModuleNotFoundError` and
   a non-zero exit code. In that case, prompt the installer to run `pip install python-pptx`.

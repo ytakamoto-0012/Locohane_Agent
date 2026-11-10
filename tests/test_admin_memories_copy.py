@@ -51,7 +51,7 @@ def test_copy_keeps_owner_and_fields(env):
     mem_store.create_memory(src, "common-note", "共通", "reference", "c")
     res = _copy(env, [{"name": "term-abc", "owner": "alice"}, {"name": "common-note"}])
     assert res.status_code == 200
-    assert res.json() == {"copied": 2, "overwritten": 0, "skipped": 0, "skipped_items": []}
+    assert res.json() == {"copied": 2, "skipped": 0, "failed": 0, "skipped_items": [], "failed_items": []}
     copied = mem_store.find_memory(dst, "term-abc", "alice")
     assert (copied.description, copied.memory_type, copied.content, copied.author) == ("ABC: 受発注システム", "glossary", "意味", "alice")
     assert copied.updated_by == "admin (dashboard)"
@@ -63,37 +63,71 @@ def test_copy_keeps_owner_and_fields(env):
     assert {e["action"] for e in entries} == {"memory_copy"} and entries[0]["instance"] == "dst-inst"
 
 
-def test_copy_conflict_skip_then_overwrite(env):
+def test_copy_skips_existing_name_without_replacing(env):
     src, dst = env["dirs"]["src-inst"], env["dirs"]["dst-inst"]
     mem_store.create_memory(src, "note", "new", "feedback", "新しい本文", owner="alice")
     mem_store.create_memory(dst, "note", "old", "project", "古い本文", owner="alice")
     res = _copy(env, [{"name": "note", "owner": "alice"}])
     assert res.json()["skipped"] == 1 and res.json()["skipped_items"] == ["alice / note"]
-    assert mem_store.find_memory(dst, "note", "alice").content == "古い本文"
-    res = _copy(env, [{"name": "note", "owner": "alice"}], overwrite=True)
-    assert res.json()["overwritten"] == 1
     got = mem_store.find_memory(dst, "note", "alice")
-    assert (got.content, got.memory_type) == ("新しい本文", "feedback")
-    assert not (dst / "users" / "alice" / "project" / "note.md").exists()
-    # 置き換え前の内容はバックアップに残る
-    assert list((env["root"] / "dst-inst").rglob("note*"))
+    assert (got.content, got.memory_type) == ("古い本文", "project")
 
 
 def test_copy_target_owner(env):
     src, dst = env["dirs"]["src-inst"], env["dirs"]["dst-inst"]
     mem_store.create_memory(src, "a", "d", "reference", "c", owner="alice")
-    assert _copy(env, [{"name": "a", "owner": "alice"}], target_owner="").status_code == 200
+    assert _copy(env, [{"name": "a", "owner": "alice"}], target_owner="").json()["copied"] == 1
     assert mem_store.find_memory(dst, "a", None) is not None
-    assert _copy(env, [{"name": "a", "owner": "alice"}], target_owner="bob").status_code == 200
+    assert _copy(env, [{"name": "a", "owner": "alice"}], target_owner="bob").json()["copied"] == 1
     assert mem_store.find_memory(dst, "a", "bob") is not None
 
 
-def test_copy_validation(env):
+def test_private_memory_is_copied_only_to_the_same_owner(env):
+    src, dst = env["dirs"]["src-inst"], env["dirs"]["dst-inst"]
+    mem_store.create_memory(src, "secret", "d", "user", "私的なこと", owner="alice", visibility="private")
+    # 認証情報などの有効な目印があれば、shared のまま保存されていても個人用（他のユーザーから見えない）とみなす
+    (src / "users" / "alice" / "reference").mkdir(parents=True, exist_ok=True)
+    (src / "users" / "alice" / "reference" / "phone.md").write_text(
+        "---\nname: phone\ndescription: d\ntype: reference\nvisibility: shared\n---\n\nパスワード: x\n", encoding="utf-8"
+    )
+    for target_owner in ("", "bob"):
+        body = _copy(env, [{"name": "secret", "owner": "alice"}, {"name": "phone", "owner": "alice"}], target_owner=target_owner).json()
+        assert body["copied"] == 0 and body["failed"] == 2
+        assert all("private" in item or "個人用" in item for item in body["failed_items"])
+    assert mem_store.find_memory(dst, "secret", None) is None and mem_store.find_memory(dst, "secret", "bob") is None
+    # 同じ所有者へならコピーでき、個人用のまま
+    body = _copy(env, [{"name": "secret", "owner": "alice"}]).json()
+    assert body["copied"] == 1
+    assert mem_store.find_memory(dst, "secret", "alice").visibility == "private"
+
+
+def test_same_name_from_two_owners_to_one_owner_skips_the_second(env):
+    src, dst = env["dirs"]["src-inst"], env["dirs"]["dst-inst"]
+    mem_store.create_memory(src, "note", "alice の", "reference", "a", owner="alice")
+    mem_store.create_memory(src, "note", "bob の", "reference", "b", owner="bob")
+    body = _copy(env, [{"name": "note", "owner": "alice"}, {"name": "note", "owner": "bob"}], target_owner="").json()
+    assert (body["copied"], body["skipped"]) == (1, 1)
+    assert mem_store.find_memory(dst, "note", None).content == "a"
+
+
+def test_copy_validation_and_per_item_failures(env):
     src, dst = env["dirs"]["src-inst"], env["dirs"]["dst-inst"]
     mem_store.create_memory(src, "a", "d", "reference", "c")
     assert env["client"].post("/api/instances/src-inst/memories/copy", json={"items": [{"name": "a"}], "target_instance": "src-inst"}).status_code == 400
     assert _copy(env, []).status_code == 400
-    # 1件でも無ければ何もコピーしない
-    assert _copy(env, [{"name": "a"}, {"name": "nope"}]).status_code == 404
-    assert mem_store.find_memory(dst, "a", None) is None
+    # 見つからないもの・名前が不正なものは理由を付けて飛ばし、残りはコピーする
+    body = _copy(env, [{"name": "a"}, {"name": "nope"}, {"name": "bad name"}]).json()
+    assert body["copied"] == 1 and body["failed"] == 2
+    assert any("nope" in item for item in body["failed_items"]) and any("bad name" in item for item in body["failed_items"])
+    assert mem_store.find_memory(dst, "a", None) is not None
     assert env["client"].post("/api/instances/src-inst/memories/copy", json={"items": [{"name": "a"}], "target_instance": "ghost"}).status_code == 404
+
+
+def test_copy_memory_refuses_private_to_other_owner(tmp_path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    mem_store.create_memory(src, "secret", "d", "user", "x", owner="alice", visibility="private")
+    mem = mem_store.find_memory(src, "secret", "alice")
+    with pytest.raises(ValueError):
+        mem_store.copy_memory(dst, mem, owner=None)
+    assert mem_store.copy_memory(dst, mem, owner="alice") == "copied"
+    assert mem_store.copy_memory(dst, mem, owner="alice") == "skipped"

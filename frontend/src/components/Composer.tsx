@@ -85,6 +85,9 @@ interface ComposerProps {
   interrupted?: boolean;
 }
 
+// 新規チャットの読み込みがこの時間を過ぎても終わらなければ、停止ボタンを出す（ミリ秒）。
+const STARTING_STOP_AFTER_MS = 20000;
+
 export function Composer({
   plan,
   remoteGenerating,
@@ -120,14 +123,26 @@ export function Composer({
   // 「ターンが終わった」とみなして、まだ伝わっていない指示を入力欄へ戻してしまう。
   // 新規チャットの読み込み中（ユーザーの発言がまだ1件も無いのに loading が true）。ここで入力できたり
   // 停止ボタンになったりしないよう、入力欄と送信ボタンを止める（停止ボタンにはしない）。
-  const starting = loading && !messages.some((m) => m.type === 'user_message');
+  // ただし読み込みが STARTING_STOP_AFTER_MS を過ぎても終わらない（on_chat_start の初期化が固まった等）ときは、
+  // 抜け出せるよう停止ボタンだけ出す（入力欄は止めたまま）。
+  const startingRaw = loading && !messages.some((m) => m.type === 'user_message');
+  const [startingTooLong, setStartingTooLong] = useState(false);
+  useEffect(() => {
+    if (!startingRaw) {
+      setStartingTooLong(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setStartingTooLong(true), STARTING_STOP_AFTER_MS);
+    return () => window.clearTimeout(timer);
+  }, [startingRaw]);
+  const starting = startingRaw && !startingTooLong;
   const turnRunning = (loading && !starting) || askUser?.spec.type === 'action' || Boolean(remoteGenerating);
   // useChatData().disabled は生成中（loading）も true になるが、生成中も追加指示を
   // 入力できるよう、未接続とファイル・要素の応答待ちのときだけ止める。
   // 同じ所有者の別スレッドが処理中の間は送信自体を止める（この会話が他セッションで
   // 処理中の間は、追加指示としてだけ送れる）。
   const askBlocksInput = askUser?.spec.type === 'file' || askUser?.spec.type === 'element';
-  const inputBlocked = !connected || starting || askBlocksInput || Boolean(blockedByOtherThread);
+  const inputBlocked = !connected || startingRaw || askBlocksInput || Boolean(blockedByOtherThread);
   const inputBlockedRef = useRef(inputBlocked);
   inputBlockedRef.current = inputBlocked;
 

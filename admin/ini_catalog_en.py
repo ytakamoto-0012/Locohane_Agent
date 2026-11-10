@@ -554,13 +554,13 @@ DESCRIPTIONS: dict[str, str] = {
         'The code asks, not the LLM, once per session, and reuses the answer. It asks at whichever comes first:\n'
         '  1. right after the survey explore returns (before its result reaches the main agent), counting the files under the folders it listed with Glob;\n'
         '  2. without a survey, before a reading delegation runs (two or more explore/worker calls in one response, or dispatch_agent_batch).\n'
-        'Asking after a long read only interrupts the work, so it asks before. On timeout it reads all and continues (the question says so). No time estimate is shown (it depends heavily on the contents and the numbers were always far too short); the question only says that reading all takes a long time.'
+        'Asking after a long read only interrupts the work, so it asks before. On timeout it reads only representative files (a rough read) and continues (the question says so). No time estimate is shown (it depends heavily on the contents and the numbers were always far too short); the question only says that reading all takes a long time.'
     ),
     'read_volume_guard.threshold_files': (
         'Ask when there are more files than this. Files under the session temp folders (_tmp_...) and hidden folders are not counted.'
     ),
     'read_volume_guard.ask_timeout_seconds': (
-        'Seconds to wait for the answer to this question; after that it reads all and continues. Applies even when [user_response_timeouts] ask_user_choice_seconds is 0 (no limit), so the work does not stay stopped while the user is away. 0 means no limit.'
+        'Seconds to wait for the answer to this question; after that it reads only representative files and continues. Applies even when [user_response_timeouts] ask_user_choice_seconds is 0 (no limit), so the work does not stay stopped while the user is away. 0 means no limit.'
     ),
     'read_volume_guard.sample_files_per_folder': (
         'Files read per folder when the user chooses "representative files only".'

@@ -442,11 +442,12 @@ $C -X DELETE "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H"
 # まとめて削除（1件でも見つからなければ何も削除しない。owner を省くと共通）
 $C -X POST $BASE/api/instances/default/memories/delete -H "$H" -H "$J" \
   -d '{"items":[{"name":"my-note","owner":"alice"},{"name":"old-note"}]}'
-# 別のインスタンスへコピー（コピー元は変わらない。1件でも見つからなければ何もコピーしない）。
+# 別のインスタンスへコピー（コピー元は変わらない。1件ずつ処理し、失敗したものは理由付きで報告して続ける）。
 # target_owner を省くとメモリーごとにコピー元と同じ所有者、空文字なら共通、ユーザー名ならそのユーザーのメモリー。
-# overwrite が true なら同名をバックアップを残して置き換え、false（既定）なら飛ばす。応答は copied/overwritten/skipped/skipped_items
+# 個人用のメモリーは同じ所有者へしかコピーしない。コピー先に同名があるものは飛ばす（置き換えない）。
+# 応答は copied/skipped/failed/skipped_items/failed_items
 $C -X POST $BASE/api/instances/default/memories/copy -H "$H" -H "$J" \
-  -d '{"items":[{"name":"my-note","owner":"alice"}],"target_instance":"other","target_owner":null,"overwrite":false}'
+  -d '{"items":[{"name":"my-note","owner":"alice"}],"target_instance":"other","target_owner":null}'
 # 翻訳（英語へ。保存はしない。応答は description/content/language/llm_instance）
 $C -X POST $BASE/api/instances/default/memories/translate -H "$H" -H "$J" -H "X-Locohane-Lang: en" \
   -d '{"description":"一行の説明","content":"本文"}'

@@ -322,7 +322,7 @@
     <div class="error" id="memories-error"></div>
     <form id="copy-memories-form" class="memory-form hidden">
       <h3>メモリーを別のインスタンスへコピー</h3>
-      <p class="hint">選んだメモリーを、コピー先インスタンスの永続メモリーとして複製します。公開範囲はコピー先の [memory] の規則で決め直されます。コピー先のインスタンスは再起動しなくても、次の会話から使えます。</p>
+      <p class="hint">選んだメモリーを、コピー先インスタンスの永続メモリーとして複製します。ユーザーのメモリーの公開範囲はコピー先の [memory] の規則で決め直されます。個人用のメモリーは同じ所有者へしかコピーできません。コピー先に同じ名前のメモリーがあるものは飛ばします（置き換えたいときは、先にコピー先のメモリーを削除してください）。コピー先のインスタンスは再起動しなくても、次の会話から使えます。</p>
       <div class="hint" id="copy-memories-list"></div>
       <label>コピー先インスタンス<select name="target_instance"></select></label>
       <label>コピー先の所有者
@@ -333,7 +333,6 @@
         </select>
       </label>
       <label class="hidden" id="copy-memories-owner-label">ユーザー名（所有者）<input type="text" name="owner" list="memory-owner-list" /></label>
-      <label><input type="checkbox" name="overwrite" /> コピー先に同じ名前のメモリーがあるときは置き換える（置き換え前の内容はバックアップに残ります。チェックなしなら飛ばします）</label>
       <div class="error" id="copy-memories-error"></div>
       <div class="modal-actions">
         <button type="button" id="copy-memories-cancel-btn" class="btn-cancel">閉じる</button>

@@ -180,11 +180,34 @@ def transcript_excerpt(result: dict, max_chars: int) -> str:
             lines.append(f"[tool result {entry.get('tool_name', '')}] {entry.get('content', '')[:700]}")
     if result.get("error"):
         lines.append(f"[evaluation error] {result.get('error')}: {result.get('detail', '')}")
+    # 作業フォルダに作られた・変わったファイル（evals/run_case.py の output_files）。ファイルを作るスキルは
+    # 最終回答に「作成しました」としか書かないことが多く、これが無いと AI judge は「記録で確認できない」として
+    # 正しく作られていても不合格にしていた。末尾に置き、長い記録を切り詰めても残す。
+    outputs = _output_files_lines(result.get("output_files") or [])
     text = "\n".join(lines)
-    if len(text) <= max_chars:
-        return text
-    head = max_chars // 3
-    return f"{text[:head]}\n… (snip) …\n{text[-(max_chars - head):]}"
+    tail = "\n".join(outputs)
+    budget = max_chars - (len(tail) + 1 if tail else 0)
+    if len(text) > budget:
+        head = max(budget, 0) // 3
+        text = f"{text[:head]}\n… (snip) …\n{text[-(max(budget, 0) - head):]}" if budget > 0 else ""
+    return f"{text}\n{tail}" if tail else text
+
+
+def _output_files_lines(outputs: list) -> list[str]:
+    """生成物の一覧を、AI に渡す抜粋の行にする（Excel は見た目の要約も短く添える）。"""
+    lines = []
+    for entry in outputs[:30]:
+        if not isinstance(entry, dict):
+            continue
+        line = f"[output file] {entry.get('path')} ({entry.get('size')} bytes)"
+        if entry.get("xlsx"):
+            line += f" sheets: {json.dumps(entry['xlsx'], ensure_ascii=False, default=str)[:400]}"
+        if entry.get("xlsx_error"):
+            line += f" (could not read: {entry['xlsx_error']})"
+        lines.append(line)
+    if len(outputs) > 30:
+        lines.append(f"[output file] … and {len(outputs) - 30} more")
+    return lines
 
 
 def token_usage(results: list[dict]) -> tuple[dict, int]:
