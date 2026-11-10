@@ -756,6 +756,10 @@ function openEditInstanceModal(inst) {
   const isLab = inst.kind === "skill_lab";
   $$(".app-only", modal).forEach((node) => node.classList.toggle("hidden", isLab));
   form.elements.app_port.required = !isLab;
+  // 隠した項目の入力検証（ポートの min/max 等）で送信が黙って止まらないよう、無効にして検証と送信から外す。
+  if (isLab) {
+    for (const field of ["app_host", "app_port", "headless", "watch"]) form.elements[field].disabled = true;
+  }
 
   modal.querySelector(".btn-cancel").addEventListener("click", () => modal.remove());
   form.addEventListener("submit", async (ev) => {
@@ -770,7 +774,7 @@ function openEditInstanceModal(inst) {
       watch: isLab ? null : data.get("watch") === "on",
     };
     try {
-      const portOrHostChanged = !isLab && body.app_host !== inst.app_host || body.app_port !== inst.app_port;
+      const portOrHostChanged = !isLab && (body.app_host !== inst.app_host || body.app_port !== inst.app_port);
       await api(`/api/instances/${encodeURIComponent(inst.name)}`, { method: "PUT", body });
       modal.remove();
       await refreshInstanceCards();

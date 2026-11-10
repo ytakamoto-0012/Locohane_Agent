@@ -240,20 +240,20 @@ MESSAGES: dict[str, dict[str, str]] = {
     "ask.none_selected": {"ja": "(選択なし)", "en": "(nothing selected)"},
     # --- 大量のファイルを読む前の確認（src/tools/_read_volume_guard.py） ---
     "read_volume.question": {
-        "ja": "作業ディレクトリに、読み取りの対象になるファイルが {total} 件あります（{breakdown}、{folders} フォルダ）。"
+        "ja": "読み取りの対象になるファイルが {total} 件あります（{breakdown}、{folders} フォルダ）。"
         "全部読むとかなり時間がかかります。どうしますか？"
-        "（しばらく応答がない場合は全部読んで続けます）",
-        "en": "The working directory has {total} files to read ({breakdown}, in {folders} folders). "
+        "（しばらく応答がない場合は、代表だけを読んで続けます）",
+        "en": "There are {total} files to read ({breakdown}, in {folders} folders). "
         "Reading all of them takes a long time. How should I proceed? "
-        "(If there is no answer for a while, I will read all of them.)",
+        "(If there is no answer for a while, I will read only representative files and continue.)",
     },
     "read_volume.breakdown_images": {"ja": "画像 {n}", "en": "{n} images"},
     "read_volume.breakdown_documents": {"ja": "文書 {n}", "en": "{n} documents"},
     "read_volume.breakdown_text": {"ja": "テキスト {n}", "en": "{n} text files"},
     "read_volume.choice_all": {"ja": "全部読む（時間がかかります）", "en": "Read all (takes a long time)"},
     "read_volume.choice_sample": {
-        "ja": "フォルダごとに代表 {per_folder} 件だけ読む（全部より早く終わります）",
-        "en": "Read only {per_folder} representative files per folder (finishes sooner)",
+        "ja": "フォルダごとに代表 {per_folder} 件だけ読む（ラフ読み・全部より早く終わります）",
+        "en": "Read only {per_folder} representative files per folder (rough read; finishes sooner)",
     },
     "read_volume.choice_stop": {"ja": "読まずに中止する", "en": "Stop without reading"},
     # --- サブエージェントの進捗（src/tools/_dispatch_agent_job.py・dispatch_agent_batch.py） ---

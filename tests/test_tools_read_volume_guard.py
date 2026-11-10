@@ -76,7 +76,7 @@ def test_count_source_files_skips_session_tmp_and_unknown_types(tmp_path):
 
 def test_question_uses_its_own_timeout_and_shows_no_minutes(monkeypatch, tmp_path):
     _make_tree(tmp_path)
-    _, asked = _setup(monkeypatch, tmp_path, lambda choices: choices[0])
+    _, asked = _setup(monkeypatch, tmp_path, lambda choices: choices[1])
     ai = _ai("explore", "explore")
     assert asyncio.run(guard.guard_read_volume(_input(ai))) is None
     question, choices, timeout_seconds = asked[0]
@@ -89,7 +89,7 @@ def test_question_uses_its_own_timeout_and_shows_no_minutes(monkeypatch, tmp_pat
 
 def test_parallel_read_delegations_ask_once_and_sample_blocks_all_siblings(monkeypatch, tmp_path):
     _make_tree(tmp_path)
-    session, asked = _setup(monkeypatch, tmp_path, lambda choices: choices[1])
+    session, asked = _setup(monkeypatch, tmp_path, lambda choices: choices[0])
     ai = _ai("explore", "explore", "explore")
 
     async def run():
@@ -99,7 +99,7 @@ def test_parallel_read_delegations_ask_once_and_sample_blocks_all_siblings(monke
     assert len(asked) == 1
     question, choices, _ = asked[0]
     assert "60" in question
-    assert "2" in choices[1]  # フォルダごとに代表2件
+    assert "2" in choices[0]  # フォルダごとに代表2件
     for i, result in enumerate(results):
         msg = result["messages"][0]
         assert msg.tool_call_id == f"c{i}" and "representative" in msg.content
@@ -109,15 +109,23 @@ def test_parallel_read_delegations_ask_once_and_sample_blocks_all_siblings(monke
     assert len(asked) == 1
 
 
-def test_read_all_or_timeout_runs_the_delegations(monkeypatch, tmp_path):
+def test_read_all_runs_the_delegations(monkeypatch, tmp_path):
+    _make_tree(tmp_path)
+    _, asked = _setup(monkeypatch, tmp_path, lambda c: c[1])
+    ai = _ai("explore", "worker")
+    assert asyncio.run(guard.guard_read_volume(_input(ai, 0))) is None
+    assert asyncio.run(guard.guard_read_volume(_input(ai, 1))) is None
+    assert len(asked) == 1
+
+
+def test_sample_is_the_default_and_the_timeout_answer(monkeypatch, tmp_path):
     from src.tools._ask_echo import ASK_TIMEOUT_MESSAGE
 
     _make_tree(tmp_path)
     for answer in (lambda c: c[0], lambda c: ASK_TIMEOUT_MESSAGE):
         _, asked = _setup(monkeypatch, tmp_path, answer)
         ai = _ai("explore", "worker")
-        assert asyncio.run(guard.guard_read_volume(_input(ai, 0))) is None
-        assert asyncio.run(guard.guard_read_volume(_input(ai, 1))) is None
+        assert "representative files per folder" in asyncio.run(guard.guard_read_volume(_input(ai, 0)))["messages"][0].content
         assert len(asked) == 1
 
 
@@ -173,7 +181,7 @@ def test_survey_explore_asks_right_after_it_returns_and_appends_the_answer(monke
     from langchain_core.messages import ToolMessage
 
     _make_tree(tmp_path / "Datas")
-    session, asked = _setup(monkeypatch, tmp_path, lambda c: c[1])
+    session, asked = _setup(monkeypatch, tmp_path, lambda c: c[0])
     recorder = guard.survey_recorder(_explore_input())
     assert recorder is not None
     recorder(_glob_record("Survey the Datas folder", tmp_path / "Datas"))
@@ -254,7 +262,7 @@ def test_ai_message_without_id_still_blocks_the_siblings_of_its_own_question(mon
 
 def test_delegation_that_cannot_read_much_does_not_scan_the_work_dir(monkeypatch, tmp_path):
     _make_tree(tmp_path)
-    _setup(monkeypatch, tmp_path, lambda c: c[0])
+    _setup(monkeypatch, tmp_path, lambda c: c[1])
     scanned = []
     monkeypatch.setattr(guard, "count_source_files", lambda root, *a, **k: scanned.append(root) or {})
     single = {"name": "dispatch_agent", "args": {"agent_type": "verifier", "task": "check"}, "id": "v1"}
@@ -265,7 +273,7 @@ def test_delegation_that_cannot_read_much_does_not_scan_the_work_dir(monkeypatch
 
 def test_question_marks_a_truncated_count(monkeypatch, tmp_path):
     _make_tree(tmp_path)
-    _, asked = _setup(monkeypatch, tmp_path, lambda c: c[0])
+    _, asked = _setup(monkeypatch, tmp_path, lambda c: c[1])
     real = guard.count_source_files
     monkeypatch.setattr(guard, "count_source_files", lambda root, *a, **k: {**real(root), "truncated": True})
     asyncio.run(guard.guard_read_volume(_input(_ai("explore", "explore"))))

@@ -20,7 +20,7 @@
    - dispatch_agent_batch の対象（files 指定ならその件数、それ以外は作業ディレクトリの件数）が閾値を超える。
    並列の委譲（同じ AIMessage の兄弟）が同時に来ても質問は1回で、「代表だけ」「中止」
    「自由記述」の答えならその AIMessage の委譲はすべて実行せず、答えに沿って委譲し直すよう伝える。
-応答がタイムアウト（[read_volume_guard] ask_timeout_seconds）したら全部読んで続ける。
+応答がタイムアウト（[read_volume_guard] ask_timeout_seconds）したら、既定の「代表だけ読む（ラフ読み）」で続ける。
 """
 
 from __future__ import annotations
@@ -190,7 +190,7 @@ async def _ask(total: int, inventory: dict, per_folder: int, *, truncated: bool 
 
     所要時間の見積もりは出さない（読む中身で大きく変わり、数字はいつも短すぎた）。
     待ち時間は [read_volume_guard] ask_timeout_seconds（全体の ask_user_choice_seconds が
-    無期限でも、この質問は時間切れで「全部読む」に進む）。
+    無期限でも、この質問は時間切れで「代表だけ読む」に進む）。
     """
     import importlib  # noqa: PLC0415
 
@@ -209,12 +209,12 @@ async def _ask(total: int, inventory: dict, per_folder: int, *, truncated: bool 
     )
     answer = await ask_module.ask_choice(
         question,
-        [choice_all, choice_sample, choice_stop],
+        [choice_sample, choice_all, choice_stop],
         timeout_seconds=int(_setting("read_volume_guard_ask_timeout_seconds", 30)),
     )
-    if answer in (choice_all, ASK_TIMEOUT_MESSAGE):
+    if answer == choice_all:
         kind = "all"
-    elif answer == choice_sample:
+    elif answer in (choice_sample, ASK_TIMEOUT_MESSAGE):
         kind = "sample"
     elif answer == choice_stop or answer.startswith("Error:"):
         kind = "stop"

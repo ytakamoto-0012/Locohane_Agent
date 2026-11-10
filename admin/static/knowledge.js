@@ -323,6 +323,9 @@ async function renderKnowledgePanel(container, name) {
   });
 }
 
+// 「失敗したファイル」を開いている結果の目印（描き直しをまたいで開いたままにする）。
+const knowledgeOpenFailed = new Set();
+
 // 取り込み中に一覧（ファイル数の集計を含む重い API）を取り直す間隔（ミリ秒）。間のポーリングはジョブと枠の状態だけを取る。
 const KNOWLEDGE_FULL_REFRESH_MS = 20000;
 
@@ -429,6 +432,13 @@ function knowledgeJobCell(job, maxFileMb, workers) {
     }
     if (r.failed.length) {
       const details = el("details", {}, [el("summary", { text: _t("失敗したファイル") })]);
+      // 進捗の更新で一覧を描き直しても、開いている一覧が閉じないよう、開閉を覚えて戻す。
+      const openKey = `${job.finished_at || ""}|${r.failed[0].path}`;
+      if (knowledgeOpenFailed.has(openKey)) details.open = true;
+      details.addEventListener("toggle", () => {
+        if (details.open) knowledgeOpenFailed.add(openKey);
+        else knowledgeOpenFailed.delete(openKey);
+      });
       for (const f of r.failed) details.append(el("div", { class: "hint", text: `${f.path}: ${f.reason}` }));
       parts.push(details);
     }

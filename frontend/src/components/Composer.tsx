@@ -118,13 +118,16 @@ export function Composer({
   // として扱う。生成中に別の会話へ移って戻ってきた画面（remoteGenerating。生成しているのは
   // 別のセッション）も含める。そちらは loading が false のままなので、含めないと送った直後に
   // 「ターンが終わった」とみなして、まだ伝わっていない指示を入力欄へ戻してしまう。
-  const turnRunning = loading || askUser?.spec.type === 'action' || Boolean(remoteGenerating);
+  // 新規チャットの読み込み中（ユーザーの発言がまだ1件も無いのに loading が true）。ここで入力できたり
+  // 停止ボタンになったりしないよう、入力欄と送信ボタンを止める（停止ボタンにはしない）。
+  const starting = loading && !messages.some((m) => m.type === 'user_message');
+  const turnRunning = (loading && !starting) || askUser?.spec.type === 'action' || Boolean(remoteGenerating);
   // useChatData().disabled は生成中（loading）も true になるが、生成中も追加指示を
   // 入力できるよう、未接続とファイル・要素の応答待ちのときだけ止める。
   // 同じ所有者の別スレッドが処理中の間は送信自体を止める（この会話が他セッションで
   // 処理中の間は、追加指示としてだけ送れる）。
   const askBlocksInput = askUser?.spec.type === 'file' || askUser?.spec.type === 'element';
-  const inputBlocked = !connected || askBlocksInput || Boolean(blockedByOtherThread);
+  const inputBlocked = !connected || starting || askBlocksInput || Boolean(blockedByOtherThread);
   const inputBlockedRef = useRef(inputBlocked);
   inputBlockedRef.current = inputBlocked;
 
@@ -469,7 +472,7 @@ export function Composer({
             ) : null}
             <PlanModeBadge step={plan} />
             {/* 生成中は停止ボタンと並べて出す（承認待ち等で loading=false の間は下の送信ボタンが同じ働きをする） */}
-            {(loading || remoteGenerating) && !isReplying && (value.trim() || attachments.length > 0) ? (
+            {((loading && !starting) || remoteGenerating) && !isReplying && (value.trim() || attachments.length > 0) ? (
               <button
                 type="button"
                 className="composer-submit-button"
@@ -480,7 +483,7 @@ export function Composer({
                 {t('composer.inject')}
               </button>
             ) : null}
-            {loading ? (
+            {loading && !starting ? (
               <button type="button" className="composer-stop-button" onClick={stopTask}>
                 {t('common.stop')}
               </button>
