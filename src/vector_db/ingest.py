@@ -31,6 +31,7 @@ from typing import Callable, Collection, NamedTuple, Sequence
 
 import httpx
 
+from .. import embedding_usage
 from ..config import Config
 from .catalog import Catalog, CatalogError, FileRecord, open_catalog
 from .chunking import split_text
@@ -873,6 +874,8 @@ def ingest_collection(
         keywords = open_keyword_index(cfg.vector_db_dir, name)
         # 埋め込みサーバーへの接続は取り込み全体で使い回す（embeddings.open_client 参照）。
         embedding_client = open_client(cfg, transport=embedding_transport, concurrency=slots.capacity("embed"))
+        # 埋め込みのトークン数（「利用量・料金」の台帳。リクエストごとに書くと多すぎるため、終わったときにまとめて書く）。
+        meter = embedding_usage.EmbeddingMeter()
         try:
             if rebuild:
                 # 保存先を消した後・カタログの記録を消す前に止まると、次の差分取り込みが記録を見て「変わっていない」と
@@ -894,12 +897,15 @@ def ingest_collection(
                 cfg, catalog, store, keywords, journal, name, collection.dim, model, folders, collection.recursive,
                 result, progress, should_stop, embedding_client, slots, instance,
                 exclude_keywords=collection.exclude_keywords, include_keywords=collection.include_keywords,
-                progress_bytes=progress_bytes,
+                progress_bytes=progress_bytes, embedding_meter=meter,
             )
         except StoreStopped:
             # コミットしていない書き込みは _ingest が捨てている（記録されていないファイルは次回の取り込みで処理する）。
             logger.info("vector_db ingest: instance=%s collection=%s stopped while retrying the request to Qdrant", instance or "-", name)
         finally:
+            if cfg.thread_store_enabled:
+                # 取り込みは特定のユーザーの利用ではないため、owner は SYSTEM_OWNER にする。
+                embedding_usage.flush_meter(meter, cfg.thread_store_db, embedding_usage.SOURCE_INGEST, embedding_usage.SYSTEM_OWNER)
             embedding_client.close()
             keywords.close()
             store.close()
@@ -1708,8 +1714,10 @@ class _Pipeline:
     def __init__(
         self, cfg: Config, folders: list[Path], known: dict[str, FileRecord], writer: _WriterThread, embedding_client, should_stop,
         progress, slots: IngestSlots, instance: str = "", progress_bytes: Callable[[int], None] | None = None,
+        embedding_meter: embedding_usage.EmbeddingMeter | None = None,
     ):
         self.cfg, self.folders, self.known, self.writer = cfg, folders, known, writer
+        self.embedding_meter = embedding_meter
         writer.on_written = self._written
         writer.on_block = self._pause_slot_wait
         self.embedding_client, self.should_stop, self.progress = embedding_client, should_stop, progress
@@ -2053,7 +2061,7 @@ class _Pipeline:
         job, index = item = self.image_queue[0]
         page = job.prepared.pages[index]
         detail = f"{job.prepared.path} ({page.locator})"
-        if not self._submit_embed(pool, "image", [item], detail, _embed_page, self.cfg, page, self.embedding_client, self.should_stop):
+        if not self._submit_embed(pool, "image", [item], detail, _embed_page, self.cfg, page, self.embedding_client, self.should_stop, self.embedding_meter):
             return False
         self.image_queue.popleft()
         return True
@@ -2072,6 +2080,7 @@ class _Pipeline:
         return self._submit_embed(
             pool, "text", items, detail,
             embed_texts, self.cfg, texts, kind="document", client=self.embedding_client, should_stop=self.should_stop,
+            meter=self.embedding_meter,
         )
 
     def _embedded(self, future: Future, kind: str, items: list[tuple[_Job, int]]) -> None:
@@ -2181,9 +2190,9 @@ def _jobs_of(items: list[tuple[_Job, int]]) -> list[_Job]:
     return list({id(job): job for job, _ in items}.values())
 
 
-def _embed_page(cfg: Config, page: PageImage, client, should_stop) -> list[list[float]]:
+def _embed_page(cfg: Config, page: PageImage, client, should_stop, meter=None) -> list[list[float]]:
     """ページ画像1枚を埋め込む（書き出した PNG は埋め込むときに読む。_Pipeline 参照）。"""
-    return embed_images(cfg, [page.read_png()], client=client, should_stop=should_stop)
+    return embed_images(cfg, [page.read_png()], client=client, should_stop=should_stop, meter=meter)
 
 
 def _reconcile_journal(catalog: Catalog, store, keywords: KeywordIndex, journal: IngestJournal, name: str) -> None:
@@ -2220,6 +2229,7 @@ def _ingest(
     cfg, catalog: Catalog, store, keywords: KeywordIndex, journal: IngestJournal, name, dim, model, folders, recursive, result, progress,
     should_stop, embedding_client, slots: IngestSlots, instance: str, *, exclude_keywords: Sequence[str] = (),
     include_keywords: Sequence[str] = (), progress_bytes: Callable[[int], None] | None = None,
+    embedding_meter: embedding_usage.EmbeddingMeter | None = None,
 ) -> None:
     """取り込み元のファイルを _Pipeline で処理し、フォルダから消えたファイル（除外・対象キーワードで外れたものも）を消す。
 
@@ -2249,7 +2259,9 @@ def _ingest(
     plain_writer.begin()
     writer = _WriterThread(plain_writer, should_stop)
     try:
-        pipeline = _Pipeline(cfg, folders, known, writer, embedding_client, should_stop, progress, slots, instance, progress_bytes)
+        pipeline = _Pipeline(
+            cfg, folders, known, writer, embedding_client, should_stop, progress, slots, instance, progress_bytes, embedding_meter
+        )
         pipeline.run(files)
         if not pipeline.stopped:
             # 停止したときは、未処理のファイルを「消えた」と誤って削除しないよう消さない。

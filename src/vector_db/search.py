@@ -9,6 +9,7 @@ import httpx
 from ..config import Config
 from . import references
 from .catalog import Collection, catalog_exists, open_catalog
+from ..embedding_usage import EmbeddingMeter
 from .embeddings import embed_texts, embedding_model, shared_client
 from .keyword_index import keyword_index_exists, open_keyword_index
 from .store import Hit, image_collection_name, open_store, path_collection_name
@@ -69,6 +70,7 @@ def search(
     top_k: int | None = None,
     embedding_transport: httpx.BaseTransport | None = None,
     store_transport: httpx.BaseTransport | None = None,
+    meter: EmbeddingMeter | None = None,
 ) -> SearchResult:
     """query に意味の近いチャンクを、関連の高い順に最大 top_k 件返す。
 
@@ -80,6 +82,7 @@ def search(
     尺度が違うため、コレクション・種類ごとに別々に上位を取り（本文は min_score、画像は
     image_min_score 未満を除く）、点数ではなく順位で統合する（_fuse。重みは rrf_weight_*）。
     同じファイル・同じ位置（ページ等）のチャンクは1件にまとめる。
+    meter を渡すと、検索語の埋め込みのトークン数を加算する（src/embedding_usage.py）。
 
     Raises:
         SearchError: query が空、指定したコレクションが無い・まだ取り込まれていない、
@@ -94,7 +97,7 @@ def search(
 
     # 検索のたびに接続し直さないよう、テスト用の transport が無ければプロセス内で共有するクライアントを使う。
     client = shared_client(cfg) if embedding_transport is None else None
-    vector = embed_texts(cfg, [query], kind="query", transport=embedding_transport, client=client)[0]
+    vector = embed_texts(cfg, [query], kind="query", transport=embedding_transport, client=client, meter=meter)[0]
     # 同じページのチャンクを1件にまとめると件数が減るため、各一覧は top_k より多めに取る。
     candidates = limit * _CANDIDATE_FACTOR
     lists: list[tuple[str, float, list[Hit]]] = []
@@ -130,6 +133,7 @@ def search_paths(
     top_k: int | None = None,
     embedding_transport: httpx.BaseTransport | None = None,
     store_transport: httpx.BaseTransport | None = None,
+    meter: EmbeddingMeter | None = None,
 ) -> SearchResult:
     """query に近いファイルパス（取り込み元フォルダからの相対パス）のファイルを、関連の高い順に最大 top_k 件返す。
 
@@ -146,7 +150,7 @@ def search_paths(
     result = SearchResult()
     targets = _targets(cfg, collection, result, paths=True)
     client = shared_client(cfg) if embedding_transport is None else None
-    vector = embed_texts(cfg, [query], kind="query", transport=embedding_transport, client=client)[0]
+    vector = embed_texts(cfg, [query], kind="query", transport=embedding_transport, client=client, meter=meter)[0]
     candidates = limit * _CANDIDATE_FACTOR
     lists: list[tuple[str, float, list[Hit]]] = []
     for location, group in _by_location(targets):

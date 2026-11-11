@@ -4048,6 +4048,7 @@ function drawUsage(box, data) {
     el("div", { class: "stat-row" }, [
       statTile(_t("今月のトークン"), fmtNum(cur ? cur.total : 0), thisMonth),
       statTile(_t("全期間のトークン"), fmtNum(allTotal), _t(`{0}か月分`, usage.months.length)),
+      statTile(_t("今月の埋め込みトークン"), fmtNum(cur ? cur.emb_tokens || 0 : 0), _t("ナレッジの検索・取り込み")),
       statTile(_t("今月の料金（按分）"), curCost && curCost.cost !== null ? fmtUsd(curCost.cost) : "-", curCost && curCost.cost_jpy !== null ? fmtJpy(curCost.cost_jpy) : null),
       statTile(_t("料金の合計（按分）"), costs.total_cost !== null ? fmtUsd(costs.total_cost) : "-", costs.total_cost_jpy !== null ? fmtJpy(costs.total_cost_jpy) : PRICING_MODEL_LABELS[costs.pricing_model]),
     ]),
@@ -4078,8 +4079,31 @@ function rankedSeries(keys, labelOf, otherLabel) {
   return series;
 }
 
+// 特定のユーザーに結び付かない埋め込み（ナレッジの取り込み・管理アシスタントの索引）の owner（src/embedding_usage.py の SYSTEM_OWNER）。
+const EMBEDDING_SYSTEM_OWNER = "_system";
+
+function usageUserLabel(user) {
+  return user === EMBEDDING_SYSTEM_OWNER ? _t("（取り込み・索引）") : user;
+}
+
 function userSeries(users) {
-  return rankedSeries(users, null, (n) => _t(`その他（{0}人）`, n));
+  return rankedSeries(users, usageUserLabel, (n) => _t(`その他（{0}人）`, n));
+}
+
+// 埋め込みの月別トークン数の積み上げグラフを要素1つの配列で返す（埋め込みが1件も無ければ空の配列。append(...) に展開して使う）。
+// series・field は seriesValues と同じ。
+function embeddingChart(title, note, months, series, field) {
+  if (!months.some((m) => m.emb_tokens)) return [];
+  return [
+    stackedBarChart({
+      title,
+      note,
+      categories: months.map((m) => m.month),
+      series: seriesValues(series, months, field, "emb_tokens"),
+      format: fmtNum,
+      axisFormat: fmtCompact,
+    }),
+  ];
 }
 
 // series の各月の値。field は月データの内訳（users / instances。値は {total, ...}）、metric は "total" / "cost"。
@@ -4108,7 +4132,14 @@ function buildUsageCharts(usage, costs) {
       series: seriesValues(userSeries(usage.users), usage.months, "users", "total"),
       format: fmtNum,
       axisFormat: fmtCompact,
-    })
+    }),
+    ...embeddingChart(
+      _t("月別の埋め込みトークン（ユーザー別の積み上げ）"),
+      _t("ナレッジの検索語（ユーザー別）と取り込み（「（取り込み・索引）」）の埋め込みです。生成とは単価が違うため分けています。"),
+      usage.months,
+      userSeries(usage.users),
+      "users"
+    )
   );
   const costMonths = costs.months.filter((m) => m.cost !== null);
   if (costMonths.length) {
@@ -4277,7 +4308,14 @@ function drawUsageOverview(box, data) {
         series: seriesValues(userSeries(userKeys), data.months, "users", "total"),
         format: fmtNum,
         axisFormat: fmtCompact,
-      })
+      }),
+      ...embeddingChart(
+        _t("月別の埋め込みトークン（インスタンス別の積み上げ）"),
+        _t("ナレッジの検索・取り込みと、管理アシスタントの索引の埋め込みです。生成とは単価が違うため分けています。"),
+        data.months,
+        instanceSeries,
+        "instances"
+      )
     );
     const costMonths = data.months.filter((m) => m.cost !== null);
     if (costMonths.length) {
@@ -4304,13 +4342,15 @@ function drawUsageOverview(box, data) {
   }
 
   const monthlyTable = dataTable(
-    [_t("対象月"), _t("合計トークン"), _t("入力"), _t("出力"), _t("LLM呼び出し回数"), _t("利用ユーザー数"), _t("料金（米ドル）"), _t("料金（円）"), _t("100万トークンあたり")],
+    [_t("対象月"), _t("合計トークン"), _t("入力"), _t("出力"), _t("LLM呼び出し回数"), _t("埋め込みトークン"), _t("うち埋め込みの料金"), _t("利用ユーザー数"), _t("料金（米ドル）"), _t("料金（円）"), _t("100万トークンあたり")],
     [...data.months].reverse().map((m) => [
       m.month + (m.backfilled ? _t("（概算を含む）") : ""),
       fmtNum(m.total),
       fmtNum(m.input),
       fmtNum(m.output),
       fmtNum(m.calls),
+      fmtNum(m.emb_tokens || 0),
+      m.emb_cost === null || m.emb_cost === undefined ? (m.emb_tokens && m.emb_in_share ? _t("按分に含む") : "-") : fmtUsd(m.emb_cost),
       String(Object.keys(m.users).length),
       fmtUsd(m.cost),
       fmtJpy(m.cost_jpy),
@@ -4321,6 +4361,7 @@ function drawUsageOverview(box, data) {
 
   const instanceRows = data.instances.map((i) => {
     const total = data.months.reduce((s, m) => s + ((m.instances[i.name] || {}).total || 0), 0);
+    const embTotal = data.months.reduce((s, m) => s + ((m.instances[i.name] || {}).emb_tokens || 0), 0);
     const cost = data.months.reduce((s, m) => { const c = (m.instances[i.name] || {}).cost; return c === null || c === undefined ? s : (s || 0) + c; }, null);
     const jpy = data.months.reduce((s, m) => { const c = (m.instances[i.name] || {}).cost_jpy; return c === null || c === undefined ? s : (s || 0) + c; }, null);
     return [
@@ -4333,6 +4374,7 @@ function drawUsageOverview(box, data) {
           }),
       fmtNum(total),
       fmtPct(allTotal ? total / allTotal : null),
+      fmtNum(embTotal),
       fmtUsd(cost),
       fmtJpy(jpy),
     ];
@@ -4349,12 +4391,12 @@ function drawUsageOverview(box, data) {
     } else {
       list = data.users.map((u) => ({ ...u }));
     }
-    list.sort((a, b) => b.total - a.total || a.user.localeCompare(b.user));
+    list.sort((a, b) => b.total + (b.emb_tokens || 0) - (a.total + (a.emb_tokens || 0)) || a.user.localeCompare(b.user));
     const sum = list.reduce((s, u) => s + u.total, 0);
     userBox.replaceChildren(
       dataTable(
-        [_t("ユーザー"), _t("インスタンス"), _t("合計トークン"), _t("割合"), _t("料金（米ドル）"), _t("料金（円）")],
-        list.map((u) => [u.user, (instancesOfUser[u.user] || []).map((n) => labelOf[n] || n).join(", "), fmtNum(u.total), fmtPct(sum ? u.total / sum : null), fmtUsd(u.cost), fmtJpy(u.cost_jpy)]),
+        [_t("ユーザー"), _t("インスタンス"), _t("合計トークン"), _t("割合"), _t("埋め込みトークン"), _t("料金（米ドル）"), _t("料金（円）")],
+        list.map((u) => [usageUserLabel(u.user), (instancesOfUser[u.user] || []).map((n) => labelOf[n] || n).join(", "), fmtNum(u.total), fmtPct(sum ? u.total / sum : null), fmtNum(u.emb_tokens || 0), fmtUsd(u.cost), fmtJpy(u.cost_jpy)]),
         _t("データがありません。")
       )
     );
@@ -4371,6 +4413,7 @@ function drawUsageOverview(box, data) {
     ]),
     ...data.errors.map((e) => el("div", { class: "error", text: `${labelOf[e.name] || e.name}: ${e.error}` })),
     el("p", { class: "hint", text: _t("全インスタンスの合計です（スキル研究室の評価・AI 修正・判定・下書きはスキル調整ワーカーの行、「AIに相談」は管理アシスタントの行に入ります）。料金は全インスタンス共通の料金設定（このページの下）から計算し、インスタンス別・ユーザー別には使用量の割合で按分しています（トークン課金なら使用量×単価）。") }),
+    el("p", { class: "hint", text: _t("「合計トークン」は生成（チャット）のトークンです。埋め込み（ナレッジの検索・取り込み、管理アシスタントの索引）は単価が大きく違うため「埋め込みトークン」に分け、料金設定の埋め込みの単価・請求額で別に計算します。取り込み・索引はユーザーに結び付かないため「（取り込み・索引）」の行に入ります。") }),
     ...(data.unallocated_cost > 0
       ? [el("p", { class: "hint", text: _t("うち {0} は、トークン使用量が0の月の料金のため、どのインスタンス・ユーザーにも按分していません（未配分）。インスタンス別・ユーザー別の合計は、その分だけ料金の合計より少なくなります。", fmtUsd(data.unallocated_cost)) })]
       : []),
@@ -4378,7 +4421,7 @@ function drawUsageOverview(box, data) {
     el("section", { class: "monitor-section" }, [el("h3", { text: _t("月別の集計") }), monthlyTable]),
     el("section", { class: "monitor-section" }, [
       el("h3", { text: _t("インスタンス別の集計（全期間）") }),
-      dataTable([_t("インスタンス"), _t("合計トークン"), _t("割合"), _t("料金（米ドル）"), _t("料金（円）")], instanceRows, _t("データがありません。")),
+      dataTable([_t("インスタンス"), _t("合計トークン"), _t("割合"), _t("埋め込みトークン"), _t("料金（米ドル）"), _t("料金（円）")], instanceRows, _t("データがありません。")),
       el("p", { class: "hint", text: _t("インスタンス名を押すと、そのインスタンスの「利用量・料金」を開きます。") }),
     ]),
     el("section", { class: "monitor-section" }, [el("h3", { text: _t("ユーザー別の使用量と料金") }), el("div", { class: "filter-row" }, [monthSelect]), userBox]),
@@ -4399,6 +4442,7 @@ function buildMonthlyTable(usage, costs) {
       fmtNum(u.input || 0),
       fmtNum(u.output || 0),
       fmtNum(u.calls || 0),
+      fmtNum(u.emb_tokens || 0),
       String(Object.keys(u.users || {}).length),
       fmtPct(c.share_of_all),
       fmtUsd(c.cost),
@@ -4407,7 +4451,7 @@ function buildMonthlyTable(usage, costs) {
     ];
   });
   return dataTable(
-    [_t("対象月"), _t("合計トークン"), _t("入力"), _t("出力"), _t("LLM呼び出し回数"), _t("利用ユーザー数"), _t("全インスタンスに占める割合"), _t("料金（米ドル）"), _t("料金（円）"), _t("100万トークンあたり")],
+    [_t("対象月"), _t("合計トークン"), _t("入力"), _t("出力"), _t("LLM呼び出し回数"), _t("埋め込みトークン"), _t("利用ユーザー数"), _t("全インスタンスに占める割合"), _t("料金（米ドル）"), _t("料金（円）"), _t("100万トークンあたり")],
     rows,
     _t("データがありません。")
   );
@@ -4430,18 +4474,19 @@ function buildUserBreakdown(usage, costs) {
     const agg = {};
     for (const m of picked) {
       for (const u of m.users) {
-        const a = (agg[u.user] = agg[u.user] || { user: u.user, total: 0, cost: null, cost_jpy: null });
+        const a = (agg[u.user] = agg[u.user] || { user: u.user, total: 0, emb_tokens: 0, cost: null, cost_jpy: null });
         a.total += u.total;
+        a.emb_tokens += u.emb_tokens || 0;
         if (u.cost !== null) a.cost = (a.cost || 0) + u.cost;
         if (u.cost_jpy !== null) a.cost_jpy = (a.cost_jpy || 0) + u.cost_jpy;
       }
     }
     const sum = Object.values(agg).reduce((s, a) => s + a.total, 0);
-    const list = Object.values(agg).sort((a, b) => b.total - a.total || a.user.localeCompare(b.user));
+    const list = Object.values(agg).sort((a, b) => b.total + b.emb_tokens - (a.total + a.emb_tokens) || a.user.localeCompare(b.user));
     tableBox.replaceChildren(
       dataTable(
-        [_t("ユーザー"), _t("合計トークン"), _t("割合"), _t("料金（米ドル）"), _t("料金（円）")],
-        list.map((a) => [a.user, fmtNum(a.total), fmtPct(sum ? a.total / sum : null), fmtUsd(a.cost), fmtJpy(a.cost_jpy)]),
+        [_t("ユーザー"), _t("合計トークン"), _t("割合"), _t("埋め込みトークン"), _t("料金（米ドル）"), _t("料金（円）")],
+        list.map((a) => [usageUserLabel(a.user), fmtNum(a.total), fmtPct(sum ? a.total / sum : null), fmtNum(a.emb_tokens), fmtUsd(a.cost), fmtJpy(a.cost_jpy)]),
         _t("データがありません。")
       )
     );
@@ -4451,6 +4496,7 @@ function buildUserBreakdown(usage, costs) {
   wrap.append(
     el("div", { class: "filter-row" }, [select]),
     el("p", { class: "hint", text: _t("料金はトークン課金ならユーザーごとの入力・出力トークン×単価、それ以外はその月の全インスタンス合計のトークンに占める割合で按分しています（固定費は常に割合で按分）。") }),
+    el("p", { class: "hint", text: _t("合計トークン・割合は生成（チャット）のトークンです。埋め込みの料金は、埋め込みのトークンの割合で別に按分しています。") }),
     tableBox
   );
   return wrap;
@@ -4471,6 +4517,9 @@ function buildCostForm(s, usageMonths, onSaved) {
   const inPrice = numInput(s.input_per_million, { placeholder: _t("例: 3") });
   const outPrice = numInput(s.output_per_million, { placeholder: _t("例: 15") });
   const fixed = numInput(s.fixed_monthly, { placeholder: _t("例: 20") });
+  const embPrice = numInput(s.embedding_per_million, { placeholder: _t("例: 0.02") });
+  const embInShare = el("input", { type: "checkbox" });
+  embInShare.checked = !!s.embedding_in_share;
   const note = el("textarea", { rows: 2, class: "cost-note", placeholder: _t("メモ（インスタンスタイプ・リージョン・契約形態など）") });
   note.value = s.note || "";
 
@@ -4481,6 +4530,15 @@ function buildCostForm(s, usageMonths, onSaved) {
     field(_t("出力 100万トークンあたり（米ドル）"), outPrice),
   ]);
   const fixedField = el("div", { class: "cost-group" }, [field(_t("月額固定費（米ドル）"), fixed, _t("EBS・データ転送・ロードバランサー等。各月に加算します"))]);
+  const embHint = el("span", { class: "hint" });
+  const embFields = el("div", { class: "cost-group" }, [
+    el("label", { class: "cost-field" }, [el("span", { class: "cost-label", text: _t("埋め込み 100万トークンあたり（米ドル）") }), embPrice, embHint]),
+    el("label", { class: "cost-field" }, [
+      embInShare,
+      el("span", { text: _t("埋め込みの料金が決まらない月は、埋め込みのトークンも按分の割合に含める") }),
+      el("span", { class: "hint", text: _t("埋め込みの単価も「うち埋め込み」も入れていない月だけ。オフにすると、埋め込みのトークンは按分に使いません（同じ GPU で生成と埋め込みを動かす場合など）。") }),
+    ]),
+  ]);
 
   // 月ごとの入力欄（請求額 or 稼働時間）。使用量のある月・入力済みの月・今月を並べ、月を追加できる。
   const monthKeys = new Set([...usageMonths, ...Object.keys(s.months || {}), currentMonthKey()]);
@@ -4492,14 +4550,25 @@ function buildCostForm(s, usageMonths, onSaved) {
     const entry = (s.months || {})[month] || {};
     const bill = numInput(entry.bill, { "aria-label": _t(`{0} の請求額`, month) });
     const hours = numInput(entry.hours, { max: String(hoursInMonth(month)),"aria-label": _t(`{0} の稼働時間`, month), placeholder: _t(`{0}（全時間）`, hoursInMonth(month)) });
-    monthInputs[month] = { bill, hours };
-    const tr = el("tr", { "data-month": month }, [el("td", { text: month }), el("td", { class: "col-bill" }, bill), el("td", { class: "col-hours" }, hours)]);
+    const embBill = numInput(entry.emb_bill, { "aria-label": _t(`{0} の請求額のうち埋め込みの分`, month) });
+    monthInputs[month] = { bill, hours, embBill };
+    const tr = el("tr", { "data-month": month }, [
+      el("td", { text: month }),
+      el("td", { class: "col-bill" }, bill),
+      el("td", { class: "col-bill" }, embBill),
+      el("td", { class: "col-hours" }, hours),
+    ]);
     const rows = [...monthBody.children];
     const after = rows.find((r) => r.dataset.month < month);
     monthBody.insertBefore(tr, after || null);
   };
   [...monthKeys].sort().reverse().forEach(addMonthRow);
-  monthHead.append(el("th", { text: _t("対象月") }), el("th", { class: "col-bill", text: _t("請求額（米ドル）") }), el("th", { class: "col-hours", text: _t("稼働時間") }));
+  monthHead.append(
+    el("th", { text: _t("対象月") }),
+    el("th", { class: "col-bill", text: _t("請求額（米ドル）") }),
+    el("th", { class: "col-bill", text: _t("うち埋め込み（米ドル）") }),
+    el("th", { class: "col-hours", text: _t("稼働時間") })
+  );
   const monthTable = el("table", { class: "data-table cost-month-table" }, [el("thead", {}, monthHead), monthBody]);
   const newMonth = el("input", { type: "month", class: "inline-select" });
   const addBtn = el("button", {
@@ -4520,6 +4589,11 @@ function buildCostForm(s, usageMonths, onSaved) {
     monthTable.querySelectorAll(".col-bill").forEach((n) => n.classList.toggle("hidden", m !== "monthly_bill"));
     monthTable.querySelectorAll(".col-hours").forEach((n) => n.classList.toggle("hidden", m !== "hourly"));
     monthSection.classList.toggle("hidden", m === "per_token");
+    embHint.textContent = {
+      monthly_bill: _t("請求額のうち埋め込みの分の見積もりに使います（月ごとの「うち埋め込み」を入れた月はそちらを優先）。Bedrock の Titan Text Embeddings V2 なら 0.02 前後。"),
+      hourly: _t("Amazon Bedrock 等の埋め込みを別に使う場合に入れると、時間課金に足します。生成と同じサーバーで埋め込みを動かすなら空欄にします。"),
+      per_token: _t("Amazon Bedrock の埋め込みモデルの単価（入力のみ）。Titan Text Embeddings V2 なら 0.02 前後、Cohere Embed なら 0.1 前後。"),
+    }[m];
     modeHint.textContent = {
       monthly_bill: _t("AWS の請求書や Cost Explorer に出ている月ごとの実績額を入れます。EC2・EBS・データ転送などすべて込みの金額をそのまま使い、インスタンス別・ユーザー別にはトークンの割合で按分します。"),
       hourly: _t("EC2 の GPU インスタンス等で推論サーバーを動かす場合。料金はインスタンスが起動している時間に比例し、使ったトークン数には比例しません。稼働時間を空欄にするとその月の全時間（常時起動）として計算します。"),
@@ -4543,6 +4617,7 @@ function buildCostForm(s, usageMonths, onSaved) {
         const entry = {};
         if (inp.bill.value !== "") entry.bill = inp.bill.value;
         if (inp.hours.value !== "") entry.hours = inp.hours.value;
+        if (inp.embBill.value !== "") entry.emb_bill = inp.embBill.value;
         if (Object.keys(entry).length) months[month] = entry;
       }
       const body = {
@@ -4552,6 +4627,8 @@ function buildCostForm(s, usageMonths, onSaved) {
         input_per_million: inPrice.value,
         output_per_million: outPrice.value,
         fixed_monthly: fixed.value,
+        embedding_per_million: embPrice.value,
+        embedding_in_share: embInShare.checked,
         months,
         note: note.value,
       };
@@ -4572,6 +4649,7 @@ function buildCostForm(s, usageMonths, onSaved) {
     hourlyFields,
     tokenFields,
     fixedField,
+    embFields,
     monthSection,
     field(_t("為替レート（1米ドルあたりの円）"), exchangeRate, _t("入れると円換算も表示します")),
     field(_t("メモ"), note),

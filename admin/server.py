@@ -38,6 +38,7 @@ from src.config import (
     resolve_instances_root,
     resolve_ssl_files,
 )
+from src import embedding_usage
 from src.version import __version__
 
 from . import api_docs, assistant, assistant_index, audit, auth, env_files, env_overrides, monitor, overrides, settings_files, supervisor
@@ -1708,6 +1709,13 @@ _assistant_index = {
 }
 
 
+def _record_assistant_embedding(tokens: int, calls: int) -> None:
+    """管理アシスタントの索引・検索語の埋め込みを、管理ツール側の台帳の管理アシスタントの行へ記録する。"""
+    embedding_usage.record_safely(
+        ai_usage.db_path(INSTANCES_ROOT), ai_usage.ASSISTANT_SOURCE, embedding_usage.SYSTEM_OWNER, tokens, calls
+    )
+
+
 def _assistant_embedding(target: str, llm_instance: str):
     """検索に使う埋め込み（[admin] assistant_use_embedding・assistant_embedding_instance）。無ければ None。"""
     if not _cfg.admin_assistant_use_embedding:
@@ -1721,7 +1729,7 @@ def _assistant_embedding(target: str, llm_instance: str):
         except monitor.MonitorError as exc:
             logger.warning("Admin assistant: cannot read the settings of instance %r, excluding it from embedding endpoint candidates: %s", name, exc)
             continue
-        provider = assistant_index.provider_from_config(cfg, name)
+        provider = assistant_index.provider_from_config(cfg, name, on_usage=_record_assistant_embedding)
         if provider is not None:
             return provider
     return None

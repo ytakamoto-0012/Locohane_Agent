@@ -60,7 +60,7 @@ def test_monthly_usage_falls_back_to_thread_totals(tmp_path) -> None:
     usage = usage_cost.monthly_usage(db)
     assert usage["source"] == "threads_estimate"
     assert usage["months"][0]["month"] == "2026-10"
-    assert usage["months"][0]["users"]["alice"] == {"input": 7, "output": 3, "total": 10, "calls": 0}
+    assert usage["months"][0]["users"]["alice"] == {"input": 7, "output": 3, "total": 10, "calls": 0, "emb_tokens": 0, "emb_calls": 0}
 
 
 def _usage_from_rows(rows: list[tuple]) -> dict:
@@ -172,10 +172,129 @@ def test_instance_costs_are_its_share_of_the_shared_cost() -> None:
     assert costs["total_cost"] == pytest.approx(300)
 
 
+def test_monthly_usage_reads_embedding_ledger(tmp_path) -> None:
+    """検索（ユーザー別）・取り込み（SYSTEM_OWNER）の埋め込みは、生成とは別の emb_tokens に入る。"""
+    from src import embedding_usage
+
+    db = tmp_path / "chat_threads.sqlite"
+    _make_db(db)
+    when = datetime(2026, 10, 15, 12)
+    embedding_usage.record(db, embedding_usage.SOURCE_SEARCH, "bob", 1_000, 2, when=when)
+    embedding_usage.record(db, embedding_usage.SOURCE_SEARCH, "bob", 500, 1, when=when)
+    embedding_usage.record(db, embedding_usage.SOURCE_INGEST, None, 9_000_000, 300, when=when)
+    embedding_usage.record(db, embedding_usage.SOURCE_INGEST, None, 0, 0, when=when)  # 0 は記録しない
+    embedding_usage.record(db, embedding_usage.SOURCE_INGEST, None, 2_000, 1, when=datetime(2026, 11, 1, 9))
+
+    usage = usage_cost.monthly_usage(db)
+    by_month = {m["month"]: m for m in usage["months"]}
+    oct_ = by_month["2026-10"]
+    assert oct_["total"] == 3_000_000  # 生成の合計は変わらない
+    assert oct_["emb_tokens"] == 9_001_500 and oct_["emb_calls"] == 303
+    assert oct_["users"]["bob"]["emb_tokens"] == 1_500 and oct_["users"]["bob"]["total"] == 1_000_000
+    assert oct_["users"][embedding_usage.SYSTEM_OWNER] == {
+        "input": 0, "output": 0, "total": 0, "calls": 0, "emb_tokens": 9_000_000, "emb_calls": 300,
+    }
+    # 埋め込みだけの月も出る
+    assert by_month["2026-11"]["total"] == 0 and by_month["2026-11"]["emb_tokens"] == 2_000
+    # 並びは生成＋埋め込みのトークンが多い順
+    assert usage["users"][0] == embedding_usage.SYSTEM_OWNER
+
+
+def _with_embeddings(items: list[dict], rows: list[tuple]) -> list[dict]:
+    """rows: (インスタンス名, month, owner, 埋め込みトークン) を items の使用量へ足したコピー。"""
+    items = json.loads(json.dumps(items))
+    by_name = {it["name"]: it for it in items}
+    for name, month, owner, tokens in rows:
+        months = by_name[name]["usage"]["months"]
+        m = next((x for x in months if x["month"] == month), None)
+        if m is None:
+            m = {"month": month, "input": 0, "output": 0, "total": 0, "calls": 0, "backfilled": False, "users": {}}
+            months.append(m)
+        m["emb_tokens"] = m.get("emb_tokens", 0) + tokens
+        u = m["users"].setdefault(owner, {"input": 0, "output": 0, "total": 0, "calls": 0})
+        u["emb_tokens"] = u.get("emb_tokens", 0) + tokens
+    return items
+
+
+# 10月: inst_a の取り込み（_system）が 8M、inst_b の bob の検索が 2M（生成は ITEMS のまま 4M）
+EMB_ITEMS = _with_embeddings(ITEMS, [("inst_a", "2026-10", "_system", 8_000_000), ("inst_b", "2026-10", "bob", 2_000_000)])
+
+
+def test_embeddings_do_not_change_the_split_without_embedding_pricing() -> None:
+    """埋め込みの金額が決まらない月は、既定では埋め込みのトークンを按分の割合に含めない。"""
+    settings = _settings(months={"2026-10": {"bill": 400}})
+    oct_ = {m["month"]: m for m in usage_cost.overview(EMB_ITEMS, settings)["months"]}["2026-10"]
+    assert oct_["emb_tokens"] == 10_000_000 and oct_["emb_cost"] is None
+    assert oct_["instances"]["inst_a"]["cost"] == pytest.approx(100)
+    assert oct_["instances"]["inst_b"]["cost"] == pytest.approx(300)
+    assert oct_["users"]["_system"]["cost"] == pytest.approx(0)
+
+
+def test_embedding_in_share_weights_embedding_tokens_like_generation() -> None:
+    settings = _settings(months={"2026-10": {"bill": 140}}, embedding_in_share=True)
+    oct_ = {m["month"]: m for m in usage_cost.overview(EMB_ITEMS, settings)["months"]}["2026-10"]
+    # 生成 4M + 埋め込み 10M = 14M → 10/M
+    assert oct_["instances"]["inst_a"]["cost"] == pytest.approx(90)  # 生成 1M + 埋め込み 8M
+    assert oct_["users"]["_system"]["cost"] == pytest.approx(80)
+    assert oct_["users"]["bob"]["cost"] == pytest.approx(40)  # 生成 2M + 埋め込み 2M
+
+
+def test_monthly_bill_carves_out_the_embedding_part() -> None:
+    """請求額のうち埋め込みの分（emb_bill）は埋め込みのトークンで、残りは生成のトークンで按分する。"""
+    settings = _settings(months={"2026-10": {"bill": 400, "emb_bill": 20}}, embedding_per_million=1000)
+    view = usage_cost.overview(EMB_ITEMS, settings)
+    oct_ = {m["month"]: m for m in view["months"]}["2026-10"]
+    assert oct_["cost"] == pytest.approx(400) and oct_["emb_cost"] == pytest.approx(20)  # emb_bill が単価より優先
+    # 生成分 380 を 4M で、埋め込み分 20 を 10M で
+    assert oct_["instances"]["inst_a"]["cost"] == pytest.approx(95 + 16)
+    assert oct_["instances"]["inst_b"]["cost"] == pytest.approx(285 + 4)
+    assert oct_["users"]["_system"]["cost"] == pytest.approx(16)
+    assert oct_["unallocated"] == pytest.approx(0)
+    assert sum(u["cost"] for u in oct_["users"].values()) == pytest.approx(400)
+
+
+def test_monthly_bill_estimates_the_embedding_part_from_the_unit_price() -> None:
+    settings = _settings(months={"2026-10": {"bill": 400}}, embedding_per_million=0.02)
+    oct_ = {m["month"]: m for m in usage_cost.overview(EMB_ITEMS, settings)["months"]}["2026-10"]
+    assert oct_["emb_cost"] == pytest.approx(0.2)
+    assert oct_["users"]["bob"]["cost"] == pytest.approx(399.8 * 0.5 + 0.04)
+    # 見積もりが請求額を超えるときは請求額まで
+    capped = usage_cost.month_costs(usage_cost.combine_usage(EMB_ITEMS)["months"], _settings(months={"2026-10": {"bill": 1}}, embedding_per_million=1))
+    assert capped["2026-10"]["emb_cost"] == pytest.approx(1)
+
+
+def test_per_token_adds_embedding_tokens_at_the_embedding_price() -> None:
+    settings = _settings(pricing_model="per_token", input_per_million=3, output_per_million=15, embedding_per_million=0.02)
+    oct_ = {m["month"]: m for m in usage_cost.overview(EMB_ITEMS, settings)["months"]}["2026-10"]
+    assert oct_["cost"] == pytest.approx(10.8 + 6 + 0.2)
+    assert oct_["instances"]["inst_a"]["cost"] == pytest.approx(0.6 * 3 + 0.4 * 15 + 0.16)
+    assert oct_["users"]["bob"]["cost"] == pytest.approx(2 * 3 + 0.04)
+    assert sum(u["cost"] for u in oct_["users"].values()) == pytest.approx(oct_["cost"])
+
+
+def test_hourly_adds_embedding_cost_on_top() -> None:
+    settings = _settings(pricing_model="hourly", hourly_rate=1.0, embedding_per_million=0.1)
+    oct_ = {m["month"]: m for m in usage_cost.overview(EMB_ITEMS, settings)["months"]}["2026-10"]
+    assert oct_["cost"] == pytest.approx(31 * 24 + 1.0)
+    assert oct_["users"]["_system"]["cost"] == pytest.approx(0.8)
+    assert sum(u["cost"] for u in oct_["users"].values()) == pytest.approx(oct_["cost"])
+
+
+def test_instance_costs_include_embeddings() -> None:
+    settings = _settings(months={"2026-10": {"bill": 400, "emb_bill": 20}})
+    costs = usage_cost.instance_costs(EMB_ITEMS[0]["usage"], EMB_ITEMS, settings)
+    oct_ = costs["months"][0]
+    assert oct_["emb_tokens"] == 8_000_000 and oct_["cost"] == pytest.approx(111)
+    users = {u["user"]: u for u in oct_["users"]}
+    assert users["_system"]["cost"] == pytest.approx(16) and users["_system"]["share"] == pytest.approx(8 / 9)
+
+
 @pytest.mark.parametrize(
     "data",
     [
         {"pricing_model": "free"},
+        {"embedding_per_million": "-1"},
+        {"months": {"2026-10": {"bill": 10, "emb_bill": 11}}},
         {"hourly_rate": "-1"},
         {"hourly_rate": "abc"},
         {"months": {"2026-13": {"bill": 1}}},
@@ -290,6 +409,33 @@ def test_admin_ai_usage_is_counted_as_lab_and_assistant_rows(tmp_path, monkeypat
     lab_oct = {m["month"]: m for m in lab["costs"]["months"]}["2026-10"]
     assert lab["usage"]["months"][0]["calls"] == 3
     assert lab_oct["share_of_all"] == pytest.approx(1 / 7) and lab_oct["cost"] == pytest.approx(10)
+
+
+def test_embedding_usage_of_instances_and_the_admin_assistant_is_shown(tmp_path, monkeypatch) -> None:
+    """インスタンスのスレッドDBの埋め込み（検索・取り込み）と、管理アシスタントの索引の埋め込みも集計に入る。"""
+    from fastapi.testclient import TestClient
+
+    from admin import ai_usage
+    from src import embedding_usage
+
+    root, server = _api_setup(tmp_path, monkeypatch)
+    when = datetime(2026, 10, 15, 12, 0)
+    embedding_usage.record(tmp_path / "a.sqlite", embedding_usage.SOURCE_INGEST, None, 4_000_000, 10, when=when)
+    embedding_usage.record(ai_usage.db_path(root), ai_usage.ASSISTANT_SOURCE, None, 1_000_000, 3, when=when)
+
+    client = TestClient(server.app)
+    body = {"months": {"2026-10": {"bill": 35, "emb_bill": 5}}}
+    data = client.put("/api/usage/cost-settings", json=body).json()
+    assert data["settings"]["months"]["2026-10"] == {"bill": 35.0, "emb_bill": 5.0}
+    oct_ = {m["month"]: m for m in data["months"]}["2026-10"]
+    assert oct_["emb_tokens"] == 5_000_000 and oct_["emb_calls"] == 13
+    assert oct_["instances"]["inst_a"]["cost"] == pytest.approx(30 + 4)
+    assert oct_["instances"][ai_usage.ASSISTANT_SOURCE]["cost"] == pytest.approx(1)
+    assert oct_["users"][embedding_usage.SYSTEM_OWNER]["emb_tokens"] == 5_000_000
+
+    detail = client.get("/api/instances/inst_a/usage").json()
+    assert detail["usage"]["months"][1]["emb_tokens"] == 4_000_000
+    assert {m["month"]: m for m in detail["costs"]["months"]}["2026-10"]["cost"] == pytest.approx(34)
 
 
 def test_rows_without_an_instance_are_virtual_and_do_not_clash_with_an_instance_name(tmp_path, monkeypatch) -> None:

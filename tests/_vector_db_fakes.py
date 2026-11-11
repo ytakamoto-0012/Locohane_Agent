@@ -67,7 +67,11 @@ class FakeEmbeddingServer:
                 data.append({"index": i, "embedding": base64.b64encode(struct.pack(f"<{len(vec)}f", *vec)).decode("ascii")})
                 continue
             data.append({"index": i, "embedding": [vec, vec] if self.two_dimensional else vec})
-        return httpx.Response(200, json={"data": data, "model": body["model"]})
+        # usage は llama-server・vLLM と同じ形（入力の文字数をトークン数とみなす）。
+        tokens = sum(len(_input_text(item)) for item in body["input"])
+        return httpx.Response(
+            200, json={"data": data, "model": body["model"], "usage": {"prompt_tokens": tokens, "total_tokens": tokens}}
+        )
 
     @property
     def transport(self) -> httpx.MockTransport:
@@ -209,6 +213,8 @@ def make_config(tmp_path: Path, **changes):
         "vector_db_chunk_overlap": 20,
         "vector_db_qdrant_url": "http://qdrant:6333",
         "vector_db_qdrant_collection_prefix": "locohane_test_",
+        # 埋め込みの使用量の台帳（src/embedding_usage.py）の書き込み先。本物のスレッドDBへ書かないよう tmp_path に置く。
+        "thread_store_db": tmp_path / "chat_threads.sqlite",
     }
     defaults.update(changes)
     return dataclasses.replace(cfg, **defaults)

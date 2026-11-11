@@ -575,7 +575,10 @@ $C "$BASE/api/instances/default/monitor/endpoints"
 # months[].instances / months[].users に按分した内訳、errors に読めなかったインスタンス
 $C "$BASE/api/usage/overview"
 # 全インスタンス共通の料金設定の保存（pricing_model は monthly_bill / hourly / per_token。数値は空欄=未入力。
-# months は "YYYY-MM" -> {"bill": 請求額, "hours": 稼働時間}。応答は GET /api/usage/overview と同じ形）
+# months は "YYYY-MM" -> {"bill": 請求額, "hours": 稼働時間, "emb_bill": 請求額のうち埋め込みの分}。
+# embedding_per_million は埋め込みの100万トークン単価、embedding_in_share は埋め込みの金額が決まらない月に
+# 埋め込みのトークンも按分の割合に含めるか（true/false）。応答は GET /api/usage/overview と同じ形。
+# 使用量の emb_tokens・emb_calls は埋め込み（ナレッジの検索・取り込み等）、total 等は生成のトークン）
 $C -X PUT $BASE/api/usage/cost-settings -H "$H" -H "$J" \
   -d '{"pricing_model":"hourly","hourly_rate":1.006,"fixed_monthly":20,"exchange_rate":150,"months":{"2026-10":{"hours":300}}}'
 # 1インスタンスの月別の使用量（usage）と、共通の料金からこのインスタンスへ按分した金額（costs）

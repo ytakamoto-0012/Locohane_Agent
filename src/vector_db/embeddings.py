@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from ..config import Config, LLMEndpoint
+from ..embedding_usage import EmbeddingMeter, tokens_of
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,7 @@ def embed_texts(
     client: httpx.Client | None = None,
     should_stop: Callable[[], bool] | None = None,
     wait_when_busy: bool | None = None,
+    meter: EmbeddingMeter | None = None,
 ) -> list[list[float]]:
     """texts の埋め込みベクターを入力と同じ順で返す。
 
@@ -150,6 +152,8 @@ def embed_texts(
         wait_when_busy: 全接続先が埋まっているときに空きを待つか（_choose_order）。省略時は kind="document"
             （取り込み）なら待ち、"query"（検索）なら待たない。止める手段の無い呼び出し（管理アシスタントの索引等）は
             False を渡すこと。
+        meter: 渡すと、成功したリクエストごとに応答の usage のトークン数を加算する（「利用量・料金」の台帳用。
+            src/embedding_usage.py）。
 
     Raises:
         EmbeddingError: どの接続先からも埋め込みを得られなかった場合
@@ -169,7 +173,9 @@ def embed_texts(
         wait_when_busy = kind == "document"
     with _client_scope(cfg, client, transport) as http:
         for start in range(0, len(inputs), batch_size):
-            vectors.extend(_embed_batch(cfg, http, endpoints, inputs[start : start + batch_size], max_retries, should_stop, wait_when_busy))
+            vectors.extend(
+                _embed_batch(cfg, http, endpoints, inputs[start : start + batch_size], max_retries, should_stop, wait_when_busy, meter)
+            )
     return vectors
 
 
@@ -180,6 +186,7 @@ def embed_images(
     transport: httpx.BaseTransport | None = None,
     client: httpx.Client | None = None,
     should_stop: Callable[[], bool] | None = None,
+    meter: EmbeddingMeter | None = None,
 ) -> list[list[float]]:
     """PNG 画像の埋め込みベクターを入力と同じ順で返す（[vector_db].image_input = true の取り込み用）。
 
@@ -187,7 +194,7 @@ def embed_images(
     埋め込みモデル）の形式 {"content": [{"type": "image_url", ...}]} で送る。
     画像はデータが大きく、llama-server では同じリクエスト内の画像入力の結果が
     揺れる不具合も報告されているため、embedding_batch_size によらず1枚ずつ送る。
-    document_prefix はテキスト用のため付けない。transport・client・should_stop は embed_texts と同じ。
+    document_prefix はテキスト用のため付けない。transport・client・should_stop・meter は embed_texts と同じ。
 
     Raises:
         EmbeddingError: どの接続先からも埋め込みを得られなかった場合
@@ -201,7 +208,7 @@ def embed_images(
         for png in pngs:
             url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
             batch = [{"content": [{"type": "image_url", "image_url": {"url": url}}]}]
-            vectors.extend(_embed_batch(cfg, http, endpoints, batch, cfg.vector_db_embedding_max_retries or None, should_stop, True))
+            vectors.extend(_embed_batch(cfg, http, endpoints, batch, cfg.vector_db_embedding_max_retries or None, should_stop, True, meter))
     return vectors
 
 
@@ -434,6 +441,7 @@ def _embed_batch(
     max_retries: int | None,
     should_stop: Callable[[], bool] | None,
     wait_when_busy: bool,
+    meter: EmbeddingMeter | None = None,
 ) -> list[list[float]]:
     """batch を埋め込む。エラーが返れば次の接続先へ切り替え、全接続先でエラーなら時間を置いて試し直す。
 
@@ -473,7 +481,12 @@ def _embed_batch(
                     retryable = True
                     _mark_failed(endpoint)
                 continue
-            return _parse_response(url, response.json(), len(batch))
+            body = response.json()
+            vectors = _parse_response(url, body, len(batch))
+            if meter is not None:
+                # 課金されるのは入力トークン（応答の usage.prompt_tokens）。usage を返さない接続先は回数だけ数える。
+                meter.add(tokens_of(body.get("usage") if isinstance(body, dict) else None))
+            return vectors
         detail = " / ".join(errors)
         if not retryable or (max_retries is not None and retries >= max_retries):
             suffix = f" (retried {retries} times)" if retries else ""

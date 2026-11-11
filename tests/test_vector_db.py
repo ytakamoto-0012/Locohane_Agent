@@ -1194,6 +1194,44 @@ def test_ingest_is_incremental(env):
     assert str(docs / "empty.md") in {h.source_path for h in search.search_paths(cfg, "empty", **kwargs).hits}
 
 
+def test_embed_texts_counts_prompt_tokens_with_meter(tmp_path):
+    from src.embedding_usage import EmbeddingMeter
+
+    cfg = make_config(tmp_path, vector_db_embedding_batch_size=2)
+    server = FakeEmbeddingServer()
+    meter = EmbeddingMeter()
+    texts = ["ab", "cde", "f"]
+    embed_texts(cfg, texts, kind="document", transport=server.transport, meter=meter)
+    prefix = cfg.vector_db_document_prefix
+    assert meter.take() == (sum(len(prefix + t) for t in texts), 2)  # 2件ずつ送るので2リクエスト
+    assert meter.take() == (0, 0)
+
+
+def test_embedding_meter_counts_calls_when_the_server_returns_no_usage(tmp_path):
+    from src.embedding_usage import EmbeddingMeter
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": fake_vector("x")}]})
+
+    meter = EmbeddingMeter()
+    embed_texts(make_config(tmp_path), ["x"], kind="query", transport=httpx.MockTransport(handler), meter=meter)
+    assert meter.take() == (0, 1)
+
+
+def test_ingest_records_embedding_usage_in_the_thread_db(env):
+    import sqlite3
+
+    from src import embedding_usage
+
+    cfg = env["cfg"]
+    ingest.ingest_collection(cfg, "docs", **env["kwargs"])
+    with sqlite3.connect(cfg.thread_store_db) as conn:
+        conn.row_factory = sqlite3.Row
+        [row] = embedding_usage.read_rows(conn)
+    assert (row["source"], row["owner"]) == (embedding_usage.SOURCE_INGEST, embedding_usage.SYSTEM_OWNER)
+    assert row["calls"] == len(env["embed"].requests) and row["tokens"] > 0
+
+
 def test_ingest_reuses_one_embedding_client(env, monkeypatch):
     # ファイルごとに接続し直すと、Windows の localhost では毎回約2秒かかるため、取り込み全体で1つを使い回す。
     cfg, kwargs = env["cfg"], env["kwargs"]

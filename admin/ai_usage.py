@@ -23,6 +23,8 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
+from src import embedding_usage
+
 logger = logging.getLogger(__name__)
 
 DB_FILENAME = "admin_ai_usage.sqlite"
@@ -100,8 +102,61 @@ def record_safely(instances_root: Path, source: str, owner: str | None, usage: d
         logger.warning("Could not record the admin AI token usage (source=%s)", source, exc_info=True)
 
 
+# 月・インスタンス・ユーザーごとの使用量の項目。total 等は生成（チャット）の LLM、emb_* は埋め込み
+# （src/embedding_usage.py。課金は入力トークンだけのため、トークン数とリクエスト数だけ）。
+USAGE_FIELDS = ("input", "output", "total", "calls", "emb_tokens", "emb_calls")
+
+
+def zero_usage() -> dict:
+    return {k: 0 for k in USAGE_FIELDS}
+
+
+def build_monthly_usage(gen_rows: list[dict], emb_rows: list[dict], source: str | None) -> dict:
+    """生成の台帳の行と埋め込みの台帳の行から、admin/usage_cost.py の monthly_usage() の形を作る。
+
+    Args:
+        gen_rows: {"month", "owner", "input", "output", "total", "calls", ("backfilled")} の並び。
+        emb_rows: {"month", "owner", "tokens", "calls"} の並び（src/embedding_usage.read_rows）。
+
+    Returns:
+        {"source", "months": [{"month", **USAGE_FIELDS, "backfilled", "users": {owner: {USAGE_FIELDS}}}, ...]（古い順）,
+         "users": [owner, ...]（全期間の生成＋埋め込みのトークンが多い順）}
+    """
+    months: dict[str, dict] = {}
+    totals: dict[str, int] = {}
+
+    def bucket(month: str, owner: str) -> tuple[dict, dict]:
+        m = months.setdefault(month, {"month": month, **zero_usage(), "backfilled": False, "users": {}})
+        return m, m["users"].setdefault(owner, zero_usage())
+
+    for r in gen_rows:
+        m, u = bucket(r["month"], r["owner"])
+        for k in ("input", "output", "total", "calls"):
+            v = int(r.get(k) or 0)
+            m[k] += v
+            u[k] += v
+        m["backfilled"] = m["backfilled"] or bool(r.get("backfilled"))
+        totals[r["owner"]] = totals.get(r["owner"], 0) + int(r.get("total") or 0)
+    for r in emb_rows:
+        m, u = bucket(r["month"], r["owner"])
+        tokens, calls = int(r.get("tokens") or 0), int(r.get("calls") or 0)
+        m["emb_tokens"] += tokens
+        u["emb_tokens"] += tokens
+        m["emb_calls"] += calls
+        u["emb_calls"] += calls
+        totals[r["owner"]] = totals.get(r["owner"], 0) + tokens
+    return {
+        "source": source,
+        "months": [months[k] for k in sorted(months)],
+        "users": sorted(totals, key=lambda o: (-totals[o], o)),
+    }
+
+
 def monthly_usage_by_source(instances_root: Path) -> dict[str, dict]:
-    """source → admin/usage_cost.py の monthly_usage() と同じ形（source="admin_ledger"）。台帳が無ければ空。"""
+    """source → admin/usage_cost.py の monthly_usage() と同じ形（source="admin_ledger"）。台帳が無ければ空。
+
+    埋め込みの台帳（同じファイルの embedding_usage_monthly。管理アシスタントの索引等）も同じ source に合わせて載せる。
+    """
     path = db_path(instances_root)
     if not path.is_file():
         return {}
@@ -109,21 +164,14 @@ def monthly_usage_by_source(instances_root: Path) -> dict[str, dict]:
         conn.row_factory = sqlite3.Row
         exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ai_usage_monthly'").fetchone()
         rows = conn.execute("SELECT month, source, owner, input, output, total, calls FROM ai_usage_monthly").fetchall() if exists else []
-    result: dict[str, dict] = {}
-    totals: dict[str, dict[str, int]] = {}
+        emb_rows = embedding_usage.read_rows(conn)
+    gen_by_source: dict[str, list[dict]] = {}
+    emb_by_source: dict[str, list[dict]] = {}
     for r in rows:
-        src = result.setdefault(r["source"], {"source": "admin_ledger", "months": {}, "users": []})
-        m = src["months"].setdefault(
-            r["month"], {"month": r["month"], "input": 0, "output": 0, "total": 0, "calls": 0, "backfilled": False, "users": {}}
-        )
-        u = m["users"].setdefault(r["owner"], {"input": 0, "output": 0, "total": 0, "calls": 0})
-        for k in ("input", "output", "total", "calls"):
-            v = int(r[k] or 0)
-            m[k] += v
-            u[k] += v
-        t = totals.setdefault(r["source"], {})
-        t[r["owner"]] = t.get(r["owner"], 0) + int(r["total"] or 0)
-    for name, src in result.items():
-        src["months"] = [src["months"][k] for k in sorted(src["months"])]
-        src["users"] = sorted(totals[name], key=lambda o: (-totals[name][o], o))
-    return result
+        gen_by_source.setdefault(r["source"], []).append(dict(r))
+    for r in emb_rows:
+        emb_by_source.setdefault(r["source"], []).append(r)
+    return {
+        name: build_monthly_usage(gen_by_source.get(name, []), emb_by_source.get(name, []), "admin_ledger")
+        for name in sorted(set(gen_by_source) | set(emb_by_source))
+    }

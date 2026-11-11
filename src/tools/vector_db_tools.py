@@ -5,6 +5,7 @@ from __future__ import annotations
 from langchain_core.tools import tool
 import logging
 
+from .. import chat_log, embedding_usage
 from ..vector_db import search as vector_search
 from ..vector_db.catalog import CatalogError
 from ..vector_db.embeddings import EmbeddingError
@@ -30,6 +31,23 @@ def _unexpected_error(tool_name: str, e: Exception) -> str:
     """
     logger.exception("%s: unexpected error", tool_name)
     return f"Error: an unexpected error occurred while searching internal documents ({type(e).__name__}: {e}). Try again later."
+
+
+def _chat_owner() -> str:
+    """会話のユーザー（生成の台帳 token_usage_monthly と同じ thread_store.resolve_owner の名前）。セッション外は匿名。"""
+    try:
+        from chainlit.context import context as cl_context  # noqa: PLC0415 - evals・テストでは文脈が無い
+
+        user = cl_context.session.user
+    except Exception:  # noqa: BLE001 - ChainlitContextException を含むセッション文脈外
+        user = None
+    return chat_log.resolve_log_username(user.identifier if user else None)
+
+
+def _record_search_usage(cfg, meter: embedding_usage.EmbeddingMeter) -> None:
+    """検索語の埋め込みのトークン数を、スレッドDBの埋め込みの台帳へ記録する（「利用量・料金」用）。"""
+    if cfg.thread_store_enabled:
+        embedding_usage.flush_meter(meter, cfg.thread_store_db, embedding_usage.SOURCE_SEARCH, _chat_owner())
 
 
 def _enabled_config():
@@ -159,12 +177,15 @@ def search_documents(query: str, collection: str = "", top_k: int = 0) -> str:
     cfg = _enabled_config()
     if cfg is None:
         return _DISABLED_MESSAGE
+    meter = embedding_usage.EmbeddingMeter()
     try:
-        result = vector_search.search(cfg, query, collection=collection.strip() or None, top_k=top_k or None)
+        result = vector_search.search(cfg, query, collection=collection.strip() or None, top_k=top_k or None, meter=meter)
     except (vector_search.SearchError, EmbeddingError, StoreError, CatalogError) as e:
         return f"Error: {e}"
     except Exception as e:  # noqa: BLE001 - sqlite3.Error（再構築中の検索等）・応答の JSON の不正等
         return _unexpected_error("search", e)
+    finally:
+        _record_search_usage(cfg, meter)
     logger.info("search_documents: query=%r collection=%r hits=%d", query, collection, len(result.hits))
     notes = [f"({name} is not searched: {reason})" for name, reason in result.skipped]
     if not result.hits:
@@ -227,12 +248,15 @@ def search_document_paths(query: str, collection: str = "", top_k: int = 0) -> s
     cfg = _enabled_config()
     if cfg is None:
         return _DISABLED_MESSAGE
+    meter = embedding_usage.EmbeddingMeter()
     try:
-        result = vector_search.search_paths(cfg, query, collection=collection.strip() or None, top_k=top_k or None)
+        result = vector_search.search_paths(cfg, query, collection=collection.strip() or None, top_k=top_k or None, meter=meter)
     except (vector_search.SearchError, EmbeddingError, StoreError, CatalogError) as e:
         return f"Error: {e}"
     except Exception as e:  # noqa: BLE001 - sqlite3.Error（再構築中の検索等）・応答の JSON の不正等
         return _unexpected_error("search", e)
+    finally:
+        _record_search_usage(cfg, meter)
     logger.info("search_document_paths: query=%r collection=%r hits=%d", query, collection, len(result.hits))
     notes = [f"({name} is not searched: {reason})" for name, reason in result.skipped]
     if not result.hits:

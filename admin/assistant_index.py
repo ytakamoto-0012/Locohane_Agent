@@ -108,15 +108,29 @@ class SearchResult:
     mode: str
 
 
-def provider_from_config(cfg: Config, instance: str) -> EmbeddingProvider | None:
+def provider_from_config(
+    cfg: Config, instance: str, *, on_usage: Callable[[int, int], None] | None = None
+) -> EmbeddingProvider | None:
     """インスタンスの [vector_db] embedding_url から埋め込みの計算方法を作る（未設定なら None）。
 
     [vector_db] enabled が false でも、embedding_url があれば使う（ナレッジを使わないインスタンスでも
     埋め込みサーバーだけ指定しておけば、管理アシスタントの検索に使える）。
+    on_usage を渡すと、埋め込むたびに (トークン数, リクエスト数) を渡して呼ぶ（「利用量・料金」の台帳用）。
     """
     if not cfg.vector_db_embedding_endpoints:
         return None
+    from src.embedding_usage import EmbeddingMeter
     from src.vector_db.embeddings import embed_texts, embedding_model
+
+    def embed(texts: list[str], kind: str) -> list[list[float]]:
+        meter = EmbeddingMeter()
+        try:
+            # 相談の回答を待たせ、止める手段も無いため、埋め込みサーバーが埋まっていても空きを待たずに送る
+            # （段落の埋め込みは kind="document" でも、取り込みと違って待たない）。
+            return embed_texts(cfg, texts, kind=kind, wait_when_busy=False, meter=meter)
+        finally:
+            if on_usage is not None:
+                on_usage(*meter.take())
 
     cache_id = json.dumps(
         {
@@ -129,9 +143,7 @@ def provider_from_config(cfg: Config, instance: str) -> EmbeddingProvider | None
         sort_keys=True,
     )
     return EmbeddingProvider(
-        # 相談の回答を待たせ、止める手段も無いため、埋め込みサーバーが埋まっていても空きを待たずに送る
-        # （段落の埋め込みは kind="document" でも、取り込みと違って待たない）。
-        embed=lambda texts, kind: embed_texts(cfg, texts, kind=kind, wait_when_busy=False),
+        embed=embed,
         cache_id=cache_id,
         label=f"[vector_db] embedding_url of instance {instance}",
     )

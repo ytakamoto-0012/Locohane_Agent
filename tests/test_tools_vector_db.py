@@ -93,6 +93,23 @@ def test_search_documents_returns_sources_with_path_memory_refs(env):
     assert "/ docs /" not in tools.search_document_paths.func(query="weld.md", top_k=1)
 
 
+def test_search_tools_record_query_embedding_usage_per_user(env):
+    """検索語の埋め込みは、会話のユーザー（セッション外は anonymous）の source="search" の行に記録する。"""
+    import sqlite3
+
+    from src import embedding_usage
+
+    cfg = env["cfg"]
+    vector_db_tools.search_documents.invoke({"query": "溶接"})
+    vector_db_tools.search_document_paths.invoke({"query": "weld"})
+    with sqlite3.connect(cfg.thread_store_db) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = {r["source"]: r for r in embedding_usage.read_rows(conn)}
+    search_row = rows[embedding_usage.SOURCE_SEARCH]
+    assert search_row["owner"] == "anonymous" and search_row["calls"] == 2 and search_row["tokens"] > 0
+    assert rows[embedding_usage.SOURCE_INGEST]["owner"] == embedding_usage.SYSTEM_OWNER
+
+
 def test_search_documents_truncates_to_max_result_chars(env, monkeypatch):
     monkeypatch.setattr(tools._state, "_LLM_CONFIG", dataclasses.replace(env["cfg"], vector_db_max_result_chars=150))
     text = tools.search_documents.func(query="会議室の予約")

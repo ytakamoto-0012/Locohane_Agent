@@ -358,6 +358,7 @@ EN: dict[str, str] = {
     '料金形態は {0} のいずれかにしてください。': 'The pricing model must be one of {0}.',
     '月は YYYY-MM の形式で指定してください: {0}': 'Specify the month as YYYY-MM: {0}',
     '{0} の稼働時間が1か月の時間数を超えています。': 'The running hours for {0} exceed the hours in a month.',
+    '{0} の「うち埋め込み」が請求額を超えています。': 'The embedding part for {0} exceeds the bill.',
     '{0} を読めません: {1}': 'Cannot read {0}: {1}',
     'instance.json を読めません。': 'Cannot read instance.json.',
     'インスタンス {0} のコレクション {1} は既に参照 {2} として参照しています。': 'Collection {1} of instance {0} is already referenced as {2}.',

@@ -579,7 +579,7 @@ and WAL cannot be used). Use "Data backup" (in the settings dashboard section) t
 | Path | Content | When it may be deleted | How to delete |
 |------|------|------------------------|----------|
 | `data/checkpoints.sqlite` | LangGraph conversation state (the history of all threads) | When past conversation history is no longer needed | Delete the file (while the app is stopped) |
-| `data/chat_threads.sqlite` | Metadata for the conversation thread list (left sidebar) and resuming (thread names, owners, Chainlit Step history), and the ledger of monthly token usage per user (`token_usage_monthly`, for "Usage & cost" in the settings dashboard). A separate file from `checkpoints.sqlite` (see `[thread_store]`) | When the list/resume feature is no longer needed | Delete the file (while the app is stopped; `checkpoints.sqlite` itself remains, so conversation state is not lost) |
+| `data/chat_threads.sqlite` | Metadata for the conversation thread list (left sidebar) and resuming (thread names, owners, Chainlit Step history), and the ledger of monthly token usage per user (generation in `token_usage_monthly`, embeddings in `embedding_usage_monthly`; for "Usage & cost" in the settings dashboard). A separate file from `checkpoints.sqlite` (see `[thread_store]`) | When the list/resume feature is no longer needed | Delete the file (while the app is stopped; `checkpoints.sqlite` itself remains, so conversation state is not lost) |
 | `data/logs/app.log` | App operation log | Any time | Delete the file |
 | `data/memory/` | Persistent memory (common `user`/`feedback`/`project`/`reference` subfolders + the `MEMORY.md` index, and per-user `users/<user>/`) | When the accumulated memories are no longer needed | Delete the folder contents (`MEMORY.md` is regenerated on the next save). For one user only, delete `users/<user>/` |
 | `data/vector_db/` | The vector DB's `catalog.sqlite` (collection definitions, records of ingested files), the vectors `vectors.sqlite` with `backend = sqlite_vec`, the keyword index of the text `keywords/<collection name>.sqlite` (one file per collection), and the ingestion journal `ingest_journal.sqlite` that records files left half-written by a forced termination (`[vector_db] dir`). `catalog.sqlite` also holds references to collections of other instances (the `collection_refs` table). The source documents themselves are not copied | When a collection is no longer needed | Delete the collection on the Knowledge screen of the settings dashboard (to delete the whole folder, stop the app and the admin tool's ingestion first; with `backend = qdrant` the vectors remain on the Qdrant side) |
@@ -2385,6 +2385,13 @@ There are two screens.
 Chart colors go to the top 7 (instances or users) by all-time usage; the 8th and beyond are folded into "Others".
 Usage is input + output (including sub-agents and compaction).
 
+Embeddings (`/v1/embeddings`: knowledge search queries and ingestion, and the admin assistant's index) cost far less per
+token than generation (e.g. Titan Text Embeddings V2 on Bedrock is about $0.02 per 1M tokens), so they are shown as
+"Embedding tokens", separate from the generation "Total tokens", and priced separately (see "Embedding cost" below).
+Embeddings are billed by input tokens only, so the embedding server's `usage.prompt_tokens` (or `total_tokens`) is
+counted. Endpoints that return no `usage` record only the number of requests. Search query embeddings go to the chat
+user's row; ingestion and indexing are not tied to a user and go to the "(ingestion and indexing)" row (owner `_system`).
+
 In the cost settings, choose a pricing model and enter the values by hand. Amounts are estimates from the values entered,
 not the AWS bill itself.
 
@@ -2412,6 +2419,19 @@ How costs are allocated:
 - Instances whose thread DB or settings cannot be read are shown as errors at the top of the all-instances screen, and
   their usage is treated as 0 (they are not part of the denominator either).
 
+Embedding cost ("Embeddings per 1M tokens", the per-month "Of which embeddings", and the allocation checkbox in the cost settings):
+
+| Pricing model | Embedding cost |
+|---|---|
+| Monthly bill | The bill is assumed to include embeddings; their part is carved out of it. A month with "Of which embeddings" (e.g. the Cost Explorer amount filtered to the embedding model's usage type) uses that amount; otherwise the estimate embedding unit price × embedding tokens (capped at the bill) |
+| Hourly | Embedding unit price × embedding tokens is added to the hourly cost (e.g. when only embeddings use Bedrock; leave the price empty if embeddings run on the same server as generation) |
+| Per-token | Embedding unit price × embedding tokens is added (the Bedrock embedding model's price; there is no output price) |
+
+- The embedding cost is split among instances and users by their **share of the embedding tokens**; the rest is split by generation tokens.
+- In months where the embedding cost is not determined (no unit price and no "Of which embeddings"), embedding tokens are
+  not used for allocation by default (for when their load is negligible, e.g. on the same GPU as generation). Turning on
+  "include embedding tokens in the allocation ratio" adds them to the denominator with the same weight as generation tokens.
+
 Data sources and storage:
 
 | Item | Location |
@@ -2419,6 +2439,7 @@ Data sources and storage:
 | Monthly usage | The `token_usage_monthly` table in `[thread_store] db`. The main app adds to the row for the current month (in the main app's local time) and user on every LLM call (`add_monthly_usage` in `src/thread_store.py`). Deleting a thread does not reduce it. Nothing is recorded with `[thread_store] enabled=false` or `[llm] track_token_usage=false` |
 | Usage from before the ledger | Once, on the first start that creates this table, the totals of existing threads (`token_usage_cumulative`) are counted in each thread's last-updated month. Conversations spanning months lean toward their last-updated month, so this is an estimate (shown as "includes estimate"). If the main app has not been started since the update, the same estimate is calculated on the fly |
 | AI use of the admin tool | The `ai_usage_monthly` table of `instances/admin_ai_usage.sqlite`, shared by all instances (`admin/ai_usage.py`). Adds up, per month, source and user, the Skill Lab (all evaluation cases, AI judge, AI fixes and drafting done by a skill tuning worker; the source is the worker's instance name and the user is whoever started the loop/tryout or made the AI request) and the admin assistant (source `_admin_assistant`, the user is the administrator who asked). Evaluation usage comes from `token_usage_total` of `evals/run_case.py` (including sub-agents); the rest from `usage_metadata` of the LLM responses. If the LLM endpoint's settings have `[llm] track_token_usage = false`, no usage is returned and nothing is recorded. An evaluation stopped midway is not recorded (a consultation records what it used so far even when stopped or failed). Usage of deleted workers remains as "(Skill Lab, deleted)". Opening the "Usage & cost" sub-tab of a skill tuning worker shows what is recorded here |
+| Embedding usage | For app instances, the `embedding_usage_monthly` table in `[thread_store] db` (`src/embedding_usage.py`), adding tokens and requests per month, purpose (`search` = search queries, `ingest` = knowledge ingestion) and user. Searches are written by the main app on each search; ingestion is written by the ingest worker once at the end of each run (a run whose ingest worker crashed leaves nothing). The admin assistant's index and query embeddings go to the table of the same name in `instances/admin_ai_usage.sqlite` (source `_admin_assistant`). Instances with `[thread_store] enabled=false` record nothing. Embeddings before this feature was added are not recorded |
 | Cost settings | `instances/aws_cost.json`, shared by all instances (directly under `[admin] instances_dir`; created on the first save in the admin tool) |
 
 ### Admin settings
