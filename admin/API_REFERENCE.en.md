@@ -578,7 +578,10 @@ Monthly token usage per user, and costs calculated from AWS charges entered by h
 # Allocated breakdown in months[].instances / months[].users, unreadable instances in errors
 $C "$BASE/api/usage/overview"
 # Save the cost settings shared by all instances (pricing_model is monthly_bill / hourly / per_token. Empty numbers = not entered.
-# months is "YYYY-MM" -> {"bill": amount billed, "hours": running hours}. The response has the same shape as GET /api/usage/overview)
+# months is "YYYY-MM" -> {"bill": amount billed, "hours": running hours, "emb_bill": embedding part of the bill}.
+# embedding_per_million is the embedding price per 1M tokens; embedding_in_share is whether to include embedding tokens in the
+# allocation ratio in months without an embedding cost (true/false). The response has the same shape as GET /api/usage/overview.
+# emb_tokens / emb_calls in the usage are embeddings (knowledge search, ingestion, etc.); total etc. are generation tokens)
 $C -X PUT $BASE/api/usage/cost-settings -H "$H" -H "$J" \
   -d '{"pricing_model":"hourly","hourly_rate":1.006,"fixed_monthly":20,"exchange_rate":150,"months":{"2026-10":{"hours":300}}}'
 # Monthly usage of one instance (usage) and the amounts allocated to it from the shared cost (costs)
