@@ -1302,6 +1302,83 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   検索の対象にする（画像ファイルだけのコレクションでも探せる。`search_documents` はそのコレクションを「本文のある文書がありません」として外す）。この機能の導入前に取り込んだコレクションは、次の「取り込み（差分）」で内容を埋め込み直さずに
   パスだけを埋め込む（取り込み済みファイルの記録 `path_indexed` で判定。キーワード索引に無いパスも同じ取り込みで補う）。
 
+### 内蔵の埋め込み（CPU）
+
+外部の埋め込みサーバーを起動しなくても、`[vector_db] embedding_url` を空（`[]`、既定）にしておけば、Locohane のプロセスの中で
+ONNX の埋め込みモデルを CPU で動かす（`src/vector_db/local_embeddings.py`。onnxruntime + tokenizers で計算し、
+`1_Pooling/config.json` に従って CLS / 平均でまとめて L2 正規化する。通信はしない）。モデルはリポジトリに含めないため、
+最初に1回だけ取得する（`models/` は `.gitignore` 済み）:
+
+```cmd
+call python_env.bat
+python tools\download_embedding_model.py
+```
+
+既定のモデルは [ibm-granite/granite-embedding-97m-multilingual-r2](https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2)
+（Apache 2.0、97M パラメータ、384 次元、最大 32,768 トークン、日本語を含む多言語。fp32 の ONNX で約 400MB）を
+`models/embedding/granite-embedding-97m-multilingual-r2/` に保存し、`local_embedding_model` の既定もこのフォルダを指す。
+多言語の検索の評価（Multilingual MTEB Retrieval、18タスク）は 60.3 で、同じ大きさの `multilingual-e5-small`（50.9）より高い。
+精度を優先するなら `--model 311m`（granite-embedding-311m-multilingual-r2、768 次元・約 1.2GB、65.2。CPU ではその分遅い）を取得し、
+`local_embedding_model` をそのフォルダにする。そのほかの sentence-transformers 形式で `onnx/model.onnx` と `tokenizer.json` のあるモデルも
+`--model <組織>/<モデル>` で取得して使える（ライセンスはフォルダの `README.md` で確かめる）。
+完全オフラインの環境では、通信できる PC で取得したフォルダを同じ場所へコピーする。
+
+- `embedding_url` を書くとそちらを使う（内蔵は使わない）。`enabled = true` で `embedding_url` も内蔵のモデルも無いと起動時にエラーになる。
+- 埋め込みの接続先は `local://<フォルダ名>` の1件として扱い、コレクションにはフォルダ名を埋め込みモデル名として記録する
+  （モデルを変えたらコレクションを「再構築」する）。接頭辞の `auto` もフォルダ名で判定する（granite は接頭辞なし）。
+- テキストのみに対応する。`image_input = true` とは併用できない（起動時にエラー）。
+- **計算する場所**（`local_embedding_device`）: `cpu`（既定）・`cuda`（NVIDIA）・`directml`（Windows の DirectX 12 の GPU。NVIDIA・AMD・Intel）・
+  `auto`（cuda → directml → cpu の順に使えるもの）。GPU は onnxruntime の別のパッケージが要り、1つの環境に1つしか入れられない
+  （`onnxruntime`・`onnxruntime-gpu`・`onnxruntime-directml` は同じ `onnxruntime` モジュールを入れる）:
+
+  ```cmd
+  :: cuda（約 2GB。CUDA・cuDNN の DLL も pip で入る）
+  python -m pip uninstall -y onnxruntime onnxruntime-directml
+  python -m pip install "onnxruntime-gpu[cuda,cudnn]==1.31.1"
+  :: directml
+  python -m pip uninstall -y onnxruntime onnxruntime-gpu
+  python -m pip install onnxruntime-directml==1.24.4
+  ```
+
+  GPU 版を入れた後に `pip install -r requirements.txt` を実行すると CPU 版が上書きされるため、そのときは上の2行をもう一度実行する。
+  `cuda`・`directml` を選んだのに使えない（パッケージが違う・ドライバーや CUDA の DLL を読めない）ときは、CPU に黙って切り替えずに
+  エラーにする（CPU は1桁遅く、気付かないまま取り込みが長引くため。`auto` だけは CPU に切り替えてログに残す）。GPU が複数あるときは
+  `local_embedding_device_id` で選ぶ。開発環境（Core Ultra 5 225・RTX 5060 Ti）での実測（fp32 の 97m、約 600〜700 トークンのチャンク）:
+
+  | 計算する場所 | 速さ | ベクター |
+  |---|---|---|
+  | `cpu`（5スレッド＝既定 / 10スレッド） | 毎秒 約 9 件 / 約 11 件 | — |
+  | `directml`（RTX 5060 Ti） | 毎秒 約 80〜90 件 | CPU と一致（コサイン 1.00000） |
+  | `cuda`（RTX 5060 Ti） | 毎秒 約 130 件 | CPU と一致（コサイン 1.00000） |
+
+- **CPU のスレッド数**（`local_embedding_threads`）: 0（既定）なら物理コア数の半分（切り上げ）。取り込みの準備（PDF・Office の読み取り）や
+  チャットの応答と CPU を分け合うため。10 コアの実測で、半分で全コアの約 8 割の速さが出て、それ以上はほとんど伸びない。
+- **並列数**: 1つのモデルで同時には1件ずつ計算する（同時に来たものは順番待ち）。`ingest_embed_requests` を増やしても速くならない。
+  実測で、CUDA は同時に計算しても速くならず（1回で GPU を使い切る）、CPU は4本で約 17% しか速くならず、DirectML は同時に計算すると
+  プロセスが落ちたため。1つずつなので、メモリーのピークも1回の計算の分で決まる（下のメモリーの上限がそのまま効く）。
+- **メモリーの上限**（`local_embedding_ram_limit_mb`＝cpu の RAM、`local_embedding_vram_limit_mb`＝cuda・directml の VRAM。既定 4096、0 は上限なし。0 は、長い文が混ざると数十 GB 使うことがあるため勧めない）:
+  1回の計算のメモリーは「モデルの重み ＋ 件数 × トークン数²」（ModernBERT の注意機構がトークン数の2乗で増える）でほぼ決まる。
+  モデルの `config.json`（ヘッド数・幅）と重みの大きさから見積もり（`estimate_memory()`）、上限に収まるよう長すぎる文を切り詰め
+  （1件で上限を超えない長さまで）、長さの近い文をまとめて上限に収まる件数ずつ計算する（`plan_batches()`。パディングも減る）。
+  見積もりの係数は 97m で実測したピークより少し大きめにしてある。
+  - CUDA は onnxruntime にも上限（`gpu_mem_limit`）を渡し、見積もりが外れても VRAM からあふれて共有メモリー（RAM）で数十倍遅く
+    動き続けるのではなく、エラーで止める（実測で、16件 × 4096 トークンを上限なしで流すと VRAM 16GB からあふれ、RAM を 21GB 使って約 40 倍遅くなった）。
+  - DirectML は確保した VRAM を入力の形（件数 × トークン数）ごとに持ち続ける（同じ形では増えず、違う長さが来るたびに積み上がる）ため、
+    長さを 512 トークン単位にそろえ、上限の半分で計画する（その分、CUDA より1回の件数が少なく遅い）。
+  - GPU で動かしても RAM は onnxruntime 等で 1〜2GB ほど使う。
+  - 最悪の入力（8192 トークンを超える長文 16 件と、約 700 トークンのチャンク 64 件）での実測のピーク:
+
+    | 計算する場所 | 上限 | 1件の上限トークン数 | ピーク |
+    |---|---|---|---|
+    | `cpu` | 2048 / 4096 MB | 約 3,000 / 約 4,900 | RAM 約 1,700〜1,900 / 3,500 MB（プロセス全体） |
+    | `cuda` | 2048 / 4096 MB | 約 2,900 / 約 4,800 | VRAM 約 1,600 / 3,200 MB |
+    | `directml` | 2048 / 4096 MB | 1,536 / 2,560 | VRAM 約 900 / 2,400 MB |
+
+  チャットの推論サーバーと同じ GPU を使うときは、そちらが使う VRAM を残した値にする。
+- 量子化版（`onnx/model_quint8_avx2.onnx`）は fp32 版とのコサインが 0.96 前後までずれ、同じ文でもバッチの組み方で結果が変わるため、
+  既定では fp32 版（`onnx/model.onnx`）を使う（`onnx/model.onnx` が無いときだけほかの `*.onnx` を使う）。
+- 料金がかからないため、「利用量・料金」の埋め込みトークンには数えない。
+
 ### 埋め込みサーバーの準備と設定
 
 埋め込みはチャット用とは別の埋め込みモデルを llama-server で起動し、OpenAI 互換の `/v1/embeddings` で計算する
@@ -1888,7 +1965,14 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[vector_db]` | `qdrant_max_retries` | Qdrant へ接続できない・接続を切られた・タイムアウトした・5xx・408・429 が返ったときに送り直す回数（既定5。`-1` は無制限、`0` は送り直さない。取り込み・コピーは送り直しの待ち中も「停止」で止められる。検索はこの値によらず最大1回）。**全インスタンス共通**（インスタンス別に上書きできない。設定ダッシュボードの「管理者設定」で変えられる） | `VECTOR_DB_QDRANT_MAX_RETRIES` |
 | `[vector_db]` | `qdrant_retry_interval_seconds` | 上記の送り直しの間隔（秒。既定10。検索は最大1秒）。**全インスタンス共通**（インスタンス別に上書きできない。設定ダッシュボードの「管理者設定」で変えられる） | `VECTOR_DB_QDRANT_RETRY_INTERVAL_SECONDS` |
 | `[vector_db]` | `qdrant_preset` | Qdrant のコレクションのチャンク件数の規模別の設定（`none` 既定＝Qdrant の既定 / `1m` / `2m` / … / `10m`＝〜100万〜1000万件向け。HNSW・int8 量子化・ベクターのディスク配置・セグメント数・検索時の `hnsw_ef`）。既存のコレクションには次の取り込み時に反映（再構築不要）。「Qdrant を使う」参照 | `VECTOR_DB_QDRANT_PRESET` |
-| `[vector_db]` | `embedding_url` | 埋め込みを計算する接続先（`/v1/embeddings`）。`[llm] main_url` と同じ形式で、全要素同じ `model`・`start`/`end` 指定不可。`enabled = true` のとき必須（`[]` は未設定） | `VECTOR_DB_EMBEDDING_URL` |
+| `[vector_db]` | `embedding_url` | 埋め込みを計算する接続先（`/v1/embeddings`）。`[llm] main_url` と同じ形式で、全要素同じ `model`・`start`/`end` 指定不可。空（`[]`）なら内蔵の埋め込み（`local_embedding_model`）を使い、`enabled = true` でどちらも無ければエラー | `VECTOR_DB_EMBEDDING_URL` |
+| `[vector_db]` | `local_embedding_model` | `embedding_url` が空のときの内蔵の埋め込み（CPU）のモデルのフォルダ（`onnx/model.onnx`・`tokenizer.json`。既定 `models/embedding/granite-embedding-97m-multilingual-r2`。空なら使わない。「内蔵の埋め込み（CPU）」参照） | `VECTOR_DB_LOCAL_EMBEDDING_MODEL` |
+| `[vector_db]` | `local_embedding_device` | 内蔵の埋め込みを計算する場所（`cpu` 既定 / `cuda` / `directml` / `auto`。GPU は onnxruntime の別パッケージが要る） | `VECTOR_DB_LOCAL_EMBEDDING_DEVICE` |
+| `[vector_db]` | `local_embedding_device_id` | `cuda`・`directml` で使う GPU の番号（既定0） | `VECTOR_DB_LOCAL_EMBEDDING_DEVICE_ID` |
+| `[vector_db]` | `local_embedding_threads` | 内蔵の埋め込みの CPU スレッド数（既定0＝物理コア数の半分。`cpu` のとき） | `VECTOR_DB_LOCAL_EMBEDDING_THREADS` |
+| `[vector_db]` | `local_embedding_ram_limit_mb` | `cpu` で1回の計算に使う RAM の上限（MB、既定4096、0 は上限なし）。収まるよう長い文を切り詰め、件数を分ける | `VECTOR_DB_LOCAL_EMBEDDING_RAM_LIMIT_MB` |
+| `[vector_db]` | `local_embedding_vram_limit_mb` | `cuda`・`directml` で1回の計算に使う VRAM の上限（MB、既定4096、0 は上限なし） | `VECTOR_DB_LOCAL_EMBEDDING_VRAM_LIMIT_MB` |
+| `[vector_db]` | `local_embedding_max_tokens` | 内蔵の埋め込みで1チャンクを切り詰めるトークン数（既定8192） | `VECTOR_DB_LOCAL_EMBEDDING_MAX_TOKENS` |
 | `[vector_db]` | `embedding_routing_strategy` | `embedding_url` が複数件のときの選び方（`round_robin` 既定 / `random` / `priority_failover`。`round_robin`・`priority_failover` は llama_cpp なら GET /slots、vllm なら GET /metrics で空きを確かめ、埋まっている接続先を飛ばす）。どの戦略でもエラーが返れば次の接続先へ送り直す（「埋め込みサーバーの準備と設定」参照） | `VECTOR_DB_EMBEDDING_ROUTING_STRATEGY` |
 | `[vector_db]` | `embedding_max_retries` | 取り込みで全接続先がエラーになったとき試し直す回数（既定3）。`0` なら成功するまで無制限。408・429 以外の 4xx だけなら試し直さない | `VECTOR_DB_EMBEDDING_MAX_RETRIES` |
 | `[vector_db]` | `search_embedding_max_retries` | 検索（`search_documents`）で同じく試し直す回数（既定2）。`0` は試し直さない（無制限は指定できない） | `VECTOR_DB_SEARCH_EMBEDDING_MAX_RETRIES` |
@@ -2203,7 +2287,7 @@ AI が作業している間も入力欄に入力でき、送信すると作業�
 - **並列数**: `[llm] max_concurrent_requests`・`[graph] max_parallel`・`[subagent] max_parallel`
 - **トークン制御**: `[graph] token_guard_soft_threshold`・`[subagent] token_guard_soft_threshold`・`token_guard_hard_threshold`・`[context_trim] enabled`・`trigger_total_tokens`・`[context_compaction] enabled`・`token_threshold`・`single_request_token_threshold`・`pre_note_threshold`・`[token_ratio]` の各キー
 - **スキル関係**: `[paths] project_locohane_dir`・`[subagent] agent_type_run_script_allowlist`・`[main_agent_tool_guard] allow_entries`・`[plan] plan_approval_exempt_scripts`・`[skill_creator]` の各キー・`[skill_lab] instance_locohane_dir`
-- **ベクターDB**: `[vector_db]` の `enabled`・`backend`・`distance`・`qdrant_url`・`qdrant_preset`・`embedding_url`・`embedding_routing_strategy`・`embedding_max_retries`・`search_embedding_max_retries`・`embedding_retry_interval_seconds`・`embedding_encoding_format`・`query_prefix`・`document_prefix`・`image_input`・`image_input_extensions`・`embedded_images`・`embedded_image_min_px`・`image_dpi`・`office_timeout_seconds`・`ingest_temp_dir`・`ingest_workers`・`ingest_processes`・`ingest_embed_requests`・`scan_workers`・`max_files_per_collection`・`chunk_size`・`chunk_overlap`・`max_file_mb`・`top_k`・`max_result_chars`・`min_score`・`image_min_score`・`path_min_score`・`rrf_weight_text`・`rrf_weight_keyword`・`rrf_weight_image`・`rrf_weight_path_keyword`
+- **ベクターDB**: `[vector_db]` の `enabled`・`backend`・`distance`・`qdrant_url`・`qdrant_preset`・`embedding_url`・`local_embedding_model`・`local_embedding_device`・`local_embedding_device_id`・`local_embedding_ram_limit_mb`・`local_embedding_vram_limit_mb`・`local_embedding_threads`・`local_embedding_max_tokens`・`embedding_routing_strategy`・`embedding_max_retries`・`search_embedding_max_retries`・`embedding_retry_interval_seconds`・`embedding_encoding_format`・`query_prefix`・`document_prefix`・`image_input`・`image_input_extensions`・`embedded_images`・`embedded_image_min_px`・`image_dpi`・`office_timeout_seconds`・`ingest_temp_dir`・`ingest_workers`・`ingest_processes`・`ingest_embed_requests`・`scan_workers`・`max_files_per_collection`・`chunk_size`・`chunk_overlap`・`max_file_mb`・`top_k`・`max_result_chars`・`min_score`・`image_min_score`・`path_min_score`・`rrf_weight_text`・`rrf_weight_keyword`・`rrf_weight_image`・`rrf_weight_path_keyword`
 
 その種類のインスタンスに出していないキーだけのプリセットは出さない（スキル調整ワーカーは出すキーが少ないため、プリセットは出ない）。
 
@@ -2848,14 +2932,14 @@ Claude Code からは `/release` スキル（`.claude/skills/release/`）でこ�
 
 ### 依存パッケージ（商用利用可）
 
-`requirements.txt`（pip）の直接依存から到達する実行時の推移的依存、全 162 パッケージの
+`requirements.txt`（pip）の直接依存から到達する実行時の推移的依存、全 173 パッケージの
 ライセンス内訳:
 
 | ライセンス種別 | 数 | 商用利用 |
 |---|---:|---|
-| Apache 2.0 | 74 | ✅ |
-| MIT | 57 | ✅ |
-| BSD | 26 | ✅ |
+| Apache 2.0 | 78 | ✅ |
+| MIT | 60 | ✅ |
+| BSD | 30 | ✅ |
 | PSF | 3 | ✅ |
 | MPL 2.0 | 2 | ✅（改変せず利用する限り） |
 
@@ -2874,6 +2958,9 @@ THIRD_PARTY_LICENSES.md には含まれていません。npm 依存を追加・�
 なお `frontend/public/favicon.svg`（`public/build/favicon.svg` に配布）は
 [Chainlit](https://github.com/Chainlit/chainlit)（Apache 2.0）が同梱するデフォルトの
 favicon をそのまま使用しています。
+
+内蔵の埋め込み（CPU）のモデルはリポジトリに含めず、管理者が `tools/download_embedding_model.py` で Hugging Face から取得する。
+既定の [granite-embedding-97m-multilingual-r2](https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2)・`--model 311m` の granite-embedding-311m-multilingual-r2 はどちらも Apache 2.0（IBM）で商用利用できる。`--model <組織>/<モデル>` でほかのモデルを使うときは、そのモデルのライセンス（取得したフォルダの `README.md`）を確かめること。
 
 ### 外部通信について（完全オフライン保証）
 
@@ -2894,7 +2981,7 @@ MCPサーバー機能（`.locohane/settings.json`、上記「MCPサーバー接�
 ネットワーク通信を行うかどうかは各MCPサーバーの実装次第であり、本プロジェクトの
 管理範囲外です。
 
-ベクターDB（`[vector_db]`、既定は無効）を有効にした場合、埋め込みは `embedding_url` の推論サーバー、
+ベクターDB（`[vector_db]`、既定は無効）を有効にした場合、埋め込みは `embedding_url` の推論サーバー（空なら内蔵の埋め込み（CPU）で計算し、送らない。モデルを取得する `tools/download_embedding_model.py` だけは、管理者が実行したときに Hugging Face へ接続する）、
 `backend = qdrant` 時のベクターは `qdrant_url` の Qdrant サーバーへ送る（取り込んだ文書のチャンク本文を含む）。
 どちらもローカルまたは LAN 内のサーバーを指定する前提で、既定の `backend = sqlite_vec` ではローカルファイルにだけ保存する。
 

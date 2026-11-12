@@ -40,6 +40,9 @@ TOP = [
     "python-docx",
     "python-pptx",
     "sqlite-vec",
+    "onnxruntime",
+    "tokenizers",
+    "numpy",
 ]
 # 告知に含めない実行環境ツール。
 EXCLUDE = {"pip", "setuptools", "wheel"}

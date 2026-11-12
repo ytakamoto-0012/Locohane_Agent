@@ -277,3 +277,6 @@ python_env.bat
 
 # HTTPS 用の証明書・秘密鍵（[admin].ssl_certfile / ssl_keyfile）
 certs/
+
+# 内蔵の埋め込み（CPU）のモデル（tools/download_embedding_model.py で取得。サイズが大きいためリポジトリに含めない）
+/models/

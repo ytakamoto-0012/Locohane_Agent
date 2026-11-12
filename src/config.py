@@ -180,6 +180,13 @@ LLM_ROUTING_STRATEGIES = frozenset({"round_robin", "random", "priority_failover"
 # 選択候補にする際 GET /slots で実際に空きスロットがあるか確認する対象になる
 # （src/llm/routing.py の _probe_llama_cpp_slots_available() 参照）。
 LLM_PROVIDERS = frozenset({"openai_compatible", "llama_cpp", "vllm"})
+# [vector_db].embedding_url が空で、内蔵の埋め込み（CPU。src/vector_db/local_embeddings.py）を使うときの
+# 埋め込みの接続先の provider（config.ini には書けない。_as_local_embedding_endpoints() が組み立てる）。
+LOCAL_EMBEDDING_PROVIDER = "local"
+# [vector_db].local_embedding_model の既定（tools/download_embedding_model.py の取得先）。
+DEFAULT_LOCAL_EMBEDDING_MODEL = "models/embedding/granite-embedding-97m-multilingual-r2"
+# [vector_db].local_embedding_device の選択肢（src/vector_db/local_embeddings.py の DEVICES・admin/ini_catalog.py の _KEY_CHOICES と一致させる）。
+LOCAL_EMBEDDING_DEVICES = ("cpu", "cuda", "directml", "auto")
 # [vector_db].backend の選択肢（admin/ini_catalog.py の _KEY_CHOICES と一致させる）。
 VECTOR_DB_BACKENDS = ("sqlite_vec", "qdrant")
 # [vector_db].distance の選択肢（Qdrant の distance の綴り。admin/ini_catalog.py の _KEY_CHOICES と一致させる）。
@@ -614,7 +621,16 @@ class Config:
         vector_db_distance: コレクションを作るときの距離関数（VECTOR_DB_DISTANCES の
             いずれか。backend=sqlite_vec では VECTOR_DB_SQLITE_VEC_DISTANCES のいずれか）。
         vector_db_embedding_endpoints: 埋め込みを計算する接続先（/v1/embeddings）。
-            enabled=False のときは空でもよい。
+            enabled=False のときは空でもよい。embedding_url が空で local_embedding_model のフォルダにモデルがあれば、
+            内蔵の埋め込み（provider=LOCAL_EMBEDDING_PROVIDER）の1件（_as_local_embedding_endpoints()）。
+        vector_db_local_embedding_model: 内蔵の埋め込み（CPU）のモデルのフォルダ（ONNX と tokenizer.json。
+            src/vector_db/local_embeddings.py）。設定が空なら None（内蔵を使わない）。
+        vector_db_local_embedding_device: 内蔵の埋め込みを計算する場所（LOCAL_EMBEDDING_DEVICES のいずれか）。
+        vector_db_local_embedding_device_id: 内蔵の埋め込みに使う GPU の番号（cuda・directml のとき）。
+        vector_db_local_embedding_ram_limit_mb: 内蔵の埋め込みが cpu で1回の計算に使う RAM の上限（MB。0 は上限なし）。
+        vector_db_local_embedding_vram_limit_mb: 内蔵の埋め込みが cuda・directml で1回の計算に使う VRAM の上限（MB。0 は上限なし）。
+        vector_db_local_embedding_threads: 内蔵の埋め込みの onnxruntime のスレッド数（0 は onnxruntime に任せる。cpu のとき）。
+        vector_db_local_embedding_max_tokens: 内蔵の埋め込みで1チャンクを切り詰めるトークン数。
         vector_db_embedding_batch_size: 埋め込み1リクエストあたりのチャンク数。
         vector_db_embedding_timeout_seconds: 埋め込み1リクエストのタイムアウト秒数。
         vector_db_embedding_routing_strategy: vector_db_embedding_endpoints が複数ある場合の
@@ -1255,6 +1271,13 @@ class Config:
     vector_db_qdrant_preset: str
     vector_db_distance: str
     vector_db_embedding_endpoints: tuple[LLMEndpoint, ...]
+    vector_db_local_embedding_model: Path | None
+    vector_db_local_embedding_device: str
+    vector_db_local_embedding_device_id: int
+    vector_db_local_embedding_ram_limit_mb: float
+    vector_db_local_embedding_vram_limit_mb: float
+    vector_db_local_embedding_threads: int
+    vector_db_local_embedding_max_tokens: int
     vector_db_embedding_batch_size: int
     vector_db_embedding_timeout_seconds: float
     vector_db_embedding_routing_strategy: str
@@ -2266,6 +2289,39 @@ def _as_embedding_endpoints(value: str | None) -> tuple[LLMEndpoint, ...]:
     return endpoints
 
 
+def _as_local_embedding_model(value: str | None) -> Path | None:
+    """[vector_db].local_embedding_model を絶対パスにする（相対パスは PROJECT_ROOT 基準。空なら None）。"""
+    text = _unquote(value)
+    if not text:
+        return None
+    return _resolve(PROJECT_ROOT, text)
+
+
+def _as_local_embedding_device(value: str | None) -> str:
+    """[vector_db].local_embedding_device の値を検証する（LOCAL_EMBEDDING_DEVICES のいずれか。大文字小文字は問わない）。"""
+    text = str(value or "").strip().lower()
+    if text not in LOCAL_EMBEDDING_DEVICES:
+        raise ValueError(f"[vector_db].local_embedding_device must be one of {'/'.join(LOCAL_EMBEDDING_DEVICES)}: {value!r}")
+    return text
+
+
+def _as_local_embedding_endpoints(model_dir: Path | None) -> tuple[LLMEndpoint, ...]:
+    """embedding_url が空のときの埋め込みの接続先。model_dir に内蔵の埋め込みのモデルがあれば
+    provider=LOCAL_EMBEDDING_PROVIDER の1件（model はフォルダ名。コレクションに記録され、接頭辞の自動判定にも使う）、無ければ空。
+    """
+    from .vector_db.local_embeddings import is_model_dir
+
+    if model_dir is None or not is_model_dir(model_dir):
+        return ()
+    return (LLMEndpoint(base_url=f"local://{model_dir.name}", api_key="", model=model_dir.name, provider=LOCAL_EMBEDDING_PROVIDER),)
+
+
+def uses_local_embeddings(cfg: "Config") -> bool:
+    """埋め込みに内蔵の埋め込み（CPU）を使うか。"""
+    endpoints = cfg.vector_db_embedding_endpoints
+    return bool(endpoints) and endpoints[0].provider == LOCAL_EMBEDDING_PROVIDER
+
+
 def _as_vector_db_backend(value: str | None) -> str:
     """[vector_db].backend の値を検証する（VECTOR_DB_BACKENDS のいずれか）。"""
     text = str(value or "").strip().lower()
@@ -2391,8 +2447,8 @@ def _validate_vector_db(cfg: "Config") -> None:
     Raises:
         ValueError: chunk_overlap が 0〜chunk_size-1 の範囲外、min_score が 0〜1 の範囲外、
             backend=sqlite_vec なのに distance が sqlite-vec の対応しない値（Dot）、
-            または enabled=true なのに embedding_url が空・backend=qdrant なのに
-            qdrant_url が空の場合。
+            または enabled=true なのに埋め込みの接続先が無い（embedding_url が空で内蔵のモデルも無い）・
+            内蔵の埋め込みなのに image_input=true・backend=qdrant なのに qdrant_url が空の場合。
     """
     if not (0 <= cfg.vector_db_chunk_overlap < cfg.vector_db_chunk_size):
         raise ValueError(
@@ -2415,7 +2471,15 @@ def _validate_vector_db(cfg: "Config") -> None:
     if not cfg.vector_db_enabled:
         return
     if not cfg.vector_db_embedding_endpoints:
-        raise ValueError("Specify embedding_url when [vector_db].enabled = true.")
+        where = f" or put the built-in embedding model in {cfg.vector_db_local_embedding_model}" if cfg.vector_db_local_embedding_model else ""
+        raise ValueError(
+            f"Specify embedding_url when [vector_db].enabled = true{where} (tools/download_embedding_model.py downloads it)."
+        )
+    if cfg.vector_db_image_input and uses_local_embeddings(cfg):
+        raise ValueError(
+            "The built-in embeddings (CPU) cannot embed images. Set [vector_db].image_input = false, "
+            "or set embedding_url to a server with an image embedding model."
+        )
     if cfg.vector_db_backend == "qdrant" and not cfg.vector_db_qdrant_url:
         raise ValueError("Specify qdrant_url when [vector_db].backend = qdrant.")
 
@@ -3407,6 +3471,11 @@ def load_config(
     sub_url_raw = main_url_raw if sub_endpoints_inherit_main else sub_url_configured_raw
 
     vector_db_embedding_endpoints = _as_embedding_endpoints(os.getenv("VECTOR_DB_EMBEDDING_URL", vector_db.get("embedding_url", "")))
+    vector_db_local_embedding_model = _as_local_embedding_model(
+        os.getenv("VECTOR_DB_LOCAL_EMBEDDING_MODEL", vector_db.get("local_embedding_model", DEFAULT_LOCAL_EMBEDDING_MODEL))
+    )
+    if not vector_db_embedding_endpoints:
+        vector_db_embedding_endpoints = _as_local_embedding_endpoints(vector_db_local_embedding_model)
 
     cfg = Config(
         main_endpoints=_as_llm_endpoints(
@@ -3633,6 +3702,33 @@ def load_config(
         vector_db_qdrant_preset=_as_vector_db_qdrant_preset(os.getenv("VECTOR_DB_QDRANT_PRESET", vector_db.get("qdrant_preset", "none"))),
         vector_db_distance=_as_vector_db_distance(os.getenv("VECTOR_DB_DISTANCE", vector_db.get("distance", "Cosine"))),
         vector_db_embedding_endpoints=vector_db_embedding_endpoints,
+        vector_db_local_embedding_model=vector_db_local_embedding_model,
+        vector_db_local_embedding_device=_as_local_embedding_device(
+            os.getenv("VECTOR_DB_LOCAL_EMBEDDING_DEVICE", vector_db.get("local_embedding_device", "cpu"))
+        ),
+        vector_db_local_embedding_device_id=_non_negative_int(
+            os.getenv("VECTOR_DB_LOCAL_EMBEDDING_DEVICE_ID", vector_db.get("local_embedding_device_id", 0)),
+            "[vector_db].local_embedding_device_id",
+        ),
+        vector_db_local_embedding_ram_limit_mb=float(
+            _non_negative_int(
+                os.getenv("VECTOR_DB_LOCAL_EMBEDDING_RAM_LIMIT_MB", vector_db.get("local_embedding_ram_limit_mb", 4096)),
+                "[vector_db].local_embedding_ram_limit_mb",
+            )
+        ),
+        vector_db_local_embedding_vram_limit_mb=float(
+            _non_negative_int(
+                os.getenv("VECTOR_DB_LOCAL_EMBEDDING_VRAM_LIMIT_MB", vector_db.get("local_embedding_vram_limit_mb", 4096)),
+                "[vector_db].local_embedding_vram_limit_mb",
+            )
+        ),
+        vector_db_local_embedding_threads=_non_negative_int(
+            os.getenv("VECTOR_DB_LOCAL_EMBEDDING_THREADS", vector_db.get("local_embedding_threads", 0)), "[vector_db].local_embedding_threads"
+        ),
+        vector_db_local_embedding_max_tokens=_positive_int(
+            os.getenv("VECTOR_DB_LOCAL_EMBEDDING_MAX_TOKENS", vector_db.get("local_embedding_max_tokens", 8192)),
+            "[vector_db].local_embedding_max_tokens",
+        ),
         vector_db_embedding_batch_size=_positive_int(
             os.getenv("VECTOR_DB_EMBEDDING_BATCH_SIZE", vector_db.get("embedding_batch_size", 16)), "[vector_db].embedding_batch_size"
         ),

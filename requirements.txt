@@ -54,6 +54,10 @@ regex==2026.7.10
 #     文書の読み取りは下記の pypdf / python-docx / openpyxl / python-pptx を共用する ---
 python-calamine==0.9.0               # xlsx/xlsm のセルの値の読み取り（Rust 実装で openpyxl より大幅に速い。読めない・大きすぎるブックは openpyxl で読む。src/vector_db/extract.py）
 sqlite-vec==0.1.9                    # [vector_db] backend=sqlite_vec（既定）のベクター保存・近傍検索（SQLite 拡張）。langgraph-checkpoint-sqlite の依存として導入済みだが、直接importするため明記
+# 内蔵の埋め込み（CPU。[vector_db] local_embedding_model、src/vector_db/local_embeddings.py）。外部の埋め込みサーバーを使わず ONNX のモデルを動かす
+onnxruntime==1.31.1                  # MIT License。CPU 版（GPU 版の onnxruntime-gpu は不要）
+tokenizers==0.23.3                   # Apache 2.0。Hugging Face の tokenizer.json を読む
+numpy==2.3.5                         # BSD。onnxruntime の依存として導入されるが、直接importするため明記
 
 # --- pdf-tools スキル（PDF読み込み: pypdf / PDFページ画像化: pypdfium2 /
 #     PDF生成: reportlab（platypus）で自前のセマンティックHTML断片パーサーから

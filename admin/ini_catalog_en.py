@@ -966,7 +966,55 @@ DESCRIPTIONS: dict[str, str] = {
         '            how to check whether the endpoint is free before sending (see embedding_routing_strategy below; "openai_compatible" is not checked).\n'
         'If several are given, they are tried in the order of embedding_routing_strategy, switching to the next endpoint when an error is returned (cannot connect, non-200 HTTP).\n'
         'They must return the same vectors, so use the same model for all (start/end cannot be specified).\n'
-        'Required when enabled = true ([] means not set).'
+        'If empty ([]), the built-in embeddings (CPU) of local_embedding_model below are used. With enabled = true and neither of them, startup fails with an error.'
+    ),
+    'vector_db.local_embedding_model': (
+        'Folder of the built-in embedding model (CPU) used when embedding_url is empty (a relative path is based on the app folder).\n'
+        'Runs an ONNX model on the CPU inside the Locohane process (onnxruntime, no network access) instead of starting an external embedding server.\n'
+        'Put onnx/model.onnx and tokenizer.json (optionally 1_Pooling/config.json) in the folder. python tools\\download_embedding_model.py downloads\n'
+        'the default model (ibm-granite/granite-embedding-97m-multilingual-r2, Apache 2.0, about 400MB, 384 dimensions, multilingual including Japanese).\n'
+        'For higher accuracy, granite-embedding-311m-multilingual-r2 (768 dimensions, about 1.2GB, slower on the CPU accordingly) can also be chosen.\n'
+        'Text only (cannot be combined with image_input = true). After changing the model, "rebuild" the existing collections.\n'
+        'Leave it empty not to use the built-in embeddings.'
+    ),
+    'vector_db.local_embedding_device': (
+        'Where the built-in embeddings are computed. One of the following 4 values (case-insensitive):\n'
+        '  cpu      - compute on the CPU (default; works with onnxruntime of requirements.txt as is).\n'
+        '  cuda     - compute on an NVIDIA GPU (about 10 times faster than the CPU). Install onnxruntime-gpu instead of onnxruntime (about 2GB):\n'
+        '               python -m pip uninstall -y onnxruntime onnxruntime-directml\n'
+        '               python -m pip install "onnxruntime-gpu[cuda,cudnn]==1.31.1"\n'
+        '  directml - compute on a DirectX 12 GPU of Windows (NVIDIA, AMD, Intel; about 7 times faster than the CPU). Install onnxruntime-directml instead of onnxruntime:\n'
+        '               python -m pip uninstall -y onnxruntime onnxruntime-gpu\n'
+        '               python -m pip install onnxruntime-directml==1.24.4\n'
+        '  auto     - use the first of cuda -> directml -> cpu that is installed and usable.\n'
+        'Only one of onnxruntime, onnxruntime-gpu and onnxruntime-directml can be installed in an environment. Running pip install -r requirements.txt\n'
+        'after installing a GPU package overwrites it with the CPU package, so run the 2 lines above again in that case.\n'
+        'If cuda or directml is chosen but cannot be used (wrong package, the driver or CUDA DLLs cannot be loaded), it errors out instead of switching to the CPU.'
+    ),
+    'vector_db.local_embedding_device_id': (
+        'Number of the GPU used with cuda or directml (0 or more). Change it when there are several GPUs (for directml, the order of the GPUs in Windows).'
+    ),
+    'vector_db.local_embedding_threads': (
+        'Number of CPU threads used by the built-in embeddings (0 or more; used only with cpu). 0 means half the number of physical cores (rounded up).\n'
+        'It is half by default to share the CPU with ingestion preparation (reading PDF and Office files) and chat responses\n'
+        '(measured on 10 cores, half the cores gives about 80% of the speed of all cores; all cores is only about 20% faster).\n'
+        'Embeddings are computed one at a time (requests sent at the same time wait their turn), so raising ingest_embed_requests does not make it faster.'
+    ),
+    'vector_db.local_embedding_ram_limit_mb': (
+        'Upper limit (MB, 0 or more; 0 means no limit) of the RAM the built-in embeddings use for one computation with cpu.\n'
+        'The amount used is mostly the model weights (about 400MB for the default model) + count x tokens squared, so to stay within this limit\n'
+        'it truncates texts that are too long (to a length that does not exceed the limit by itself) and reduces the number computed at once. The smaller the limit, the shorter long texts are cut.\n'
+        'Guideline (default model, cpu): 4096 allows up to about 4,900 tokens per text, and about 40 chunks of about 700 tokens at once. 2048 allows up to about 3,000 tokens.\n'
+        'A value too small even to load the model (below about 800 for the default model) is an error. 0 means no limit (not recommended: it can use tens of GB when long texts are mixed in).'
+    ),
+    'vector_db.local_embedding_vram_limit_mb': (
+        'Upper limit (MB, 0 or more; 0 means no limit) of the VRAM the built-in embeddings use for one computation with cuda or directml. Same idea as local_embedding_ram_limit_mb.\n'
+        'When sharing the GPU with the chat inference server, leave room for what it uses (when VRAM overflows, Windows moves it to RAM\n'
+        'and it becomes tens of times slower; with cuda this limit is also passed to onnxruntime, which stops with an error when it is exceeded).\n'
+        'Even on the GPU, onnxruntime etc. use about 1-2GB of RAM.'
+    ),
+    'vector_db.local_embedding_max_tokens': (
+        'Number of tokens a chunk is truncated to by the built-in embeddings (1 or more). With chunk_size = 800, a Japanese chunk is roughly 400-800 tokens.'
     ),
     'vector_db.embedding_routing_strategy': (
         'How to choose when there are several embedding_url entries. The same 3 values as [llm] main_routing_strategy:\n'
