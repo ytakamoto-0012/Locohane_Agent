@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-11-13
+
 ### 追加
 
 - ナレッジ（ベクターDB）の埋め込みを、外部の埋め込みサーバー無しで CPU で計算できるようにしました（内蔵の埋め込み）。
@@ -1285,7 +1287,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.4...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.5...HEAD
+[0.7.5]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.1...v0.7.2
