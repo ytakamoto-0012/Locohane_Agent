@@ -57,6 +57,36 @@ def response_language_instruction() -> str:
     )
 
 
+# LLM に書かせる文章の言語コード → プロンプトで伝える言語名。
+LLM_LANGUAGE_NAMES = {"ja": "Japanese", "en": "English"}
+
+
+def output_language(instance_setting: object, fallback: object = None) -> str:
+    """LLM に書かせる文章（下書き・判定の理由・要因分析等）の言語コード（"ja" / "en"）。
+
+    インスタンスの [ui].default_language が ja / en ならそれに合わせる（利用者が読む言語・
+    評価でアシスタントが答える言語と揃えるため）。auto なら fallback（依頼した時の
+    ダッシュボードの表示言語）、それも無ければ日本語。以前はプロンプトが英語のまま言語を
+    指定しておらず、インスタンスの設定に関係なく英語で書かれていた。
+    """
+    if isinstance(instance_setting, str) and instance_setting.strip().lower() in LLM_LANGUAGE_NAMES:
+        return instance_setting.strip().lower()
+    return normalize(fallback) if isinstance(fallback, str) and fallback.strip() else "ja"
+
+
+def output_language_rule(lang: str) -> str:
+    """英語で書いたシステムプロンプトの末尾に足す、出力言語の指示。"""
+    name = LLM_LANGUAGE_NAMES.get(lang, "Japanese")
+    return (
+        "\n\n## Output language\n"
+        f"Write every piece of natural-language text you output in {name} (prose, explanations, reasons, analyses, "
+        "Markdown body text, the user instructions and judging viewpoints of test cases, notes), even though these "
+        "instructions and the material are written in English. Do not translate code, commands, file paths, URLs, "
+        "config keys, tool names, skill and agent names (ASCII slugs), case IDs, JSON keys, or headings you are told "
+        "to keep exactly as shown."
+    )
+
+
 class LanguageMiddleware:
     """X-Locohane-Lang ヘッダーをリクエストの表示言語として contextvar に入れる ASGI ミドルウェア。
 
@@ -97,8 +127,8 @@ EN: dict[str, str] = {
     "試すケースを選んでください。": "Choose the cases to try.",
     "mode は loop か tryout にしてください。": "mode must be loop or tryout.",
     "開始するには次を入れてください: {0}": "Fill in the following before starting: {0}",
-    "担当のスキル調整ワーカー {0} が見つかりません。「担当・名前を変更」で選び直してください。": "The assigned skill tuning worker {0} was not found. Choose again with \"Change worker/name\".",
-    "担当のスキル調整ワーカーを選んでください（「担当・名前を変更」）。": "Choose the assigned skill tuning worker (\"Change worker/name\").",
+    "担当のスキル調整ワーカー {0} が見つかりません。「テーマの設定」で選び直してください。": "The assigned skill tuning worker {0} was not found. Choose again with \"Theme settings\".",
+    "担当のスキル調整ワーカーを選んでください（「テーマの設定」）。": "Choose the assigned skill tuning worker (\"Theme settings\").",
     "スキル調整ワーカーがありません。先にインスタンス一覧で作成してください。": "There is no skill tuning worker. Create one in the instance list first.",
     "AI への依頼（下書き）が終わるまで待ってから開始してください。": "Wait until the request to the AI (draft) finishes before starting.",
     "テーマの状態が変わったため開始できませんでした。画面を更新してください。": "Could not start because the theme's state changed. Refresh the page.",
@@ -273,7 +303,20 @@ EN: dict[str, str] = {
     '① 研究対象（スキルかサブエージェントを1つ以上）': '① Research targets (one or more skills or sub-agents)',
     '② やってほしいことの「目的」': '② The "purpose" of what you want it to do',
     '③ 試験問題（1問以上）': '③ Test questions (one or more)',
-    '③ 試験問題の直し（読めない・条件や使うファイルが足りない: {0}）': '③ Fix the test questions (unreadable, or missing conditions or files: {0})',
+    '③ 試験問題の直し（読めない・条件や使うファイルが足りない・合格できない条件がある: {0}）': '③ Fix the test questions (unreadable, missing conditions or files, or conditions that can never pass: {0})',
+    'どう答えても合格できない条件があります: {0}': 'There are conditions that no answer can pass: {0}',
+    '利用者の指示に空の行があります': 'The user instructions have an empty line',
+    '「{0}」は回答に必要なのに、その中の「{1}」は回答に入ってはいけないことになっています': 'The answer must contain "{0}", but "{1}" inside it must not appear in the answer',
+    '呼ぶべきツール（{0}）が、すべて呼んではいけないツールにも入っています': 'All the tools that must be called ({0}) are also tools that must not be called',
+    '引数を確かめるツール {0} が、呼んではいけないツールにも入っています': 'The tool {0} whose arguments are checked is also a tool that must not be called',
+    '{0} の同じ呼び出しが、必要な呼び出しにも、してはいけない呼び出しにも入っています': 'The same call of {0} is both required and forbidden',
+    'トライアウトの回数は 1〜1000 の整数にしてください（空欄なら既定の回数）。': 'Make the number of tryout runs an integer from 1 to 1000 (leave it empty for the default).',
+    'ループ・トライアウトの実行中・開始待ちの間はトライアウトの回数を変えられません。先に停止してください。': 'The number of tryout runs cannot be changed while a loop or tryout is running or waiting to start. Stop it first.',
+    'スキル {0} がありません（{1}）': 'There is no skill {0} ({1})',
+    'サブエージェント {0} がありません（{1}）': 'There is no sub-agent {0} ({1})',
+    'ツール {0} がありません': 'There is no tool {0}',
+    '③ 試験問題の直し（存在しない名前を確かめている: {0}）': '③ Fix the test questions (they check names that do not exist: {0})',
+    '確認スクリプト {0} がありません（入力ファイルのフォルダ fixtures/ に置いてください）': 'The verify script {0} does not exist (put it in the input file folder fixtures/)',
     '[paths] common_data_dir（データディレクトリ全体）': '[paths] common_data_dir (the whole data directory)',
     '[paths] checkpoint_db（会話状態）': '[paths] checkpoint_db (conversation state)',
     '[thread_store] db（スレッド一覧）': '[thread_store] db (thread list)',

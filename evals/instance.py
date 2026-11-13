@@ -52,6 +52,17 @@ def resolve_instance_name(cli_value: str | None) -> str:
     return name
 
 
+def instance_config(name: str):
+    """インスタンス name の設定（src.config.Config）を、今のプロセスに適用せずに読む。
+
+    run_all.py が、評価対象インスタンスの [skill_lab].temp_dir を知るために使う（ケースごとの
+    子プロセスは apply_instance() してから読む）。
+    """
+    from src.config import load_config
+
+    return load_config(overrides_path=resolve_instances_root() / name / "config_overrides.json", instance_name=name)
+
+
 def apply_instance(name: str) -> None:
     """管理ツールの子プロセス起動 + app.py 先頭と同じ手順でインスタンスを適用する。
 
@@ -151,7 +162,7 @@ def main() -> int:
     print(f"log_dir: {config.log_dir}")
     print(f"default_workdir: {config.default_workdir}")
     print(f"skill_draft_dir: {config.skill_draft_dir}")
-    print(f"skill_tryout_repeats: {config.skill_tryout_repeats}")
+    print(f"skill_lab_tryout_repeats: {config.skill_lab_tryout_repeats}")
     return 0
 
 

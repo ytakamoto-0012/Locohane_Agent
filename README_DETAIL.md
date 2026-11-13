@@ -592,6 +592,7 @@ Locohane/
 | `data/skill_drafts/<ユーザー名>/` | skill-creator が作ったユーザー別ドラフトスキル（`<スキル名>/`）と、その評価結果（`_workspace/`）。`[skill_creator] draft_dir`。不採用のドラフトも記録として残る（一覧には出ない） | 不要なドラフトがあるとき | ドラフトのフォルダを削除（作成者は skill-creator の `delete_draft.py` でも消せる）。自動削除はされない |
 | `data/<インスタンス名>/skill_drafts_archive/<ユーザー名>/<スキル名>_<日時>/` | 昇格したドラフトの退避先（`_workspace/` ごと移る。`[skill_creator] archive_dir`） | 記録が不要になったとき | フォルダを削除 |
 | `data/skill_lab/themes/<テーマID>/` | スキル研究室の研究テーマ（仕様・開発中の資産・ケース・入力ファイル・評価と AI 修正の記録 `runs/`）。対象インスタンスごとに分かれる | テーマが終わり、記録が不要になったとき | スキル研究室のテーマ一覧・テーマ詳細の「削除」（下記「スキル研究室」）。手で消す場合はテーマのフォルダを削除（実行中でないこと） |
+| `data/<インスタンス名>/evals_temp/` | 評価（スキル研究室のループ・1回試行・トライアウト、`evals/run_all.py`）が実行中に使う一時フォルダ（ケースの作業フォルダ・隔離したメモリー／パスメモリー／計画の詳細／ドラフトスキルの置き場・スキルとケースの写し・AI 修正のバックアップ）。評価対象インスタンスの `[skill_lab] temp_dir`。OS の一時フォルダは使わない | 通常は終わると自動で消える。強制終了で残ったものは、最後の更新から `[skill_lab] temp_retention_hours`（既定24時間）を過ぎると自動で消える（評価の開始時・本体の起動時と `temp_cleanup_interval_hours` ごと・スキル調整ワーカーの同じ間隔ごと） | 評価が動いていないときにフォルダ内を削除 |
 | `data/temp/_tmp_<作成時刻>_<短縮ID>/` | `execute_python_code`/`run_script` の中間生成物・`write_scratch_note`/`write_thread_note` の書き出し先。チャットでアップロードしたファイル（`uploads/<送信日時>/`。作業フォルダを指定していてもここ）。自セッション専用（`[default_workdir]` 参照）。フォルダ名先頭の作成時刻（`YYMMDDHHMMSS`）はファイラー上で作成順に並べるためのもの。短縮IDは thread_id の SHA-1 先頭10桁（パス長上限 260文字を超えにくくするため、thread_id をそのまま使わない。旧形式 `_tmp_<作成時刻>_<thread_id>` のフォルダも再開時にそのまま使われる） | セッション終了後、不要になったとき | フォルダ内を削除（`[default_workdir] retention_days`/`cleanup_interval_hours` により自動削除もされる） |
 | `data/elements/<thread_id>/` | 添付ファイル（`provide_download`/`analyze_image`の`show_in_chat=True`等）・回答本文への画像埋め込みの永続化先。スレッド再開・プロセス再起動後も表示できるようここへ実体をコピー保存する（`[elements]`参照、`src/thread_store.py`） | 添付ファイルが不要になったとき | フォルダ内を削除 |
 | `instances/_assistant_index/` | 管理ツールの「AIに相談」が検索に使う、config.ini・README_DETAIL.md・API リファレンスの段落の埋め込みのキャッシュ（埋め込みの接続先・モデルごとに1ファイル。`data/` 配下ではない） | いつでも（次の相談で作り直す。初回は数十秒かかる） | フォルダを削除 |
@@ -955,7 +956,7 @@ LLM側の共通変換ルール（`system_prompt/system_prompt.md`・`system_prom
   トライアウト記録は空になり、昇格時もハッシュが一致しないトライアウト結果は使えない。
 - **正式化はスキル開発者が管理ツールのスキル研究室で行う**（下記「設定ダッシュボード」の「スキル研究室」）。
   開発者はドラフトを研究テーマに取り込み（取り込んだ時点の複製で作業するため、作成者は引き続き編集できる）、
-  仕様とケースを整え、研究室の AI に不具合を自己修正させて、トライアウト（`[skill_creator] tryout_repeats` 回、既定10回）に
+  仕様とケースを整え、研究室の AI に不具合を自己修正させて、トライアウト（`[skill_lab] tryout_repeats` 回、既定10回。テーマごとに変えられる）に
   全回合格させる。人は確認・軽い手修正・承認／否認をする。承認すると、ドラフトを作ったインスタンス専用の置き場
   （`[skill_lab] instance_locohane_dir`、既定 `instances/<インスタンス名>/skills/`）へ昇格し、元のドラフトは
   `[skill_creator] archive_dir`（既定 `data/<インスタンス名>/skill_drafts_archive/`）へ `_workspace` ごと移る。
@@ -1884,15 +1885,26 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[default_workdir]` | `allow_sandbox_dir` | セッション分離の外側で常時書き込みを許可する追加ディレクトリのリスト（`[{"dir": "パス", "allow_entries": [["スキル名","スクリプトファイル名"], ...]}, ...]`形式）。各要素の`allow_entries`を空リストにすると、対象を問わずそのディレクトリへ無制限に書き込み可能になる。登録したディレクトリはスレッドを問わず常時書き込み可能になる点に注意（既定は空リストで無効） | `ALLOW_SANDBOX_DIR` |
 | `[default_workdir]` | `retention_days` | 上記 `dir` 配下のファイル保持日数（0以下で自動削除無効） | `DEFAULT_WORKDIR_RETENTION_DAYS` |
 | `[skill_creator]` | `draft_dir` | ユーザー別ドラフトスキルの置き場（既定 `${common_data_dir}/skill_drafts`）。スキル走査対象と重なると起動時エラー | `SKILL_DRAFT_DIR` |
-| `[skill_creator]` | `tryout_repeats` | スキル安定化トライアウトの既定回数（昇格時に各ケースをこの回数だけ繰り返し、全回合格で合格。既定10） | `SKILL_TRYOUT_REPEATS` |
 | `[skill_creator]` | `other_users_drafts` | 他ユーザーのドラフトの扱い。`hidden`（既定）／`listed`／`readable`／`full`（「ドラフトスキル（ユーザー別）と昇格」参照） | `SKILL_OTHER_USERS_DRAFTS` |
 | `[skill_creator]` | `archive_dir` | 昇格したドラフトの退避先（既定 `${common_data_dir}/skill_drafts_archive`）。スキル走査対象・`draft_dir` と重なると起動時エラー | `SKILL_ARCHIVE_DIR` |
+| `[skill_lab]` | `tryout_repeats` | スキル安定化トライアウトの回数の既定値（正式スキルへの昇格（スキル研究室・promote-skill）で各ケースをこの回数だけ繰り返し、全回合格で合格。既定10）。スキル研究室ではテーマごとに「テーマの設定」で変えられる（空欄ならこの値）。以前は `[skill_creator]` にあった（旧い `config_overrides.json` の書き方・環境変数 `SKILL_TRYOUT_REPEATS` も読む） | `SKILL_LAB_TRYOUT_REPEATS` |
 | `[skill_lab]` | `instance_locohane_dir` | インスタンス専用の拡張ディレクトリで、スキル研究室・promote-skill の昇格先（既定 `${instance_dir}` = `instances/<インスタンス名>`。`skills/`・`agents/`・回帰テスト用の `evals/<テーマID>/` を置く）。昇格先（対象）のインスタンスの値が使われる。本体も `project_locohane_dir` と同じく `skills/`・`agents/`・`LOCOHANE.md` を検知し、そのどれよりも後方（最優先）で常に走査する（`project_locohane_dir` を上書きしても外れない） | `INSTANCE_LOCOHANE_DIR` |
 | `[skill_lab_worker]` | `max_iterations` | スキル調整ワーカーの スキル調整ループの最大反復回数（既定8）。このセクションはスキル調整ワーカーの設定画面にだけ出る（本体には出ない） | `SKILL_LAB_MAX_ITERATIONS` |
 | `[skill_lab_worker]` | `max_hours` | 1テーマのループに使ってよい最大時間（既定6時間） | `SKILL_LAB_MAX_HOURS` |
 | `[skill_lab_worker]` | `poll_interval_seconds` | ワーカーが処理待ちのテーマを探す間隔（既定10秒） | `SKILL_LAB_POLL_INTERVAL_SECONDS` |
 | `[skill_lab_worker]` | `fixer_max_file_chars` | AI に渡す資産ファイル1つあたりの最大文字数（既定20000） | `SKILL_LAB_FIXER_MAX_FILE_CHARS` |
 | `[skill_lab_worker]` | `transcript_excerpt_chars` | AI に渡す実行の記録の抜粋の最大文字数（1回分、既定6000） | `SKILL_LAB_TRANSCRIPT_EXCERPT_CHARS` |
+| `[skill_lab_worker]` | `excerpt_user_chars` / `excerpt_thinking_chars` / `excerpt_ai_text_chars` / `excerpt_ai_note_chars` / `excerpt_tool_args_chars` / `excerpt_tool_result_chars` / `excerpt_subagent_args_chars` / `excerpt_subagent_result_chars` | 上の抜粋の項目ごとの最大文字数（利用者の指示800・思考600（末尾から。0で渡さない）・最終本文1500・ツールを呼ぶときの本文400・ツールの引数600・結果700・サブエージェントの中の引数400・結果300） | `SKILL_LAB_EXCERPT_*` |
+| `[skill_lab_worker]` | `judge_spec_chars` / `judge_answer_chars` / `judge_checks_chars` / `judge_criteria_chars` | AI judge・機械判定の見直しに渡す仕様6000・最終回答4000・落ちた照合4000・ケースの judge 2000 の最大文字数 | `SKILL_LAB_JUDGE_*` |
+| `[skill_lab_worker]` | `fixer_max_files_per_fix` / `fixer_max_reverts` | 1回の AI 修正で変えてよいファイルの数（既定2。0で制限なし）と、合格していたケースを壊した直しの取り消しが何回に達したら止めるか（既定3。0で止めない） | `SKILL_LAB_FIXER_MAX_FILES_PER_FIX` / `SKILL_LAB_FIXER_MAX_REVERTS` |
+| `[skill_lab_worker]` | `tryout_stop_on_first_failure` / `evaluate_baseline` / `restore_best_state` / `report_ai_summary` | トライアウトを最初の不合格で打ち切る・改良前の版を最初に評価する・止まったとき一番よかった内容に戻す・終わったとき AI に総括を書かせる（どれも既定 true） | `SKILL_LAB_TRYOUT_STOP_ON_FIRST_FAILURE` 等 |
+| `[skill_lab_worker]` | `fixer_failed_runs_per_case` / `fixer_history_iterations` | 修正を頼むときに見せる、ケースごとの落ちた回の数（既定2）と、これまでの反復の数（試した直しの中身・その後も落ちたケース。既定6） | `SKILL_LAB_FIXER_FAILED_RUNS_PER_CASE` / `SKILL_LAB_FIXER_HISTORY_ITERATIONS` |
+| `[skill_lab]` | `temp_dir` | 評価（`evals/run_all.py`・`run_case.py`、スキル研究室のループ・1回試行・トライアウトを含む）が実行中に使う一時フォルダの置き場（既定 `${common_data_dir}/evals_temp`）。評価対象インスタンスの値が使われる。OS の一時フォルダは使わない。`[data_backup]` の対象外 | `SKILL_LAB_TEMP_DIR` |
+| `[skill_lab]` | `temp_retention_hours` | 強制終了等で残った一時フォルダを、最後の更新（中のファイルを含む）からこの時間を過ぎたら自動削除する（既定24。`[skill_lab_worker].max_hours` より長くする。0以下で削除しない）。評価の開始時、本体の起動時と下記の間隔ごと、スキル調整ワーカーの下記の間隔ごとに行う | `SKILL_LAB_TEMP_RETENTION_HOURS` |
+| `[skill_lab]` | `temp_cleanup_interval_hours` | 上記の自動削除のチェック間隔（時間、既定1） | `SKILL_LAB_TEMP_CLEANUP_INTERVAL_HOURS` |
+| `[skill_lab]` | `copy_memory_types` | 評価の開始時に本番のメモリーから写す種類（カンマ区切り、既定 `glossary`）。評価のメモリーは毎回空から始まる（カンニング防止）が、社内の用語辞書が無いと本番と同じように言葉を解釈できないため。写すのは本番でも誰でも読めるもの（共通・各ユーザーの共有のもの。個人用・機密の目印があるものは除く）だけ。空欄なら写さない | `SKILL_LAB_COPY_MEMORY_TYPES` |
+| `[skill_lab]` | `verify_timeout_seconds` | ケースの `verify_script`（会話の後に作業フォルダの生成物を確かめるスクリプト）の制限時間（秒、既定120） | `SKILL_LAB_VERIFY_TIMEOUT_SECONDS` |
+| `[skill_lab]` | `record_thinking_chars` | 評価の記録（results.json）に残すアシスタントの思考の最大文字数（1回の LLM 呼び出し分、既定4000。0で残さない）。スキル研究室の AI 修正・judge が判断の理由を分析するのに使う | `SKILL_LAB_RECORD_THINKING_CHARS` |
 | `[default_workdir]` | `cleanup_interval_hours` | default_workdir 自動削除チェック間隔（時間） | `DEFAULT_WORKDIR_CLEANUP_INTERVAL_HOURS` |
 | `[log]` | `dir` | ログ出力先 | `LOG_DIR` |
 | `[log]` | `level` | ログの詳細度。`info`（現行仕様、ツール呼び出しの概要のみ）／`debug`（ツール呼び出しの全引数・全結果・LLM応答本文・thinkingまで記録）／`none`（ログを一切生成しない） | `LOG_LEVEL` |
@@ -2743,6 +2755,11 @@ AI には「キーの一覧は検索で選んだ一部なので、一覧に無�
 テーマの全資産（`--skill-overlay`・`--agent-overlay`）と設定パッチ（`--config-patch`）を重ね、LLM の接続先だけを研究室のものにして
 （`--llm-from-instance`）全ケースを評価する。judge 付きのケースは AI judge が仕様と judge の観点で判定する
 （言い回し・表記の違いでは落とさず、観点が求める事実・数値・操作が欠けている・違っているときに不合格にする）。
+不合格にしてよいのは、判断の観点を満たさないとき・仕様の「期待する出力」が欠けているとき・「やってはいけないこと」をしたときだけで、
+不合格にするときは反した項目を引用させる（引用できない不合格は合格扱い。最終的な合否は人がレビューで確認する）。
+AI judge・AI 修正には、委譲先のサブエージェントの中のツール呼び出しも見せる。
+研究室の AI が書く文章（仕様・ケース・スキルの下書き、判定の理由、要因分析、総括）は、対象インスタンスの `[ui] default_language` の
+言語で書く（auto なら依頼・開始した時のダッシュボードの言語）。
 
 ケースの機械判定（`expect`）のうち、文字列・引数の照合（`response_contains`・`response_not_contains`・`tool_call_args_contains`）は
 完全一致のため、「1,234円」と「1234円」のような表記の違いだけで落ちることがある。研究室では、この照合だけで落ちた回を
@@ -2754,7 +2771,10 @@ AI には「キーの一覧は検索で選んだ一部なので、一覧に無�
   作成者の判定基準としてこの見直しにも渡す。LLM が使えないときは不合格のまま。
 - 見直しでも合わず、ケースに「AI が判断する点」があるときは、落ちた照合を添えて AI judge まで進め、その判断で合否を決める
   （「意味が同じなら合格」などの観点が、言葉の照合で落ちた回にも効く）。
-- どのツールを呼んだか・呼ばなかったか（`tool_called_any`・`tool_not_called`）で落ちた回は見直さない。
+- どのツールを呼んだか（`tool_called_any`）・引数の照合（`tool_call_args_contains`）は、まず委譲先のサブエージェントの中の
+  呼び出しも数えて照合し直す（委譲先が研究対象のスキルを読んでいれば読んだことになる）。
+- 呼んではいけないツール（`tool_not_called`）・使ってはいけない呼び出し（`tool_call_args_not_contains`）・確認スクリプト
+  （`verify_script`）で落ちた回は見直さない。
 
 AI judge と見直しには、ツール呼び出しの抜粋・最終回答に加えて、作業フォルダに作られたファイルの一覧（`[output file]` の行。
 Excel は見た目の要約付き）を渡す。試験問題で「使うファイル」を指定しなくても、評価は空の一時フォルダを作業フォルダにして
@@ -2767,23 +2787,49 @@ Excel は見た目の要約付き）を渡す。試験問題で「使うファ�
 見直しの結果は各回の結果に「機械判定の見直し」として出る。LLM が見直して合格にした回は、AI judge と同じく
 昇格の承認で人が確認する対象になる。
 
-1. 失敗があれば、AI が失敗の記録（満たさなかった判定・ツール呼び出しと結果・最終回答）と仕様を読んで原因を分析し、
-   資産（SKILL.md・scripts/・references/・サブエージェント定義）・ケース・設定パッチを直して、もう一度評価する。
-   直せる場所はテーマ内に限られ、frontmatter・tools 名・ケースの形式・Python の構文に1つでも違反があれば修正は全部取り消し、
-   その理由を次の反復に渡す。ケースも直せるが、仕様と矛盾している場合だけで、変更はレビュー画面で強調される。
-   試験に通るだけの直し方を防ぐため、AI はケースの削除・追加、入力ファイル（`cases/fixtures/`）の変更、研究対象そのもの
-   （SKILL.md・エージェント定義）の削除、研究対象に無いスキル・サブエージェントの新規作成はできない。
+0. 取り込んだ資産（正式スキル・ドラフトの複製）があれば、最初に改良前の版（`baseline/`）を1回評価し、改良前後の比較を
+   テーマ詳細と総括に出す（`[skill_lab_worker] evaluate_baseline`。ケースが変わらなければ評価し直さない）。
+1. 失敗があれば、AI が失敗の記録（満たさなかった判定・アシスタントの思考の末尾・ツールを呼ぶときの本文・ツール呼び出しと結果・
+   サブエージェントの中の呼び出し・最終回答・評価環境の注記（ループ検知などでの打ち切り・所要時間・ガードや計画承認による拒否・
+   ライブラリ不足・スクリプトの時間切れ））と仕様、これまでの反復（試した直しの中身・その後も落ちたケース・トライアウトの合格回数・
+   取り消した直し）を読んで原因を分析し、資産（SKILL.md・scripts/・references/・サブエージェント定義）・設定パッチを直して、
+   もう一度評価する。1回の反復で直すのは原因1つ（触るファイルは `[skill_lab_worker] fixer_max_files_per_fix` 個まで。
+   多すぎる・適用できない提案は、評価し直さずに1回だけ出し直させる）。小さいモデル向けの書き方（短い文・ルールと代わりの行動・
+   箇条書き）と、文章で直らない機械的な作業はスクリプトへ移す方針を AI に指示している。
+   直せる場所はテーマ内に限られ、frontmatter・tools 名・Python の構文に1つでも違反があれば修正は全部取り消し、
+   その理由を次の反復に渡す。試験に通るだけの直し方を防ぐため、AI はケース・入力ファイル（`cases/fixtures/`）の変更、
+   研究対象そのもの（SKILL.md・エージェント定義）の削除、研究対象に無いスキル・サブエージェントの新規作成はできない。
    評価で使う LLM に接続できない（`llm_unreachable`）ときは、AI 修正に回さず「エラー」で止める。
-2. 全ケースに合格したら、対象インスタンスの `tryout_repeats` 回ずつのトライアウトを行い、全回合格で「レビュー待ち」にする。
-3. `[skill_lab_worker] max_iterations`・`max_hours` に達したら「上限到達」で止まる（手で直して再開できる）。研究室を停止した場合は、
+   - 研究対象を直しても合格しない原因（ケース: 利用者の指示にスキルを使う理由が無い・名前の綴り違い・採点の条件が満たせない、
+     仕様: 自己矛盾、環境: ライブラリが無い・毎回時間切れ等）を AI が見つけたら、研究対象を書き換えずに「人の見直しが必要」で
+     止め、原因の種類・問題点・直し方の提案を表示する（指摘が誤りならそのまま開始し直せる）。
+   - AI 修正の後の内容が、このループで評価して不合格だった内容と同じに戻ったら（同じ直しの繰り返し・行ったり来たり・
+     直せないまま2回続いた・取り消した直しをまた入れた）、「修正が行き詰まり」で止める。
+   - 直しで、それまで全回合格していたケースが落ちたら、その直しを取り消し（直す前の内容を `runs/<反復>/before_fix/` に控えている）、
+     直す前の記録で直し直させる。取り消しが `[skill_lab_worker] fixer_max_reverts` 回に達したら「修正が行き詰まり」で止める
+     （ケースどうしの矛盾・答えのゆらぎの見込み）。
+2. 全ケースに合格したら、テーマのトライアウトの回数（「テーマの設定」。空欄なら対象インスタンスの `[skill_lab] tryout_repeats`）ずつ
+   トライアウトを行い、全回合格で「レビュー待ち」にする
+   （不合格の回が出たら残りを回さずに打ち切る。`[skill_lab_worker] tryout_stop_on_first_failure`）。
+3. `[skill_lab_worker] max_iterations`・`max_hours` に達したら「上限到達」で止まる（手で直して再開できる。最後の評価で落ちた
+   ケースと、トライアウトなら何回中何回合格したかを添える）。上限到達・行き詰まり・人の見直しが必要で止まったときは、研究対象を
+   このループで一番合格の多かった内容（`runs/best/`）に戻す（`[skill_lab_worker] restore_best_state`）。
+   終わったときは総括（反復ごとの結果・直したファイル・取り消し・改良前との比較と、AI のまとめ）をテーマ詳細に出す
+   （`[skill_lab_worker] report_ai_summary`）。研究室を停止した場合は、
    次に起動したときに続きから再開する（異常終了で「実行中」のまま残った AI への依頼も、起動時に待ちへ戻す）。
    テーマの「停止」は、担当のワーカーが動いていなければその場で停止になり、ワーカーが止まっている間に押した停止が
    再起動時に打ち消されることはない。
 
 開始すると担当のスキル調整ワーカーが決まる（ワーカーが1つで「自動」の場合もそのワーカーに決める）。担当はテーマ詳細の
-「担当・名前を変更」で変えられる（実行中・開始待ちの間は停止してから）。AI への下書きの依頼が残っている間は開始できない
+「テーマの設定」で変えられる（実行中・開始待ちの間は停止してから）。AI への下書きの依頼が残っている間は開始できない
 （ループの途中で仕様・ケースが書き換わらないように）。合格の決め方（expect の条件か judge）が無いケース・`work_dir` の
-入力フォルダが無いケースがあると、開始の条件（③）を満たさない。1つのドラフトを取り込めるのは、終わっていないテーマ1つだけ。
+入力フォルダが無いケース・どう答えても満たせない条件のケース（含むべき言葉の中に禁止の言葉がある、呼ぶべきツールを禁止している、
+同じ呼び出しを必要とも禁止ともしている、指示が空の行等）・確認スクリプトが無いケース・対象インスタンスに無いスキル名・
+サブエージェント名・ツール名を確かめているケース（綴り違い・古い名前）があると、開始の条件（③）を満たさない。
+ケースには、使ってはいけない場面の確認（「このスキルを使ってはいけない」= `tool_call_args_not_contains`。委譲先の中の呼び出しも
+数える）と、作ったファイルを確かめるスクリプト（`verify_script`。入力ファイルのフォルダに置いた .py で、AI 修正は書き換えられない）も
+書ける。AI が作るケースには、使ってはいけない場面の問題を1つ以上入れさせる（説明文を「何でも拾う」方向へ直して合格させないため）。
+試験問題は一覧の「削除」で消せる（入力ファイルは残る。ループの実行中・開始待ちは消せない）。1つのドラフトを取り込めるのは、終わっていないテーマ1つだけ。
 テーマはテーマ一覧・テーマ詳細の「削除」でフォルダごと消せる（元に戻せない。`admin/skill_lab/api.py` の `delete_theme`）。
 ループ・トライアウトの実行中・開始待ちと、AI への依頼（下書き・1回試行）の処理中は消せない（先に停止する）。終わっていない
 テーマを消すと、取り込み元のドラフトは利用者のもとに残り、研究室の印だけが外れる（また別のテーマに取り込める）。昇格済みの

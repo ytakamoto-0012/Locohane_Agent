@@ -1,9 +1,11 @@
 """AI 修正（評価で失敗した回を研究室の LLM に見せ、テーマのファイルを直させる）。
 
-直せるのはテーマ内の資産（assets/ 配下のスキル・サブエージェント）・ケース（cases/*.yaml）・
-設定パッチ（config_patch.json）・仕様以外のファイル。仕様（spec.md）は人が決めた要件なので直させない。
-ケースも直してよいが、変更はレビュー画面で強調表示し、人が確かめる（ケースが変われば
-トライアウトは0回からやり直しになる）。
+直せるのはテーマ内の資産（assets/ 配下のスキル・サブエージェント）と設定パッチ（config_patch.json）。
+仕様（spec.md）とケース（cases/）は人が決めたものなので直させない。失敗の原因が研究対象の外にある
+（ケース: 利用者の指示にスキルを使う理由が無い・名前の綴り違い・採点の条件が満たせない等、
+仕様: 自己矛盾、環境: ライブラリが無い・毎回時間切れ等）と AI が判断したときは、blockers として
+報告させ、ワーカーはループを止めて人に見直してもらう（何度スキルを直しても合格しないため）。
+実行の許可（ガード設定）が原因なら、AI が config_patch.json で直す。
 
 修正は全部適用できるか、全部やめるかのどちらか。パスの制限（themes.resolve_path）と形式の検証
 （SKILL.md・エージェント定義の frontmatter と tools 名・ケース・設定パッチ・Python の構文）に
@@ -14,9 +16,9 @@ from __future__ import annotations
 
 import json
 import shutil
-import tempfile
 from pathlib import Path
 
+from evals import temp_dirs
 from src.config import Config
 
 from . import evaluation, themes
@@ -26,20 +28,61 @@ _SYSTEM = """You fix the skills and sub-agents of a business AI assistant (an ag
 A skill consists of SKILL.md (frontmatter with name and description at the top, the procedure in the body), scripts/ (Python scripts) and references/.
 A sub-agent consists of agents/<name>.md (frontmatter with name, description and tools at the top; the body is the system prompt).
 Read the records of failures in the evaluation, identify the cause, and fix the files so that they behave as the spec says.
+In the records, "[AI thinking]" is the end of the assistant's internal thoughts before each step (why it chose or did not choose
+a skill, tool or sub-agent), "[AI]" is the text it wrote, and "[sub-agent N ...]" are tool calls inside a sub-agent it delegated to.
+"[harness note]" lines are facts measured by the evaluation harness (turns cut off by a loop guard, time taken, tools refused by
+settings, missing Python libraries, time limits). Use them to tell setting and environment problems from mistakes of the model:
+do not "fix" a refusal by a setting or a missing library by rewriting the skill's wording.
+
+First decide whether the failure can be fixed by editing the research targets or config_patch.json at all.
+It cannot when the cause is one of these "blockers" (no reasonable fix of the assets makes it pass):
+- kind "case" (the case itself is defective):
+  - the user instruction (turns) gives no reason to do what the case checks: it asks for something unrelated to the
+    research target's description and "When to use" (e.g. only "hello" or "what is 1+1?" for a skill that must be read),
+    and does not name the target either;
+  - the instruction names a skill or sub-agent with a wrong spelling (e.g. "hello_world" for "hellow_world") or one that does not exist;
+  - the checks (expect, judge) contradict the spec or each other, or require something the instruction did not ask for;
+  - the checks can never be satisfied: an exact text or value that cannot be known from the instruction, the input files
+    or the research targets (e.g. a number that is not in the data), something that cannot be seen in the record
+    (e.g. the assistant's thoughts or speed), or a tool that does not exist;
+  - the input files the case needs are missing.
+- kind "spec": the spec contradicts itself (e.g. "Expected output" requires what "Must not do" forbids) or asks for something impossible.
+- kind "environment": something outside the theme's files, for example a Python library or command the scripts need is not
+  installed, the work needs a folder or service the assistant may not access, or every run times out because the machine or
+  the model is too slow (not because the skill does needless work).
+Settings that config_patch.json can change are not blockers; fix them there yourself: which skill scripts the main agent may call
+directly ([main_agent_tool_guard] allow_entries, e.g. [["<skill>", "<script>.py"], -1]), which scripts are exempt from plan
+approval ([plan] plan_approval_exempt_scripts, e.g. [["<skill>", "<script>.py"]]) and which skills each sub-agent type may run
+([subagent] agent_type_run_script_allowlist, e.g. [["<agent type>", "<skill>"]]). config_patch.json is
+{"<section>": {"<key>": [items to add]}}.
+If there is a blocker, report it in "blockers" and do not edit any file (the loop stops and a person deals with it).
+Do not try to make the assets pass despite a blocker (for example by making a skill claim every message).
+If there is no blocker, leave "blockers" empty and fix the assets.
 
 Rules:
 - Do not change the spec (spec.md). Fix the assets to match the spec.
+- Fix one cause per iteration: pick the most likely cause and make the smallest change for it, so that the next evaluation
+  shows whether it worked (changing several things at once hides which change helped or broke something).
+  Do not break cases that already pass.
 - Do not add ad hoc instructions that only work for the failure at hand (such as "always answer XX"). Generalize the cause and fix that.
+- The skills are read by a fairly small local LLM. Write for it: short sentences, one rule per line with what to do instead,
+  conditions as bullet points, no long background or many examples. Write example names and values in the users' language
+  (the model copies example names such as sheet names into its output).
+- Mechanical work that the model keeps getting wrong in different ways (counting, numbering, dates, sums, copying many values,
+  checking many cells) is not fixed by more wording: move it into a script in scripts/ that the skill tells the model to run,
+  and have the script print what the model needs (and report problems it detects).
 - The frontmatter name of SKILL.md and agent definitions must be the same as the folder name / file name.
 - On success, scripts print one line of JSON to stdout with exit code 0; on failure, they print the reason to stderr with exit code 1.
-- You may fix a case (cases/*.yaml) only if the case itself contradicts the spec. If you do, write the reason in analysis.
-  You cannot delete or add cases, or change the cases' input files (cases/fixtures/).
-- Paths you can fix: assets/skills/<name>/... and assets/agents/<name>.md of existing research targets, existing cases/<ID>.yaml, config_patch.json
+- Do not edit, delete or add cases (cases/) or their input files; report problems with cases in "blockers".
+- Paths you can fix: assets/skills/<name>/... and assets/agents/<name>.md of existing research targets, config_patch.json
   (you cannot create new skills or sub-agents, and you cannot delete SKILL.md or agent definitions themselves)
-- Keep the language of the files you edit (do not translate existing text).
+- Keep the language of the files you edit (do not translate existing text); write text you add to a file in the same language as that file.
+  This takes precedence over the output language below for file contents. Write "analysis" in the output language.
 
 Output only JSON in the following format:
 {"analysis": "the cause of the failure and how to fix it",
+ "blockers": [{"kind": "case" or "spec" or "environment", "case_id": "<ID of the case concerned (empty if not about one case)>",
+               "problem": "what is wrong (concrete)", "suggestion": "what a person should do"}],
  "edits": [
    {"path": "assets/skills/<name>/SKILL.md", "old": "the original string to replace (must match exactly one place in the file)", "new": "the new string"},
    {"path": "assets/skills/<name>/scripts/run.py", "content": "the new content of the whole file"},
@@ -78,8 +121,10 @@ def theme_context(directory: Path, max_file_chars: int, *, include_cases: bool =
     return "\n\n".join(parts)
 
 
-def failures_text(results: list[dict], verdicts: list[dict], excerpt_chars: int, per_case: int = 2) -> str:
-    """失敗した回の説明（ケースごとに最大 per_case 回分）。"""
+def failures_text(results: list[dict], verdicts: list[dict], excerpt_chars: int, per_case: int | None = None) -> str:
+    """失敗した回の説明（ケースごとに最大 per_case 回分。省略時は [skill_lab_worker] fixer_failed_runs_per_case）。"""
+    if per_case is None:
+        per_case = evaluation.current_limits().fixer_failed_runs_per_case
     by_key = {(v["case_id"], v["repeat_index"]): v for v in verdicts}
     shown: dict[str, int] = {}
     blocks = []
@@ -108,46 +153,145 @@ def failures_text(results: list[dict], verdicts: list[dict], excerpt_chars: int,
     return "\n\n".join(blocks) or "(no failure records)"
 
 
-def history_text(iterations: list[dict], limit: int = 5) -> str:
+def edit_summary(edits: list) -> list[dict]:
+    """適用した修正の中身の要約（次の反復の AI に「何を試したか」を見せるため、反復の記録に残す）。"""
+    summary = []
+    for edit in edits:
+        if not isinstance(edit, dict) or not isinstance(edit.get("path"), str):
+            continue
+        if edit.get("delete"):
+            summary.append({"path": edit["path"], "kind": "delete"})
+        elif isinstance(edit.get("content"), str):
+            summary.append({"path": edit["path"], "kind": "rewrite", "new": edit["content"][:400]})
+        else:
+            summary.append({"path": edit["path"], "kind": "replace", "old": str(edit.get("old", ""))[:200], "new": str(edit.get("new", ""))[:300]})
+    return summary
+
+
+def failed_cases_text(iteration: dict) -> str:
+    """反復で落ちたケース。複数回の評価（トライアウト）では何回中何回合格したかも添える
+    （一部の回だけ落ちる = 答えがゆらいでいる、を AI 修正と人が見分けられるように）。"""
+    parts = []
+    for cid, c in sorted((iteration.get("cases") or {}).items()):
+        failed = int(c.get("fail") or 0) + int(c.get("error") or 0)
+        if not failed:
+            continue
+        total = failed + int(c.get("pass") or 0)
+        parts.append(f"{cid} (passed {total - failed}/{total})" if total > 1 else cid)
+    return ", ".join(parts)
+
+
+def history_text(iterations: list[dict], limit: int | None = None) -> str:
+    """これまでの反復（どのケースが落ちたか・何をどう直したか・なぜ直せなかったか）。
+
+    以前は直したファイル名と分析の冒頭しか渡しておらず、AI が試して効かなかった直しを繰り返したり、
+    前の直しを元に戻したりしうる状態だった（2026-11-13 ユーザー指摘）。直しの中身まで渡す。
+    """
+    if limit is None:
+        limit = evaluation.current_limits().fixer_history_iterations
     rows = []
-    for it in iterations[-limit:]:
+    for it in iterations[-limit:] if limit > 0 else []:
         fix = it.get("fix") or {}
-        rows.append(
-            f"- Iteration {it.get('n')} ({it.get('phase')}): verdict {it.get('verdict')}"
-            + (f", fixed files {fix.get('applied')}, analysis: {str(fix.get('analysis', ''))[:300]}" if fix else "")
-            + (f", why the fix could not be applied: {fix.get('errors')}" if fix.get("errors") else "")
-        )
+        row = f"- Iteration {it.get('n')} ({it.get('phase')}): verdict {it.get('verdict')}"
+        failed = failed_cases_text(it)
+        if failed:
+            row += f", failed cases {failed}"
+        if fix.get("analysis"):
+            row += f"\n  analysis: {str(fix['analysis'])[:500]}"
+        for e in fix.get("edit_summary") or []:
+            if e["kind"] == "replace":
+                row += f"\n  edit {e['path']}: replaced {json.dumps(e.get('old', ''), ensure_ascii=False)} with {json.dumps(e.get('new', ''), ensure_ascii=False)}"
+            elif e["kind"] == "rewrite":
+                row += f"\n  edit {e['path']}: rewrote the whole file (starts with {json.dumps(e.get('new', '')[:200], ensure_ascii=False)})"
+            else:
+                row += f"\n  edit {e['path']}: deleted"
+        if fix.get("errors"):
+            row += f"\n  why the fix could not be applied: {fix['errors']}"
+        rows.append(row)
     return "\n".join(rows) or "(none yet)"
 
 
-def propose(config: Config, directory: Path, *, failures: str, history: str, max_file_chars: int) -> dict:
+def too_many_files(edits: list, max_files: int) -> str | None:
+    """1回の修正で触るファイルが多すぎれば理由を返す（1回の反復で直すのは原因1つ。tune-prompt と同じ規則）。"""
+    paths = {e["path"].replace("\\", "/").strip("/") for e in edits if isinstance(e, dict) and isinstance(e.get("path"), str)}
+    if max_files > 0 and len(paths) > max_files:
+        return (
+            f"The fix changes {len(paths)} files ({', '.join(sorted(paths))}); change at most {max_files} file(s) per iteration "
+            "and fix only the most likely cause."
+        )
+    return None
+
+
+def propose(
+    config: Config, directory: Path, *, failures: str, history: str, max_file_chars: int, previous_errors: list[str] | None = None
+) -> dict:
+    """修正を提案させる。previous_errors: 直前の提案を適用できなかった理由（評価し直さずに出し直させるとき）。"""
     user = (
         f"{theme_context(directory, max_file_chars)}\n\n"
-        f"# Iterations so far\n{history}\n\n"
+        f"# Iterations so far (the fixes already tried, and the cases that still failed after them)\n{history}\n\n"
         f"# Failure records of this evaluation\n{failures}\n\n"
-        "Identify the cause and output the fix in the specified JSON format."
+        "Identify the cause and output the fix in the specified JSON format.\n"
+        "Do not repeat a fix that was already tried and did not make the case pass, and do not undo an earlier fix: "
+        "look for a different cause. If the same case kept failing for the same reason after several different fixes, "
+        "consider whether there is a blocker (a defective case, a contradicting spec or an environment problem).\n"
+        "A case that passed in some runs of a tryout and failed in others is not a blocker: make the behavior steadier "
+        "(clearer steps, fewer choices left to the model)."
     )
+    if previous_errors:
+        user += "\n\n# Your previous proposal for this evaluation could not be applied\n" + "\n".join(f"- {e}" for e in previous_errors)
+        user += "\nPropose again, avoiding these problems."
     data = ask_json(config, _SYSTEM, user)
-    if not isinstance(data, dict) or not isinstance(data.get("edits"), list):
+    if not isinstance(data, dict) or not isinstance(data.get("edits", []), list):
         raise LabLLMError(f"Invalid format of the fix response: {str(data)[:300]}")
-    return {"analysis": str(data.get("analysis", "")), "edits": data["edits"]}
+    known_cases = {c["id"] for c in themes.list_cases(directory)}
+    return {
+        "analysis": str(data.get("analysis", "")),
+        "edits": data.get("edits") or [],
+        # 旧形式（case_problems）で答えるモデルもあるので、両方読む
+        "blockers": _blockers((data.get("blockers") or []) + (data.get("case_problems") or []), known_cases),
+    }
+
+
+BLOCKER_KINDS = ("case", "spec", "environment")
+
+
+def _blockers(raw, known_cases: set[str]) -> list[dict]:
+    """AI が「研究対象を直しても合格しない」とした原因（ケース・仕様・環境）を、形を整えて返す。
+
+    利用者の指示（turns）にスキルを使う理由が無い・採点の条件が満たせない・仕様が矛盾する・
+    ライブラリが入っていない等は、何度直しても合格しない。以前は AI 修正がスキルを書き換え続け、
+    反復の上限まで回っていた（2026-11-13 ユーザー報告）。
+    ケースの指摘は実在するケースのものだけ残す（無いケースを指す指摘でループを止めない）。
+    """
+    blockers = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "case").strip().lower()
+        kind = kind if kind in BLOCKER_KINDS else "case"
+        case_id = str(item.get("case_id") or "").strip()
+        problem = str(item.get("problem") or "").strip()
+        if not problem or (kind == "case" and case_id not in known_cases):
+            continue
+        if case_id not in known_cases:
+            case_id = ""
+        blockers.append({"kind": kind, "case_id": case_id, "problem": problem, "suggestion": str(item.get("suggestion") or "").strip()})
+    return blockers
 
 
 def _forbidden(directory: Path, rel: str, path: Path, *, delete: bool) -> str | None:
     """AI 修正でしてはいけない変更なら理由を返す。
 
     試験に通るだけの直し方（失敗したケースを消す・入力ファイルを都合よく書き換える・
-    研究対象そのものを消す・別の資産を作って差し替える）を防ぐ。ケースの中身を直すのは、
-    仕様と矛盾している場合に限って認め、レビューで強調表示する。
+    研究対象そのものを消す・別の資産を作って差し替える）を防ぐ。ケースは書き換えさせない
+    （問題は blockers で報告させる）。
     """
     parts = rel.split("/")
     if parts[0] == themes.CASES_DIRNAME and len(parts) >= 3:
         return "The AI cannot change the input files of cases"
     if parts[0] == themes.CASES_DIRNAME:
-        if delete:
-            return "The AI cannot delete cases"
-        if not path.is_file():
-            return "The AI cannot add cases (it can only fix existing ones)"
+        # ケースに問題があれば blockers で報告させ、ループを止めて人に直してもらう（AI はケースを書き換えない）。
+        return "The AI cannot change cases (report problems with a case in blockers instead)"
     if parts[0] == themes.ASSETS_DIRNAME:
         asset = path if parts[1] == "agents" else directory / themes.ASSETS_DIRNAME / "skills" / parts[2]
         exists = asset.is_file() if parts[1] == "agents" else (asset / "SKILL.md").is_file()
@@ -158,8 +302,14 @@ def _forbidden(directory: Path, rel: str, path: Path, *, delete: bool) -> str | 
     return None
 
 
-def apply_edits(directory: Path, edits: list, *, known_tools: list[str] | None) -> tuple[list[str], list[str]]:
-    """edits をすべて適用する（1つでも失敗したら全部元に戻す）。(適用したパス, エラー) を返す。"""
+def apply_edits(
+    directory: Path, edits: list, *, known_tools: list[str] | None, temp_root: Path | None = None
+) -> tuple[list[str], list[str]]:
+    """edits をすべて適用する（1つでも失敗したら全部元に戻す）。(適用したパス, エラー) を返す。
+
+    temp_root: 元に戻すためのバックアップを置く場所（対象インスタンスの [skill_lab].temp_dir）。
+        省略時はテーマの runs/ の下（OS の一時フォルダは使わない）。
+    """
     errors: list[str] = []
     planned: list[tuple[str, Path, str | None]] = []  # (rel, path, 新しい内容 or None=削除)
     pending: dict[Path, str | None] = {}
@@ -218,7 +368,7 @@ def apply_edits(directory: Path, edits: list, *, known_tools: list[str] | None) 
     if not planned:
         return [], ["There are no fixes"]
 
-    with tempfile.TemporaryDirectory(prefix="skill_lab_fix_") as tmp:
+    with temp_dirs.temporary(temp_root or directory / themes.RUNS_DIRNAME, "skill_lab_fix_") as tmp:
         backups: dict[Path, Path | None] = {}
         try:
             for rel, path, content in planned:

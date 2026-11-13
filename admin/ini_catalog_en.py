@@ -773,9 +773,6 @@ DESCRIPTIONS: dict[str, str] = {
     'skill_creator.archive_dir': (
         "Where promoted drafts are moved (moved together with _workspace to <username>/<skill name>_<date time>/; they disappear from the creator's list). Like draft_dir, making it the same as, or nested with, the skill scan targets or draft_dir causes an error at startup. ${common_data_dir} / ${instance} can be used."
     ),
-    'skill_creator.tryout_repeats': (
-        'Default number of runs of the skill stabilization tryout (evals/run_all.py --repeat). On promotion, each case is repeated this many times, and only those that pass every run pass. An integer of 1 or more.'
-    ),
     'skill_creator.other_users_drafts': (
         "Handling of other users' drafts (everything is always possible for your own drafts). One of these 4 values:\n"
         'hidden   - not shown in the skill list. Cannot be read, run, written or evaluated (cannot be read from Read/Glob/Grep/execute_python_code etc. either).\n'
@@ -844,7 +841,102 @@ DESCRIPTIONS: dict[str, str] = {
         'Maximum number of characters per asset file passed to the AI when asking for a fix (the excess is omitted).'
     ),
     'skill_lab_worker.transcript_excerpt_chars': (
-        'Maximum number of characters of the transcript excerpt (tool calls and results) passed to the AI when asking for a fix or judging (per run).'
+        'Maximum number of characters of the transcript excerpt (tool calls and results) passed to the AI when asking for a fix or judging (per run). '
+        'When exceeded, the first third and the end are kept and the middle is omitted.'
+    ),
+    'skill_lab_worker.excerpt_user_chars': (
+        'Maximum number of characters of each item in the excerpt above. Adjust them to the context length of the model and to what you want to examine (larger values let the AI see more, but make the input longer).\n'
+        'User instructions (per turn).'
+    ),
+    'skill_lab_worker.excerpt_thinking_chars': (
+        "The assistant's thoughts (per LLM call; taken from the end, where the decision usually is). They show why it chose or did not choose a skill. 0 does not pass them.\n"
+        "The thoughts must be kept in the evaluation records ([skill_lab] record_thinking_chars of the instance being evaluated)."
+    ),
+    'skill_lab_worker.excerpt_ai_text_chars': (
+        "The assistant's final text (a response without tool calls)."
+    ),
+    'skill_lab_worker.excerpt_ai_note_chars': (
+        'Text the assistant wrote together with a tool call (such as "I will read the skill").'
+    ),
+    'skill_lab_worker.excerpt_tool_args_chars': (
+        'Arguments of tool calls.'
+    ),
+    'skill_lab_worker.excerpt_tool_result_chars': (
+        'Results of tools.'
+    ),
+    'skill_lab_worker.excerpt_subagent_args_chars': (
+        'Arguments of tool calls inside sub-agents the assistant delegated to.'
+    ),
+    'skill_lab_worker.excerpt_subagent_result_chars': (
+        'Results of tools inside sub-agents the assistant delegated to.'
+    ),
+    'skill_lab_worker.judge_spec_chars': (
+        'Maximum number of characters of the spec (spec.md) passed to the AI judge.'
+    ),
+    'skill_lab_worker.judge_answer_chars': (
+        'Maximum number of characters of the final answer passed to the AI judge and the rule review.'
+    ),
+    'skill_lab_worker.judge_checks_chars': (
+        'Maximum number of characters of the failed text and argument checks passed to the AI judge and the rule review.'
+    ),
+    'skill_lab_worker.judge_criteria_chars': (
+        'Maximum number of characters of the case\'s "points the AI judges" (judge) passed to the rule review.'
+    ),
+    'skill_lab_worker.fixer_failed_runs_per_case': (
+        'Number of failed runs shown per case when asking for a fix.'
+    ),
+    'skill_lab_worker.fixer_history_iterations': (
+        'Number of past iterations (the contents of the fixes tried and the cases that still failed after them) shown when asking for a fix (newest first).'
+    ),
+    'skill_lab_worker.fixer_max_files_per_fix': (
+        'Number of files one AI fix may change (one cause per iteration; a proposal that changes more is asked again once without evaluating again). 0 means no limit.'
+    ),
+    'skill_lab_worker.fixer_max_reverts': (
+        'When an AI fix makes a case that passed every run fail, the fix is reverted. When the reverts reach this number, the loop stops as "fixes stalled" '
+        '(the cases probably contradict each other, or the answers vary). 0 never stops (fixes are still reverted).'
+    ),
+    'skill_lab_worker.tryout_stop_on_first_failure': (
+        'Stop a tryout at the first failed run without running the rest (one failure fails the tryout anyway; saves the time of the default 10 runs per case).'
+    ),
+    'skill_lab_worker.evaluate_baseline': (
+        'At the start of a loop, evaluate once the version as it was imported (before the changes; copies of official skills and drafts), and show the before/after comparison on the screen and in the report.\n'
+        'It is not evaluated again while the cases do not change, nor for themes that only have newly created assets.'
+    ),
+    'skill_lab_worker.restore_best_state': (
+        'When the loop stops at a limit, as "fixes stalled" or as "needs review", restore the research targets to the content that passed the most in this loop (not restored if nothing ever passed).'
+    ),
+    'skill_lab_worker.report_ai_summary': (
+        'When a loop or tryout ends, have the AI write a summary (what was achieved, what still fails and the likely cause, what to do next). The table per iteration is kept regardless of this setting.'
+    ),
+    'skill_lab.tryout_repeats': (
+        'Default number of runs of the skill stabilization tryout (evals/run_all.py --repeat). When promoting to an official skill (the Skill Lab and promote-skill of Claude Code), '
+        'each case is repeated this many times and passes only if every run passes. In the Skill Lab the number can be changed per research theme ("Theme settings"; empty means this value). An integer of 1 or more.\n'
+        'It used to be in [skill_creator] (the old entries in config_overrides.json and the environment variable SKILL_TRYOUT_REPEATS are still read).'
+    ),
+    'skill_lab.temp_dir': (
+        'Where evaluations (evals/run_all.py and run_case.py, including the Skill Lab loop, single trials and tryouts, and skill-creator evaluations) create temporary folders while they run. The settings of the instance being evaluated are used.\n'
+        'The working folders of cases (copies of input files and the outputs), the memory and path memory isolated for the evaluation, the copies of skills and cases fixed during the evaluation, and the backups of Skill Lab AI fixes are created here and removed when done.\n'
+        "The OS temporary folder (%TEMP%) is not used (it is hard to see what is left there). ${common_data_dir} / ${instance} can be used. It is not included in the [data_backup] backups."
+    ),
+    'skill_lab.temp_retention_hours': (
+        'Temporary folders left behind by a forced or abnormal exit are deleted automatically once this many hours (decimals allowed) have passed since they were last updated (including updates of the files inside). '
+        'Make it longer than [skill_lab_worker].max_hours so that folders of running evaluations are not deleted. 0 or less disables the automatic deletion.\n'
+        "They are deleted at the start of an evaluation, when the instance (main) starts and at the interval below, and by the skill tuning worker at the interval below (for all instances it serves)."
+    ),
+    'skill_lab.temp_cleanup_interval_hours': (
+        'Interval (hours, decimals allowed) of the automatic deletion check above.'
+    ),
+    'skill_lab.record_thinking_chars': (
+        "Maximum number of characters of the assistant's thoughts kept in the evaluation records (results.json) (per LLM call; when exceeded, the first quarter and the end are kept and the middle is omitted).\n"
+        'The AI fixes and the AI judge of the Skill Lab use them to analyze, for example, why a skill was not chosen (how much is passed is [skill_lab_worker] excerpt_thinking_chars). 0 does not keep them.'
+    ),
+    'skill_lab.copy_memory_types': (
+        'Memory types copied from the production memory (of the instance being evaluated) when an evaluation starts (comma-separated: user / feedback / project / reference / glossary).\n'
+        'The evaluation memory starts empty every time (so that answers written in one run cannot be read in later runs), but without the in-house glossary the assistant cannot interpret words as in production. '
+        'Only memories anyone can read in production are copied (common ones and the shared ones of each user; ones with personal or confidential markers are excluded), and changes during the evaluation do not affect production. Empty copies nothing.'
+    ),
+    'skill_lab.verify_timeout_seconds': (
+        "Time limit (seconds) of a case's verify_script (a script that checks the files in the working folder after the conversation). When exceeded, the case fails."
     ),
     'path_memory.dir': (
         'Directory where path memory (src/path_memory.py) saves the per-conversation registry files (<thread_id>.json).'

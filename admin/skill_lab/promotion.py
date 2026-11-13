@@ -187,10 +187,9 @@ def check(instances_root: Path, directory: Path, *, distribute_to: list[str] | N
     tryout = data.get("tryout")
     result.problems += themes.tryout_matches(directory, tryout)
     if tryout:
-        if (tryout.get("repeat") or 0) < target_cfg.skill_tryout_repeats:
-            result.problems.append(
-                f"Not enough tryout runs: {tryout.get('repeat')} (required: {target_cfg.skill_tryout_repeats} or more)"
-            )
+        required = themes.tryout_repeats(data, target_cfg)  # テーマの設定（無ければ [skill_lab] tryout_repeats）
+        if (tryout.get("repeat") or 0) < required:
+            result.problems.append(f"Not enough tryout runs: {tryout.get('repeat')} (required: {required} or more)")
         if tryout.get("ai_verdict") != "pass":
             result.problems.append("The tryout did not pass every run")
         if tryout.get("instance") != instance:

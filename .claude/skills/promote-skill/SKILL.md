@@ -1,6 +1,6 @@
 ---
 name: promote-skill
-description: Locohane の利用者が skill-creator で作ったドラフトスキル（../Locohane_Agent-Settings/data/<インスタンス名>/skill_drafts/<ユーザー名>/<スキル名>/）を、スキル安定化トライアウト（同じ eval ケースを config.ini [skill_creator].tryout_repeats 回ずつ繰り返し、全回合格）に通したうえで、スキル開発者の承認を得て、そのインスタンス専用の正式スキル置き場（[skill_lab].instance_locohane_dir の skills/、既定 <instances_dir>/<インスタンス名>/skills/）へ昇格させ、ドラフトはアーカイブする。不合格なら理由を付けて作成者へ差し戻す。「ドラフトを昇格して」「ドラフトスキルを正式化して」「skill_draftsを見て」「/promote-skill」等で使う。ドラフトの修正はしない（合否の関門役）。正式スキルのチューニングは tune-prompt、ケースの新規作成は create-eval-case の担当。
+description: Locohane の利用者が skill-creator で作ったドラフトスキル（../Locohane_Agent-Settings/data/<インスタンス名>/skill_drafts/<ユーザー名>/<スキル名>/）を、スキル安定化トライアウト（同じ eval ケースを config.ini [skill_lab].tryout_repeats 回ずつ繰り返し、全回合格）に通したうえで、スキル開発者の承認を得て、そのインスタンス専用の正式スキル置き場（[skill_lab].instance_locohane_dir の skills/、既定 <instances_dir>/<インスタンス名>/skills/）へ昇格させ、ドラフトはアーカイブする。不合格なら理由を付けて作成者へ差し戻す。「ドラフトを昇格して」「ドラフトスキルを正式化して」「skill_draftsを見て」「/promote-skill」等で使う。ドラフトの修正はしない（合否の関門役）。正式スキルのチューニングは tune-prompt、ケースの新規作成は create-eval-case の担当。
 ---
 
 # promote-skill: ドラフトスキルの昇格

@@ -41,7 +41,6 @@ import sys
 import time
 import uuid
 import weakref
-from dataclasses import replace
 from pathlib import Path
 
 # 完全オフライン運用を保証するための防御的な無効化（import より前に設定）。
@@ -88,7 +87,7 @@ from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, Tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.errors import GraphRecursionError
 
-from src.agent_types import render_agent_types_block, scan_agent_types
+from src.agent_types import scan_agent_types
 from src.chat_log import (
     append_resume_marker,
     append_turn,
@@ -101,11 +100,7 @@ from src.cleanup import run_cleanup_dirs_loop as cleanup_run_cleanup_dirs_loop
 from src.cleanup import run_cleanup_files_in_subdirs_loop as cleanup_run_cleanup_files_in_subdirs_loop
 from src.cleanup import run_cleanup_loop as cleanup_run_cleanup_loop
 from src.config import (
-    expand_config_vars,
     load_config,
-    render_agent_type_run_script_allowlist_block,
-    render_memory_visibility_block,
-    render_plan_approval_exempt_scripts_block,
     with_reasoning_effort,
 )
 from src.context_compaction import (
@@ -144,18 +139,10 @@ from src.llm import (
 from src.llm.thinking_control import unknown_tool_names
 from src.log_rotation import LineCountRotatingFileHandler
 from src.mcp_client import init_mcp_tools, shutdown_mcp_tools
-from src.memory import MEMORY_INDEX_MARKER, render_memory_block
 from src import ask_reconnect
 from src.ask_relay import pending_asks as _pending_asks, resolve_pending_ask
 from src.plan_persist import plan_message_id, register_plan_persist
-from src.project_instructions import render_project_instructions_block
 from src.skills import (
-    build_system_prompt_from_block,
-    filter_skills_for_agent_type,
-    filter_skills_for_main_agent_guard,
-    render_skills_block,
-    render_skills_block_with_guard_annotation,
-    render_skills_block_with_hint,
     scan_skills,
 )
 from src.subagent import is_truncated_result
@@ -171,7 +158,6 @@ from src.tools import (
     forget_session_tool_semaphores,
     get_all_tools,
     init_tools,
-    list_blocked_tool_names_for_hint,
     probe_workdir_access,
     register_raw_unc_paths_in_text,
     reset_call_history_guards_after_compaction,
@@ -182,7 +168,7 @@ from src.tools._plan_render import _render_plan_payload
 from src.tools._path_memory_helpers import _register_path_memory
 from src.tools._state import SESSION_REASONING_EFFORT_KEY
 from src.tools._workdir import _build_workdir_status_info, _resolve_exec_workdir
-from src.tools.vector_db_tools import render_document_collections_block
+from src.system_prompt_builder import build_prompts, fill_session_parts
 
 # dispatch_agent（サブエージェント）由来のメッセージに付与する author 名。
 # frontend/src/utils/messageTree.ts の SUBAGENT_MESSAGE_AUTHOR、
@@ -1928,7 +1914,7 @@ async def _setup() -> None:
 
     実行内容:
     1. ログ出力先を設定する（_config はモジュール読み込み時に読み込み済み）。
-    2. scan_skills() でスキルを走査し、build_system_prompt_from_block() で
+    2. scan_skills() でスキルを走査し、src/system_prompt_builder.py の build_prompts() で
        システムプロンプトを組み立てる（第1段階 Discovery）。
     3. init_tools() でツール（read_skill/read_skill_file/run_script/
        execute_python_code/dispatch_agent/メモリー系ツール）に skills ルート・
@@ -2047,38 +2033,6 @@ async def _setup() -> None:
     # 第1段階 Discovery: スキルを走査して name+description をシステムプロンプトへ。
     # skills_dir と locohane_skills_dirs をマージ（同名は locohane 側優先）。
     skills = scan_skills([_config.skills_dir, *_config.locohane_skills_dirs])
-    # メインエージェントの system_prompt に差し込む {{skills}}/{{main_agent_blocked_tools_hint}}
-    # は [main_agent_tool_guard].visibility_mode の値だけで組み立て方が変わる
-    # （dispatch_agent配下のサブエージェント用 {{skills}} は下記の通り本ガードと無関係に
-    # skills から別途組み立てるため、いずれのモードでもスキル自体は失われない）。
-    # main_agent_tool_guard_mode（呼び出し制限そのもののON/OFF/範囲）とは独立した軸で、
-    # mode=false の場合は filter_skills_for_main_agent_guard 等が内部で
-    # 絞り込み・ブロックを行わなくなるため、strict/hint を選んでも自然に
-    # 「全部見せる」として振る舞う。visibility_modeの対象はスキル一覧＋ビルトイン
-    # ツールのヒント表示だが、blocked_tools_hint は get_all_tools()（ビルトイン+MCP）
-    # 全体が対象のため、mode=all の場合はMCP動的ツール名もヒントに混ざりうる
-    # （mode=tools_skills_only ならMCPは常に許可されるため混ざらない）。
-    #   visibility_mode=all   : 全スキル名・descriptionを一覧に表示するが、直接実行不可な
-    #                          分は description の末尾に注記を追記し、呼べないビルトイン
-    #                          ツール名一覧もテキストで案内する（bindはしない）。
-    #   visibility_mode=hint  : 全スキル名を列挙しつつ直接実行不可な分は description を
-    #                          固定文言に差し替え、呼べないビルトインツール名一覧も
-    #                          テキストで案内する（bindはしない。無駄な往復を避けるため）。
-    #   visibility_mode=strict: 直接実行できないスキルは一覧から除外する（従来の挙動）。
-    if _config.main_agent_tool_guard_visibility_mode in ("all", "hint"):
-        if _config.main_agent_tool_guard_visibility_mode == "all":
-            main_skills_block = render_skills_block_with_guard_annotation(skills, _config)
-        else:
-            main_skills_block = render_skills_block_with_hint(skills, _config)
-        blocked_names = list_blocked_tool_names_for_hint(get_all_tools(), _config)
-        blocked_tools_hint = (
-            "The following built-in tools cannot be called directly (delegate to dispatch_agent if you need details or execution): " + ", ".join(blocked_names)
-            if blocked_names
-            else ""
-        )
-    else:
-        main_skills_block = render_skills_block(filter_skills_for_main_agent_guard(skills, _config))
-        blocked_tools_hint = ""
     # ループ検知が本文だけを監視する設定で思考予算も無制限だと、思考のループを
     # 止めるものが無くなる。
     if (
@@ -2099,73 +2053,12 @@ async def _setup() -> None:
                 "[thinking_control].after_tools contains unknown tool names (MCP tools may be false positives depending on connection state): %s",
                 ", ".join(unknown),
             )
-    # ユーザー別ドラフトスキル（src/skill_drafts.py）はセッションごとに見える範囲が
-    # 違うため、ここでは目印だけを一覧の末尾に残し、_rebuild_graph() で差し替える。
-    main_skills_block = f"{main_skills_block}{skill_drafts.DRAFT_SKILLS_MARKER}"
-    system_prompt = build_system_prompt_from_block(main_skills_block, _config.system_prompt_path).replace(
-        "{{main_agent_blocked_tools_hint}}", blocked_tools_hint
-    )
-    # エージェント種別（agents/*.md、ClaudeCode の .claude/agents/*.md 相当）を走査し、
-    # 各種別のシステムプロンプトにも {{skills}}/{{agent_types}} を差し込む
-    # （本文で {{agent_types}} を使う種別が dispatch_agent の委譲先一覧を参照できるようにするため）。
+    # メインエージェント・サブエージェントのシステムプロンプト（src/system_prompt_builder.py。評価 evals/run_case.py と共通）。
+    # ユーザーごとに変わる部分（ドラフトスキル・メモリーの索引）は目印のまま残し、_rebuild_graph() で差し替える。
     # agents_dir と locohane_agents_dirs をマージ（同名は locohane 側優先）。
-    # {{skills}} は [subagent].agent_type_run_script_allowlist に登録がある種別だけ
-    # 登録スキルへ絞る（run_script で呼べないスキルを載せても拒否されるだけのため）。
-    # 絞り込みたくない種別は {{all_skills}} を使うと全スキル一覧が載る。
-    agent_type_defs = scan_agent_types([_config.agents_dir, *_config.locohane_agents_dirs])
-    agent_types_block = render_agent_types_block(agent_type_defs)
-    all_skills_block = render_skills_block(skills)
-    agent_type_defs = [
-        replace(
-            a,
-            system_prompt=a.system_prompt.replace(
-                "{{skills}}",
-                render_skills_block(
-                    filter_skills_for_agent_type(skills, a.name, _config.subagent_agent_type_run_script_allowlist)
-                ),
-            )
-            .replace("{{all_skills}}", all_skills_block)
-            .replace("{{agent_types}}", agent_types_block)
-            .replace(
-                "{{run_script_allowlist}}",
-                render_agent_type_run_script_allowlist_block(a.name, _config.subagent_agent_type_run_script_allowlist),
-            ),
-        )
-        for a in agent_type_defs
-    ]
-    # 永続メモリーの索引はユーザー別（自分 → 共通 → 他のユーザーの共有のもの）のため、ここでは目印だけを残し、
-    # セッションごとに _apply_session_draft_skills() が差し替える（起動後に増えたメモリーも次の会話から載る）。
-    # subagent 側には差し込まない。
-    system_prompt = system_prompt.replace("{{memory}}", MEMORY_INDEX_MARKER)
-    # dispatch_agent が選べるエージェント種別一覧を {{agent_types}} へ差し込む。
-    system_prompt = system_prompt.replace("{{agent_types}}", agent_types_block)
-    # 計画承認（Plan Mode）を免除される読み取り専用スクリプトのホワイトリストを
-    # {{plan_approval_exempt_scripts}} へ差し込む（config.ini の値が唯一の正）。
-    system_prompt = system_prompt.replace(
-        "{{plan_approval_exempt_scripts}}",
-        render_plan_approval_exempt_scripts_block(_config.plan_approval_exempt_scripts),
+    system_prompt, agent_type_defs = build_prompts(
+        _config, skills, scan_agent_types([_config.agents_dir, *_config.locohane_agents_dirs])
     )
-    # config.ini の値を ${変数名} として埋め込めるよう展開する（{{...}}置換完了後に行う）。
-    system_prompt = expand_config_vars(system_prompt, _config)
-    # .locohane/LOCOHANE.md はユーザー自由記述のため ${...} を偶然含んでいても
-    # expand_config_vars() の未定義変数エラーで起動が落ちないよう、config変数展開が
-    # 完了した後の最後の差し込みとして扱う。
-    system_prompt = system_prompt.replace(
-        "{{project_instructions}}",
-        render_project_instructions_block(_config.project_instructions_paths),
-    )
-    # メモリーの公開範囲の決め方（[memory]）。振り分け基準は管理者の自由記述のため、project_instructions と同じく
-    # config 変数の展開の後に差し込む。
-    system_prompt = system_prompt.replace("{{memory_visibility}}", render_memory_visibility_block(_config))
-
-    # サブエージェント共通の注意事項（反復回数の定義・フォールバック方針）を、
-    # agents/*.md ファイル自体には書き込まず、各 agent_type の system_prompt
-    # （メモリ上の文字列）の末尾に自動連結する。
-    subagent_common = expand_config_vars(
-        (_config.system_prompt_path.parent / "subagent_common.md").read_text(encoding="utf-8"),
-        _config,
-    )
-    agent_type_defs = [replace(a, system_prompt=f"{a.system_prompt}\n\n{subagent_common}") for a in agent_type_defs]
 
     # ツールに skills ルート等を注入（dispatch_agent 用にエージェント種別定義も渡す）。
     # locohane_skills_dirs を逆順で先に置くことで、read_skill/run_script/analyze_image 等の
@@ -2307,6 +2200,18 @@ async def _setup() -> None:
             )
         )
 
+    # 評価（スキル研究室・evals）の一時フォルダ（[skill_lab].temp_dir）に強制終了等で残ったものも、
+    # 起動時1回 + 定期ループで片付ける（評価の開始時にも片付けるが、評価が動かない間も残さないため）。
+    from evals import temp_dirs as _eval_temp_dirs
+
+    _eval_temp_dirs.cleanup_stale(_config.skill_lab_temp_dir, _config.skill_lab_temp_retention_hours)
+    if _config.skill_lab_temp_retention_hours > 0:
+        asyncio.create_task(
+            _eval_temp_dirs.cleanup_loop(
+                _config.skill_lab_temp_dir, _config.skill_lab_temp_retention_hours, _config.skill_lab_temp_cleanup_interval_hours
+            )
+        )
+
     # P0-3: httpcore の cancel scope breakage 検知フィルタを登録する。
     # _setup() は一度だけ呼ばれるため、ここで登録すれば十分（冪等処理あり）。
     _register_cancel_scope_watcher()
@@ -2362,10 +2267,7 @@ async def _rebuild_graph(thread_id: str, *, wait_when_busy: bool = True):
     # 2026-08-26 監査で発見した既存の軽微なエッジケースの修正）。
     set_current_session(thread_id, tab_id=cl.context.session.id)
     # ナレッジのコレクション一覧は取り込みで変わるため、起動時ではなく組み立てのたびに差し込む。
-    system_prompt = (
-        _apply_session_draft_skills().replace("{{document_collections}}", render_document_collections_block(_config))
-        + i18n.response_language_directive()
-    )
+    system_prompt = _apply_session_draft_skills() + i18n.response_language_directive()
     # 組み立てに使った言語。画面で言語を切り替えたら on_message が比べて組み直す。
     cl.user_session.set("graph_lang", i18n.current_lang())
     # 入力欄ツールバーで選んだ reasoning_effort（on_message が送信時の値を入れる）。
@@ -2396,9 +2298,8 @@ def _apply_session_draft_skills() -> str:
     drafts = skill_drafts.scan_visible_drafts(_config, draft_user)
     cl.user_session.set("visible_draft_names", [d.skill.name for d in drafts if d.readable])
     cl.user_session.set("drafts_signature", skill_drafts.drafts_signature(drafts))
-    return _system_prompt.replace(
-        skill_drafts.DRAFT_SKILLS_MARKER, skill_drafts.render_draft_skills_block(drafts)
-    ).replace(MEMORY_INDEX_MARKER, render_memory_block(_config.memory_dir, viewer=draft_user))
+    # ナレッジのコレクション一覧もここで差し込む（src/system_prompt_builder.py。評価と共通）。
+    return fill_session_parts(_system_prompt, _config, drafts=drafts, memory_viewer=draft_user)
 
 
 @cl.on_stop

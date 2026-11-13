@@ -40,6 +40,9 @@ class CreateThemeBody(BaseModel):
 class UpdateThemeBody(BaseModel):
     title: str | None = None
     lab: str | None = None
+    # トライアウトの回数（このテーマだけ）。null を送ると設定を外して既定（[skill_lab] tryout_repeats）に戻す。
+    # 送らなければ変えない（model_fields_set で見分ける）。
+    tryout_repeats: int | None = None
 
 
 class AddAssetBody(BaseModel):
@@ -188,6 +191,32 @@ def build_router(
             raise HTTPException(status_code=409, detail=_t("ループ・トライアウトの実行中は編集できません。先に停止してください。"))
         return data
 
+    def _reference_problems(name: str, directory: Path) -> dict[str, list[str]]:
+        """ケースが確かめる名前のうち、対象インスタンスに無いもの（themes.case_reference_problems）。
+
+        ツール名の一覧は別プロセスで求めるため、まだ求め終わっていなければツール名は確かめない（画面を待たせない）。
+        """
+        try:
+            cfg = _cfg(name)
+            assets = themes.list_assets(directory)
+            skills = {s["name"] for s in sources.list_official_skills(cfg)} | set(assets["skills"])
+            agents = {a["name"] for a in sources.list_official_agents(cfg)} | set(assets["agents"])
+            try:
+                tools = sources.main_agent_tool_names(timeout=0)
+            except RuntimeError:
+                tools = None
+            return themes.case_reference_problems(directory, skills=skills, agents=agents, tools=set(tools) if tools else None)
+        except Exception as exc:  # noqa: BLE001 - 点検できなくても画面・開始は止めない
+            logger.warning("Could not check the names referenced by the cases of %s: %s", directory.name, exc)
+            return {}
+
+    def _start_missing(name: str, directory: Path) -> list[str]:
+        missing = themes.start_missing(directory)
+        problems = _reference_problems(name, directory)
+        if problems:
+            missing.append(_t("③ 試験問題の直し（存在しない名前を確かめている: {0}）", ", ".join(sorted(problems))))
+        return missing
+
     def _summary(directory: Path) -> dict:
         data = themes.read_or_none(directory)
         if data is None:
@@ -299,7 +328,11 @@ def build_router(
             "fixtures": themes.list_fixtures(directory),
             "tryout_problems": themes.tryout_matches(directory, data.get("tryout")) if data.get("tryout") else None,
             "labs": _labs(),
-            "start_missing": themes.start_missing(directory),
+            # トライアウトの回数の既定（対象インスタンスの [skill_lab] tryout_repeats）と、このテーマで使う回数
+            "tryout_repeats_default": _cfg(name).skill_lab_tryout_repeats,
+            "tryout_repeats_effective": themes.tryout_repeats(data, _cfg(name)),
+            "start_missing": _start_missing(name, directory),
+            "case_reference_problems": _reference_problems(name, directory),
         }
 
     @router.put("/api/instances/{name}/skill-lab/themes/{theme_id}")
@@ -311,13 +344,25 @@ def build_router(
         if body.lab is not None and themes.read(directory).get("status") in themes.ACTIVE_STATUSES:
             # 実行中に担当を替えると、元のワーカーが続けている間に新しいワーカーも同じテーマを拾ってしまう。
             raise HTTPException(status_code=409, detail=_t("ループ・トライアウトの実行中・開始待ちの間は担当のワーカーを変えられません。先に停止してください。"))
+        set_repeats = "tryout_repeats" in body.model_fields_set
+        if set_repeats:
+            if body.tryout_repeats is not None and not 1 <= body.tryout_repeats <= 1000:
+                raise HTTPException(status_code=400, detail=_t("トライアウトの回数は 1〜1000 の整数にしてください（空欄なら既定の回数）。"))
+            if themes.read(directory).get("status") in themes.ACTIVE_STATUSES and body.tryout_repeats != themes.read(directory).get("tryout_repeats"):
+                # 実行中に変えると、ループの途中で合格の基準が変わる。
+                raise HTTPException(status_code=409, detail=_t("ループ・トライアウトの実行中・開始待ちの間はトライアウトの回数を変えられません。先に停止してください。"))
 
         def _apply(d: dict) -> None:
             if body.title is not None and body.title.strip():
                 d["title"] = body.title.strip()
             if body.lab is not None:
                 d["lab"] = body.lab or None
-            themes.add_history(d, user, "update", f"title={d['title']} lab={d.get('lab')}")
+            if set_repeats:
+                if body.tryout_repeats is None:
+                    d.pop("tryout_repeats", None)
+                else:
+                    d["tryout_repeats"] = body.tryout_repeats
+            themes.add_history(d, user, "update", f"title={d['title']} lab={d.get('lab')} tryout_repeats={d.get('tryout_repeats') or 'default'}")
 
         themes.update(directory, _apply)
         _audit(request, user, name, "skill_lab_theme_update", theme=theme_id)
@@ -560,7 +605,7 @@ def build_router(
             if not str(body.params.get("request") or "").strip():
                 raise HTTPException(status_code=400, detail=_t("何をさせたいかを書いてください。"))
         try:
-            task_id = themes.add_task(directory, body.type, body.params, actor=user)
+            task_id = themes.add_task(directory, body.type, body.params, actor=user, lang=current_lang())
         except themes.ThemeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _audit(request, user, name, "skill_lab_task", theme=theme_id, task=body.type)
@@ -577,17 +622,17 @@ def build_router(
         data = _guard_editable(directory)
         if body.mode not in ("loop", "tryout"):
             raise HTTPException(status_code=400, detail=_t("mode は loop か tryout にしてください。"))
-        missing = themes.start_missing(directory)
+        missing = _start_missing(name, directory)
         if missing:
             raise HTTPException(status_code=400, detail=_t("開始するには次を入れてください: {0}", (", " if current_lang() == "en" else "、").join(missing)))
         labs = _labs()
         lab = data.get("lab")
         if lab and lab not in {x["name"] for x in labs}:
-            raise HTTPException(status_code=400, detail=_t("担当のスキル調整ワーカー {0} が見つかりません。「担当・名前を変更」で選び直してください。", lab))
+            raise HTTPException(status_code=400, detail=_t("担当のスキル調整ワーカー {0} が見つかりません。「テーマの設定」で選び直してください。", lab))
         if not lab and len(labs) != 1:
             raise HTTPException(
                 status_code=400,
-                detail=_t("担当のスキル調整ワーカーを選んでください（「担当・名前を変更」）。") if labs else _t("スキル調整ワーカーがありません。先にインスタンス一覧で作成してください。"),
+                detail=_t("担当のスキル調整ワーカーを選んでください（「テーマの設定」）。") if labs else _t("スキル調整ワーカーがありません。先にインスタンス一覧で作成してください。"),
             )
         pending = [t for t in data.get("tasks") or [] if t.get("type") != "trial" and t.get("status") in ("queued", "running")]
         if pending:
@@ -604,7 +649,8 @@ def build_router(
             d["status"] = themes.STATUS_QUEUED
             d["lab"] = lab
             # by: 「利用量・料金」でこのループの AI 利用を誰の分として数えるか（worker.py の _usage_owner）。
-            d["loop"] = {"mode": body.mode, "queued_at": themes.now_iso(), "stop_requested": False, "by": user}
+            # lang: インスタンスの [ui].default_language が auto のとき、AI の判定理由・要因分析をこの言語で書かせる。
+            d["loop"] = {"mode": body.mode, "queued_at": themes.now_iso(), "stop_requested": False, "by": user, "lang": current_lang()}
             themes.add_history(d, user, "start", body.mode)
 
         themes.update(directory, _apply)

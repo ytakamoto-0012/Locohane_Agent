@@ -41,7 +41,6 @@ import json
 import shutil
 import subprocess
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -52,7 +51,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from evals.case_schema import load_case  # noqa: E402
-from evals.instance import resolve_instance_name  # noqa: E402
+from evals import temp_dirs  # noqa: E402
+from evals.instance import instance_config, resolve_instance_name  # noqa: E402
 from evals.skill_tree import FIXTURES_DIRNAME, cases_sha256, file_sha256, tree_sha256  # noqa: E402
 # 無言終了時の自動リトライ（src/graph.py の ainvoke_ensuring_final_text、
 # 既定 max_retries=2）や大量画像を扱うケースはグラフの ainvoke が複数回・
@@ -300,6 +300,11 @@ def main() -> int:
     parser.add_argument("--config-patch", type=Path, help="run_case.py の --config-patch へ渡す")
     parser.add_argument("--llm-from-instance", help="run_case.py の --llm-from-instance へ渡す")
     parser.add_argument(
+        "--stop-on-fail",
+        action="store_true",
+        help="機械判定で不合格・エラーの回が出たら、残りの回を実行せずに終える（トライアウトの早期打ち切り。結果は不合格）",
+    )
+    parser.add_argument(
         "--keep-outputs",
         action="store_true",
         help="各回の作業フォルダで作られた文書ファイルを結果フォルダの outputs/<ケース>[_r<回>]/ へ残す（run_case.py の --keep-outputs）",
@@ -329,9 +334,11 @@ def main() -> int:
     source_cases_dir = case_paths[0].parent
 
     print(f"対象インスタンス: {instance_name}", file=sys.stderr)
+    # 一時フォルダは OS の一時フォルダではなく、対象インスタンスの [skill_lab].temp_dir に作る（evals/temp_dirs.py）。
+    temp_root = temp_dirs.config_root(instance_config(instance_name))
     # 結果フォルダ名（終了時刻）が決まるまで、残す生成物はここへ溜める（下の tmp は先に消える）
-    kept_outputs = Path(tempfile.mkdtemp(prefix="evals_outputs_")) if args.keep_outputs else None
-    with tempfile.TemporaryDirectory(prefix="evals_run_all_", ignore_cleanup_errors=True) as tmp:
+    kept_outputs = temp_dirs.make_dir(temp_root, "outputs_") if args.keep_outputs else None
+    with temp_dirs.temporary(temp_root, "run_all_") as tmp:
         # ケースと --skill-overlay のスキルを開始時点の内容で固定する。--repeat の
         # 途中でドラフトが編集されても、全回を同じ内容で評価するため。ケースは
         # 対象外のものも含めてフォルダごと写し、ハッシュはその写しで求める
@@ -385,9 +392,12 @@ def main() -> int:
         }
 
         results = []
+        stopped_early = False
         # 同じケースを続けて回すより、ケースを一巡してから次の回へ進む方が、
         # 途中で打ち切っても全ケースの回数が揃う（各結果には repeat_index を付ける）。
         for repeat_index in range(1, args.repeat + 1):
+            if stopped_early:
+                break
             for path in run_paths:
                 label = f"（{repeat_index}/{args.repeat}回目）" if args.repeat > 1 else ""
                 print(f"実行中: {path.name}{label}", file=sys.stderr)
@@ -408,6 +418,11 @@ def main() -> int:
                 if args.repeat > 1:
                     result["repeat_index"] = repeat_index
                 results.append(result)
+                if args.stop_on_fail and _classify(result) in ("fail", "error"):
+                    # 1回でも落ちればトライアウトは不合格。残りの回（既定10回×ケース数）を回す時間を使わない。
+                    print(f"不合格のため打ち切り: {path.name}（{repeat_index}回目）", file=sys.stderr)
+                    stopped_early = True
+                    break
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_root = args.results_dir.resolve() if args.results_dir else PROJECT_ROOT / "evals" / "results" / target
@@ -423,6 +438,8 @@ def main() -> int:
     # tryout.json は --repeat 1 でも必ず書く（昇格の照合と skill-creator の
     # run_isolated_eval.py が、評価した内容のハッシュを読むため）。
     report = {**_tryout_report(results, args.repeat), "instance": instance_name, **snapshot_info}
+    if stopped_early:
+        report["stopped_early"] = True
     (out_dir / "tryout.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     if args.repeat > 1:
         summary = f"{summary}\n{_render_tryout(report)}"

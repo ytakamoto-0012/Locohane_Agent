@@ -74,7 +74,7 @@ def _instance_config(name: str) -> dict:
     code = (
         "import json,sys; from evals.instance import apply_instance; apply_instance(sys.argv[1]);"
         "from src.config import load_config; c=load_config();"
-        "print(json.dumps({'draft_dir': str(c.skill_draft_dir), 'tryout_repeats': c.skill_tryout_repeats,"
+        "print(json.dumps({'draft_dir': str(c.skill_draft_dir), 'tryout_repeats': c.skill_lab_tryout_repeats,"
         "'skills_roots': [str(c.skills_dir), *[str(d) for d in c.locohane_skills_dirs]],"
         "'dest_root': str(c.instance_locohane_dir / 'skills'), 'archive_dir': str(c.skill_archive_dir)}))"
     )

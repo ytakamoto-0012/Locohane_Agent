@@ -13,6 +13,8 @@ const LAB_STATUS_LABELS = {
   running: _t("実行中"),
   review: _t("レビュー待ち"),
   exhausted: _t("上限到達"),
+  blocked: _t("人の見直しが必要"),
+  stalled: _t("修正が行き詰まり"),
   error: _t("エラー"),
   stopped: _t("停止"),
   promoted: _t("昇格済み"),
@@ -254,7 +256,7 @@ function renderThemeHeader(state, header, container) {
     buttons.push(
       el("button", { class: "primary", text: _t("スキル調整ループを開始"), disabled: startDisabled, onclick: () => startTheme(state, "loop") }),
       el("button", { text: _t("トライアウトだけ実行"), disabled: startDisabled, onclick: () => startTheme(state, "tryout") }),
-      el("button", { text: _t("担当・名前を変更"), onclick: () => openThemeSettingsModal(state) }),
+      el("button", { text: _t("テーマの設定"), onclick: () => openThemeSettingsModal(state) }),
       el("button", {
         text: _t("取りやめ"),
         onclick: async () => {
@@ -281,21 +283,43 @@ function renderThemeHeader(state, header, container) {
     notes.push(el("p", { class: "warn-box", text: _t(`担当の スキル調整ワーカー {0} が起動していません。インスタンス一覧から起動してください。`, lab.display_name) }));
   }
   if (LAB_ACTIVE.includes(d.status) && !lab) {
-    notes.push(el("p", { class: "warn-box", text: _t("担当の スキル調整ワーカーが見つからないため、このままでは始まりません。停止してから「担当・名前を変更」で選び直してください。") }));
+    notes.push(el("p", { class: "warn-box", text: _t("担当の スキル調整ワーカーが見つからないため、このままでは始まりません。停止してから「テーマの設定」で選び直してください。") }));
   }
   if (editable && !lab) {
     notes.push(
       el("p", {
         class: "warn-box",
         text: d.lab
-          ? _t(`担当の スキル調整ワーカー {0} が見つかりません。「担当・名前を変更」で選び直してください。`, d.lab)
+          ? _t(`担当の スキル調整ワーカー {0} が見つかりません。「テーマの設定」で選び直してください。`, d.lab)
           : d.labs.length
-            ? _t("担当の スキル調整ワーカーが決まっていません。「担当・名前を変更」で選んでください。")
+            ? _t("担当の スキル調整ワーカーが決まっていません。「テーマの設定」で選んでください。")
             : _t("スキル調整ワーカーがありません。インスタンス一覧で種類「スキル調整ワーカー」を作成してください。"),
       }),
     );
   }
-  if (loop.message) notes.push(el("p", { class: "hint", text: loop.message }));
+  if (d.status === "blocked" && (loop.blockers || []).length) {
+    // AI 修正が「研究対象を直しても合格しない原因（ケース・仕様・環境）」を指摘してループを止めた
+    // （admin/skill_lab/worker.py の _stop_for_blockers）。
+    const kindLabel = { case: _t("原因: ケース"), spec: _t("原因: 仕様"), environment: _t("原因: 環境") };
+    notes.push(
+      el("div", { class: "warn-box" }, [
+        el("p", { text: _t("スキルを直しても合格しない原因が見つかったため、スキル調整ループを止めました。下の問題を直してから、もう一度開始してください。指摘が誤りなら、そのまま開始し直せます。") }),
+        el(
+          "ul",
+          {},
+          loop.blockers.map((p) =>
+            el("li", {}, [
+              el("strong", { text: `[${kindLabel[p.kind] || kindLabel.case}${p.case_id ? " " + p.case_id : ""}] ` }),
+              p.problem,
+              p.suggestion ? el("div", { class: "hint", text: _t("直し方の提案: {0}", p.suggestion) }) : null,
+            ]),
+          ),
+        ),
+      ]),
+    );
+  } else if (loop.message) notes.push(el("p", { class: "hint", text: loop.message }));
+  const report = labReport(d);
+  if (report) notes.push(report);
   if (LAB_CLOSED.includes(d.status)) {
     notes.push(el("p", { class: "hint", text: _t("このテーマは終わっています。「再開して編集」を押すと準備中に戻り、研究内容を直してスキル調整ループをもう一度回せます。") }));
   }
@@ -306,6 +330,57 @@ function renderThemeHeader(state, header, container) {
     ...notes,
     el("div", { class: "theme-actions" }, buttons),
   );
+}
+
+// 合格の多さ（admin/skill_lab/worker.py の _score: [全回合格のケース数, 合格率]）を「x/y 件」で表す。
+function labScoreText(cases) {
+  const list = Object.values(cases || {});
+  const full = list.filter((c) => c.pass && !c.fail && !c.error).length;
+  return _t("{0}/{1} 件合格", full, list.length);
+}
+
+// ループ・トライアウトの総括（worker.py の _write_report）と、改良前の版との比較（_evaluate_baseline）。
+function labReport(d) {
+  const report = (d.loop || {}).report;
+  const baseline = d.baseline_eval;
+  if (!report && !baseline) return null;
+  const items = [];
+  if (baseline) {
+    const last = (d.iterations || [])[d.iterations.length - 1];
+    items.push(
+      el("p", {
+        text: last
+          ? _t("改良前（取り込んだときの版）: {0} → 最新の評価（反復 {1}）: {2}", labScoreText(baseline.cases), last.n, labScoreText(last.cases))
+          : _t("改良前（取り込んだときの版）: {0}", labScoreText(baseline.cases)),
+      }),
+    );
+  }
+  if (report && report.summary) items.push(el("p", { class: "pre-wrap", text: report.summary }));
+  if (report && (report.iterations || []).length) {
+    const phase = { eval: _t("評価"), tryout: _t("トライアウト") };
+    items.push(
+      el(
+        "ul",
+        {},
+        report.iterations.map((it) =>
+          el("li", {
+            text: [
+              `#${it.n} ${phase[it.phase] || it.phase}: ${it.verdict === "pass" ? _t("合格") : _t("不合格")}`,
+              it.failed ? _t("落ちたケース: {0}", it.failed) : "",
+              it.stopped_early ? _t("（最初の不合格で打ち切り）") : "",
+              (it.fixed || []).length ? _t("直したファイル: {0}", it.fixed.join(", ")) : "",
+              it.reverted ? _t("（合格していたケースを壊したため取り消し）") : "",
+              it.blockers ? _t("（人の見直しが必要な原因を報告）") : "",
+            ]
+              .filter(Boolean)
+              .join(" "),
+          }),
+        ),
+      ),
+    );
+  }
+  if (report && report.restored_best) items.push(el("p", { class: "hint", text: report.restored_best }));
+  return el("details", { class: "lab-report", open: report ? "open" : null }, [el("summary", { text: report ? _t("ループの総括") : _t("改良前との比較") }), ...items]);
 }
 
 // 終わったテーマ（取りやめ・差し戻し・昇格済み）を準備中に戻す（admin/skill_lab/api.py の reopen）。
@@ -334,10 +409,32 @@ function openThemeSettingsModal(state) {
   const title = el("input", { type: "text" });
   title.value = d.title;
   const lab = labSelect(d.labs, d.lab);
+  // トライアウトの回数（このテーマだけ。空欄なら対象インスタンスの [skill_lab] tryout_repeats）
+  const repeats = el("input", { type: "number", min: 1, max: 1000, class: "narrow", placeholder: _t("既定 {0}", d.tryout_repeats_default) });
+  repeats.value = d.tryout_repeats || "";
   const ok = el("button", { class: "primary", type: "button", text: _t("保存") });
-  const m = labModal(_t("担当・名前を変更"), [el("label", {}, [_t("テーマ名"), title]), el("label", {}, [_t("担当の スキル調整ワーカー"), lab])], { actions: [ok] });
+  const m = labModal(
+    _t("テーマの設定"),
+    [
+      el("label", {}, [_t("テーマ名"), title]),
+      el("label", {}, [_t("担当の スキル調整ワーカー"), lab]),
+      el("label", {}, [
+        _t("トライアウトの回数（各ケースをこの回数ずつ実行し、全回合格で合格。空欄なら既定の {0} 回）", d.tryout_repeats_default),
+        repeats,
+      ]),
+    ],
+    { actions: [ok] },
+  );
   ok.addEventListener("click", async () => {
-    const res = await labAction(() => api(themePath(state.name, state.id), { method: "PUT", body: { title: title.value, lab: lab.value } }), m.errorBox);
+    const n = repeats.value.trim() ? Number(repeats.value) : null;
+    if (n !== null && !(Number.isInteger(n) && n >= 1 && n <= 1000)) {
+      m.errorBox.textContent = _t("トライアウトの回数は 1〜1000 の整数にしてください（空欄なら既定の回数）。");
+      return;
+    }
+    const res = await labAction(
+      () => api(themePath(state.name, state.id), { method: "PUT", body: { title: title.value, lab: lab.value, tryout_repeats: n } }),
+      m.errorBox,
+    );
     if (!res) return;
     m.close();
     await state.reload();
@@ -1004,13 +1101,34 @@ async function openAgentEditor(state, agent) {
 
 /* --- ケース --- */
 
+// 試験問題（cases/<ID>.yaml）を消す（admin/skill_lab/api.py の delete_file。ループ中・終わったテーマでは断られる）。
+// 入力ファイル（fixtures/）は他の問題でも使えるので消さない。トライアウトの結果は無効になる。
+async function deleteCase(state, c, err) {
+  const instruction = (c.turns || []).join(" → ");
+  let message = _t("試験問題 {0} を削除します。元に戻せません。よろしいですか？", c.id);
+  if (instruction) message += "\n" + _t("利用者の指示: {0}", instruction.length > 80 ? instruction.slice(0, 80) + "…" : instruction);
+  if (!confirm(message)) return;
+  if (await labAction(() => api(themePath(state.name, state.id, `/files?path=${encodeURIComponent(c.path)}`), { method: "DELETE" }), err)) {
+    await state.reload();
+    refreshThemeSections(state);
+  }
+}
+
 function renderThemeCases(state, body) {
   const d = state.data;
   const editable = themeEditable(state);
   const err = el("div", { class: "error" });
   const rows = d.cases_list.map((c) => [
     c.id,
-    c.error ? el("span", { class: "error", text: c.error }) : (c.turns || []).join(" → "),
+    c.error
+      ? el("span", { class: "error", text: c.error })
+      : (state.data.case_reference_problems || {})[c.id]
+        ? el("span", {}, [
+            (c.turns || []).join(" → "),
+            // 存在しないスキル・サブエージェント・ツールの名前を確かめている（綴り違い・古い名前。admin/skill_lab/api.py の _reference_problems）
+            el("div", { class: "error", text: state.data.case_reference_problems[c.id].join(" / ") }),
+          ])
+        : (c.turns || []).join(" → "),
     c.work_dir || "-",
     c.judge ? _t("あり") : "-",
     el("span", {}, [
@@ -1025,6 +1143,7 @@ function renderThemeCases(state, body) {
         { class: "link-btn inline-link", text: _t("1回試す"), onclick: () => addTask(state, "trial", { case_id: c.id }, err) },
         _t("試行中…"),
       ),
+      ...(editable ? [" ", linkBtn(_t("削除"), () => deleteCase(state, c, err))] : []),
     ]),
   ]);
   body.append(
@@ -1033,7 +1152,7 @@ function renderThemeCases(state, body) {
     el("p", { class: "hint", text: _t("例: 指示「この見積書をチェックして」（見積書のファイルを添えて）→ 合格の条件「回答に計算ミスの箇所が書かれている」") }),
     el("p", {
       class: "hint",
-      text: _t("「スキル調整ループを開始」を押すと、AI がこの試験を何度も解き、不合格ならスキルを直して解き直します。問題そのものが②と食い違っているときだけ、AI が問題の方を直すことがあります（直した内容は昇格前に確認できます）。"),
+      text: _t("「スキル調整ループを開始」を押すと、AI がこの試験を何度も解き、不合格ならスキルを直して解き直します。AI は問題を書き換えません。問題そのもの（指示・合格の決め方）に原因があると AI が判断したときは、ループを止めて知らせます。"),
     }),
     dataTable(["ID", _t("利用者の指示"), _t("使うファイル"), _t("AI が判断する点"), ""], rows, _t("まだ試験問題はありません。")),
     err,
@@ -1137,6 +1256,16 @@ async function openCaseEditor(state, caseId) {
   skillSel.value = readArgs || "";
   const agentSel = el("select", {}, [el("option", { value: "", text: _t("（確かめない）") }), ...[...assets.agents, ...state.sources.agents.map((a) => a.name)].filter((v, i, a) => a.indexOf(v) === i).map((n) => el("option", { value: n, text: n }))]);
   agentSel.value = dispatchArgs || "";
+  // 使ってはいけない場面の試験（evals/case_schema.py の tool_call_args_not_contains。委譲先の中の呼び出しも数える）
+  const notReadArgs = ((expect.tool_call_args_not_contains || {}).read_skill || {}).skill_name;
+  const notDispatchArgs = ((expect.tool_call_args_not_contains || {}).dispatch_agent || {}).agent_type;
+  const skillNotSel = el("select", {}, [...skillSel.options].map((o) => el("option", { value: o.value, text: o.text })));
+  skillNotSel.value = notReadArgs || "";
+  const agentNotSel = el("select", {}, [...agentSel.options].map((o) => el("option", { value: o.value, text: o.text })));
+  agentNotSel.value = notDispatchArgs || "";
+  // 生成物を機械的に確かめるスクリプト（ケースの verify_script。入力ファイルのフォルダ fixtures/ の中の .py）
+  const verifyScript = el("input", { type: "text", placeholder: _t("例: fixtures/sample/check.py") });
+  verifyScript.value = data.verify_script || "";
   const called = el("input", { type: "text", placeholder: _t("カンマ区切り（いずれかが呼ばれれば合格）") });
   called.value = (expect.tool_called_any || []).join(", ");
   const notCalled = el("input", { type: "text", placeholder: _t("カンマ区切り（どれも呼ばれなければ合格）") });
@@ -1178,6 +1307,10 @@ async function openCaseEditor(state, caseId) {
         el("label", {}, [_t("回答に必ず入っているべき言葉（1行に1つ）"), contains]),
         el("label", {}, [_t("回答に入っていてはいけない言葉（1行に1つ）"), notContains]),
         el("label", {}, [_t("AI が判断する点（言葉では決めにくい良し悪し。例: 指摘が具体的で、根拠の箇所が示されている）"), judgeArea]),
+        el("label", {}, [
+          _t("作ったファイルを確かめるスクリプト（入力ファイルのフォルダに置いた .py。作業フォルダと情報の JSON を受け取り、終了コード 0 なら合格）"),
+          verifyScript,
+        ]),
       ]),
       el("label", {}, [requiredLabel(_t("使うファイル（「試験問題で使うファイル」でアップロードしたフォルダ）"), false), workDir]),
       el("details", { class: "theme-advanced" }, [
@@ -1185,6 +1318,8 @@ async function openCaseEditor(state, caseId) {
         el("label", {}, [_t("問題の名前（英数字・-・_）"), id]),
         el("label", {}, [_t("このスキルを使ったか"), skillSel]),
         el("label", {}, [_t("このサブエージェントに任せたか"), agentSel]),
+        el("label", {}, [_t("このスキルを使ってはいけない（使わない場面の試験）"), skillNotSel]),
+        el("label", {}, [_t("このサブエージェントに任せてはいけない（使わない場面の試験）"), agentNotSel]),
         el("label", {}, [_t("使うべき機能（ツール名）"), called]),
         el("label", {}, [_t("使ってはいけない機能（ツール名）"), notCalled]),
         el("p", { class: "hint", text: _t("やり取りが続く場合: 利用者の指示に --- だけの行をはさむと、そこから先が2回目以降の発言になります。") }),
@@ -1217,12 +1352,18 @@ async function openCaseEditor(state, caseId) {
       delete rest.dispatch_agent;
       if (Object.keys(rest).length) exp.tool_call_args_contains = rest;
     }
+    const notArgs = { ...(expect.tool_call_args_not_contains || {}) };
+    delete notArgs.read_skill;
+    delete notArgs.dispatch_agent;
+    if (skillNotSel.value) notArgs.read_skill = { skill_name: skillNotSel.value };
+    if (agentNotSel.value) notArgs.dispatch_agent = { agent_type: agentNotSel.value };
+    if (Object.keys(notArgs).length) exp.tool_call_args_not_contains = notArgs;
     const csv = (s) => s.split(",").map((x) => x.trim()).filter(Boolean);
     if (csv(called.value).length) exp.tool_called_any = csv(called.value);
     if (csv(notCalled.value).length) exp.tool_not_called = csv(notCalled.value);
     if (linesOf(contains.value).length) exp.response_contains = linesOf(contains.value);
     if (linesOf(notContains.value).length) exp.response_not_contains = linesOf(notContains.value);
-    if (!Object.keys(exp).length && !judgeArea.value.trim()) {
+    if (!Object.keys(exp).length && !judgeArea.value.trim() && !verifyScript.value.trim()) {
       m.errorBox.textContent = _t("合格の決め方を1つ以上入れてください（回答に入っているべき言葉、または AI が判断する点など）。");
       return;
     }
@@ -1233,6 +1374,7 @@ async function openCaseEditor(state, caseId) {
       expect: Object.keys(exp).length ? exp : null,
       judge: judgeArea.value.trim() || null,
       work_dir: workDir.value || null,
+      verify_script: verifyScript.value.trim() || null,
       scripted_text_answers: linesOf(answers.value),
       auto_approve: autoApprove.checked,
       timeout_seconds: timeout.value ? Number(timeout.value) : null,
@@ -1251,7 +1393,12 @@ async function openCaseEditor(state, caseId) {
 // 機械判定（文字列・引数の完全一致）で落ちた回を見直した結果（admin/skill_lab/judge.py の review_rules）。
 function ruleReviewNote(review) {
   if (!review) return null;
-  const how = review.how === "normalized" ? _t("表記をそろえて照合") : _t("AI が中身を判定");
+  const how =
+    review.how === "normalized"
+      ? _t("表記をそろえて照合")
+      : review.how === "subagent"
+        ? _t("委譲先の呼び出しも照合")
+        : _t("AI が中身を判定");
   const verdict = review.pass ? _t("合格扱い") : _t("不合格");
   return el("p", { class: "hint" }, [
     el("strong", { text: _t(`機械判定の見直し（{0}）: {1} `, how, verdict) }),
@@ -1292,7 +1439,10 @@ function renderThemeRuns(state, body) {
     linkBtn(_t("詳しく"), () => openIterationDetail(state, it.n)),
   ]);
   body.append(
-    el("p", { class: "hint", text: _t("評価で失敗があると AI が原因を分析して直し、もう一度評価します。全ケースに合格したらトライアウト（対象インスタンスの tryout_repeats 回ずつ）を行い、全回合格でレビュー待ちになります。") }),
+    el("p", {
+      class: "hint",
+      text: _t("評価で失敗があると AI が原因を分析して直し、もう一度評価します。全ケースに合格したらトライアウト（各ケース {0} 回ずつ。回数は「テーマの設定」で変えられます）を行い、全回合格でレビュー待ちになります。", state.data.tryout_repeats_effective),
+    }),
     dataTable([_t("反復"), _t("種類"), _t("判定"), _t("ケースごとの合格"), _t("AI 修正"), ""], rows, _t("まだ実行していません。")),
   );
 }

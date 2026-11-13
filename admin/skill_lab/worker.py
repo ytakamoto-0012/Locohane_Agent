@@ -26,18 +26,47 @@ import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from evals import temp_dirs
 from src.config import PROJECT_ROOT
 
 from .. import ai_usage
 from .. import instances as inst
+from ..i18n import output_language as output_language_code
 from . import drafting, evaluation, fixer, judge, sources, themes
-from .llm import LabLLMError, usage_sink
+from .llm import LabLLMError, ask_text, current_output_language, output_language, usage_sink
 
 logger = logging.getLogger("skill_lab.worker")
 
 
 class _Stop(Exception):
     pass
+
+
+# runs/ の下の控え（一番よかった内容・直す前の内容）
+BEST_DIRNAME = "best"
+BEFORE_FIX_DIRNAME = "before_fix"
+
+# 止まったときに一番よかった内容へ戻す状態（合格・人の停止・エラーでは戻さない）
+_RESTORE_BEST_STATUSES = frozenset({"exhausted", "stalled", "blocked"})
+# 総括を残す状態（再開待ち・人の停止以外）
+_REPORT_STATUSES = frozenset({"review", "exhausted", "stalled", "blocked", "error", "draft"})
+
+_REPORT_SYSTEM = """You write the end-of-loop report of a skill tuning loop for the person in charge.
+The input is JSON: the final status, each iteration (phase, verdict, failed cases with pass counts, files fixed, analysis,
+whether the fix was reverted, blockers), the best iteration, whether the targets were restored to it, the results of the
+version before the changes (baseline) and the final message.
+Write 4 to 8 short lines: what was achieved (compare with the baseline if present), what still fails and the most likely
+reason, and what the person should do next (fix a case, the spec or the environment, lower the theme's tryout runs, review and promote, etc.).
+Write only facts that are in the input. Output plain text without headings."""
+
+
+def _score(iteration: dict) -> tuple[int, float]:
+    """反復の合格の多さ（全回合格したケースの数, 全回のうち合格した割合）。一番よかった内容を選ぶのに使う。"""
+    cases = iteration.get("cases") or {}
+    full = sum(1 for c in cases.values() if c.get("pass") and not c.get("fail") and not c.get("error"))
+    runs = sum(int(c.get("pass") or 0) + int(c.get("fail") or 0) + int(c.get("error") or 0) for c in cases.values())
+    ratio = round(sum(int(c.get("pass") or 0) for c in cases.values()) / runs, 4) if runs else 0.0
+    return full, ratio
 
 
 class Worker:
@@ -145,10 +174,46 @@ class Worker:
             themes.update(directory, _apply)
             logger.info("Returned the interrupted tasks of theme %s to the queue.", directory.name)
 
+    def sweep_temp_dirs(self) -> None:
+        """各インスタンス（kind=app）の評価の一時フォルダ（[skill_lab].temp_dir）に残ったごみを片付ける。
+
+        評価の子プロセスが強制終了されると一時フォルダが残る。本体（app.py）を動かしていない
+        インスタンスでも残さないよう、ワーカーが [skill_lab].temp_cleanup_interval_hours ごとに片付ける。
+        """
+        from src.config import load_config
+
+        seen: set[Path] = set()
+        for name in inst.list_instance_names(self.instances_root):
+            try:
+                if inst.read_instance(self.instances_root, name).is_skill_lab:
+                    continue
+                cfg = load_config(overrides_path=inst.overrides_path(self.instances_root, name), instance_name=name)
+            except Exception:  # noqa: BLE001 - 設定を読めないインスタンスは _theme_dirs() が警告する
+                continue
+            root = cfg.skill_lab_temp_dir.resolve()
+            if root in seen:
+                continue
+            seen.add(root)
+            removed = temp_dirs.cleanup_stale(root, cfg.skill_lab_temp_retention_hours)
+            if removed:
+                logger.info("Removed %d leftover evaluation temp folder(s) in %s", len(removed), root)
+
+    def _maybe_sweep_temp_dirs(self) -> None:
+        interval = float(getattr(self.config, "skill_lab_temp_cleanup_interval_hours", 1)) * 3600
+        now = time.monotonic()
+        if now < getattr(self, "_next_sweep", 0.0):
+            return
+        self._next_sweep = now + interval
+        try:
+            self.sweep_temp_dirs()
+        except Exception as e:  # noqa: BLE001 - 片付けの失敗でワーカーを止めない
+            logger.warning("Failed to clean up evaluation temp folders: %s", e)
+
     def run_forever(self) -> None:
         logger.info("Skill tuning worker %s started.", self.lab)
         recovered = False
         while not self.shutdown:
+            self._maybe_sweep_temp_dirs()
             try:
                 if not recovered:
                     self.recover()
@@ -205,9 +270,21 @@ class Worker:
 
         themes.update(directory, _apply)
 
+    def _output_lang(self, instance: str, requested: str | None) -> str:
+        """AI に書かせる文章の言語: 対象インスタンスの [ui].default_language（auto なら依頼した時の画面の言語）。"""
+        try:
+            setting = self._target_config(instance).ui_default_language
+        except Exception:  # noqa: BLE001 - 設定を読めなくても言語の決定で処理を止めない（評価・下書き側で同じ失敗が出る）
+            setting = None
+        return output_language_code(setting, requested)
+
     def _run_task(self, instance: str, directory: Path, task: dict) -> None:
         owner = task.get("by")
-        with usage_sink(lambda usage: self._record_usage(owner, usage)):
+        with (
+            usage_sink(lambda usage: self._record_usage(owner, usage)),
+            output_language(self._output_lang(instance, task.get("lang"))),
+            evaluation.limits(evaluation.ExcerptLimits.from_config(self.config)),
+        ):
             self._run_task_inner(instance, directory, task)
 
     def _run_task_inner(self, instance: str, directory: Path, task: dict) -> None:
@@ -343,17 +420,24 @@ class Worker:
             return
         if not picked["ok"]:
             return
-        owner = self._usage_owner(themes.read(directory))
-        with usage_sink(lambda usage: self._record_usage(owner, usage)):
+        current = themes.read(directory)
+        owner = self._usage_owner(current)
+        lang = self._output_lang(instance, (current.get("loop") or {}).get("lang"))
+        with (
+            usage_sink(lambda usage: self._record_usage(owner, usage)),
+            output_language(lang),
+            evaluation.limits(evaluation.ExcerptLimits.from_config(self.config)),
+        ):
             self._run_theme_body(instance, directory, mode)
 
     def _run_theme_body(self, instance: str, directory: Path, mode: str) -> None:
         try:
-            target_cfg = self._target_config(instance)
+            # トライアウトの回数はテーマの設定（無ければ対象インスタンスの [skill_lab] tryout_repeats）
+            repeats = themes.tryout_repeats(themes.read(directory), self._target_config(instance))
             if mode == "tryout":
-                self._tryout_only(instance, directory, target_cfg.skill_tryout_repeats)
+                self._tryout_only(instance, directory, repeats)
             else:
-                self._loop(instance, directory, target_cfg.skill_tryout_repeats)
+                self._loop(instance, directory, repeats)
         except (evaluation.EvaluationStopped, _Stop):
             if self.shutdown:
                 self._finish(directory, themes.STATUS_QUEUED, "interrupted because the lab stopped (resumes where it left off when restarted)")
@@ -364,6 +448,10 @@ class Worker:
             self._finish(directory, themes.STATUS_ERROR, f"{type(e).__name__}: {e}"[:2000])
 
     def _finish(self, directory: Path, status: str, detail: str) -> None:
+        restored = self._restore_best(directory) if status in _RESTORE_BEST_STATUSES else None
+        if restored:
+            detail = f"{detail}\n{restored}"
+
         def _apply(d: dict) -> None:
             d["status"] = status
             if d.get("loop"):
@@ -371,25 +459,43 @@ class Worker:
                 if status != themes.STATUS_QUEUED:
                     d["loop"]["deadline"] = None
                 d["loop"]["message"] = detail
+                if restored:
+                    d["loop"]["restored_best"] = restored
             themes.add_history(d, f"skill tuning worker {self.lab}", f"loop_{status}", detail)
 
         themes.update(directory, _apply)
+        if status in _REPORT_STATUSES:
+            self._write_report(directory, status)
 
     def _check_limits(self, directory: Path) -> str | None:
         data = themes.read(directory)
         loop = data.get("loop") or {}
+        message = None
         if loop.get("iterations_used", 0) >= self.config.skill_lab_max_iterations:
-            return f"Reached the iteration limit ({self.config.skill_lab_max_iterations})"
+            message = f"Reached the iteration limit ({self.config.skill_lab_max_iterations})"
         deadline = loop.get("deadline")
-        if deadline and datetime.now().astimezone() > datetime.fromisoformat(deadline):
-            return f"Reached the time limit ({self.config.skill_lab_max_hours} hours)"
-        return None
+        if not message and deadline and datetime.now().astimezone() > datetime.fromisoformat(deadline):
+            message = f"Reached the time limit ({self.config.skill_lab_max_hours} hours)"
+        if message:
+            # 最後の評価で落ちたケース（トライアウトなら何回中何回合格したか）を添える。ほとんど合格しているなら
+            # 答えがゆらいでいる（トライアウトの回数が厳しすぎる・ケースの条件が細かすぎる）見込みが高い。
+            last = (data.get("iterations") or [None])[-1]
+            failed = fixer.failed_cases_text(last) if last else ""
+            if failed:
+                message += f". Failed cases in the last evaluation ({last.get('phase')}): {failed}"
+        return message
 
     def _evaluate(self, instance: str, directory: Path, repeat: int, phase: str) -> dict:
-        """評価して AI judge まで行い、反復として記録する。"""
+        """評価して AI judge まで行い、反復として記録する。
+
+        ループ中は、合格の多さ（_score）が今までで一番よかった内容を runs/best/ に控える（_restore_best）。
+        トライアウトは [skill_lab_worker] tryout_stop_on_first_failure なら最初の不合格で打ち切る。
+        """
         data = themes.read(directory)
         n = len(data.get("iterations") or []) + 1
         run_dir = directory / themes.RUNS_DIRNAME / f"{n:03d}"
+        # 評価した内容（研究対象・ケース・設定パッチ）。AI 修正が同じ内容に戻したかの判定に使う（_stop_if_stalled）。
+        state_sha = themes.state_sha256(directory)
         run = evaluation.run(
             directory,
             instance=instance,
@@ -398,6 +504,7 @@ class Worker:
             results_root=run_dir,
             base_env=self.base_env,
             should_stop=lambda: self._stop_requested(directory),
+            stop_on_fail=phase == "tryout" and bool(getattr(self.config, "skill_lab_tryout_stop_on_first_failure", True)),
         )
         self._record_eval_usage(self._usage_owner(data), run["results"])
         spec = (directory / themes.SPEC_FILENAME).read_text(encoding="utf-8")
@@ -418,12 +525,22 @@ class Worker:
             "cases": per_case,
             "out_dir": run["out_dir"],
             "verdicts": verdicts,
+            "state_sha": state_sha,
         }
+        if (run.get("tryout") or {}).get("stopped_early"):
+            iteration["stopped_early"] = True
+        score = _score(iteration)
+        best = ((data.get("loop") or {}).get("best") or {}) if data.get("loop") else None
+        new_best = best is not None and (not best or tuple(best.get("score") or (0, 0)) < score)
+        if new_best:
+            themes.snapshot_targets(directory, directory / themes.RUNS_DIRNAME / BEST_DIRNAME)
 
         def _apply(d: dict) -> None:
             d.setdefault("iterations", []).append(iteration)
             if d.get("loop") is not None:
                 d["loop"]["iterations_used"] = d["loop"].get("iterations_used", 0) + 1
+                if new_best:
+                    d["loop"]["best"] = {"n": n, "phase": phase, "score": list(score), "state_sha": state_sha}
             if phase == "tryout" and passed:
                 d["tryout"] = {
                     **run["tryout"],
@@ -440,20 +557,56 @@ class Worker:
         themes.update(directory, _apply)
         return {"iteration": iteration, "run": run, "verdicts": verdicts, "passed": passed}
 
-    def _fix(self, instance: str, directory: Path, outcome: dict) -> None:
+    def _fix(self, instance: str, directory: Path, outcome: dict) -> list[dict]:
+        """AI に直させる。AI が研究対象の外の原因を指摘したら、研究対象は直さずにその指摘を返す（無ければ空）。
+
+        直す前の内容を runs/<反復>/before_fix/ に控える（次の評価で合格していたケースが落ちたら戻す。_revert_if_regressed）。
+        提案を適用できなかったとき（触るファイルが多すぎる・置き換え元が見つからない等）は、評価し直さずに1回だけ出し直させる。
+        """
         cfg = self.config
         data = themes.read(directory)
-        failures = fixer.failures_text(outcome["run"]["results"], outcome["verdicts"], cfg.skill_lab_transcript_excerpt_chars)
-        history = fixer.history_text(data.get("iterations") or [])
-        fix: dict = {}
-        try:
-            proposal = fixer.propose(self._llm_config(instance), directory, failures=failures, history=history, max_file_chars=cfg.skill_lab_fixer_max_file_chars)
-            applied, errors = fixer.apply_edits(directory, proposal["edits"], known_tools=list(sources.subagent_tool_names()))
-            fix = {"analysis": proposal["analysis"], "applied": applied, "errors": errors, "edits": len(proposal["edits"])}
-        except LabLLMError as e:
-            fix = {"analysis": "", "applied": [], "errors": [str(e)]}
         n = outcome["iteration"]["n"]
         run_dir = directory / themes.RUNS_DIRNAME / f"{n:03d}"
+        failures = fixer.failures_text(outcome["run"]["results"], outcome["verdicts"], cfg.skill_lab_transcript_excerpt_chars)
+        history = fixer.history_text(data.get("iterations") or [])
+        max_files = int(getattr(cfg, "skill_lab_fixer_max_files_per_fix", 2))
+        fix: dict = {}
+        try:
+            previous_errors: list[str] | None = None
+            for attempt in (1, 2):
+                proposal = fixer.propose(
+                    self._llm_config(instance),
+                    directory,
+                    failures=failures,
+                    history=history,
+                    max_file_chars=cfg.skill_lab_fixer_max_file_chars,
+                    previous_errors=previous_errors,
+                )
+                if proposal["blockers"]:
+                    # 原因が研究対象の外（ケース・仕様・環境）にあると、いくら直しても合格しない。研究対象は書き換えずに止める。
+                    fix = {"analysis": proposal["analysis"], "applied": [], "errors": [], "edits": 0, "blockers": proposal["blockers"]}
+                    break
+                limit_error = fixer.too_many_files(proposal["edits"], max_files)
+                if limit_error:
+                    applied, errors = [], [limit_error]
+                else:
+                    if not (run_dir / BEFORE_FIX_DIRNAME).is_dir():
+                        themes.snapshot_targets(directory, run_dir / BEFORE_FIX_DIRNAME)
+                    applied, errors = fixer.apply_edits(
+                        directory,
+                        proposal["edits"],
+                        known_tools=list(sources.subagent_tool_names()),
+                        temp_root=temp_dirs.config_root(self._target_config(instance)),
+                    )
+                fix = {"analysis": proposal["analysis"], "applied": applied, "errors": errors, "edits": len(proposal["edits"])}
+                if applied:
+                    fix["edit_summary"] = fixer.edit_summary(proposal["edits"])
+                if applied or attempt == 2:
+                    break
+                fix["first_attempt_errors"] = errors
+                previous_errors = errors
+        except LabLLMError as e:
+            fix = {"analysis": "", "applied": [], "errors": [str(e)]}
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "fix.json").write_text(json.dumps(fix, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -461,13 +614,253 @@ class Worker:
             for it in d.get("iterations") or []:
                 if it["n"] == n:
                     it["fix"] = fix
-            themes.add_history(
-                d, "AI", "fix", ("fixed files: " + ", ".join(fix["applied"])) if fix["applied"] else ("could not fix: " + " / ".join(fix["errors"]))[:500]
+            if fix.get("blockers"):
+                summary = "blockers: " + ", ".join(f"{b['kind']}{(':' + b['case_id']) if b['case_id'] else ''}" for b in fix["blockers"])
+            elif fix["applied"]:
+                summary = "fixed files: " + ", ".join(fix["applied"])
+            else:
+                summary = "could not fix: " + " / ".join(fix["errors"])
+            themes.add_history(d, "AI", "fix", summary[:500])
+
+        themes.update(directory, _apply)
+        return fix.get("blockers") or []
+
+    def _loop_iterations(self, data: dict) -> list[dict]:
+        """このループ（開始以降）の反復。"""
+        started = (data.get("loop") or {}).get("started_at") or ""
+        return [it for it in data.get("iterations") or [] if str(it.get("at") or "") >= started]
+
+    def _revert_if_regressed(self, directory: Path, outcome: dict) -> dict | None:
+        """直前の AI 修正で、それまで全回合格していたケースが落ちたら、その直しを取り消す。
+
+        tune-prompt と同じく「合格しているケースを壊さない」ため。取り消したら、取り消した直しの前の状態の
+        評価の記録で直させ直すための outcome を返す（今回の評価は取り消した直しの記録なので使わない）。取り消さなければ None。
+        """
+        data = themes.read(directory)
+        its = self._loop_iterations(data)
+        if len(its) < 2:
+            return None
+        cur, prev = its[-1], its[-2]
+        snapshot = directory / themes.RUNS_DIRNAME / f"{prev['n']:03d}" / BEFORE_FIX_DIRNAME
+        if not (prev.get("fix") or {}).get("applied") or not snapshot.is_dir():
+            return None
+        cur_cases = cur.get("cases") or {}
+        broken = sorted(
+            cid
+            for cid, c in (prev.get("cases") or {}).items()
+            if c.get("pass") and not c.get("fail") and not c.get("error")
+            and (cur_cases.get(cid, {}).get("fail") or cur_cases.get(cid, {}).get("error"))
+        )
+        if not broken:
+            return None
+        themes.restore_targets(
+            directory, snapshot, actor="AI", message=f"reverted the fix of iteration {prev['n']} because it broke {', '.join(broken)}"
+        )
+
+        def _apply(d: dict) -> None:
+            for it in d.get("iterations") or []:
+                if it["n"] == cur["n"]:
+                    it["reverted"] = {"fix_of_iteration": prev["n"], "broken_cases": broken}
+                if it["n"] == prev["n"] and it.get("fix") is not None:
+                    it["fix"]["reverted"] = {"by_iteration": cur["n"], "broken_cases": broken}
+            if d.get("loop") is not None:
+                d["loop"]["reverts"] = d["loop"].get("reverts", 0) + 1
+            themes.add_history(d, "AI", "revert", f"iteration {prev['n']}: broke {', '.join(broken)}")
+
+        themes.update(directory, _apply)
+        try:
+            results = json.loads((Path(prev["out_dir"]) / "results.json").read_text(encoding="utf-8"))
+        except (OSError, KeyError, ValueError):
+            results = []
+        return {"iteration": {**cur}, "run": {"results": results}, "verdicts": prev.get("verdicts") or [], "passed": False}
+
+    def _stop_for_reverts(self, directory: Path) -> bool:
+        """直しの取り消しが続いたら止める（ケースどうしがぶつかる・答えがゆらいでいる見込みが高い）。"""
+        data = themes.read(directory)
+        limit = int(getattr(self.config, "skill_lab_fixer_max_reverts", 3))
+        reverts = (data.get("loop") or {}).get("reverts", 0)
+        if limit <= 0 or reverts < limit:
+            return False
+        broken = sorted({c for it in self._loop_iterations(data) for c in (it.get("reverted") or {}).get("broken_cases", [])})
+        messages = {
+            "ja": f"AI 修正が、合格していたケース（{', '.join(broken)}）を壊して取り消されることが {reverts} 回あったため、止めました。"
+            "ケースどうしが矛盾している（一方を直すと他方が落ちる）か、答えがゆらいでいて偶然合格・不合格になっている見込みがあります。"
+            "落ちたケースの記録を見て、ケースか仕様を見直してください。",
+            "en": f"Stopped because AI fixes broke cases that had passed ({', '.join(broken)}) and were reverted {reverts} times. "
+            "The cases may contradict each other (fixing one breaks another), or the answers vary so that cases pass or fail by chance. "
+            "Review the cases or the spec using the records of the failed cases.",
+        }
+        self._finish(directory, themes.STATUS_STALLED, messages.get(current_output_language(), messages["ja"]))
+        return True
+
+    def _restore_best(self, directory: Path) -> str | None:
+        """ループで一番合格の多かった内容へ戻す（今の内容がそれと違うとき）。戻したら説明を返す。
+
+        最後の直しは評価されていないことが多く、それまでの直しで悪くなっていることもあるため、上限到達・行き詰まり・
+        人の見直しが必要で止まったときは、評価で確かめた一番よい内容を残す（一度も合格が無ければ戻さない）。
+        """
+        if not getattr(self.config, "skill_lab_restore_best_state", True):
+            return None
+        data = themes.read(directory)
+        best = (data.get("loop") or {}).get("best") or {}
+        snapshot = directory / themes.RUNS_DIRNAME / BEST_DIRNAME
+        if not best or tuple(best.get("score") or (0, 0)) <= (0, 0) or not snapshot.is_dir():
+            return None
+        if themes.state_sha256(directory) == best.get("state_sha"):
+            return None
+        themes.restore_targets(directory, snapshot, actor=f"skill tuning worker {self.lab}", message=f"restored the best state (iteration {best['n']})")
+        full, ratio = best["score"]
+        messages = {
+            "ja": f"研究対象を、このループで一番よかった反復 {best['n']} の内容に戻しました（全回合格のケース {full} 件、合格率 {ratio:.0%}）。",
+            "en": f"The research targets were restored to the best state of this loop, iteration {best['n']} "
+            f"({full} case(s) passed every run, pass rate {ratio:.0%}).",
+        }
+        return messages.get(current_output_language(), messages["ja"])
+
+    def _evaluate_baseline(self, instance: str, directory: Path) -> None:
+        """取り込んだときの版（改良前。baseline/assets/）を1回評価し、改良前後の比較に使う。
+
+        取り込んだ資産（正式スキル・ドラフトの複製）が無い・ケースが前回の評価から変わっていないときは評価しない。
+        新しく作った資産は改良前には無いものとして評価する（設定パッチも重ねない）。
+        """
+        if not getattr(self.config, "skill_lab_evaluate_baseline", True):
+            return
+        base = directory / themes.BASELINE_DIRNAME / themes.ASSETS_DIRNAME
+        assets = themes.assets_in(base)
+        if not assets["skills"] and not assets["agents"]:
+            return
+        data = themes.read(directory)
+        cases_sha = themes.content_hashes(directory)["cases"]
+        if (data.get("baseline_eval") or {}).get("cases_sha") == cases_sha:
+            return
+        run = evaluation.run(
+            directory,
+            instance=instance,
+            lab=self.lab,
+            repeat=1,
+            results_root=directory / themes.RUNS_DIRNAME / "baseline",
+            base_env=self.base_env,
+            should_stop=lambda: self._stop_requested(directory),
+            assets_base=base,
+            config_patch=False,
+        )
+        self._record_eval_usage(self._usage_owner(data), run["results"])
+        verdicts = judge.judge_results(
+            self._llm_config(instance),
+            spec=(directory / themes.SPEC_FILENAME).read_text(encoding="utf-8"),
+            results=run["results"],
+            excerpt_chars=self.config.skill_lab_transcript_excerpt_chars,
+        )
+        per_case: dict[str, dict[str, int]] = {}
+        for v in verdicts:
+            c = per_case.setdefault(v["case_id"], {"pass": 0, "fail": 0, "error": 0})
+            c["pass" if v["outcome"] == "pass" else ("error" if v["outcome"] == "error" else "fail")] += 1
+        result = {
+            "at": themes.now_iso(),
+            "cases": per_case,
+            "cases_sha": cases_sha,
+            "out_dir": run["out_dir"],
+            "score": list(_score({"cases": per_case})),
+        }
+        themes.update(directory, lambda d: d.update({"baseline_eval": result}))
+
+    def _write_report(self, directory: Path, status: str) -> None:
+        """ループ・トライアウトの終わりに、総括（反復ごとの結果・直したもの・改良前との比較・AI のまとめ）を残す。"""
+        data = themes.read(directory)
+        its = self._loop_iterations(data)
+        rows = []
+        for it in its:
+            fix = it.get("fix") or {}
+            rows.append(
+                {
+                    "n": it["n"],
+                    "phase": it.get("phase"),
+                    "verdict": it.get("verdict"),
+                    "failed": fixer.failed_cases_text(it),
+                    "stopped_early": bool(it.get("stopped_early")),
+                    "fixed": fix.get("applied") or [],
+                    "analysis": str(fix.get("analysis") or "")[:400],
+                    "reverted": bool(fix.get("reverted")),
+                    "blockers": len(fix.get("blockers") or []),
+                }
             )
+        last = its[-1] if its else None
+        loop = data.get("loop") or {}
+        report = {
+            "status": status,
+            "at": themes.now_iso(),
+            "iterations": rows,
+            "final": {"n": last["n"], "score": list(_score(last)), "cases": last.get("cases")} if last else None,
+            "best": loop.get("best"),
+            "restored_best": loop.get("restored_best"),
+            "baseline": {k: v for k, v in (data.get("baseline_eval") or {}).items() if k in ("cases", "score", "at")} or None,
+            "message": loop.get("message"),
+        }
+        if getattr(self.config, "skill_lab_report_ai_summary", True) and rows:
+            try:
+                report["summary"] = ask_text(
+                    self._llm_config(data.get("instance") or ""), _REPORT_SYSTEM, json.dumps(report, ensure_ascii=False, default=str)[:12000]
+                )
+            except Exception as e:  # noqa: BLE001 - まとめが書けなくても総括の表は残す
+                logger.warning("Could not write the AI summary of theme %s: %s", directory.name, e)
+
+        def _apply(d: dict) -> None:
+            if d.get("loop") is not None:
+                d["loop"]["report"] = report
 
         themes.update(directory, _apply)
 
+    def _stop_if_stalled(self, directory: Path) -> bool:
+        """AI 修正の後の内容が、このループで既に評価して不合格だった内容と同じなら止める（状態 stalled）。
+
+        過去の修正を元に戻す・2つの直し方を行ったり来たりする・直せないまま同じ内容で評価し直す、を
+        繰り返すと、反復の上限まで同じ失敗を繰り返すだけになる（2026-11-13 ユーザー指摘）。
+        直前の反復と同じ内容（修正を適用できなかった）は、一時的な失敗のこともあるので1回だけ評価し直す。
+        """
+        data = themes.read(directory)
+        started = (data.get("loop") or {}).get("started_at") or ""
+        failed = [
+            it for it in data.get("iterations") or []
+            if it.get("verdict") == "fail" and it.get("state_sha") and str(it.get("at") or "") >= started
+        ]
+        if not failed:
+            return False
+        now = themes.state_sha256(directory)
+        same = [it for it in failed if it["state_sha"] == now]
+        # 直前の反復と同じ（直しを適用できなかった）なら1回は評価し直す。ただし取り消した直しをまた入れたのなら止める。
+        if not same or (same == [failed[-1]] and not failed[-1].get("reverted")):
+            return False
+        first = same[0]["n"]
+        messages = {
+            "ja": f"AI 修正が、このループの反復 {first} で評価して不合格だったのと同じ内容に戻したため、止めました"
+            "（同じ直しの繰り返し・行ったり来たり、または直せないまま同じ内容が続いています）。"
+            "反復の記録の分析を見て、研究対象・仕様・ケースを人が見直してください。",
+            "en": f"Stopped because the AI fix returned to the same content that was evaluated and failed in iteration {first} of this loop "
+            "(the same fix repeated, fixes going back and forth, or no change could be made). "
+            "Review the research targets, the spec and the cases using the analyses in the iteration records.",
+        }
+        self._finish(directory, themes.STATUS_STALLED, messages.get(current_output_language(), messages["ja"]))
+        return True
+
+    def _stop_for_blockers(self, directory: Path, problems: list[dict]) -> bool:
+        """AI 修正が研究対象の外の原因（ケース・仕様・環境）を指摘したら、ループを止めて人に報告する（状態 blocked）。"""
+        if not problems:
+            return False
+
+        def _apply(d: dict) -> None:
+            if d.get("loop") is not None:
+                d["loop"]["blockers"] = problems
+
+        themes.update(directory, _apply)
+        lines = [
+            f"[{p['kind']}{(' ' + p['case_id']) if p.get('case_id') else ''}] {p['problem']}" + (f" → {p['suggestion']}" if p.get("suggestion") else "")
+            for p in problems
+        ]
+        self._finish(directory, themes.STATUS_BLOCKED, "\n".join(lines)[:2000])
+        return True
+
     def _loop(self, instance: str, directory: Path, tryout_repeats: int) -> None:
+        self._evaluate_baseline(instance, directory)
         while True:
             if self._stop_requested(directory):
                 raise _Stop()
@@ -475,13 +868,20 @@ class Worker:
             if limit:
                 self._finish(directory, themes.STATUS_EXHAUSTED, limit)
                 return
-            # 合間に、他のテーマの短いタスク（1回試行・下書き）を片付ける。
+            # 合間に、他のテーマの短いタスク（1回試行・下書き）と、一時フォルダのごみを片付ける。
             self.process_tasks()
+            self._maybe_sweep_temp_dirs()
             outcome = self._evaluate(instance, directory, 1, "eval")
             if self._stop_for_infra(directory, outcome):
                 return
             if not outcome["passed"]:
-                self._fix(instance, directory, outcome)
+                reverted = self._revert_if_regressed(directory, outcome)
+                if reverted is not None:
+                    if self._stop_for_reverts(directory):
+                        return
+                    outcome = reverted
+                if self._stop_for_blockers(directory, self._fix(instance, directory, outcome)) or self._stop_if_stalled(directory):
+                    return
                 continue
             if self._stop_requested(directory):
                 raise _Stop()
@@ -491,7 +891,8 @@ class Worker:
             if outcome["passed"]:
                 self._finish(directory, themes.STATUS_REVIEW, f"Passed every run of the tryout ({tryout_repeats} runs per case)")
                 return
-            self._fix(instance, directory, outcome)
+            if self._stop_for_blockers(directory, self._fix(instance, directory, outcome)) or self._stop_if_stalled(directory):
+                return
 
     def _stop_for_infra(self, directory: Path, outcome: dict) -> bool:
         """研究対象を直しても解決しない失敗なら、AI 修正に回さずエラーで止める。"""

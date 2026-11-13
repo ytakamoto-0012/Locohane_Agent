@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import msvcrt
 import os
@@ -56,6 +57,8 @@ STATUS_QUEUED = "queued"  # ループ（またはトライアウト）の開始�
 STATUS_RUNNING = "running"
 STATUS_REVIEW = "review"  # トライアウトに全回合格し、人の確認待ち
 STATUS_EXHAUSTED = "exhausted"  # 反復回数・時間の上限に達した
+STATUS_STALLED = "stalled"  # AI 修正が、この回のループで評価して不合格だった内容に戻した（同じ直しの繰り返し・行ったり来たり）
+STATUS_BLOCKED = "blocked"  # AI 修正が研究対象の外の原因（ケース・仕様・環境）を指摘して止めた。人が見直す
 STATUS_ERROR = "error"
 STATUS_STOPPED = "stopped"  # 人が止めた
 STATUS_PROMOTED = "promoted"
@@ -456,7 +459,7 @@ def validate_agent_md(content: str, file_stem: str, known_tools: list[str] | Non
 
 
 def validate_case_yaml(content: str, case_id: str) -> str | None:
-    import tempfile
+    from evals.case_schema import parse_case
 
     try:
         data = yaml.safe_load(content)
@@ -466,27 +469,96 @@ def validate_case_yaml(content: str, case_id: str) -> str | None:
         return f"Case {case_id}: make id a string (quote an id made only of digits, like '{case_id}')."
     if isinstance(data, dict) and data.get("id") not in (None, case_id):
         return f"Case {case_id}: make id ({data.get('id')}) the same as the file name."
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / f"{case_id}.yaml"
-        path.write_text(content, encoding="utf-8")
-        try:
-            case = load_case(path)
-        except (ValueError, TypeError) as e:
-            return f"Case {case_id}: {str(e).replace(str(path), path.name)}"
+    path = Path(f"{case_id}.yaml")
+    try:
+        case = parse_case(content, path)
+    except (ValueError, TypeError) as e:
+        return f"Case {case_id}: {str(e).replace(str(path), path.name)}"
     if not case_has_condition(case):
         # expect の項目がすべて空で judge も無いケースは何をしても合格になり、AI 修正の抜け道にもなる。
         return f"Case {case_id}: add at least one way to decide passing (a condition in expect, or judge)."
     return None
 
 
+def impossible_conditions(case) -> list[str]:
+    """どう答えても満たせない（互いに矛盾する）確認の条件の説明。
+
+    採点の基準が満たせないケースは、研究対象をいくら直しても合格せず、反復の上限まで回り続けた
+    （2026-11-13 ユーザー報告）。実行しなくても分かる矛盾は、開始前に知らせる。
+    実行しないと分からないもの（指示にスキルを使う理由が無い等）は AI 修正が blockers で報告する。
+    """
+    problems = []
+    if any(not str(t).strip() for t in case.turns):
+        problems.append(_t("利用者の指示に空の行があります"))
+    e = case.expect
+    if e is None:
+        return problems
+    for required in e.response_contains:
+        for forbidden in e.response_not_contains:
+            if forbidden and forbidden in required:
+                problems.append(_t("「{0}」は回答に必要なのに、その中の「{1}」は回答に入ってはいけないことになっています", required, forbidden))
+    if e.tool_called_any and all(t in e.tool_not_called for t in e.tool_called_any):
+        problems.append(_t("呼ぶべきツール（{0}）が、すべて呼んではいけないツールにも入っています", ", ".join(e.tool_called_any)))
+    for tool in e.tool_call_args_contains:
+        if tool in e.tool_not_called:
+            problems.append(_t("引数を確かめるツール {0} が、呼んではいけないツールにも入っています", tool))
+    for tool, args in e.tool_call_args_not_contains.items():
+        want = e.tool_call_args_contains.get(tool)
+        if isinstance(want, dict) and isinstance(args, dict) and all(want.get(k) == v for k, v in args.items()):
+            problems.append(_t("{0} の同じ呼び出しが、必要な呼び出しにも、してはいけない呼び出しにも入っています", tool))
+    return problems
+
+
+def case_reference_problems(directory: Path, *, skills: set[str], agents: set[str], tools: set[str] | None) -> dict[str, list[str]]:
+    """ケースが確かめるスキル名・サブエージェント名・ツール名のうち、存在しないもの（ケース ID → 説明）。
+
+    綴り違い（hello_world と hellow_world）や、作り直し・改名で古くなった名前を期待するケースは、
+    研究対象をいくら直しても合格しない（2026-11-13 ユーザー報告。evals/tuning_log.md の iter56 にも、
+    今の作りでは呼ばれないツールを期待したままのケースがあった）。tools が None なら（ツール名の一覧を
+    まだ求められていない）ツール名は確かめない。MCP の動的ツール（mcp__…）も確かめない。
+    """
+    problems: dict[str, list[str]] = {}
+    for path in sorted((directory / CASES_DIRNAME).glob("*.yaml")):
+        try:
+            case = load_case(path)
+        except Exception:  # noqa: BLE001 - 読めないケースは list_cases が理由を出す
+            continue
+        e = case.expect
+        if e is None:
+            continue
+        found: list[str] = []
+        for key, args in (("tool_call_args_contains", e.tool_call_args_contains), ("tool_call_args_not_contains", e.tool_call_args_not_contains)):
+            skill = (args.get("read_skill") or {}).get("skill_name") if isinstance(args.get("read_skill"), dict) else None
+            if skill and skill not in skills:
+                found.append(_t("スキル {0} がありません（{1}）", skill, key))
+            agent = (args.get("dispatch_agent") or {}).get("agent_type") if isinstance(args.get("dispatch_agent"), dict) else None
+            if agent and agent not in agents:
+                found.append(_t("サブエージェント {0} がありません（{1}）", agent, key))
+        if tools is not None:
+            named = [*e.tool_called_any, *e.tool_not_called, *e.tool_call_args_contains, *e.tool_call_args_not_contains]
+            unknown = sorted({t for t in named if t not in tools and not t.startswith("mcp__")})
+            if unknown:
+                found.append(_t("ツール {0} がありません", ", ".join(unknown)))
+        if found:
+            problems[case.id] = found
+    return problems
+
+
 def case_has_condition(case) -> bool:
     """ケースに合否を決める条件が1つ以上あるか（evals.case_schema.EvalCase）。"""
-    if case.judge and case.judge.strip():
+    if (case.judge and case.judge.strip()) or getattr(case, "verify_script", None):
         return True
     e = case.expect
     if e is None:
         return False
-    return bool(e.tool_called_any or e.tool_not_called or e.tool_call_args_contains or e.response_contains or e.response_not_contains)
+    return bool(
+        e.tool_called_any
+        or e.tool_not_called
+        or e.tool_call_args_contains
+        or e.tool_call_args_not_contains
+        or e.response_contains
+        or e.response_not_contains
+    )
 
 
 def validate_python(content: str, rel: str) -> str | None:
@@ -514,7 +586,11 @@ def asset_path(directory: Path, asset_type: str, name: str) -> Path:
 
 
 def list_assets(directory: Path) -> dict[str, list[str]]:
-    base = directory / ASSETS_DIRNAME
+    return assets_in(directory / ASSETS_DIRNAME)
+
+
+def assets_in(base: Path) -> dict[str, list[str]]:
+    """base（テーマの assets/ か、改良前の版の baseline/assets/）にあるスキル・エージェントの名前。"""
     skills = sorted(p.name for p in (base / "skills").iterdir() if (p / "SKILL.md").is_file()) if (base / "skills").is_dir() else []
     agents = sorted(p.stem for p in (base / "agents").glob("*.md")) if (base / "agents").is_dir() else []
     return {"skills": skills, "agents": agents}
@@ -615,6 +691,7 @@ def list_cases(directory: Path) -> list[dict]:
                     "judge": case.judge,
                     "has_expect": case.expect is not None,
                     "work_dir": case.work_dir,
+                    "verify_script": case.verify_script,
                     "notes": case.notes,
                 }
             )
@@ -622,6 +699,10 @@ def list_cases(directory: Path) -> list[dict]:
                 item["error"] = "There is no way to decide passing (an expect condition or judge)"
             elif case.work_dir and not _work_dir_exists(directory, case.work_dir):
                 item["error"] = f"The folder of files to use, {case.work_dir}, does not exist"
+            elif case.verify_script and not (path.parent / case.verify_script).resolve().is_file():
+                item["error"] = _t("確認スクリプト {0} がありません（入力ファイルのフォルダ fixtures/ に置いてください）", case.verify_script)
+            elif impossible := impossible_conditions(case):
+                item["error"] = _t("どう答えても合格できない条件があります: {0}", " / ".join(impossible))
         except Exception as e:  # noqa: BLE001 - 一覧では壊れたケースも理由付きで出す
             item["error"] = str(e)
         result.append(item)
@@ -685,7 +766,7 @@ def start_missing(directory: Path) -> list[str]:
     broken = [c["id"] for c in cases if c.get("error")]
     if broken:
         # 読めないケースがあると評価がエラーになり、AI 修正の手がかりにもならない。
-        missing.append(_t("③ 試験問題の直し（読めない・条件や使うファイルが足りない: {0}）", ', '.join(broken)))
+        missing.append(_t("③ 試験問題の直し（読めない・条件や使うファイルが足りない・合格できない条件がある: {0}）", ', '.join(broken)))
     return missing
 
 
@@ -726,6 +807,50 @@ def content_hashes(directory: Path) -> dict:
         "cases": cases_sha256(directory / CASES_DIRNAME),
         "config_patch": file_sha256(patch) if patch.is_file() else None,
     }
+
+
+def tryout_repeats(data: dict, cfg) -> int:
+    """このテーマのトライアウトの回数（テーマの設定。無ければ対象インスタンスの [skill_lab] tryout_repeats）。"""
+    value = data.get("tryout_repeats")
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return value
+    return cfg.skill_lab_tryout_repeats
+
+
+def snapshot_targets(directory: Path, dest: Path) -> None:
+    """AI 修正が直せるもの（assets/ と config_patch.json）を dest へ写す（一番よかった状態・直す前の状態の控え）。
+
+    dest はテーマの runs/ の下に置く（runs/ は API から書き換えられず、評価にも使われない）。
+    """
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    if (directory / ASSETS_DIRNAME).is_dir():
+        shutil.copytree(directory / ASSETS_DIRNAME, dest / ASSETS_DIRNAME, ignore=shutil.ignore_patterns("__pycache__"))
+    patch = directory / CONFIG_PATCH_FILENAME
+    if patch.is_file():
+        shutil.copy2(patch, dest / CONFIG_PATCH_FILENAME)
+
+
+def restore_targets(directory: Path, src: Path, *, actor: str, message: str) -> None:
+    """snapshot_targets() で控えた状態へ assets/ と config_patch.json を戻す（ケース・仕様は触らない）。"""
+    if not (src / ASSETS_DIRNAME).is_dir():
+        raise ThemeError(f"No saved state to restore: {src}")
+    assets = directory / ASSETS_DIRNAME
+    if assets.exists():
+        shutil.rmtree(assets)
+    shutil.copytree(src / ASSETS_DIRNAME, assets)
+    patch = directory / CONFIG_PATCH_FILENAME
+    if (src / CONFIG_PATCH_FILENAME).is_file():
+        shutil.copy2(src / CONFIG_PATCH_FILENAME, patch)
+    elif patch.is_file():
+        patch.write_text("{}\n", encoding="utf-8")
+    mark_changed(directory, actor, message)
+
+
+def state_sha256(directory: Path) -> str:
+    """研究対象・ケース・設定パッチの今の内容をまとめた1つのハッシュ（同じ内容に戻ったかの判定用）。"""
+    return hashlib.sha256(json.dumps(content_hashes(directory), sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def tryout_matches(directory: Path, tryout: dict | None) -> list[str]:
@@ -773,8 +898,11 @@ def pending_same_task(data: dict, task_type: str, params: dict) -> dict | None:
     return None
 
 
-def add_task(directory: Path, task_type: str, params: dict, *, actor: str) -> str:
+def add_task(directory: Path, task_type: str, params: dict, *, actor: str, lang: str | None = None) -> str:
     """依頼を積む。
+
+    lang: 依頼した時のダッシュボードの表示言語（インスタンスの [ui].default_language が auto のとき、
+        AI に書かせる文章の言語にする。admin/i18n.py の output_language）。
 
     Raises:
         ThemeError: 不明な種類、または同じ依頼が処理待ち・処理中（テーマのロックの中で確かめるので、同時に押しても1件だけ積む）。
@@ -787,7 +915,15 @@ def add_task(directory: Path, task_type: str, params: dict, *, actor: str) -> st
         if pending_same_task(data, task_type, params) is not None:
             raise ThemeError(_t("同じ依頼を AI が処理しています。終わってから頼んでください。"))
         data.setdefault("tasks", []).append(
-            {"id": task_id, "type": task_type, "params": params, "status": "queued", "created_at": now_iso(), "by": actor}
+            {
+                "id": task_id,
+                "type": task_type,
+                "params": params,
+                "status": "queued",
+                "created_at": now_iso(),
+                "by": actor,
+                **({"lang": lang} if lang else {}),
+            }
         )
         # 古い完了済みタスクは残しすぎない（直近50件）。
         done = [t for t in data["tasks"] if t["status"] in ("done", "error")]

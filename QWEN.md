@@ -65,6 +65,7 @@
 ## 修正・実装時ルール
 
 - 新しいpipライブラリのインストールが必要な時は、必ず `requirements.txt` を更新する。
+- OS の一時フォルダ（`%TEMP%`、`tempfile.TemporaryDirectory()` / `mkdtemp()` / `mkstemp()` / `NamedTemporaryFile()` を `dir` 指定なしで呼ぶもの、`tempfile.gettempdir()`）は使わない。強制終了で残ったものがどこにあるか管理できないため。一時フォルダはインスタンスの `common_data_dir` の下に作り、置き場は config.ini の設定（例: 評価は `[skill_lab].temp_dir`、`evals/temp_dirs.py`）で変えられるようにして、残ったものを片付ける処理も用意する。保存の途中で壊さないための一時ファイル（書き込み先と同じフォルダに `dir=` を指定して作り、置き換えるもの）はよい。pytest の `tmp_path` もよい。
 
 ## 個人情報の扱い（公開リポジトリ）
 

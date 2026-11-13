@@ -587,6 +587,7 @@ and WAL cannot be used). Use "Data backup" (in the settings dashboard section) t
 | `data/skill_drafts/<username>/` | Per-user draft skills created by skill-creator (`<skill name>/`) and their evaluation results (`_workspace/`). `[skill_creator] draft_dir`. Rejected drafts also remain as records (not shown in the list) | When there are unneeded drafts | Delete the draft folder (the creator can also delete it with `delete_draft.py` of skill-creator). Not deleted automatically |
 | `data/<instance name>/skill_drafts_archive/<username>/<skill name>_<date time>/` | Where promoted drafts are moved (together with `_workspace/`; `[skill_creator] archive_dir`) | When the records are no longer needed | Delete the folder |
 | `data/skill_lab/themes/<theme ID>/` | Research themes of the Skill Lab (spec, assets under development, cases, input files, records of evaluation and AI fixes `runs/`). Separated per target instance | When the theme is over and the records are no longer needed | "Delete" in the Skill Lab theme list or theme details (see "Skill Lab" below). To delete by hand, delete the theme folder (it must not be running) |
+| `data/<instance name>/evals_temp/` | Temporary folders used while evaluations run (the Skill Lab loop, single trials and tryouts, `evals/run_all.py`): working folders of cases, isolated memory / path memory / plan details / draft skill locations, copies of skills and cases, backups of AI fixes. `[skill_lab] temp_dir` of the instance being evaluated. The OS temporary folder is not used | Normally removed automatically when done. Leftovers of forced exits are removed automatically once `[skill_lab] temp_retention_hours` (default 24 hours) have passed since their last update (at the start of an evaluation, when the main app starts and every `temp_cleanup_interval_hours`, and by the skill tuning worker at the same interval) | Delete the folder contents while no evaluation is running |
 | `data/temp/_tmp_<creation time>_<short ID>/` | Intermediate output of `execute_python_code`/`run_script`, and the destination of `write_scratch_note`/`write_thread_note`. Files uploaded in the chat (`uploads/<send time>/`; here even if a working folder is specified). Only for the session itself (see `[default_workdir]`). The creation time at the start of the folder name (`YYMMDDHHMMSS`) is for sorting in creation order in a file manager. The short ID is the first 10 hex digits of the SHA-1 of the thread_id (thread_id is not used as is, to avoid exceeding the 260-character path length limit; folders in the old form `_tmp_<creation time>_<thread_id>` are also used as is when resuming) | When no longer needed after the session ends | Delete the folder contents (also deleted automatically by `[default_workdir] retention_days`/`cleanup_interval_hours`) |
 | `data/elements/<thread_id>/` | Where attachments (`provide_download`, `analyze_image` with `show_in_chat=True`, etc.) and images embedded in answer text are persisted. The actual files are copied here so they can be shown after resuming a thread or restarting the process (see `[elements]`, `src/thread_store.py`) | When attachments are no longer needed | Delete the folder contents |
 | `instances/_assistant_index/` | Cache of embeddings of paragraphs of config.ini, README_DETAIL.md and the API reference, used for search by the admin tool's "Ask AI" (one file per embedding endpoint/model; not under `data/`) | Any time (rebuilt on the next question; the first time takes tens of seconds) | Delete the folder |
@@ -944,7 +945,7 @@ Key points of the design:
   the tryout records in `_draft_meta.json`, and at promotion, tryout results whose hash does not match cannot be used.
 - **Making it official is done by skill developers in the admin tool's Skill Lab** (see "Skill Lab" in "Settings dashboard" below).
   The developer imports the draft into a research theme (working on a copy made at import time, so the creator can keep editing),
-  prepares the spec and cases, lets the lab's AI fix defects by itself, and makes it pass every run of the tryout (`[skill_creator] tryout_repeats` times, default 10).
+  prepares the spec and cases, lets the lab's AI fix defects by itself, and makes it pass every run of the tryout (`[skill_lab] tryout_repeats` times, default 10; can be changed per theme).
   Humans check, make light manual fixes, and approve/reject. On approval, it is promoted to the location dedicated to the instance that created the draft
   (`[skill_lab] instance_locohane_dir`, default `instances/<instance name>/skills/`), and the original draft
   moves together with `_workspace` to `[skill_creator] archive_dir` (default `data/<instance name>/skill_drafts_archive/`).
@@ -1854,15 +1855,25 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[default_workdir]` | `allow_sandbox_dir` | List of additional directories where writing is always allowed outside session separation (`[{"dir": "path", "allow_entries": [["skill name","script file name"], ...]}, ...]` form). Making an element's `allow_entries` an empty list allows unlimited writing to that directory regardless of the target. Note that registered directories are always writable regardless of thread (empty list and disabled by default) | `ALLOW_SANDBOX_DIR` |
 | `[default_workdir]` | `retention_days` | Retention in days of files under `dir` above (0 or less disables automatic deletion) | `DEFAULT_WORKDIR_RETENTION_DAYS` |
 | `[skill_creator]` | `draft_dir` | Location of per-user draft skills (default `${common_data_dir}/skill_drafts`). Overlapping with the skill scan targets is an error at startup | `SKILL_DRAFT_DIR` |
-| `[skill_creator]` | `tryout_repeats` | Default number of runs of the skill stabilization tryout (on promotion each case is repeated this many times and passes if every run passes; default 10) | `SKILL_TRYOUT_REPEATS` |
 | `[skill_creator]` | `other_users_drafts` | Handling of other users' drafts. `hidden` (default) / `listed` / `readable` / `full` (see "Draft skills (per user) and promotion") | `SKILL_OTHER_USERS_DRAFTS` |
 | `[skill_creator]` | `archive_dir` | Where promoted drafts are moved (default `${common_data_dir}/skill_drafts_archive`). Overlapping with the skill scan targets or `draft_dir` is an error at startup | `SKILL_ARCHIVE_DIR` |
+| `[skill_lab]` | `tryout_repeats` | Default number of runs of the skill stabilization tryout (on promotion to an official skill, by the Skill Lab or promote-skill, each case is repeated this many times and passes if every run passes; default 10). In the Skill Lab it can be changed per theme in "Theme settings" (empty means this value). It used to be in `[skill_creator]` (old `config_overrides.json` entries and the environment variable `SKILL_TRYOUT_REPEATS` are still read) | `SKILL_LAB_TRYOUT_REPEATS` |
+| `[skill_lab]` | `temp_dir` | Where evaluations (`evals/run_all.py`, `run_case.py`, including the Skill Lab loop, single trials and tryouts) create temporary folders while they run (default `${common_data_dir}/evals_temp`). The value of the instance being evaluated is used. The OS temporary folder is not used. Not included in `[data_backup]` | `SKILL_LAB_TEMP_DIR` |
+| `[skill_lab]` | `temp_retention_hours` / `temp_cleanup_interval_hours` | Temporary folders left by forced exits are deleted automatically once this many hours have passed since their last update, including the files inside (default 24; make it longer than `[skill_lab_worker] max_hours`; 0 or less disables it), checked every `temp_cleanup_interval_hours` (default 1) | `SKILL_LAB_TEMP_RETENTION_HOURS` / `SKILL_LAB_TEMP_CLEANUP_INTERVAL_HOURS` |
+| `[skill_lab]` | `record_thinking_chars` | Maximum characters of the assistant's thoughts kept in the evaluation records (results.json) per LLM call (default 4000; 0 does not keep them). Used by the Skill Lab's AI fixes and AI judge to analyze why the assistant acted as it did | `SKILL_LAB_RECORD_THINKING_CHARS` |
+| `[skill_lab]` | `copy_memory_types` | Memory types copied from the production memory when an evaluation starts (comma-separated, default `glossary`). The evaluation memory starts empty every time (to prevent carrying answers over), but without the in-house glossary the assistant cannot interpret words as in production. Only memories anyone can read in production are copied (common ones and each user's shared ones; ones with personal or confidential markers are excluded). Empty copies nothing | `SKILL_LAB_COPY_MEMORY_TYPES` |
+| `[skill_lab]` | `verify_timeout_seconds` | Time limit (seconds) of a case's `verify_script` (a script that checks the files in the working folder after the conversation; default 120) | `SKILL_LAB_VERIFY_TIMEOUT_SECONDS` |
 | `[skill_lab]` | `instance_locohane_dir` | The instance-only extension directory, the promotion destination of the Skill Lab and promote-skill (default `${instance_dir}` = `instances/<instance name>`; holds `skills/`, `agents/` and `evals/<theme ID>/` for regression tests). The value of the promotion destination (target) instance is used. Like `project_locohane_dir`, the main app also detects `skills/`, `agents/` and `LOCOHANE.md` here, and always scans it after (with priority over) all of them (it is not dropped even if `project_locohane_dir` is overridden) | `INSTANCE_LOCOHANE_DIR` |
 | `[skill_lab_worker]` | `max_iterations` | Maximum iterations of the skill tuning loop of the skill tuning worker (default 8). This section appears only on the settings screen of skill tuning workers (not on main instances) | `SKILL_LAB_MAX_ITERATIONS` |
 | `[skill_lab_worker]` | `max_hours` | Maximum time one theme's loop may use (default 6 hours) | `SKILL_LAB_MAX_HOURS` |
 | `[skill_lab_worker]` | `poll_interval_seconds` | Interval at which the worker looks for themes waiting to be processed (default 10 seconds) | `SKILL_LAB_POLL_INTERVAL_SECONDS` |
 | `[skill_lab_worker]` | `fixer_max_file_chars` | Maximum characters per asset file passed to the AI (default 20000) | `SKILL_LAB_FIXER_MAX_FILE_CHARS` |
 | `[skill_lab_worker]` | `transcript_excerpt_chars` | Maximum characters of the excerpt of the execution record passed to the AI (per run, default 6000) | `SKILL_LAB_TRANSCRIPT_EXCERPT_CHARS` |
+| `[skill_lab_worker]` | `excerpt_user_chars` / `excerpt_thinking_chars` / `excerpt_ai_text_chars` / `excerpt_ai_note_chars` / `excerpt_tool_args_chars` / `excerpt_tool_result_chars` / `excerpt_subagent_args_chars` / `excerpt_subagent_result_chars` | Maximum characters of each item in the excerpt above (user instruction 800, thoughts 600 (from the end; 0 does not pass them), final text 1500, text written with a tool call 400, tool arguments 600, results 700, arguments inside sub-agents 400, results 300) | `SKILL_LAB_EXCERPT_*` |
+| `[skill_lab_worker]` | `judge_spec_chars` / `judge_answer_chars` / `judge_checks_chars` / `judge_criteria_chars` | Maximum characters of the spec (6000), final answer (4000), failed checks (4000) and the case's judge (2000) passed to the AI judge and the rule review | `SKILL_LAB_JUDGE_*` |
+| `[skill_lab_worker]` | `fixer_failed_runs_per_case` / `fixer_history_iterations` | Number of failed runs shown per case (default 2) and of past iterations (the fixes tried and the cases that still failed after them; default 6) when asking for a fix | `SKILL_LAB_FIXER_FAILED_RUNS_PER_CASE` / `SKILL_LAB_FIXER_HISTORY_ITERATIONS` |
+| `[skill_lab_worker]` | `fixer_max_files_per_fix` / `fixer_max_reverts` | Number of files one AI fix may change (default 2; 0 means no limit), and how many reverts of fixes that broke passing cases stop the loop (default 3; 0 never stops) | `SKILL_LAB_FIXER_MAX_FILES_PER_FIX` / `SKILL_LAB_FIXER_MAX_REVERTS` |
+| `[skill_lab_worker]` | `tryout_stop_on_first_failure` / `evaluate_baseline` / `restore_best_state` / `report_ai_summary` | Stop a tryout at the first failure, evaluate the version before the changes first, restore the best content when stopping, and have the AI write the end-of-loop report (all default true) | `SKILL_LAB_TRYOUT_STOP_ON_FIRST_FAILURE` etc. |
 | `[default_workdir]` | `cleanup_interval_hours` | Interval (hours) of the default_workdir automatic deletion check | `DEFAULT_WORKDIR_CLEANUP_INTERVAL_HOURS` |
 | `[log]` | `dir` | Log output location | `LOG_DIR` |
 | `[log]` | `level` | Log verbosity. `info` (the current behavior; only summaries of tool calls) / `debug` (records all arguments and results of tool calls, LLM response text and thinking) / `none` (creates no log at all) | `LOG_LEVEL` |
@@ -2673,6 +2684,11 @@ One theme is a bundle of several skills and sub-agents and the cases spanning th
 on the target instance's setup (including the company's own skills and guard settings), switches only the LLM endpoints to the lab's
 (`--llm-from-instance`), and evaluates all cases. Cases with judge are judged by the AI judge from the viewpoint of the spec and the judge
 (a different wording or notation is not a reason to fail; it fails when a fact, number or action the viewpoint asks for is missing or wrong).
+It may fail a run only when the viewpoint is not met, when something in the spec's "Expected output" is missing, or when something in "Must not do"
+was done, and it must quote the item it failed (a failure without a quoted item is treated as a pass; a person makes the final decision in the review).
+The AI judge and AI fixes also see the tool calls inside sub-agents the assistant delegated to.
+The text the lab's AI writes (drafts of specs, cases and skills, reasons of verdicts, analyses, reports) is written in the language of the target
+instance's `[ui] default_language` (for auto, the dashboard language when the request was made or the loop started).
 
 The text and argument checks of a case's `expect` (`response_contains`, `response_not_contains`, `tool_call_args_contains`) compare exactly,
 so a run could fail only because of notation, such as "1,234円" against "1234円". The lab reviews runs that failed only these checks,
@@ -2680,27 +2696,55 @@ in this order (`admin/skill_lab/judge.py`; the verdicts of `evals/run_all.py` it
 
 - First it compares again after normalizing full/half width, spaces, thousands separators, path separators (`/` and `\`) and case. If they match, the run passes.
 - If they still differ, the lab's LLM judges whether the content is the same despite the notation. If the LLM cannot be used, the run stays failed.
-- Runs that failed on which tools were called or not called (`tool_called_any`, `tool_not_called`) are not reviewed.
+- Which tools were called (`tool_called_any`) and argument checks (`tool_call_args_contains`) are first compared again counting the calls inside
+  sub-agents too (a skill read by a delegated sub-agent counts as read).
+- Runs that failed on tools that must not be called (`tool_not_called`), calls that must not be made (`tool_call_args_not_contains`) or the
+  verify script (`verify_script`) are not reviewed.
 
 The result appears as "Review of mechanical checks" on each run. Runs the LLM accepted are, like the AI judge, reviewed by a person when approving the promotion.
 
-1. If there are failures, the AI reads the failure records (unmet checks, tool calls and results, final answer) and the spec, analyzes the cause,
-   fixes the assets (SKILL.md, scripts/, references/, sub-agent definitions), cases and settings patch, and evaluates again.
-   What it can fix is limited to within the theme, and if even one violation of the frontmatter, tool names, case format or Python syntax is found, all fixes are undone
-   and the reason is passed to the next iteration. It can also fix cases, but only when they contradict the spec, and the changes are highlighted on the review screen.
-   To prevent fixes that only pass the tests, the AI cannot delete or add cases, change input files (`cases/fixtures/`), delete the research targets themselves
-   (SKILL.md, agent definitions), or create new skills/sub-agents that are not research targets.
+0. If there are imported assets (copies of official skills or drafts), the version before the changes (`baseline/`) is evaluated once first, and the
+   before/after comparison is shown in the theme details and the report (`[skill_lab_worker] evaluate_baseline`; not evaluated again while the cases do not change).
+1. If there are failures, the AI reads the failure records (unmet checks, the end of the assistant's thoughts, text written with tool calls, tool calls and
+   results, calls inside sub-agents, final answer, and notes from the evaluation harness: cut-offs by loop guards, time taken, refusals by guards or plan
+   approval, missing libraries, script time limits), the spec and the past iterations (the fixes tried, the cases that still failed after them, tryout pass
+   counts, reverted fixes), analyzes the cause, fixes the assets (SKILL.md, scripts/, references/, sub-agent definitions) and the settings patch, and evaluates again.
+   One cause is fixed per iteration (at most `[skill_lab_worker] fixer_max_files_per_fix` files; a proposal that changes more or cannot be applied is asked
+   again once without evaluating again). The AI is told to write for a small model (short sentences, a rule with what to do instead, bullet points) and to
+   move mechanical work that wording does not fix into scripts.
+   What it can fix is limited to within the theme, and if even one violation of the frontmatter, tool names or Python syntax is found, all fixes are undone
+   and the reason is passed to the next iteration. To prevent fixes that only pass the tests, the AI cannot change cases or input files (`cases/fixtures/`),
+   delete the research targets themselves (SKILL.md, agent definitions), or create new skills/sub-agents that are not research targets.
    When it cannot connect to the LLM used for evaluation (`llm_unreachable`), it stops with "error" without moving on to AI fixes.
-2. When all cases pass, a tryout of `tryout_repeats` runs each is done for the target instance, and if every run passes it becomes "awaiting review".
-3. When `[skill_lab_worker] max_iterations` or `max_hours` is reached, it stops with "limit reached" (you can fix things by hand and resume). If the lab is stopped,
+   - When the AI finds a cause that fixing the research targets cannot solve (case: the user instruction gives no reason to use the skill, a misspelled
+     name, checks that can never be met; spec: it contradicts itself; environment: a missing library, every run times out), it stops as "needs review"
+     without rewriting the research targets, and shows the kind of cause, the problem and a suggested fix (if the finding is wrong, just start again).
+   - When the content after an AI fix is the same as content evaluated and failed in this loop (the same fix repeated, going back and forth, no change twice
+     in a row, a reverted fix put back), it stops as "fixes stalled".
+   - When a fix makes a case that passed every run fail, the fix is reverted (the content before the fix is kept in `runs/<iteration>/before_fix/`) and the
+     AI fixes again from the records before it. When reverts reach `[skill_lab_worker] fixer_max_reverts`, it stops as "fixes stalled" (the cases may
+     contradict each other, or the answers vary).
+2. When all cases pass, a tryout is done with the theme's number of runs per case ("Theme settings"; empty means the target instance's
+   `[skill_lab] tryout_repeats`), and if every run passes it becomes "awaiting review" (it stops at the first failed run;
+   `[skill_lab_worker] tryout_stop_on_first_failure`).
+3. When `[skill_lab_worker] max_iterations` or `max_hours` is reached, it stops with "limit reached" (you can fix things by hand and resume; the failed
+   cases of the last evaluation and, for a tryout, how many runs passed are shown). When it stops at a limit, as "fixes stalled" or as "needs review", the
+   research targets are restored to the content that passed the most in this loop (`runs/best/`; `[skill_lab_worker] restore_best_state`). When it ends,
+   a report (results per iteration, fixed files, reverts, the before/after comparison and an AI summary) is shown in the theme details
+   (`[skill_lab_worker] report_ai_summary`). If the lab is stopped,
    it resumes where it left off when next started (requests to the AI left "running" by an abnormal exit are also put back to waiting at startup).
    "Stop" on a theme stops it on the spot if the worker in charge is not running, and a stop pressed while the worker was stopped
    is not undone when it restarts.
 
 Starting decides the skill tuning worker in charge (even with one worker and "automatic", that worker is decided). The worker in charge can be changed with
-"Change worker / name" in the theme details (stop it first while running or waiting to start). It cannot be started while requests to the AI for drafting remain
-(so that the spec and cases are not rewritten in the middle of the loop). Cases without a way to decide passing (an expect condition or judge), or whose `work_dir`
-input folder does not exist, make the start condition (③) unmet. One draft can be imported only into one theme that is not finished.
+"Theme settings" in the theme details (stop it first while running or waiting to start; the number of tryout runs can also be set there). It cannot be started while requests to the AI for drafting remain
+(so that the spec and cases are not rewritten in the middle of the loop). Cases without a way to decide passing (an expect condition, judge or verify script),
+whose `work_dir` input folder or verify script does not exist, with conditions no answer can meet (a forbidden word inside a required word, a required tool
+that is also forbidden, the same call both required and forbidden, an empty instruction line), or that check skill, sub-agent or tool names that do not exist
+in the target instance (misspelled or outdated names) make the start condition (③) unmet. Cases can also check when not to use something ("this skill must
+not be used" = `tool_call_args_not_contains`, counting calls inside sub-agents) and the files created (`verify_script`, a .py placed in an input file folder
+that AI fixes cannot rewrite). Cases drafted by the AI include at least one case of when not to use the target (so that a description is not fixed to
+claim every message). Test questions can be deleted with "Delete" in the list. One draft can be imported only into one theme that is not finished.
 A theme can be deleted with its whole folder by "Delete" in the theme list or the theme details (cannot be undone; `delete_theme`
 in `admin/skill_lab/api.py`). It cannot be deleted while its loop or tryout is running or waiting to start, or while AI requests
 (drafts, single trials) are being processed (stop it first). Deleting a theme that is not finished leaves the source drafts with

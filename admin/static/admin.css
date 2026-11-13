@@ -411,7 +411,10 @@ select.inline-select { width: auto; }
 .lab-status { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); white-space: nowrap; }
 .lab-status-running, .lab-status-queued { border-color: var(--accent); color: var(--accent-hover); }
 .lab-status-review { border-color: var(--ok); color: var(--ok); }
-.lab-status-error, .lab-status-exhausted { border-color: var(--danger); color: var(--danger); }
+.lab-status-error, .lab-status-exhausted, .lab-status-blocked, .lab-status-stalled { border-color: var(--danger); color: var(--danger); }
+.lab-report { margin: 8px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.lab-report .pre-wrap { white-space: pre-wrap; }
+.lab-report ul { margin: 4px 0; padding-left: 20px; }
 .lab-status-promoted { background: #1f3a2a; color: #9be0b5; }
 .theme-title-row { display: flex; align-items: center; gap: 10px; }
 .theme-title-row h3 { margin: 8px 0; }

@@ -35,12 +35,22 @@ Output only a Markdown spec with the following headings (no preamble). Keep the 
 ## Must not do
 Under "When to use", write in which work and situations it is used; do not write concrete instructions a user would type (those go in the test cases).
 Do not add features by guesswork; write only what can be read from the material. Write unclear points as lines starting with "TODO:".
-Write the body text in the same language as the requester's note or the existing spec (Japanese if there is neither)."""
+Keep the headings above in English exactly as shown, and write the theme name line and the body text under each heading in the output language given below
+(translate content you take over from the research targets or an existing spec written in another language)."""
 
 _CASES_SYSTEM = """You create test cases that check the behavior of a business AI assistant.
-The assistant runs on a fairly small local LLM, so write the user instructions (turns) short and to the point, as real users would type them, in the same language as the spec.
+The assistant runs on a fairly small local LLM, so write the user instructions (turns) short and to the point, as real users would type them, in the output language given below.
+The assistant answers in that language too, so write response_contains / response_not_contains words, judge and notes in it as well.
 A case is a test question that checks whether the research targets (the skills and sub-agents under assets/) behave as the spec (spec.md) says.
 - From the spec's "Purpose" and "When to use", create instructions users would actually type.
+- The assistant chooses a skill or sub-agent only from its name and description, so each instruction must give it a reason to use
+  the research target: ask for the work the target's description and "When to use" cover. If a skill can only be chosen by name
+  (for example a test skill that does the same whatever is asked), name it in the instruction with the exact spelling.
+  An instruction such as only "hello" or "what is 1+1?" that is unrelated to the target never makes the assistant use it.
+- Make the checks match what the instruction asks; do not check for something the instruction does not ask for.
+- When you create 2 or more cases, include at least one case where the research target must NOT be used: an instruction for other
+  work that looks similar, checked with tool_call_args_not_contains (e.g. {"read_skill": {"skill_name": "<target>"}} or
+  {"dispatch_agent": {"agent_type": "<target>"}}). This keeps fixes from making a skill claim every message.
 - Turn the spec's "Expected output" into pass conditions (response_contains, judge), and "Must not do" into fail conditions
   (response_not_contains, tool_not_called, judge).
 - Use only skill names, sub-agent names and tool names that actually exist in the research targets.
@@ -48,19 +58,24 @@ A case is a test question that checks whether the research targets (the skills a
 A single case may check a flow that uses several skills and sub-agents.
 Output only a JSON array in the following format:
 [{"id": "001_basic", "turns": ["user instruction"],
-  "expect": {"tool_called_any": [...], "tool_not_called": [...], "tool_call_args_contains": {"tool name": {"argument": "value"}}, "response_contains": [...], "response_not_contains": [...]},
+  "expect": {"tool_called_any": [...], "tool_not_called": [...], "tool_call_args_contains": {"tool name": {"argument": "value"}},
+             "tool_call_args_not_contains": {"tool name": {"argument": "value"}}, "response_contains": [...], "response_not_contains": [...]},
   "judge": "the viewpoint for judging the result (optional; only for points that cannot be decided objectively)",
   "work_dir": "fixtures/<folder of input files> (only when input files are needed)",
   "notes": "what this case checks"}]
 Write only the expect keys you use. Whether a skill was read can be checked with {"tool_call_args_contains": {"read_skill": {"skill_name": "<skill name>"}}},
 and delegation to a sub-agent with {"tool_call_args_contains": {"dispatch_agent": {"agent_type": "<name>"}}}.
-Always write at least one of expect and judge. The id may contain only letters, digits, hyphens and underscores."""
+Always write at least one of expect and judge. The id may contain only letters, digits, hyphens and underscores.
+Do not write verify_script (a checking script in the input file folders that a person prepares)."""
 
 _SKILL_SYSTEM = """You write skills (SKILL.md) for a business AI assistant.
 A SKILL.md starts with frontmatter (name, description) and the body describes the procedure.
 - The description is the only trigger clue. Write concretely "what it does" and "for what kind of instructions it is used" (1024 characters or fewer).
 - The body is 500 lines or fewer. If it uses scripts, write call examples in the form `python <script>.py <args...>` and also explain what the output means.
 - Do not write tool names (run_script, etc.) in the body.
+- The body is read by a fairly small local LLM: short sentences, one rule per line with what to do instead, conditions as bullet
+  points, no long background or many examples. Write example names and values in the users' language.
+- Write the description and the body in the output language given below (keep name as given).
 Output only the full text of SKILL.md (no preamble, no code fences)."""
 
 _AGENT_SYSTEM = """You write sub-agents (agents/<name>.md) for a business AI assistant.
@@ -70,6 +85,7 @@ The file starts with frontmatter (name, description, tools), and the body become
 - For tools, choose only the minimum needed, comma-separated, from the given list of tool names.
 - In the body, write the role, procedure, form of the final answer and prohibitions; write {{skills}} where the skill list is inserted,
   and {{run_script_allowlist}} where the list of skills runnable with run_script is inserted.
+- Write the description and the body in the output language given below (keep name and tool names as they are).
 Output only JSON in the following format:
 {"content": "full text of the file", "allowlist": [["<this name>", "<skill name allowed to be called with run_script>"], ...]}
 Write allowlist only if there are skills it should call with run_script (otherwise an empty array)."""

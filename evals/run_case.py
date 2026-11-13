@@ -21,14 +21,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import dataclasses
 import json
 import logging
 import os
+import re
 import shutil
+import subprocess
 import sys
-import tempfile
 import uuid
 from pathlib import Path
 
@@ -55,7 +55,7 @@ from evals.case_schema import EvalCase, Expect, load_case  # noqa: E402
 from evals.headless_chainlit import install as install_headless_chainlit  # noqa: E402
 from evals.headless_chainlit import patch_ask_relay  # noqa: E402
 from evals.instance import apply_instance, llm_env_from_instance, resolve_instance_name  # noqa: E402
-from evals import output_inspect  # noqa: E402
+from evals import output_inspect, temp_dirs  # noqa: E402
 from evals.timing_callbacks import LatencyCallbackHandler  # noqa: E402
 
 
@@ -75,7 +75,20 @@ def _check_llm_reachable(base_url: str) -> str | None:
     return None
 
 
-def _serialize_messages(messages) -> list[dict]:
+# 結果（results.json）に残す思考の最大文字数の既定値（1メッセージあたり。超えた分は間を省く）。
+# 実際の値は評価対象インスタンスの [skill_lab] record_thinking_chars（0 で残さない）。
+_REASONING_KEEP_CHARS = 4000
+
+
+def _clip_middle(text: str, limit: int) -> str:
+    """limit 文字を超えたら先頭1/4と末尾3/4を残す（結論は末尾に来ることが多いため末尾を多めに）。"""
+    if len(text) <= limit:
+        return text
+    head = limit // 4
+    return f"{text[:head]}\n… ({len(text) - limit} characters omitted) …\n{text[-(limit - head):]}"
+
+
+def _serialize_messages(messages, reasoning_chars: int = _REASONING_KEEP_CHARS) -> list[dict]:
     """LangGraph の MessagesState をシリアライズ可能な dict のリストへ変換する。
 
     Args:
@@ -93,6 +106,11 @@ def _serialize_messages(messages) -> list[dict]:
             entry["tool_calls"] = [{"name": tc.get("name"), "args": tc.get("args")} for tc in tool_calls]
         if isinstance(msg, ToolMessage) and getattr(msg, "name", None):
             entry["tool_name"] = msg.name
+        # 思考（src/llm/dialect.py が additional_kwargs["reasoning_content"] にそろえる）。スキル研究室の
+        # AI 修正が「なぜそのスキルを選ばなかったか」等を分析できるよう残す（長いものは先頭と末尾だけ）。
+        reasoning = (getattr(msg, "additional_kwargs", None) or {}).get("reasoning_content")
+        if reasoning_chars > 0 and isinstance(reasoning, str) and reasoning.strip():
+            entry["reasoning"] = _clip_middle(reasoning.strip(), reasoning_chars)
         usage = getattr(msg, "usage_metadata", None)
         if usage:
             entry["usage_metadata"] = dict(usage)
@@ -172,7 +190,7 @@ def _max_usage_per_call(transcript: list[dict]) -> dict:
     }
 
 
-def _evaluate_expect(expect: Expect, transcript: list[dict], final_answer: str) -> dict:
+def _evaluate_expect(expect: Expect, transcript: list[dict], final_answer: str, subagent_calls: list[dict] | None = None) -> dict:
     """Expect のルールを transcript / final_answer に照らして判定する。
 
     Args:
@@ -200,6 +218,8 @@ def _evaluate_expect(expect: Expect, transcript: list[dict], final_answer: str) 
         results["tool_called_any"] = {
             "pass": ok,
             "detail": f"expected any of {expect.tool_called_any}, called={sorted(called_tools)}",
+            # スキル研究室の見直し（admin/skill_lab/judge.py）がサブエージェント内の呼び出しと照合し直すための元の値
+            "expected": list(expect.tool_called_any),
         }
 
     if expect.tool_not_called:
@@ -218,6 +238,21 @@ def _evaluate_expect(expect: Expect, transcript: list[dict], final_answer: str) 
             # 機械判定を見直す側（admin/skill_lab/judge.py）が表記ゆれを照合し直すための元の値
             "expected": partial,
             "calls": calls,
+        }
+
+    # 使ってはいけない呼び出し（「このスキルを読まないこと」等）は、委譲先のサブエージェントの中の呼び出しも数える
+    # （メインが委譲しただけで、委譲先が読んでいれば使ったことになる）。
+    sub_args_by_tool: dict[str, list[dict]] = {}
+    for c in subagent_calls or []:
+        if isinstance(c, dict) and c.get("name"):
+            sub_args_by_tool.setdefault(c["name"], []).append(c.get("args") or {})
+    for tool_name, partial in expect.tool_call_args_not_contains.items():
+        calls = args_by_tool.get(tool_name, []) + sub_args_by_tool.get(tool_name, [])
+        hits = [call for call in calls if all(call.get(k) == v for k, v in partial.items())]
+        results[f"tool_call_args_not_contains:{tool_name}"] = {
+            "pass": not hits,
+            "detail": f"unexpectedly called with {partial}: {hits}" if hits else "ok",
+            "expected": partial,
         }
 
     if expect.response_contains:
@@ -254,6 +289,103 @@ def _with_overlay_guard_exemptions(config, overlay_root: Path):
         config.plan_approval_exempt_scripts, config.main_agent_tool_guard_allow_entries, entries
     )
     return dataclasses.replace(config, plan_approval_exempt_scripts=plan_exempt, main_agent_tool_guard_allow_entries=allow_entries)
+
+
+def _copy_production_memories(production, dest: Path) -> list[Path]:
+    """本番のメモリーのうち [skill_lab] copy_memory_types の種類を、評価用の空のメモリーへ写す。写したファイルを返す。
+
+    評価のメモリーは毎回空から始まる（カンニング防止）が、社内の専門用語の辞書（glossary）が無いと本番と同じように
+    言葉を解釈できない（2026-11-13 ユーザー指摘）。写すのは、評価中のアシスタント（匿名ユーザー）が本番でも読めるもの
+    （共通のものと、各ユーザーの shared のもの。個人用・機密の目印があるものは除く。src/memory.py の is_visible_to）だけ。
+    """
+    from src import memory, skill_drafts
+    from src.config import memory_policy
+
+    types = getattr(production, "skill_lab_copy_memory_types", ())
+    source = Path(production.memory_dir)
+    if not types or not source.is_dir():
+        return []
+    policy = memory_policy(production)
+    viewer = skill_drafts.draft_owner_name(None)
+    copied = []
+    for memory_type in types:
+        for mem in memory.all_memories(source, memory_type):
+            if mem.owner is not None and not memory.is_visible_to(mem, viewer, policy):
+                continue
+            target = dest / mem.path.relative_to(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(mem.path, target)
+            copied.append(target)
+    if copied:
+        memory.rebuild_all_indexes(dest)
+    return copied
+
+
+# 評価中にアシスタントのツールが書き込む、本番では残り続ける場所（環境変数 → case_tmp の下のフォルダ名）。
+# 評価の1回ごとに使い捨てのフォルダへ向ける。そうしないと、
+# - 1回目に書いたもの（メモリーに残した答え・skill-creator で作ったドラフト等）を2回目以降が読めてしまう（カンニング）
+# - 評価のたびに本番のデータフォルダ（評価対象インスタンスの common_data_dir）にファイルが残る（計画の詳細 plan_<thread_id>.md 等）
+_ISOLATED_DIRS = (
+    ("PLANS_DIR", "plans"),
+    ("SKILL_DRAFT_DIR", "skill_drafts"),
+    ("SKILL_ARCHIVE_DIR", "skill_drafts_archive"),
+)
+
+
+def _isolate_persistent_dirs(case_tmp: Path, *, memory_dir: Path, path_memory_dir: Path) -> None:
+    """メモリー・パスメモリー・計画の詳細・ドラフトスキルの置き場を、このケース実行専用の一時フォルダへ向ける（load_config() の前に呼ぶ）。"""
+    os.environ["MEMORY_DIR"] = str(memory_dir)
+    os.environ["PATH_MEMORY_DIR"] = str(path_memory_dir)
+    for env_name, dirname in _ISOLATED_DIRS:
+        path = case_tmp / dirname
+        path.mkdir(parents=True, exist_ok=True)
+        os.environ[env_name] = str(path)
+
+
+def _run_verify_script(case: EvalCase, config, thread_id: str, case_tmp: Path, info: dict) -> dict:
+    """ケースの verify_script で、会話の後の作業フォルダを機械的に確かめる（終了コード 0 なら合格）。
+
+    `<python> <script> <作業フォルダ> <情報の JSON（case_id・final_answer・output_files）>` で実行する。
+    作業フォルダはアシスタントが実際に読み書きしたスレッド専用フォルダ（本番と同じ _tmp_<…>）。
+    スクリプトは入力ファイル（fixtures/）の中に置くため、スキル研究室の AI 修正は書き換えられない。
+    """
+    from src.tools._workdir import _resolve_exec_workdir
+
+    script = _resolve_case_file(case, case.verify_script or "")
+    if not script.is_file():
+        return {"pass": False, "detail": f"verify_script not found: {case.verify_script}"}
+    workdir = _resolve_exec_workdir(thread_id)
+    info_path = case_tmp / "verify_info.json"
+    info_path.write_text(json.dumps(info, ensure_ascii=False, default=str), encoding="utf-8")
+    timeout = config.skill_lab_verify_timeout_seconds
+    try:
+        proc = subprocess.run(
+            [config.script_python, str(script), str(workdir), str(info_path)],
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            env={**os.environ, "PYTHONUTF8": "1"},
+        )
+    except subprocess.TimeoutExpired:
+        return {"pass": False, "detail": f"verify_script timed out after {timeout} seconds"}
+    except OSError as e:
+        return {"pass": False, "detail": f"verify_script could not run: {e}"}
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return {"pass": proc.returncode == 0, "detail": output[-2000:] or f"exit code {proc.returncode}", "exit_code": proc.returncode}
+
+
+def _resolve_case_file(case: EvalCase, value: str) -> Path:
+    """ケースが指すファイル（verify_script）を _resolve_case_dir と同じ規則で解決する。"""
+    raw = Path(value)
+    if raw.is_absolute():
+        return raw.resolve()
+    beside_case = (case.source_path.parent / raw).resolve()
+    if beside_case.is_file():
+        return beside_case
+    return (_PROJECT_ROOT / raw).resolve()
 
 
 def _resolve_work_dir(case: EvalCase) -> Path:
@@ -362,22 +494,15 @@ async def _run(
     # headless_chainlit.install() 適用後にインポートする
     # （src.tools 内の cl.xxx 参照が呼び出し時に解決されるため順序自体は問わないが、
     #  意図を明確にするためここでインポートする）。
-    from dataclasses import replace
-
     from src import i18n
-    from src.agent_types import render_agent_types_block, scan_agent_types
-    from src.config import (
-        expand_config_vars,
-        load_config,
-        render_agent_type_run_script_allowlist_block,
-        render_memory_visibility_block,
-    )
+    from src.agent_types import scan_agent_types
+    from src.config import load_config
     from src.graph import ainvoke_ensuring_final_text, build_graph
     from src.llm import ThinkingLoopDetected, mark_user_turn
     from src import skill_drafts
-    from src.memory import MEMORY_INDEX_MARKER, rebuild_index, render_memory_block
-    from src.tools.vector_db_tools import render_document_collections_block
-    from src.skills import build_system_prompt, filter_skills_for_agent_type, render_skills_block, scan_skills
+    from src.memory import rebuild_all_indexes
+    from src.skills import scan_skills
+    from src.system_prompt_builder import build_prompts, fill_session_parts
     from src.subagent import add_tool_call_observer, remove_tool_call_observer
     from src.tools import get_all_tools, init_tools
 
@@ -396,16 +521,17 @@ async def _run(
     # からそちらを作業ディレクトリにすることで、フィクスチャを常に読み取り
     # 専用のまま保つ。
     # work_dir の指定が無いケースも、空の一時ディレクトリを作業ディレクトリにする（生成物を記録するため）。
-    workdir_cm = tempfile.TemporaryDirectory(prefix="evals_workdir_")
-    overlay_cm = tempfile.TemporaryDirectory(prefix="evals_skill_overlay_") if skill_overlays else contextlib.nullcontext(None)
-    agent_overlay_cm = tempfile.TemporaryDirectory(prefix="evals_agent_overlay_") if agent_overlays else contextlib.nullcontext(None)
-    with (
-        tempfile.TemporaryDirectory(prefix="evals_memory_") as tmp_memory_dir,
-        tempfile.TemporaryDirectory(prefix="evals_path_memory_") as tmp_path_memory_dir,
-        workdir_cm as tmp_workdir,
-        overlay_cm as tmp_overlay_root,
-        agent_overlay_cm as tmp_agent_overlay_root,
-    ):
+    # これらの一時フォルダは OS の一時フォルダではなく、評価対象インスタンスの [skill_lab].temp_dir の下の
+    # ケースごとのフォルダ（case_<ID>_*）に作る（強制終了で残っても場所が分かり、次の評価が片付ける。evals/temp_dirs.py）。
+    production = load_config()  # 隔離する前の設定（本番のメモリーの場所・公開範囲の規則・一時フォルダの置き場）
+    temp_root = temp_dirs.config_root(production)
+    with temp_dirs.temporary(temp_root, f"case_{re.sub(r'[^A-Za-z0-9_-]+', '_', case.id)[:40]}_") as case_tmp:
+        tmp_memory_dir, tmp_path_memory_dir, tmp_workdir = (str(Path(case_tmp) / n) for n in ("memory", "path_memory", "workdir"))
+        tmp_overlay_root = str(Path(case_tmp) / "skill_overlay") if skill_overlays else None
+        tmp_agent_overlay_root = str(Path(case_tmp) / "agent_overlay") if agent_overlays else None
+        for d in (tmp_memory_dir, tmp_path_memory_dir, tmp_workdir, tmp_overlay_root, tmp_agent_overlay_root):
+            if d:
+                Path(d).mkdir()
         overlay_roots: list[Path] = []
         if tmp_overlay_root:
             for skill_dir in skill_overlays or []:
@@ -416,13 +542,14 @@ async def _run(
             for agent_file in agent_overlays or []:
                 shutil.copy2(agent_file, Path(tmp_agent_overlay_root) / agent_file.name)
             agent_overlay_roots = [Path(tmp_agent_overlay_root)]
-        os.environ["MEMORY_DIR"] = tmp_memory_dir
-        os.environ["PATH_MEMORY_DIR"] = tmp_path_memory_dir
+        _isolate_persistent_dirs(Path(case_tmp), memory_dir=Path(tmp_memory_dir), path_memory_dir=Path(tmp_path_memory_dir))
+        # 社内の用語辞書（glossary）等は本番のものを写す（[skill_lab] copy_memory_types。本番でも誰でも読めるものだけ）
+        _copy_production_memories(production, Path(tmp_memory_dir))
         # ケースが memory_seed を指定していれば、過去に記録したメモリーがある状態から始める
         # （写しを使うのでシードのフォルダは汚れない）。索引 MEMORY.md も作り直す。
         if case.memory_seed:
             shutil.copytree(_resolve_case_dir(case, case.memory_seed), tmp_memory_dir, dirs_exist_ok=True)
-            rebuild_index(Path(tmp_memory_dir))
+            rebuild_all_indexes(Path(tmp_memory_dir))
         # ケースが work_dir（プロジェクトルート相対パス）を指定していれば、
         # run_script/execute_python_code/view_image の既定作業ディレクトリを
         # そこへ固定する（例: 大量ファイル探索シナリオのフィクスチャ）。
@@ -495,56 +622,22 @@ async def _run(
         skills = scan_skills([config.skills_dir, *config.locohane_skills_dirs, *overlay_roots])
         if exclude_skills:
             skills = [sk for sk in skills if sk.name not in set(exclude_skills)]
-        system_prompt = build_system_prompt(skills, config.system_prompt_path)
-        # app.py の _setup() と同じ手順で agent_type_defs を構築し、
-        # {{agent_types}}/{{memory}} プレースホルダーを置換する
-        # （本番と同じシステムプロンプトで評価するため）。
-        # --agent-overlay も同じく本番の構成の上に最優先で重ねる（scan_agent_types は後方優先）。
-        agent_type_defs = scan_agent_types([config.agents_dir, *config.locohane_agents_dirs, *agent_overlay_roots])
-        agent_types_block = render_agent_types_block(agent_type_defs)
-        agent_type_defs = [
-            replace(
-                a,
-                system_prompt=a.system_prompt.replace(
-                    "{{skills}}",
-                    render_skills_block(
-                        filter_skills_for_agent_type(skills, a.name, config.subagent_agent_type_run_script_allowlist)
-                    ),
-                )
-                .replace("{{all_skills}}", render_skills_block(skills))
-                .replace("{{agent_types}}", agent_types_block)
-                .replace(
-                    "{{run_script_allowlist}}",
-                    render_agent_type_run_script_allowlist_block(a.name, config.subagent_agent_type_run_script_allowlist),
-                ),
-            )
-            for a in agent_type_defs
-        ]
-        # 索引は config 変数の展開の後に差し込む（app.py と同じ）。メモリーの本文に "${" があると、
-        # 先に差し込んだ場合だけ expand_config_vars() が未定義変数として起動時に失敗するため。
-        system_prompt = system_prompt.replace("{{memory}}", MEMORY_INDEX_MARKER)
-        system_prompt = system_prompt.replace("{{agent_types}}", agent_types_block)
-        system_prompt = system_prompt.replace("{{document_collections}}", render_document_collections_block(config))
-        # config.ini の値を ${変数名} として埋め込めるよう展開する（app.py の
-        # _setup() と同じ手順、{{...}}置換完了後に行う）。
-        system_prompt = expand_config_vars(system_prompt, config)
-        # メモリーのツールはセッション外では匿名ユーザーとして動く（src/tools/memory_tools.py）ため、索引も同じ立場で組み立てる。
-        system_prompt = system_prompt.replace(
-            MEMORY_INDEX_MARKER, render_memory_block(config.memory_dir, viewer=skill_drafts.draft_owner_name(None))
+        # システムプロンプトは本番（app.py）と同じ関数で組み立てる（src/system_prompt_builder.py）。
+        # スキル一覧の見せ方（[main_agent_tool_guard] visibility_mode）・LOCOHANE.md・計画承認を免除される
+        # スクリプト・呼べないツールの案内まで本番と同じになる（以前は別々に組み立てており、評価ではこれらが抜けていた）。
+        # --agent-overlay も本番の構成の上に最優先で重ねる（scan_agent_types は後方優先）。
+        system_prompt, agent_type_defs = build_prompts(
+            config, skills, scan_agent_types([config.agents_dir, *config.locohane_agents_dirs, *agent_overlay_roots])
         )
-        # app.py の _setup() と同じく、メモリーの公開範囲の決め方を config 変数の展開の後に差し込む。
-        system_prompt = system_prompt.replace("{{memory_visibility}}", render_memory_visibility_block(config))
+        # 利用者のドラフトスキルは除く（本番でも作成者本人にしか見えない。評価する資産は研究対象として正式スキルと
+        # 同じく重ねている）。メモリーのツールはセッション外では匿名ユーザーとして動く（src/tools/memory_tools.py）ため、
+        # 索引も同じ立場で組み立てる。
+        system_prompt = fill_session_parts(system_prompt, config, drafts=[], memory_viewer=skill_drafts.draft_owner_name(None))
         # 本番（app.py の _rebuild_graph）と同じく応答言語の指示を末尾に足す。セッションが
-        # 無いため [ui].default_language（auto なら日本語）の言語になる。
+        # 無いため [ui].default_language（auto なら日本語）の言語になる。既定言語の登録（app.py の
+        # set_default_language と同じ）をしていなかったため、英語のインスタンスでも日本語で答えさせていた。
+        i18n.set_default_language(config.ui_default_language)
         system_prompt += i18n.response_language_directive()
-
-        # サブエージェント共通の注意事項を各 agent_type の system_prompt 末尾に
-        # 連結する（app.py の _setup() と同じ手順）。
-        subagent_common = expand_config_vars(
-            (config.system_prompt_path.parent / "subagent_common.md").read_text(encoding="utf-8"),
-            config,
-        )
-        agent_type_defs = [replace(a, system_prompt=f"{a.system_prompt}\n\n{subagent_common}") for a in agent_type_defs]
 
         # キーワード引数で渡す（init_tools は開発中でシグネチャが変わりうるため、
         # 位置引数だとズレて誤った型を渡してしまう事故が起きやすい）。
@@ -696,7 +789,7 @@ async def _run(
                 remove_tool_call_observer(observe_subagent_call)
 
             messages = result["messages"] if result else []
-            transcript = _serialize_messages(messages)
+            transcript = _serialize_messages(messages, config.skill_lab_record_thinking_chars)
             token_usage_total = _sum_usage(transcript)
             token_usage_max_per_call = _max_usage_per_call(transcript)
 
@@ -708,7 +801,16 @@ async def _run(
 
             rule_results: dict = {}
             if case.expect is not None:
-                rule_results = _evaluate_expect(case.expect, transcript, final_answer)
+                rule_results = _evaluate_expect(case.expect, transcript, final_answer, subagent_calls)
+            output_files = (
+                output_inspect.describe_outputs(workdir_root, output_inspect.changed_files(workdir_root, workdir_before), keep_outputs)
+                if workdir_root is not None
+                else None
+            )
+            if case.verify_script:
+                rule_results["verify_script"] = _run_verify_script(
+                    case, config, thread_id, Path(case_tmp), {"case_id": case.id, "final_answer": final_answer, "output_files": output_files or []}
+                )
 
             out = {
                 "case_id": case.id,
@@ -726,10 +828,8 @@ async def _run(
             }
             if subagent_calls:
                 out["subagent_tool_calls"] = subagent_calls
-            if workdir_root is not None:
-                out["output_files"] = output_inspect.describe_outputs(
-                    workdir_root, output_inspect.changed_files(workdir_root, workdir_before), keep_outputs
-                )
+            if output_files is not None:
+                out["output_files"] = output_files
             if turn_cutoffs:
                 out["turn_cutoffs"] = turn_cutoffs
             if mid_turn_error is not None:

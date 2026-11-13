@@ -1169,10 +1169,10 @@ const CONFIG_PRESETS = [
       "main_agent_tool_guard.allow_entries",
       "plan.plan_approval_exempt_scripts",
       "skill_creator.draft_dir",
-      "skill_creator.tryout_repeats",
       "skill_creator.other_users_drafts",
       "skill_creator.archive_dir",
       "skill_lab.instance_locohane_dir",
+      "skill_lab.tryout_repeats",
     ],
   },
   {

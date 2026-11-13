@@ -1215,7 +1215,6 @@ class Config:
     # （skills_dir/project_locohane_dirs）とは重ならないことを load_config() が保証する。
     skill_draft_dir: Path
     # スキル安定化トライアウト（同じケースを何回連続で通せば合格とするか）の既定回数。
-    skill_tryout_repeats: int
     # 他ユーザーのドラフトの扱い（hidden/listed/readable/full、SKILL_DRAFT_VISIBILITY_MODES）。
     skill_other_users_drafts: str
     # 昇格したドラフトの退避先（スキル走査対象・skill_draft_dir と重ならないことを load_config() が保証する）。
@@ -1227,6 +1226,37 @@ class Config:
     skill_lab_poll_interval_seconds: float
     skill_lab_fixer_max_file_chars: int
     skill_lab_transcript_excerpt_chars: int
+    # AI に渡す記録の項目ごとの切り詰め（[skill_lab_worker] excerpt_* / judge_* / fixer_*。admin/skill_lab/evaluation.py の ExcerptLimits）
+    skill_lab_excerpt_user_chars: int
+    skill_lab_excerpt_thinking_chars: int
+    skill_lab_excerpt_ai_text_chars: int
+    skill_lab_excerpt_ai_note_chars: int
+    skill_lab_excerpt_tool_args_chars: int
+    skill_lab_excerpt_tool_result_chars: int
+    skill_lab_excerpt_subagent_args_chars: int
+    skill_lab_excerpt_subagent_result_chars: int
+    skill_lab_judge_spec_chars: int
+    skill_lab_judge_answer_chars: int
+    skill_lab_judge_checks_chars: int
+    skill_lab_judge_criteria_chars: int
+    skill_lab_fixer_failed_runs_per_case: int
+    skill_lab_fixer_history_iterations: int
+    skill_lab_fixer_max_files_per_fix: int
+    skill_lab_fixer_max_reverts: int
+    skill_lab_tryout_stop_on_first_failure: bool
+    skill_lab_evaluate_baseline: bool
+    skill_lab_restore_best_state: bool
+    skill_lab_report_ai_summary: bool
+
+    # --- 評価の一時フォルダ（[skill_lab].temp_*、evals/temp_dirs.py） ---
+    # [skill_lab] tryout_repeats（スキル安定化トライアウトの回数の既定値。研究テーマごとに変えられる）
+    skill_lab_tryout_repeats: int
+    skill_lab_temp_dir: Path
+    skill_lab_temp_retention_hours: float
+    skill_lab_temp_cleanup_interval_hours: float
+    skill_lab_record_thinking_chars: int
+    skill_lab_verify_timeout_seconds: int
+    skill_lab_copy_memory_types: tuple[str, ...]
 
     # --- Chainlitセッションファイルディレクトリ（.files/）の自動削除 ---
     chainlit_files_retention_days: int
@@ -2739,6 +2769,19 @@ def _parse_memory_user_ranks(value: str | None) -> dict[str, int]:
     return ranks
 
 
+def _as_memory_types(value: object, key: str) -> tuple[str, ...]:
+    """カンマ区切りのメモリーの種類（src/memory.py の MEMORY_TYPES）。空欄なら空。
+
+    Raises:
+        ValueError: MEMORY_TYPES に無い種類がある場合。
+    """
+    items = tuple(dict.fromkeys(x.strip() for x in str(value or "").split(",") if x.strip()))
+    unknown = [x for x in items if x not in memory.MEMORY_TYPES]
+    if unknown:
+        raise ValueError(f"{key} has unknown memory types {unknown} (choose from {', '.join(memory.MEMORY_TYPES)})")
+    return items
+
+
 def memory_policy(config: Config) -> memory.MemoryPolicy:
     """Config の [memory] から、メモリーの公開範囲と優先順位の規則を作る。"""
     return memory.MemoryPolicy(
@@ -2752,6 +2795,18 @@ def memory_policy(config: Config) -> memory.MemoryPolicy:
 def render_memory_visibility_block(config: Config) -> str:
     """system_prompt.md の {{memory_visibility}} へ差し込む、公開範囲の決め方の説明を組み立てる。"""
     return memory.render_visibility_block(config.memory_shared_criteria, config.memory_private_criteria, memory_policy(config))
+
+
+def _as_float(value: object, key: str) -> float:
+    """数値として解釈して返す（0 以下も可。「0 以下で無効」の設定用）。
+
+    Raises:
+        ValueError: 数値として解釈できない場合。
+    """
+    try:
+        return float(str(value).strip())
+    except ValueError as e:
+        raise ValueError(f"{key} must be a number: {value!r}") from e
 
 
 def _positive_float(value: object, key: str) -> float:
@@ -3303,7 +3358,7 @@ def load_config(
     skill_creator_section = parser["skill_creator"] if parser.has_section("skill_creator") else {}
     skill_lab_section = parser["skill_lab"] if parser.has_section("skill_lab") else {}
     skill_lab_worker_section = parser["skill_lab_worker"] if parser.has_section("skill_lab_worker") else {}
-    path_memory = parser["path_memory"] if parser.has_section("path_memory") else {}
+    path_memory =parser["path_memory"] if parser.has_section("path_memory") else {}
     memory_section = parser["memory"] if parser.has_section("memory") else {}
     vector_db = parser["vector_db"] if parser.has_section("vector_db") else {}
     log_section = parser["log"] if parser.has_section("log") else {}
@@ -3605,9 +3660,6 @@ def load_config(
                 resolved_instance_name,
             ),
         ),
-        skill_tryout_repeats=_positive_int(
-            os.getenv("SKILL_TRYOUT_REPEATS", skill_creator_section.get("tryout_repeats", 10)), "[skill_creator].tryout_repeats"
-        ),
         skill_other_users_drafts=_parse_skill_draft_visibility(
             os.getenv("SKILL_OTHER_USERS_DRAFTS", skill_creator_section.get("other_users_drafts", "hidden"))
         ),
@@ -3634,6 +3686,89 @@ def load_config(
         skill_lab_transcript_excerpt_chars=_positive_int(
             os.getenv("SKILL_LAB_TRANSCRIPT_EXCERPT_CHARS", skill_lab_worker_section.get("transcript_excerpt_chars", 6000)),
             "[skill_lab_worker].transcript_excerpt_chars",
+        ),
+        skill_lab_excerpt_user_chars=_non_negative_int(
+            os.getenv("SKILL_LAB_EXCERPT_USER_CHARS", skill_lab_worker_section.get("excerpt_user_chars", 800)), "[skill_lab_worker].excerpt_user_chars"
+        ),
+        skill_lab_excerpt_thinking_chars=_non_negative_int(
+            os.getenv("SKILL_LAB_EXCERPT_THINKING_CHARS", skill_lab_worker_section.get("excerpt_thinking_chars", 600)), "[skill_lab_worker].excerpt_thinking_chars"
+        ),
+        skill_lab_excerpt_ai_text_chars=_non_negative_int(
+            os.getenv("SKILL_LAB_EXCERPT_AI_TEXT_CHARS", skill_lab_worker_section.get("excerpt_ai_text_chars", 1500)), "[skill_lab_worker].excerpt_ai_text_chars"
+        ),
+        skill_lab_excerpt_ai_note_chars=_non_negative_int(
+            os.getenv("SKILL_LAB_EXCERPT_AI_NOTE_CHARS", skill_lab_worker_section.get("excerpt_ai_note_chars", 400)), "[skill_lab_worker].excerpt_ai_note_chars"
+        ),
+        skill_lab_excerpt_tool_args_chars=_non_negative_int(
+            os.getenv("SKILL_LAB_EXCERPT_TOOL_ARGS_CHARS", skill_lab_worker_section.get("excerpt_tool_args_chars", 600)), "[skill_lab_worker].excerpt_tool_args_chars"
+        ),
+        skill_lab_excerpt_tool_result_chars=_non_negative_int(
+            os.getenv("SKILL_LAB_EXCERPT_TOOL_RESULT_CHARS", skill_lab_worker_section.get("excerpt_tool_result_chars", 700)), "[skill_lab_worker].excerpt_tool_result_chars"
+        ),
+        skill_lab_excerpt_subagent_args_chars=_non_negative_int(
+            os.getenv("SKILL_LAB_EXCERPT_SUBAGENT_ARGS_CHARS", skill_lab_worker_section.get("excerpt_subagent_args_chars", 400)), "[skill_lab_worker].excerpt_subagent_args_chars"
+        ),
+        skill_lab_excerpt_subagent_result_chars=_non_negative_int(
+            os.getenv("SKILL_LAB_EXCERPT_SUBAGENT_RESULT_CHARS", skill_lab_worker_section.get("excerpt_subagent_result_chars", 300)), "[skill_lab_worker].excerpt_subagent_result_chars"
+        ),
+        skill_lab_judge_spec_chars=_non_negative_int(
+            os.getenv("SKILL_LAB_JUDGE_SPEC_CHARS", skill_lab_worker_section.get("judge_spec_chars", 6000)), "[skill_lab_worker].judge_spec_chars"
+        ),
+        skill_lab_judge_answer_chars=_non_negative_int(
+            os.getenv("SKILL_LAB_JUDGE_ANSWER_CHARS", skill_lab_worker_section.get("judge_answer_chars", 4000)), "[skill_lab_worker].judge_answer_chars"
+        ),
+        skill_lab_judge_checks_chars=_non_negative_int(
+            os.getenv("SKILL_LAB_JUDGE_CHECKS_CHARS", skill_lab_worker_section.get("judge_checks_chars", 4000)), "[skill_lab_worker].judge_checks_chars"
+        ),
+        skill_lab_judge_criteria_chars=_non_negative_int(
+            os.getenv("SKILL_LAB_JUDGE_CRITERIA_CHARS", skill_lab_worker_section.get("judge_criteria_chars", 2000)), "[skill_lab_worker].judge_criteria_chars"
+        ),
+        skill_lab_fixer_failed_runs_per_case=_non_negative_int(
+            os.getenv("SKILL_LAB_FIXER_FAILED_RUNS_PER_CASE", skill_lab_worker_section.get("fixer_failed_runs_per_case", 2)), "[skill_lab_worker].fixer_failed_runs_per_case"
+        ),
+        skill_lab_fixer_history_iterations=_non_negative_int(
+            os.getenv("SKILL_LAB_FIXER_HISTORY_ITERATIONS", skill_lab_worker_section.get("fixer_history_iterations", 6)), "[skill_lab_worker].fixer_history_iterations"
+        ),
+        skill_lab_fixer_max_files_per_fix=_non_negative_int(
+            os.getenv("SKILL_LAB_FIXER_MAX_FILES_PER_FIX", skill_lab_worker_section.get("fixer_max_files_per_fix", 2)), "[skill_lab_worker].fixer_max_files_per_fix"
+        ),
+        skill_lab_fixer_max_reverts=_non_negative_int(
+            os.getenv("SKILL_LAB_FIXER_MAX_REVERTS", skill_lab_worker_section.get("fixer_max_reverts", 3)), "[skill_lab_worker].fixer_max_reverts"
+        ),
+        skill_lab_tryout_stop_on_first_failure=_as_bool(os.getenv("SKILL_LAB_TRYOUT_STOP_ON_FIRST_FAILURE", skill_lab_worker_section.get("tryout_stop_on_first_failure", "true"))),
+        skill_lab_evaluate_baseline=_as_bool(os.getenv("SKILL_LAB_EVALUATE_BASELINE", skill_lab_worker_section.get("evaluate_baseline", "true"))),
+        skill_lab_restore_best_state=_as_bool(os.getenv("SKILL_LAB_RESTORE_BEST_STATE", skill_lab_worker_section.get("restore_best_state", "true"))),
+        skill_lab_report_ai_summary=_as_bool(os.getenv("SKILL_LAB_REPORT_AI_SUMMARY", skill_lab_worker_section.get("report_ai_summary", "true"))),
+        skill_lab_tryout_repeats=_positive_int(
+            # SKILL_TRYOUT_REPEATS は [skill_creator] にあったころの環境変数（旧い .env でも効くように読む）
+            os.getenv("SKILL_LAB_TRYOUT_REPEATS") or os.getenv("SKILL_TRYOUT_REPEATS") or skill_lab_section.get("tryout_repeats", 10),
+            "[skill_lab].tryout_repeats",
+        ),
+        skill_lab_temp_dir=_resolve(
+            PROJECT_ROOT,
+            _sub_common_data_dir(
+                os.getenv("SKILL_LAB_TEMP_DIR", skill_lab_section.get("temp_dir", "${common_data_dir}/evals_temp")),
+                common_data_dir,
+                resolved_instance_name,
+            ),
+        ),
+        skill_lab_temp_retention_hours=_as_float(
+            os.getenv("SKILL_LAB_TEMP_RETENTION_HOURS", skill_lab_section.get("temp_retention_hours", 24)), "[skill_lab].temp_retention_hours"
+        ),
+        skill_lab_temp_cleanup_interval_hours=_positive_float(
+            os.getenv("SKILL_LAB_TEMP_CLEANUP_INTERVAL_HOURS", skill_lab_section.get("temp_cleanup_interval_hours", 1)),
+            "[skill_lab].temp_cleanup_interval_hours",
+        ),
+        skill_lab_record_thinking_chars=_non_negative_int(
+            os.getenv("SKILL_LAB_RECORD_THINKING_CHARS", skill_lab_section.get("record_thinking_chars", 4000)),
+            "[skill_lab].record_thinking_chars",
+        ),
+        skill_lab_verify_timeout_seconds=_positive_int(
+            os.getenv("SKILL_LAB_VERIFY_TIMEOUT_SECONDS", skill_lab_section.get("verify_timeout_seconds", 120)),
+            "[skill_lab].verify_timeout_seconds",
+        ),
+        skill_lab_copy_memory_types=_as_memory_types(
+            os.getenv("SKILL_LAB_COPY_MEMORY_TYPES", skill_lab_section.get("copy_memory_types", "glossary")), "[skill_lab].copy_memory_types"
         ),
         chainlit_files_retention_days=int(os.getenv("CHAINLIT_FILES_RETENTION_DAYS", chainlit_files.get("retention_days", 7))),
         chainlit_files_cleanup_interval_hours=float(
@@ -4439,6 +4574,34 @@ def _load_mcp_global_overrides(path: Path) -> dict:
     return data.get("mcp", {}) if isinstance(data, dict) else {}
 
 
+# 別のセクションへ移したキー（旧 (セクション, キー) → 新）。保存済みの config_overrides.json に旧い書き方が
+# 残っていても、黙って無視せずに新しい場所の値として読む（同じ値が新しい場所にもあれば新しい方を使う）。
+_MOVED_OVERRIDE_KEYS: dict[tuple[str, str], tuple[str, str]] = {
+    # トライアウトの回数は正式化（スキル研究室・promote-skill）の基準で、ドラフトを作る側（skill-creator）の設定ではない
+    ("skill_creator", "tryout_repeats"): ("skill_lab", "tryout_repeats"),
+}
+
+
+def _move_renamed_override_keys(data: dict, path: Path) -> dict:
+    """config_overrides.json の旧い (セクション, キー) を新しい場所へ移した写しを返す（元のファイルは書き換えない）。"""
+    moved = {section: dict(values) if isinstance(values, dict) else values for section, values in data.items()}
+    for (old_section, old_key), (new_section, new_key) in _MOVED_OVERRIDE_KEYS.items():
+        old_values = moved.get(old_section)
+        if not isinstance(old_values, dict) or old_key not in old_values:
+            continue
+        value = old_values.pop(old_key)
+        new_values = moved.setdefault(new_section, {})
+        if isinstance(new_values, dict) and new_key not in new_values:
+            new_values[new_key] = value
+            logger.warning(
+                "%s: [%s].%s has moved to [%s].%s; using the old entry as [%s].%s (save it again in the admin tool to move it).",
+                path, old_section, old_key, new_section, new_key, new_section, new_key,
+            )
+        else:
+            logger.warning("%s: ignoring the old entry [%s].%s because [%s].%s is also set.", path, old_section, old_key, new_section, new_key)
+    return moved
+
+
 def _apply_config_overrides(parser: configparser.ConfigParser, path: Path) -> None:
     """管理ツール（admin/ パッケージ）が書き出した config_overrides.json を
     configparser の値へ適用する（config.ini のパース直後、他の全読み込みより
@@ -4477,6 +4640,7 @@ def _apply_config_overrides(parser: configparser.ConfigParser, path: Path) -> No
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{path}: the top level must be an object (a dict keyed by section name).")
+    data = _move_renamed_override_keys(data, path)
     for section, section_values in data.items():
         if not isinstance(section_values, dict):
             raise ValueError(f"{path}: the value of section {section!r} must be an object (a dict keyed by key name).")

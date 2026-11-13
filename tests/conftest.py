@@ -18,6 +18,16 @@ _TEMP_ROOT = Path(tempfile.gettempdir()).resolve()
 
 
 @pytest.fixture(autouse=True)
+def _keep_eval_temp_in_test_dir(monkeypatch, tmp_path_factory):
+    """評価の一時フォルダ（[skill_lab].temp_dir）を、開発者の手元の本物のデータフォルダ（common_data_dir）に作らせない。
+
+    既定インスタンスの設定で evals/run_all.py を動かすテストがあり、そのままでは本物の
+    common_data_dir/evals_temp に一時フォルダを作る。置き場自体を確かめるテストは、この環境変数を消して使う。
+    """
+    monkeypatch.setenv("SKILL_LAB_TEMP_DIR", str(tmp_path_factory.getbasetemp() / "evals_temp"))
+
+
+@pytest.fixture(autouse=True)
 def _keep_embedding_usage_in_temp(monkeypatch):
     """埋め込みの使用量の台帳（src/embedding_usage.py）を、一時フォルダの外（load_config() の実際のスレッドDB等）へ書かせない。
 

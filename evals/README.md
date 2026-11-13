@@ -72,7 +72,14 @@ python -m evals.run_case evals/cases/system_prompt/001_skill_routing_pdf.yaml --
 （`evals/instance.py`）。そのため `config_overrides.json` の上書きだけでなく、
 インスタンス別 `.env` に書いた `LLM_MAIN_URL` 等の環境変数も反映される。
 ケース yaml の `env:` と、メモリー等の一時ディレクトリへの隔離はさらにその上から
-適用される。省略時は環境変数 `LOCOHANE_INSTANCE`、それも無ければ `default`。
+適用される。隔離するのは、評価中にツールが書き込み、本番では残り続ける場所すべて（メモリー・パスメモリー・
+計画の詳細 `plans_dir`・ドラフトスキルの置き場 `[skill_creator] draft_dir`/`archive_dir`・作業フォルダ）で、
+ケースの1回ごと（トライアウトの各回も）に空の一時フォルダ（`[skill_lab] temp_dir` の下）から始まる。
+1回目に書いた答えを2回目以降が読む（カンニング）ことも、本番のデータフォルダに書き込むこともない。
+本番のメモリーは、社内の用語辞書（`glossary`）だけを写して始める（`[skill_lab] copy_memory_types`。本番でも誰でも読める
+共通・共有のものだけ）。それ以外の過去の記録がある状態から始めたいケースは `memory_seed` を使う。
+システムプロンプトは本番（app.py）と同じ関数（`src/system_prompt_builder.py`）で組み立てる（スキル一覧の見せ方・LOCOHANE.md・
+計画承認を免除されるスクリプト・呼べないツールの案内まで同じ）。利用者のドラフトスキルは出さない。省略時は環境変数 `LOCOHANE_INSTANCE`、それも無ければ `default`。
 存在しないインスタンス名を指定するとケースを1件も実行せずにエラー終了する。
 どのインスタンスで実行したかは `summary.md` 先頭と `results.json` の各要素の
 `instance` に記録される。
@@ -100,8 +107,10 @@ python evals/run_all.py system_prompt --repeat 10 --instance <name>
 開始時にケース（フォルダ直下の `*.yaml` 全部）と `--skill-overlay` のスキルを一時フォルダへ写し、
 全回をその内容で評価する（途中でドラフトが編集されても回ごとに中身が変わらない）。`tryout.json` は
 `--repeat 1` でも出力し、評価した内容のハッシュ（`cases_sha256`・`skill_overlays[].sha256`。規則は
-`evals/skill_tree.py`）と実行したケース（`case_files`）も残す。promote-skill の昇格は、このハッシュが
-今のドラフトと一致し、全ケースを `[skill_creator] tryout_repeats` 回以上評価した `tryout.json` でなければ
+`evals/skill_tree.py`）と実行したケース（`case_files`）も残す。`--stop-on-fail` を付けると、不合格・エラーの回が
+出た時点で残りの回を回さずに終える（`tryout.json` に `"stopped_early": true`。判定は `fail`。スキル研究室のトライアウトが使う）。
+promote-skill の昇格は、このハッシュが
+今のドラフトと一致し、全ケースを `[skill_lab] tryout_repeats` 回以上評価した `tryout.json` でなければ
 受け付けない（ドラフトに修正が入れば合格回数は0に戻る）。
 
 ### 任意のケースフォルダ・スキルを重ねた評価（`--cases-dir` / `--skill-overlay`）
@@ -156,6 +165,8 @@ expect:                              # ルールベース判定（省略可、�
   tool_not_called: [execute_python_code]   # これらが1回も呼ばれていなければ合格
   tool_call_args_contains:           # 該当ツールの呼び出しに指定引数が含まれるか
     read_skill: {skill_name: "pdf-tools"}
+  tool_call_args_not_contains:       # 該当ツールをこの引数で呼んでいなければ合格（使ってはいけない場面の確認。
+    read_skill: {skill_name: "excel-edit"}   # 委譲先のサブエージェントの中の呼び出しも数える）
   response_contains: ["Excel"]       # 最終回答に含まれるべき文字列
   response_not_contains: ["申し訳ありません"]  # 含まれてはいけない文字列
 judge: |                             # 自由記述の判定基準（省略可）。
@@ -174,10 +185,16 @@ memory_seed: "evals/fixtures/xxx"    # ケース開始時に使い捨てのメ�
 timeout_seconds: 3600                # run_all.py がサブプロセス実行する際のタイムアウト秒数
                                       # （省略可、既定は run_all.py の CASE_TIMEOUT_SECONDS=900。
                                       # 大量ファイルを扱う重量級ケースの上書き用）
+verify_script: "fixtures/xxx/check.py"  # 会話の後に作業フォルダを確かめるスクリプト（省略可。work_dir と同じ規則で解決）。
+                                      # `python <script> <作業フォルダ> <情報の JSON>` で実行し、終了コード 0 なら合格。
+                                      # 情報の JSON は case_id・final_answer・output_files。作られたファイルの中身を
+                                      # 機械的に確かめる（AI の「作成しました」の自己申告を信じない）。制限時間は
+                                      # [skill_lab] verify_timeout_seconds。結果は rule_results の verify_script
 notes: "人間向けの補足メモ（判定には使わない）"
 ```
 
-- `expect` はルールベースで `run_case.py` がその場で pass/fail を出す。
+- `expect` はルールベースで `run_case.py` がその場で pass/fail を出す（`verify_script` の結果も含む）。
+- 結果の transcript の AIMessage には、思考の先頭と末尾（`reasoning`。長さは `[skill_lab] record_thinking_chars`）も残る。
 - `judge` は ClaudeCode（人間の代わりに読む側）が transcript を読んで判断する
   自由記述の指示。ツール呼び出しの機械的な有無では判定しづらい「捏造していないか」
   「委譲判断が妥当か」といった観点に使う。

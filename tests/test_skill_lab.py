@@ -325,7 +325,7 @@ def test_worker_loop_fixes_until_tryout_passes(lab_env, monkeypatch):
     data = themes.read(directory)
     assert data["status"] == themes.STATUS_REVIEW
     assert [c[0] for c in calls["eval"]] == ["eval", "eval", "tryout", "eval", "tryout"]
-    assert calls["eval"][2][1] == _cfg(lab_env, "org_a").skill_tryout_repeats
+    assert calls["eval"][2][1] == _cfg(lab_env, "org_a").skill_lab_tryout_repeats
     assert calls["fix"] == 2
 
 
@@ -561,14 +561,14 @@ def test_worker_ai_uses_target_settings_with_lab_endpoints(lab_env):
     """AI 修正・judge・下書きは、対象インスタンスの設定に研究室の接続先だけを重ねて呼ぶ。"""
     path = lab_env["root"] / "org_a" / "config_overrides.json"
     data = json.loads(path.read_text(encoding="utf-8"))
-    data["skill_creator"] = {"tryout_repeats": "3"}
+    data["skill_lab"] = {"tryout_repeats": "3"}
     path.write_text(json.dumps(data), encoding="utf-8")
     w = _lab_worker(lab_env)
     w.config = _cfg(lab_env, "lab1")
     llm_cfg = w._llm_config("org_a")
     assert [e.base_url for e in llm_cfg.main_endpoints] == ["http://lab-host:9999/v1"]
     assert llm_cfg.sub_endpoints == w.config.sub_endpoints
-    assert llm_cfg.skill_tryout_repeats == 3 and llm_cfg.common_data_dir == _cfg(lab_env, "org_a").common_data_dir
+    assert llm_cfg.skill_lab_tryout_repeats == 3 and llm_cfg.common_data_dir == _cfg(lab_env, "org_a").common_data_dir
 
 
 # --- API（インスタンスごとの分離） ----------------------------------------------------------
@@ -731,9 +731,10 @@ def test_fixer_cannot_game_the_cases_or_targets(lab_env):
         assert applied == [] and errors, edits
     assert (directory / "cases" / "001.yaml").is_file()
     assert (directory / "cases" / "fixtures" / "s1" / "in.txt").read_text(encoding="utf-8") == "入力"
-    # 今あるケースの中身を直すのはよい（レビューで強調表示する）
+    # 今あるケースの中身も書き換えさせない（問題は blockers で報告させ、ループを止めて人が直す）
     fixed = _CASE.format(id="001").replace("judge: x", "judge: y")
-    assert fixer.apply_edits(directory, [{"path": "cases/001.yaml", "content": fixed}], known_tools=["Read"])[1] == []
+    assert fixer.apply_edits(directory, [{"path": "cases/001.yaml", "content": fixed}], known_tools=["Read"])[1]
+    assert "judge: x" in (directory / "cases" / "001.yaml").read_text(encoding="utf-8")
 
 
 def test_case_without_effective_condition_is_rejected(lab_env):
@@ -748,6 +749,23 @@ def test_case_without_effective_condition_is_rejected(lab_env):
     cases = {c["id"]: c for c in themes.list_cases(directory)}
     assert "way to decide passing" in cases["001"]["error"] and "fixtures/nothing" in cases["002"]["error"]
     assert any("001" in m and "002" in m for m in themes.start_missing(directory))
+
+
+def test_case_with_conditions_that_can_never_pass_blocks_start(lab_env):
+    """どう答えても満たせない条件（含むべき言葉の中に禁止の言葉がある・呼ぶべきツールを禁止している等）は、
+    反復を使い切る前に、開始の条件で知らせる（2026-11-13 ユーザー報告）。"""
+    directory = _theme(lab_env)
+    contradicting = (
+        "id: '001'\ntarget: skill_lab\nturns: [合言葉を教えて]\n"
+        "expect:\n  response_contains: [ハローワールド]\n  response_not_contains: [ハロー]\n"
+        "  tool_called_any: [read_skill]\n  tool_not_called: [read_skill]\n"
+    )
+    themes.write_text(directory, "cases/001.yaml", contradicting, actor="admin")
+    themes.write_text(directory, "cases/002.yaml", _CASE.format(id="002"), actor="admin")
+    cases = {c["id"]: c for c in themes.list_cases(directory)}
+    assert "ハローワールド" in cases["001"]["error"] and "read_skill" in cases["001"]["error"]
+    assert "error" not in cases["002"]
+    assert any("001" in m and "002" not in m for m in themes.start_missing(directory))
 
 
 def test_fixture_paths_and_reserved_names(lab_env):
@@ -1232,3 +1250,118 @@ def test_fixer_does_not_show_accepted_notation_differences_as_unmet():
     }
     text = fixer.failures_text([r], [verdict], excerpt_chars=1000)
     assert "Unmet checks" not in text and "accepted" in text and "the summary is missing" in text
+
+
+# --- 同じ直しの繰り返し・ケース自体の問題でループを止める（2026-11-13 ユーザー指摘） -----------------
+
+
+def _stall_worker(monkeypatch, lab_env, directory, fixes):
+    """評価は常に不合格。修正は fixes の順に SKILL.md の本文を書き換える（None は修正できなかった）。"""
+    w, _ = _make_worker(monkeypatch, lab_env, [], max_iterations=10)
+    skill_md = directory / "assets" / "skills" / "my-skill" / "SKILL.md"
+    queue = list(fixes)
+    evaluated = []
+
+    def fake_evaluate(instance, d, repeat, phase):
+        it = {"n": len(evaluated) + 1, "phase": phase, "repeat": repeat, "verdict": "fail", "cases": {"001": {"fail": 1}},
+              "at": themes.now_iso(), "state_sha": themes.state_sha256(d)}
+        evaluated.append(it)
+
+        def _apply(data):
+            data.setdefault("iterations", []).append(it)
+            data["loop"]["iterations_used"] = data["loop"].get("iterations_used", 0) + 1
+
+        themes.update(d, _apply)
+        return {"iteration": it, "run": {"results": []}, "verdicts": [], "passed": False}
+
+    def fake_fix(instance, d, outcome):
+        body = queue.pop(0)
+        if body is not None:
+            skill_md.write_text(_skill_md("my-skill") + body, encoding="utf-8")
+        return []
+
+    monkeypatch.setattr(w, "_evaluate", fake_evaluate)
+    monkeypatch.setattr(w, "_fix", fake_fix)
+    return w, evaluated
+
+
+@pytest.mark.parametrize(
+    "fixes, evaluations",
+    [
+        (["A", "B", "A"], 3),  # 2つの直し方を行ったり来たり → 3回目の修正で、反復2と同じ内容に戻ったので止める
+        ([None, None], 2),  # 直せないまま同じ内容 → 1回だけ評価し直し、2回目で止める
+    ],
+    ids=["back_and_forth", "no_change"],
+)
+def test_loop_stops_when_fix_returns_to_failed_content(lab_env, monkeypatch, fixes, evaluations):
+    directory = _theme(lab_env)
+    _add_skill(directory, script=False)
+    themes.write_text(directory, "cases/001.yaml", _CASE.format(id="001"), actor="admin")
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_QUEUED, "loop": {"mode": "loop"}}))
+    w, evaluated = _stall_worker(monkeypatch, lab_env, directory, fixes)
+    w.run_theme("org_a", directory)
+    data = themes.read(directory)
+    assert data["status"] == themes.STATUS_STALLED
+    assert len(evaluated) == evaluations  # 上限（10回）まで回さない
+
+
+def test_history_shows_what_was_tried():
+    """次の反復の AI には、直したファイル名だけでなく直しの中身と、まだ落ちたケースを見せる。"""
+    from admin.skill_lab import fixer as fixer_mod
+
+    summary = fixer_mod.edit_summary([{"path": "assets/skills/s/SKILL.md", "old": "手順1", "new": "手順1（必ず読む）"}])
+    text = fixer_mod.history_text([{"n": 1, "phase": "eval", "verdict": "fail", "cases": {"001": {"fail": 1, "pass": 0}},
+                                    "fix": {"analysis": "読み込み不足", "applied": ["assets/skills/s/SKILL.md"], "errors": [], "edit_summary": summary}}])
+    assert "failed cases 001" in text and "手順1（必ず読む）" in text and "読み込み不足" in text
+    # トライアウト（複数回）では何回中何回合格したかも見せる（ゆらぎの見分け）
+    assert fixer_mod.failed_cases_text({"cases": {"001": {"pass": 7, "fail": 3}, "002": {"pass": 10, "fail": 0}}}) == "001 (passed 7/10)"
+
+
+def test_api_deletes_a_case_but_not_during_a_loop(client, lab_env):
+    """試験問題は一覧の「削除」（ファイル削除の API）で消せる。ループ中は消せない（2026-11-13 ユーザー報告: 画面に削除が無かった）。"""
+    theme = client.post("/api/instances/org_a/skill-lab/themes", json={"title": "A", "lab": "lab1"}).json()
+    base = f"/api/instances/org_a/skill-lab/themes/{theme['id']}"
+    for cid in ("c1", "c2"):
+        assert client.put(f"{base}/cases/{cid}", json={"data": {"turns": ["x"], "judge": "y"}}).status_code == 200
+    directory = themes.theme_dir(themes.themes_root(_cfg(lab_env, "org_a").common_data_dir), theme["id"])
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_RUNNING}))
+    assert client.delete(f"{base}/files", params={"path": "cases/c1.yaml"}).status_code == 409
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_DRAFT}))
+    assert client.delete(f"{base}/files", params={"path": "cases/c1.yaml"}).status_code == 200
+    assert [c["id"] for c in client.get(base).json()["cases_list"]] == ["c2"]
+
+
+def test_tryout_repeats_moved_to_skill_lab_and_old_entries_still_work(lab_env):
+    """トライアウトの回数は [skill_lab] tryout_repeats。旧い [skill_creator] の書き方も読む（黙って無視しない）。"""
+    path = lab_env["root"] / "org_a" / "config_overrides.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert _cfg(lab_env, "org_a").skill_lab_tryout_repeats == 10
+    data["skill_creator"] = {"tryout_repeats": "4"}
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert _cfg(lab_env, "org_a").skill_lab_tryout_repeats == 4
+    data["skill_lab"] = {"tryout_repeats": "6"}  # 新しい場所の値があればそちらを使う
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert _cfg(lab_env, "org_a").skill_lab_tryout_repeats == 6
+
+
+def test_tryout_repeats_can_be_set_per_theme(client, lab_env, monkeypatch):
+    theme = client.post("/api/instances/org_a/skill-lab/themes", json={"title": "A", "lab": "lab1"}).json()
+    base = f"/api/instances/org_a/skill-lab/themes/{theme['id']}"
+    detail = client.get(base).json()
+    assert detail["tryout_repeats_default"] == 10 and detail["tryout_repeats_effective"] == 10
+    assert client.put(base, json={"tryout_repeats": 3}).status_code == 200
+    assert client.get(base).json()["tryout_repeats_effective"] == 3
+    assert client.put(base, json={"title": "B"}).status_code == 200  # 送らなければ変えない
+    assert client.get(base).json()["tryout_repeats"] == 3
+    assert client.put(base, json={"tryout_repeats": 0}).status_code == 400
+    directory = themes.theme_dir(themes.themes_root(_cfg(lab_env, "org_a").common_data_dir), theme["id"])
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_QUEUED}))
+    assert client.put(base, json={"tryout_repeats": 5}).status_code == 409  # 実行中・開始待ちは変えられない
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_DRAFT}))
+    # ワーカーはテーマの回数でトライアウトする
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_QUEUED, "loop": {"mode": "loop"}}))
+    w, calls = _make_worker(monkeypatch, lab_env, [True, True])
+    w.run_theme("org_a", directory)
+    assert calls["eval"][1] == ("tryout", 3, True)
+    assert client.put(base, json={"tryout_repeats": None}).status_code == 200  # null で既定に戻す
+    assert "tryout_repeats" not in client.get(base).json()

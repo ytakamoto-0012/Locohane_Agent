@@ -23,6 +23,10 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 # 記録するために、タスク・テーマの処理の間だけ設定する（usage_sink()）。
 _USAGE_SINK: ContextVar[Callable[[dict], None] | None] = ContextVar("skill_lab_usage_sink", default=None)
 
+# LLM に書かせる文章の言語（"ja" / "en"）。ワーカーがタスク・テーマの処理の間だけ設定する
+# （output_language()）。設定されていれば、全ての呼び出しのシステムプロンプト末尾に言語の指示を足す。
+_OUTPUT_LANG: ContextVar[str | None] = ContextVar("skill_lab_output_lang", default=None)
+
 
 @contextmanager
 def usage_sink(fn: Callable[[dict], None]) -> Iterator[None]:
@@ -34,6 +38,21 @@ def usage_sink(fn: Callable[[dict], None]) -> Iterator[None]:
         _USAGE_SINK.reset(token)
 
 
+@contextmanager
+def output_language(lang: str | None) -> Iterator[None]:
+    """この with の中で行う LLM 呼び出しに、lang の言語で書くよう指示する（admin/i18n.py の output_language_rule）。"""
+    token = _OUTPUT_LANG.set(lang)
+    try:
+        yield
+    finally:
+        _OUTPUT_LANG.reset(token)
+
+
+def current_output_language() -> str:
+    """今の出力言語（未設定なら日本語）。"""
+    return _OUTPUT_LANG.get() or "ja"
+
+
 class LabLLMError(RuntimeError):
     """研究室の LLM から使える応答が得られなかった。"""
 
@@ -43,7 +62,12 @@ async def _ainvoke(config: Config, system: str, user_messages: list[tuple[str, s
 
     from src.llm import build_model
 
+    from admin.i18n import output_language_rule
+
     model = await build_model(config)
+    lang = _OUTPUT_LANG.get()
+    if lang:
+        system += output_language_rule(lang)
     messages = [SystemMessage(content=system)]
     for role, text in user_messages:
         messages.append(HumanMessage(content=text) if role == "user" else AIMessage(content=text))

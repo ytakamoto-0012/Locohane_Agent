@@ -45,7 +45,7 @@ from src.config import Config
 from . import audit, settings_files
 from . import instances as inst
 from .assistant import ThinkFilter
-from admin.i18n import current_lang
+from admin.i18n import current_lang, output_language, output_language_rule
 from admin.i18n import t as _t
 
 logger = logging.getLogger(__name__)
@@ -516,13 +516,19 @@ def build_router(
                 status_code=400,
                 detail=_t("選択したメモリーの本文が長すぎます（{0} 文字。上限 {1} 文字）。選ぶメモリーを減らしてください。", len(material), DRAFT_SKILL_MAX_CHARS),
             )
+        # スキルを使うのはそのインスタンスの利用者なので、インスタンスの [ui].default_language で書かせる
+        # （auto ならダッシュボードの表示言語）。以前は指示が英語のプロンプトの途中に1行あるだけで、
+        # メモリーが英語だとそのまま英語の SKILL.md になっていた。
+        lang = output_language(getattr(cfg, "ui_default_language", None), current_lang())
+        language = TRANSLATE_LANGUAGES[lang]
         system = _DRAFT_SKILL_SYSTEM.format(
             name_rule=_SKILL_NAME_RULE_GIVEN.format(name=skill_name) if skill_name else _SKILL_NAME_RULE_FREE,
-            language=TRANSLATE_LANGUAGES[current_lang()],
-        )
+            language=language,
+        ) + output_language_rule(lang)
         prompt = f"# Memories\n\n{material}"
         if (body.request or "").strip():
             prompt += f"\n\n# Note from the administrator\n{body.request.strip()}"
+        prompt += f"\n\nWrite the description and the body of the SKILL.md in {language}, even if the memories are in another language."
         llm_name = llm_instance(name) or name
         try:
             text = await _complete(config_loader(llm_name), system, prompt)

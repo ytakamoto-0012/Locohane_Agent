@@ -25,6 +25,10 @@ class Expect:
         tool_not_called: これらのツール名が1回も呼ばれていなければ合格。
         tool_call_args_contains: {ツール名: {引数キー: 期待値}}。該当ツールの
             いずれかの呼び出しで、指定した引数キーがすべて期待値と一致すれば合格。
+        tool_call_args_not_contains: {ツール名: {引数キー: 値}}。該当ツールのどの呼び出しも
+            （委譲先のサブエージェントの中の呼び出しも含めて）指定した引数キーがすべてその値に
+            一致しなければ合格。「このスキルを読まないこと」等、使ってはいけない場面の確認に使う
+            （例: {"read_skill": {"skill_name": "my-skill"}}）。
         response_contains: 最終回答にすべて含まれていれば合格。
         response_not_contains: 最終回答にどれも含まれていなければ合格。
     """
@@ -32,6 +36,7 @@ class Expect:
     tool_called_any: list[str] = field(default_factory=list)
     tool_not_called: list[str] = field(default_factory=list)
     tool_call_args_contains: dict[str, dict] = field(default_factory=dict)
+    tool_call_args_not_contains: dict[str, dict] = field(default_factory=dict)
     response_contains: list[str] = field(default_factory=list)
     response_not_contains: list[str] = field(default_factory=list)
 
@@ -73,6 +78,10 @@ class EvalCase:
             など、既定値では完走できないケース専用の上書き。
         notes: 人間向けの補足メモ（判定には使わない）。
         source_path: 読み込み元の yaml ファイルパス。
+        verify_script: 会話の後に作業フォルダを確かめる Python スクリプト（work_dir と同じくケースの
+            ファイルからの相対パス、無ければプロジェクトルート相対）。run_case.py が
+            `python <script> <作業フォルダ> <情報の JSON>` で実行し、終了コード 0 なら合格。
+            作られたファイルの中身を機械的に確かめる（AI の「作成しました」の自己申告を信じない）ために使う。
     """
 
     id: str
@@ -88,6 +97,7 @@ class EvalCase:
     notes: str
     source_path: Path
     memory_seed: str | None = None
+    verify_script: str | None = None
 
 
 def load_case(path: Path) -> EvalCase:
@@ -104,7 +114,19 @@ def load_case(path: Path) -> EvalCase:
             expect と judge のどちらも無い、のいずれか。
         FileNotFoundError: path が存在しない場合。
     """
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return parse_case(path.read_text(encoding="utf-8"), path)
+
+
+def parse_case(text: str, path: Path) -> EvalCase:
+    """yaml の文字列を検証して EvalCase を返す（path はエラー文言と source_path に使うだけで、読まない）。
+
+    保存前の内容を検証する（admin/skill_lab/themes.py の validate_case_yaml）ために、一時ファイルを
+    書かずに使えるよう load_case から分けた。
+
+    Raises:
+        ValueError: load_case と同じ。
+    """
+    data = yaml.safe_load(text)
     if not isinstance(data, dict):
         raise ValueError(f"{path}: yaml のトップレベルがオブジェクトではありません")
 
@@ -129,6 +151,7 @@ def load_case(path: Path) -> EvalCase:
             tool_called_any=list(expect_raw.get("tool_called_any", []) or []),
             tool_not_called=list(expect_raw.get("tool_not_called", []) or []),
             tool_call_args_contains=dict(expect_raw.get("tool_call_args_contains", {}) or {}),
+            tool_call_args_not_contains=dict(expect_raw.get("tool_call_args_not_contains", {}) or {}),
             response_contains=list(expect_raw.get("response_contains", []) or []),
             response_not_contains=list(expect_raw.get("response_not_contains", []) or []),
         )
@@ -137,8 +160,12 @@ def load_case(path: Path) -> EvalCase:
     if judge is not None and not isinstance(judge, str):
         raise ValueError(f"{path}: judge は文字列である必要があります")
 
-    if expect is None and not judge:
-        raise ValueError(f"{path}: expect と judge のどちらも無いケースは無効です")
+    verify_script = data.get("verify_script")
+    if verify_script is not None and not isinstance(verify_script, str):
+        raise ValueError(f"{path}: verify_script はパスの文字列である必要があります")
+
+    if expect is None and not judge and not verify_script:
+        raise ValueError(f"{path}: expect・judge・verify_script のどれも無いケースは無効です")
 
     env_raw = data.get("env")
     if env_raw is not None and not isinstance(env_raw, dict):
@@ -159,4 +186,5 @@ def load_case(path: Path) -> EvalCase:
         notes=str(data.get("notes", "")),
         source_path=path,
         memory_seed=str(data["memory_seed"]) if data.get("memory_seed") else None,
+        verify_script=verify_script or None,
     )

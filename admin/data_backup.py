@@ -215,7 +215,8 @@ def collect_sources(
         except Exception as exc:  # noqa: BLE001 - 設定の読めないインスタンスは飛ばして他を続ける
             warnings.append(_t("インスタンス {0} の設定を読めないため、そのデータはバックアップしていません: {1}", name, exc))
             continue
-        excludes: list[Path] = []
+        # 評価の一時フォルダ（[skill_lab].temp_dir）は実行中だけ使う物なので、設定に関係なく入れない。
+        excludes: list[Path] = [cfg.skill_lab_temp_dir] if getattr(cfg, "skill_lab_temp_dir", None) else []
         if settings.exclude_workdir:
             excludes.append(cfg.default_workdir)
         if settings.exclude_logs:
