@@ -579,3 +579,7 @@ input.narrow { width: 80px; }
 @keyframes kn-pulse { 0%, 100% { transform: scale(0.6); opacity: 0.6; } 50% { transform: scale(1); opacity: 1; } }
 @keyframes kn-blink { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .kn-worker { animation: none !important; } }
+
+.lab-progress { display: flex; align-items: center; gap: 8px; margin: 8px 0; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; }
+.lab-spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent, #4a8cff); border-radius: 50%; animation: lab-spin 0.9s linear infinite; flex: none; }
+@keyframes lab-spin { to { transform: rotate(360deg); } }

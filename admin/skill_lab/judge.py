@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from typing import Callable
 
 from src.config import Config
 
@@ -287,14 +288,19 @@ def review_rules(config: Config, result: dict, excerpt_chars: int) -> dict | Non
     return {**verdict, "how": "ai", "rules": sorted(failed)}
 
 
-def judge_results(config: Config, *, spec: str, results: list[dict], excerpt_chars: int) -> list[dict]:
+def judge_results(
+    config: Config, *, spec: str, results: list[dict], excerpt_chars: int, on_progress: Callable[[int, int, str], None] | None = None
+) -> list[dict]:
     """全回の結果を判定し、各回の最終判定（outcome: pass/fail/error と AI judge の結果）を返す。
 
     機械判定の文字列・引数の照合だけで落ちた回は review_rules() で見直し、中身が合っていれば
     judge（あれば）へ進める。見直しの結果は rule_review に残す（人がレビューで確認するため）。
+    on_progress: 各回の判定を始める前に (何件目, 全件数, ケース ID) で呼ぶ（画面に進み具合を出すため）。
     """
     verdicts = []
-    for r in results:
+    for i, r in enumerate(results, start=1):
+        if on_progress is not None:
+            on_progress(i, len(results), str(r.get("case_id") or ""))
         outcome = evaluation.classify(r)
         entry = {"case_id": r.get("case_id"), "repeat_index": r.get("repeat_index", 1), "outcome": outcome}
         failed_checks: dict = {}

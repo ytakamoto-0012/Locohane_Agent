@@ -401,6 +401,12 @@ def main() -> int:
             for path in run_paths:
                 label = f"（{repeat_index}/{args.repeat}回目）" if args.repeat > 1 else ""
                 print(f"実行中: {path.name}{label}", file=sys.stderr)
+                # スキル研究室のワーカーが画面に進み具合を出すための行（admin/skill_lab/evaluation.py の read_progress）
+                print(
+                    f"[progress] {len(results) + 1}/{len(run_paths) * args.repeat} {path.stem} {repeat_index}/{args.repeat}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 run_args = extra_args
                 if args.keep_outputs:
                     kept_name = path.stem + (f"_r{repeat_index}" if args.repeat > 1 else "")

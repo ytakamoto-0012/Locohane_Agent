@@ -459,6 +459,7 @@ class Worker:
                 if status != themes.STATUS_QUEUED:
                     d["loop"]["deadline"] = None
                 d["loop"]["message"] = detail
+                d["loop"]["progress"] = None
                 if restored:
                     d["loop"]["restored_best"] = restored
             themes.add_history(d, f"skill tuning worker {self.lab}", f"loop_{status}", detail)
@@ -496,6 +497,7 @@ class Worker:
         run_dir = directory / themes.RUNS_DIRNAME / f"{n:03d}"
         # 評価した内容（研究対象・ケース・設定パッチ）。AI 修正が同じ内容に戻したかの判定に使う（_stop_if_stalled）。
         state_sha = themes.state_sha256(directory)
+        self._progress(directory, phase, n=n, repeat_count=repeat)
         run = evaluation.run(
             directory,
             instance=instance,
@@ -505,11 +507,16 @@ class Worker:
             base_env=self.base_env,
             should_stop=lambda: self._stop_requested(directory),
             stop_on_fail=phase == "tryout" and bool(getattr(self.config, "skill_lab_tryout_stop_on_first_failure", True)),
+            on_progress=self._case_progress(directory, phase, n=n, repeat_count=repeat),
         )
         self._record_eval_usage(self._usage_owner(data), run["results"])
         spec = (directory / themes.SPEC_FILENAME).read_text(encoding="utf-8")
         verdicts = judge.judge_results(
-            self._llm_config(instance), spec=spec, results=run["results"], excerpt_chars=self.config.skill_lab_transcript_excerpt_chars
+            self._llm_config(instance),
+            spec=spec,
+            results=run["results"],
+            excerpt_chars=self.config.skill_lab_transcript_excerpt_chars,
+            on_progress=self._judge_progress(directory, "judging", n=n, phase=phase),
         )
         passed = judge.all_passed(verdicts)
         per_case: dict[str, dict[str, int]] = {}
@@ -567,6 +574,7 @@ class Worker:
         data = themes.read(directory)
         n = outcome["iteration"]["n"]
         run_dir = directory / themes.RUNS_DIRNAME / f"{n:03d}"
+        self._progress(directory, "fixing", n=n)
         failures = fixer.failures_text(outcome["run"]["results"], outcome["verdicts"], cfg.skill_lab_transcript_excerpt_chars)
         history = fixer.history_text(data.get("iterations") or [])
         max_files = int(getattr(cfg, "skill_lab_fixer_max_files_per_fix", 2))
@@ -624,6 +632,36 @@ class Worker:
 
         themes.update(directory, _apply)
         return fix.get("blockers") or []
+
+    def _progress(self, directory: Path, step: str, **fields) -> None:
+        """いまどの段階か（loop.progress）を記録する。画面の「実行の記録」と見出しに出す。
+
+        以前は評価が1回終わって反復の行ができるまで何も出ず、動いているのか分からなかった（2026-11-13 ユーザー指摘）。
+        step: baseline（改良前の版の評価）/ baseline_judging / eval / tryout / judging（AI judge・機械判定の見直し）/
+        fixing（AI の分析と修正）/ report（総括の作成）。同じ段階の間は since（その段階を始めた時刻）を保つ。
+        """
+        now = themes.now_iso()
+
+        def _apply(d: dict) -> None:
+            loop = d.get("loop")
+            if loop is None:
+                return
+            prev = loop.get("progress") or {}
+            same = prev.get("step") == step and prev.get("n") == fields.get("n")
+            loop["progress"] = {**(prev if same else {}), "step": step, **fields, "since": prev.get("since") if same else now, "at": now}
+
+        try:
+            themes.update(directory, _apply)
+        except Exception as e:  # noqa: BLE001 - 進み具合を書けなくても処理は続ける
+            logger.debug("Could not record progress of %s: %s", directory.name, e)
+
+    def _case_progress(self, directory: Path, step: str, **fields):
+        """evaluation.run の on_progress（何問目・何回目）を loop.progress へ書く関数。"""
+        return lambda p: self._progress(directory, step, **fields, **p)
+
+    def _judge_progress(self, directory: Path, step: str, **fields):
+        """judge.judge_results の on_progress（何件目を判定中か）を loop.progress へ書く関数。"""
+        return lambda i, total, case_id: self._progress(directory, step, **fields, done=i, total=total, case_id=case_id)
 
     def _loop_iterations(self, data: dict) -> list[dict]:
         """このループ（開始以降）の反復。"""
@@ -733,6 +771,7 @@ class Worker:
         cases_sha = themes.content_hashes(directory)["cases"]
         if (data.get("baseline_eval") or {}).get("cases_sha") == cases_sha:
             return
+        self._progress(directory, "baseline")
         run = evaluation.run(
             directory,
             instance=instance,
@@ -743,6 +782,7 @@ class Worker:
             should_stop=lambda: self._stop_requested(directory),
             assets_base=base,
             config_patch=False,
+            on_progress=self._case_progress(directory, "baseline"),
         )
         self._record_eval_usage(self._usage_owner(data), run["results"])
         verdicts = judge.judge_results(
@@ -750,6 +790,7 @@ class Worker:
             spec=(directory / themes.SPEC_FILENAME).read_text(encoding="utf-8"),
             results=run["results"],
             excerpt_chars=self.config.skill_lab_transcript_excerpt_chars,
+            on_progress=self._judge_progress(directory, "baseline_judging"),
         )
         per_case: dict[str, dict[str, int]] = {}
         for v in verdicts:
@@ -797,6 +838,7 @@ class Worker:
             "message": loop.get("message"),
         }
         if getattr(self.config, "skill_lab_report_ai_summary", True) and rows:
+            self._progress(directory, "report")
             try:
                 report["summary"] = ask_text(
                     self._llm_config(data.get("instance") or ""), _REPORT_SYSTEM, json.dumps(report, ensure_ascii=False, default=str)[:12000]

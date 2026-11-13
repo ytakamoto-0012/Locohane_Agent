@@ -1365,3 +1365,98 @@ def test_tryout_repeats_can_be_set_per_theme(client, lab_env, monkeypatch):
     assert calls["eval"][1] == ("tryout", 3, True)
     assert client.put(base, json={"tryout_repeats": None}).status_code == 200  # null で既定に戻す
     assert "tryout_repeats" not in client.get(base).json()
+
+
+# --- 実行の記録のクリア・進み具合（2026-11-14 ユーザー要望） -----------------------------------
+
+
+def _theme_with_runs(client, lab_env):
+    theme = client.post("/api/instances/org_a/skill-lab/themes", json={"title": "A", "lab": "lab1"}).json()
+    directory = themes.theme_dir(themes.themes_root(_cfg(lab_env, "org_a").common_data_dir), theme["id"])
+    _add_skill(directory)
+    themes.write_text(directory, "cases/001.yaml", _CASE.format(id="001"), actor="admin")
+    (directory / "runs" / "001").mkdir(parents=True)
+    (directory / "runs" / "001" / "results.json").write_text("[]", encoding="utf-8")
+    (directory / "runs" / "trials" / "t1").mkdir(parents=True)
+    themes.update(
+        directory,
+        lambda d: d.update(
+            {
+                "status": themes.STATUS_EXHAUSTED,
+                "iterations": [{"n": 1, "phase": "eval", "verdict": "fail", "cases": {}}],
+                "tryout": {"repeat": 3},
+                "baseline_eval": {"cases": {}},
+                "loop": {"mode": "loop", "report": {"summary": "x"}, "progress": {"step": "eval"}},
+                "tasks": [{"id": "t1", "type": "trial", "status": "done", "params": {}}, {"id": "d1", "type": "draft_spec", "status": "done", "params": {}}],
+            }
+        ),
+    )
+    return f"/api/instances/org_a/skill-lab/themes/{theme['id']}", directory
+
+
+def test_clear_runs_removes_records_but_keeps_the_work(client, lab_env):
+    base, directory = _theme_with_runs(client, lab_env)
+    summary = client.get(f"{base}/runs/summary").json()
+    assert summary["iterations"] == 1 and summary["trials"] == 1 and summary["files"] == 1 and summary["blocked_reason"] is None
+    assert summary["resets_status"] is True
+    res = client.delete(f"{base}/runs")
+    assert res.status_code == 200 and res.json()["iterations"] == 1
+    data = themes.read(directory)
+    assert data["iterations"] == [] and data["tryout"] is None and data["loop"] is None and "baseline_eval" not in data
+    assert data["status"] == themes.STATUS_DRAFT  # 結果の状態は準備中に戻る
+    assert [t["id"] for t in data["tasks"]] == ["d1"]  # 下書きの依頼は残し、1回試行だけ消す
+    assert list((directory / "runs").iterdir()) == []
+    # 研究対象・ケース・履歴は残る
+    assert (directory / "assets" / "skills" / "my-skill" / "SKILL.md").is_file() and (directory / "cases" / "001.yaml").is_file()
+    assert data["history"][-1]["action"] == "clear_runs"
+
+
+def test_clear_runs_is_refused_while_running_or_trial_or_closed(client, lab_env):
+    base, directory = _theme_with_runs(client, lab_env)
+    for status in (themes.STATUS_QUEUED, themes.STATUS_RUNNING):
+        themes.update(directory, lambda d, st=status: d.update({"status": st}))
+        assert client.get(f"{base}/runs/summary").json()["blocked_reason"]
+        assert client.delete(f"{base}/runs").status_code == 409
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_DRAFT, "tasks": [{"id": "t2", "type": "trial", "status": "running", "params": {}}]}))
+    assert client.delete(f"{base}/runs").status_code == 409
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_PROMOTED, "tasks": []}))
+    assert client.delete(f"{base}/runs").status_code == 409
+    # どれも断られたので、記録は残っている
+    assert (directory / "runs" / "001" / "results.json").is_file() and themes.read(directory)["iterations"]
+
+
+def test_clear_runs_check_and_delete_are_atomic(lab_env, monkeypatch):
+    """確かめてから消し終わるまで排他を持つ。確かめた後に実行中になっても消さない（競合しても runs/ を壊さない）。"""
+    directory = _theme(lab_env)
+    (directory / "runs" / "001").mkdir(parents=True)
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_RUNNING}))
+    with pytest.raises(themes.ThemeError):
+        themes.clear_runs(directory, actor="admin")
+    assert (directory / "runs" / "001").is_dir()
+
+
+def test_worker_records_progress_and_clears_it_when_finished(lab_env, monkeypatch):
+    directory = _theme(lab_env)
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_RUNNING, "loop": {"mode": "loop"}}))
+    w = _lab_worker(lab_env)
+    w._progress(directory, "eval", n=1, repeat_count=1, done=2, total=5, case_id="c2")
+    progress = themes.read(directory)["loop"]["progress"]
+    assert progress["step"] == "eval" and progress["done"] == 2 and progress["total"] == 5 and progress["since"]
+    since = progress["since"]
+    w._progress(directory, "eval", n=1, repeat_count=1, done=3, total=5, case_id="c3")
+    assert themes.read(directory)["loop"]["progress"]["since"] == since  # 同じ段階の間は開始時刻を保つ
+    monkeypatch.setattr(w, "_write_report", lambda *a: None)
+    w._finish(directory, themes.STATUS_STOPPED, "x")
+    assert themes.read(directory)["loop"]["progress"] is None
+
+
+def test_evaluation_reads_progress_lines_of_this_run_only(tmp_path):
+    from admin.skill_lab import evaluation
+
+    log = tmp_path / "run_all.log"
+    log.write_text("[progress] 9/9 old 1/1\n", encoding="utf-8")
+    start = log.stat().st_size
+    assert evaluation.read_progress(log, start) is None
+    with open(log, "a", encoding="utf-8") as f:
+        f.write("実行中: a\n[progress] 1/6 a 1/3\n[progress] 4/6 b 2/3\n")
+    assert evaluation.read_progress(log, start) == {"done": 4, "total": 6, "case_id": "b", "repeat": 2, "repeats": 3}

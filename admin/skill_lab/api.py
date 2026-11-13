@@ -757,6 +757,29 @@ def build_router(
 
     # --- 実行結果・差分 -----------------------------------------------------------
 
+    @router.get("/api/instances/{name}/skill-lab/themes/{theme_id}/runs/summary")
+    def runs_summary(name: str, theme_id: str, user: str = Depends(require_login)):
+        """実行の記録をクリアすると消えるもの（件数・容量）と、今クリアできるか（確認画面用）。"""
+        return themes.runs_summary(_theme(name, theme_id))
+
+    @router.delete("/api/instances/{name}/skill-lab/themes/{theme_id}/runs")
+    def clear_runs(name: str, theme_id: str, request: Request, user: str = Depends(require_login), _c=Depends(require_csrf)):
+        """実行の記録（反復・1回試行・改良前の版の評価・ループの総括・トライアウトの合格記録と runs/ の中身）を消す。
+
+        研究対象・仕様・試験問題・入力ファイル・設定パッチ・履歴は残す。実行中・開始待ち・1回試行の処理中・終わったテーマは断る
+        （確かめるのと消すのはテーマの排他の中で行う。themes.clear_runs）。
+        """
+        directory = _theme(name, theme_id)
+        try:
+            result = themes.clear_runs(directory, actor=user)
+        except themes.ThemeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _audit(
+            request, user, name, "skill_lab_runs_clear",
+            theme=theme_id, iterations=result["iterations"], trials=result["trials"], files=result["files"], bytes=result["bytes"],
+        )
+        return {"success": True, **result}
+
     @router.get("/api/instances/{name}/skill-lab/themes/{theme_id}/iterations/{n}")
     def get_iteration(name: str, theme_id: str, n: int, user: str = Depends(require_login)):
         directory = _theme(name, theme_id)

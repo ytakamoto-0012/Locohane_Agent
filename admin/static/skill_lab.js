@@ -318,6 +318,8 @@ function renderThemeHeader(state, header, container) {
       ]),
     );
   } else if (loop.message) notes.push(el("p", { class: "hint", text: loop.message }));
+  const running = labProgressBox(state);
+  if (running) notes.push(running);
   const report = labReport(d);
   if (report) notes.push(report);
   if (LAB_CLOSED.includes(d.status)) {
@@ -1428,6 +1430,76 @@ function showTrialResult(r) {
 
 /* --- 実行の記録 --- */
 
+// いまどの段階か（admin/skill_lab/worker.py の _progress が loop.progress に書く）を日本語・英語の文にする。
+function labProgressText(p, d) {
+  if (!p) return null;
+  const q = p.total ? _t("（{0}/{1} 件目: {2}）", p.done || p.index || 0, p.total, p.case_id || "") : "";
+  const repeat = p.repeats > 1 ? _t("（{0}/{1} 回目）", p.repeat, p.repeats) : "";
+  const steps = {
+    baseline: _t("改良前の版を評価しています"),
+    baseline_judging: _t("改良前の版の結果を判定しています"),
+    eval: _t("評価しています（反復 {0}）", p.n),
+    tryout: _t("トライアウトを実行しています（反復 {0}、各ケース {1} 回）", p.n, p.repeat_count),
+    judging: _t("結果を AI が判定しています（反復 {0}）", p.n),
+    fixing: _t("AI が失敗の原因を分析して直しています（反復 {0}）", p.n),
+    report: _t("総括を書いています"),
+  };
+  const since = p.since ? _t("（{0} から）", fmtTime(p.since)) : "";
+  return `${steps[p.step] || p.step}${repeat}${q} ${since}`.trim();
+}
+
+// 実行中の状況。結果が出るまで何も出ないと動いているか分からないため、段階・何問目か・経過を出す。
+function labProgressBox(state) {
+  const d = state.data;
+  if (!LAB_ACTIVE.includes(d.status)) return null;
+  const text = d.status === "queued" ? _t("開始待ちです。担当のスキル調整ワーカーが拾うと始まります。") : labProgressText((d.loop || {}).progress, d) || _t("準備しています…");
+  return el("div", { class: "lab-progress", role: "status" }, [el("span", { class: "lab-spinner", "aria-hidden": "true" }), el("span", { text })]);
+}
+
+// 実行の記録をクリアする（admin/skill_lab/api.py の runs/summary・DELETE runs）。
+// 実行中・開始待ち・1回試行の処理中・終わったテーマでは押せず、押せたとしてもサーバー側が断る。
+async function clearRuns(state, button) {
+  let info;
+  try {
+    info = await api(themePath(state.name, state.id, "/runs/summary"));
+  } catch (e) {
+    alert(e.message);
+    return;
+  }
+  if (info.blocked_reason) {
+    alert(info.blocked_reason);
+    await state.reload();
+    return;
+  }
+  const size = info.bytes >= 1048576 ? `${(info.bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(info.bytes / 1024))} KB`;
+  const lines = [
+    _t("実行の記録をクリアします。次のものが消え、元に戻せません。"),
+    _t("・反復の記録: {0} 件", info.iterations),
+    _t("・1回試行の結果: {0} 件", info.trials),
+    info.baseline ? _t("・改良前の版の評価結果") : null,
+    info.report ? _t("・ループの総括") : null,
+    info.tryout ? _t("・トライアウトの合格記録（昇格には、もう一度トライアウトが必要になります）") : null,
+    _t("・保存している評価の詳細ファイル: {0} 個（{1}）", info.files, size),
+    "",
+    _t("研究対象・仕様・試験問題・入力ファイル・設定パッチ・履歴は消えません。"),
+    info.resets_status ? _t("状態は「準備中」に戻ります。") : null,
+    "",
+    _t("よろしいですか？"),
+  ].filter((x) => x !== null);
+  if (!confirm(lines.join("\n"))) return;
+  const res = await labAction(() => api(themePath(state.name, state.id, "/runs"), { method: "DELETE" }));
+  if (!res) {
+    await state.reload(); // 断られた（実行中になっていた等）なら、今の状態に画面を合わせる
+    return;
+  }
+  if ((res.failed || []).length) alert(_t("消せなかったものがあります（使用中のファイルなど）。手で削除してください: {0}", res.failed.join(", ")));
+  await state.reload();
+  refreshThemeSections(state);
+  state.sub = "runs";
+  const body = $(".theme-body");
+  if (body) renderThemeSub(state, body);
+}
+
 function renderThemeRuns(state, body) {
   const its = (state.data.iterations || []).slice().reverse();
   const rows = its.map((it) => [
@@ -1445,6 +1517,28 @@ function renderThemeRuns(state, body) {
     }),
     dataTable([_t("反復"), _t("種類"), _t("判定"), _t("ケースごとの合格"), _t("AI 修正"), ""], rows, _t("まだ実行していません。")),
   );
+  // 実行中は状況を出し、クリアは押せなくする（サーバー側でも断る）
+  const progress = labProgressBox(state);
+  if (progress) body.prepend(progress);
+  const d = state.data;
+  const busy = LAB_ACTIVE.includes(d.status) || (d.tasks || []).some((t) => t.type === "trial" && ["queued", "running"].includes(t.status));
+  const closed = LAB_CLOSED.includes(d.status);
+  const hasRuns = its.length > 0 || (d.tasks || []).some((t) => t.type === "trial" && ["done", "error"].includes(t.status)) || d.baseline_eval;
+  const clear = el("button", {
+    type: "button",
+    class: "btn-danger",
+    text: _t("実行の記録をクリア"),
+    disabled: busy || closed || !hasRuns ? "disabled" : null,
+    title: busy
+      ? _t("実行中・開始待ち・1回試行の処理中はクリアできません。先に停止するか、終わるのを待ってください。")
+      : closed
+        ? _t("終わったテーマはクリアできません。「再開して編集」で再開してください。")
+        : hasRuns
+          ? _t("反復・1回試行・総括などの記録を消します（研究対象・ケースは消えません）")
+          : _t("クリアする記録がありません。"),
+  });
+  clear.addEventListener("click", () => clearRuns(state, clear));
+  body.append(el("div", { class: "inline-form" }, [clear]));
 }
 
 async function openIterationDetail(state, n) {

@@ -2744,7 +2744,14 @@ that is also forbidden, the same call both required and forbidden, an empty inst
 in the target instance (misspelled or outdated names) make the start condition (③) unmet. Cases can also check when not to use something ("this skill must
 not be used" = `tool_call_args_not_contains`, counting calls inside sub-agents) and the files created (`verify_script`, a .py placed in an input file folder
 that AI fixes cannot rewrite). Cases drafted by the AI include at least one case of when not to use the target (so that a description is not fixed to
-claim every message). Test questions can be deleted with "Delete" in the list. One draft can be imported only into one theme that is not finished.
+claim every message). Test questions can be deleted with "Delete" in the list.
+While a loop runs or waits to start, the "Run records" tab and the header show the current step (evaluating, tryout, AI judging, AI fixing, report), which case
+it is on and since when (`loop.progress`; before, nothing was shown until a result came out).
+"Clear run records" on the "Run records" tab deletes the iterations, single trials, the evaluation of the version before the changes, the loop report, the
+tryout pass record and the contents of `runs/` (research targets, spec, test questions, input files, the settings patch and the history are kept; a result status
+goes back to "Preparing"). The confirmation shows the counts and size that will be deleted. While the worker writes to `runs/` (running, waiting to start,
+processing a single trial) and for ended themes the button cannot be pressed, and the server refuses even if it is (the check and the deletion are done under the
+theme lock; `themes.clear_runs`). It is recorded as `clear_runs` in the history and `skill_lab_runs_clear` in the audit log. One draft can be imported only into one theme that is not finished.
 A theme can be deleted with its whole folder by "Delete" in the theme list or the theme details (cannot be undone; `delete_theme`
 in `admin/skill_lab/api.py`). It cannot be deleted while its loop or tryout is running or waiting to start, or while AI requests
 (drafts, single trials) are being processed (stop it first). Deleting a theme that is not finished leaves the source drafts with

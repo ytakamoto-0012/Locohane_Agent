@@ -809,6 +809,105 @@ def content_hashes(directory: Path) -> dict:
     }
 
 
+# 実行の記録を消したら「準備中」に戻す状態（記録が無いと、その結果の根拠が見られなくなるため）
+_RESULT_STATUSES = frozenset({STATUS_REVIEW, STATUS_EXHAUSTED, STATUS_STALLED, STATUS_BLOCKED, STATUS_ERROR, STATUS_STOPPED})
+
+
+def _clear_runs_problem(data: dict) -> str | None:
+    """実行の記録を消してはいけない状態なら理由（ワーカーが runs/ に書いている・終わったテーマ）。"""
+    if data.get("status") in ACTIVE_STATUSES:
+        return _t("ループ・トライアウトの実行中・開始待ちの間は、実行の記録をクリアできません。先に停止してください。")
+    if data.get("status") in CLOSED_STATUSES:
+        return _t("終わったテーマの実行の記録はクリアできません（昇格・差し戻しの根拠のため）。「再開して編集」で再開してからクリアしてください。")
+    if any(t.get("type") == "trial" and t.get("status") in ("queued", "running") for t in data.get("tasks") or []):
+        return _t("1回試行の処理中は、実行の記録をクリアできません。終わってからクリアしてください。")
+    return None
+
+
+def _dir_size(path: Path) -> tuple[int, int]:
+    """(ファイル数, バイト数)。"""
+    files = size = 0
+    for p in path.rglob("*") if path.is_dir() else []:
+        try:
+            if p.is_file():
+                files += 1
+                size += p.stat().st_size
+        except OSError:
+            continue
+    return files, size
+
+
+def runs_summary(directory: Path) -> dict:
+    """実行の記録として消えるもの（確認画面に出す件数・容量）と、今クリアできるか。"""
+    data = read(directory)
+    files, size = _dir_size(directory / RUNS_DIRNAME)
+    trials = [t for t in data.get("tasks") or [] if t.get("type") == "trial" and t.get("status") in ("done", "error")]
+    return {
+        "iterations": len(data.get("iterations") or []),
+        "trials": len(trials),
+        "baseline": bool(data.get("baseline_eval")),
+        "report": bool((data.get("loop") or {}).get("report")),
+        "tryout": bool(data.get("tryout")),
+        "files": files,
+        "bytes": size,
+        "status": data.get("status"),
+        "resets_status": data.get("status") in _RESULT_STATUSES,
+        "blocked_reason": _clear_runs_problem(data),
+    }
+
+
+def clear_runs(directory: Path, *, actor: str) -> dict:
+    """実行の記録（反復・1回試行・改良前の版の評価・ループの総括・トライアウトの合格記録と runs/ の中身）を消す。
+
+    研究対象・仕様・試験問題・入力ファイル・設定パッチ・履歴（theme.json の history）は残す。
+    ワーカーが runs/ に書いている間（実行中・開始待ち・1回試行の処理中）と終わったテーマでは断る。確かめてから消し終わるまで
+    テーマの排他（_locked）を持ち続け、その間にループの開始・1回試行の依頼が割り込まないようにする。
+
+    Returns:
+        {"iterations", "trials", "files", "bytes", "failed": [消せなかったパス]}
+
+    Raises:
+        ThemeError: 今は消せない状態。
+    """
+    result: dict = {}
+
+    def _apply(data: dict) -> None:
+        problem = _clear_runs_problem(data)
+        if problem:
+            raise ThemeError(problem)
+        runs = directory / RUNS_DIRNAME
+        files, size = _dir_size(runs)
+        failed: list[str] = []
+        if runs.is_dir():
+            for child in list(runs.iterdir()):
+                try:
+                    shutil.rmtree(child) if child.is_dir() else child.unlink()
+                except OSError:
+                    failed.append(child.relative_to(directory).as_posix())
+        runs.mkdir(parents=True, exist_ok=True)
+        trials = [t for t in data.get("tasks") or [] if t.get("type") == "trial" and t.get("status") in ("done", "error")]
+        result.update(
+            {"iterations": len(data.get("iterations") or []), "trials": len(trials), "files": files, "bytes": size, "failed": failed}
+        )
+        data["iterations"] = []
+        data["tryout"] = None
+        data["loop"] = None
+        data.pop("baseline_eval", None)
+        data["tasks"] = [t for t in data.get("tasks") or [] if t not in trials]
+        if data.get("status") in _RESULT_STATUSES:
+            data["status"] = STATUS_DRAFT
+        add_history(
+            data,
+            actor,
+            "clear_runs",
+            f"iterations={result['iterations']} trials={result['trials']} files={files} bytes={size}"
+            + (f" failed={', '.join(failed)}" if failed else ""),
+        )
+
+    update(directory, _apply)
+    return result
+
+
 def tryout_repeats(data: dict, cfg) -> int:
     """このテーマのトライアウトの回数（テーマの設定。無ければ対象インスタンスの [skill_lab] tryout_repeats）。"""
     value = data.get("tryout_repeats")

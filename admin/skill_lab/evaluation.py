@@ -103,8 +103,12 @@ def run(
     stop_on_fail: bool = False,
     assets_base: Path | None = None,
     config_patch: bool = True,
+    on_progress: Callable[[dict], None] | None = None,
 ) -> dict:
     """評価を1回（各ケース repeat 回）行い、結果をまとめて返す。
+
+    on_progress: 次のケースの実行を始めるたびに {"done", "total", "case_id", "repeat"} で呼ぶ（画面に進み具合を出すため。
+        evals/run_all.py が出す [progress] 行を読む）。
 
     Returns:
         {"out_dir", "results"（results.json の中身）, "tryout"（tryout.json の中身）}
@@ -129,12 +133,22 @@ def run(
         config_patch=config_patch,
     )
     log_path = log_path or (results_root / "run_all.log")
+    log_start = log_path.stat().st_size if log_path.is_file() else 0  # ログは追記するので、今回の分だけを読む
+    last_progress = None
     with open(log_path, "a", encoding="utf-8", errors="replace") as log:
         proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), env=clean_env(base_env), stdout=log, stderr=subprocess.STDOUT)
         while proc.poll() is None:
             if should_stop and should_stop():
                 _kill_tree(proc)
                 raise EvaluationStopped()
+            if on_progress is not None:
+                progress = read_progress(log_path, log_start)
+                if progress and progress != last_progress:
+                    last_progress = progress
+                    try:
+                        on_progress(progress)
+                    except Exception:  # noqa: BLE001 - 進み具合を書けなくても評価は続ける
+                        pass
             time.sleep(2)
     new_dirs = sorted(p for p in results_root.iterdir() if p.is_dir() and p.name not in before)
     if not new_dirs or not (new_dirs[-1] / "results.json").is_file():
@@ -146,6 +160,24 @@ def run(
         "results": json.loads((out_dir / "results.json").read_text(encoding="utf-8")),
         "tryout": json.loads((out_dir / "tryout.json").read_text(encoding="utf-8")),
     }
+
+
+_PROGRESS_RE = re.compile(r"^\[progress\] (\d+)/(\d+) (\S+) (\d+)/(\d+)\s*$", re.M)
+
+
+def read_progress(log_path: Path, start: int = 0) -> dict | None:
+    """evals/run_all.py のログ（start バイト目以降）から、最後の [progress] 行を読む。無ければ None。"""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(start)
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    matches = _PROGRESS_RE.findall(text)
+    if not matches:
+        return None
+    done, total, case_id, rep_i, rep_n = matches[-1]
+    return {"done": int(done), "total": int(total), "case_id": case_id, "repeat": int(rep_i), "repeats": int(rep_n)}
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
