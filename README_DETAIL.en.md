@@ -1277,6 +1277,82 @@ when looking for facts, figures or document contents (when disabled or nothing i
   get only their paths embedded on the next "ingest (differential)" without re-embedding the content
   (decided by `path_indexed` in the records of ingested files; paths missing from the keyword index are filled in by the same ingestion).
 
+### Built-in embeddings (CPU)
+
+Without starting an external embedding server, leaving `[vector_db] embedding_url` empty (`[]`, the default) runs an ONNX embedding model on the CPU
+inside the Locohane process (`src/vector_db/local_embeddings.py`; computed with onnxruntime + tokenizers, pooled by CLS / mean according to
+`1_Pooling/config.json` and L2-normalized; no network access). The model is not in the repository, so download it once first (`models/` is in `.gitignore`):
+
+```cmd
+call python_env.bat
+python tools\download_embedding_model.py
+```
+
+The default model is [ibm-granite/granite-embedding-97m-multilingual-r2](https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2)
+(Apache 2.0, 97M parameters, 384 dimensions, up to 32,768 tokens, multilingual including Japanese; about 400MB as fp32 ONNX), saved to
+`models/embedding/granite-embedding-97m-multilingual-r2/`, which is also the default of `local_embedding_model`.
+Its multilingual retrieval score (Multilingual MTEB Retrieval, 18 tasks) is 60.3, higher than `multilingual-e5-small` of the same size (50.9).
+For higher accuracy, download `--model 311m` (granite-embedding-311m-multilingual-r2, 768 dimensions, about 1.2GB, 65.2; slower on the CPU accordingly)
+and point `local_embedding_model` to that folder. Other sentence-transformers models with `onnx/model.onnx` and `tokenizer.json` can also be downloaded
+with `--model <org>/<name>` (check the license in `README.md` of the folder).
+In a fully offline environment, copy the folder downloaded on a PC with network access to the same place.
+
+- If `embedding_url` is written, it is used instead (the built-in embeddings are not used). With `enabled = true` and neither `embedding_url` nor the built-in model, startup fails with an error.
+- The embedding endpoint is treated as one entry `local://<folder name>`, and collections record the folder name as the embedding model name
+  ("rebuild" the collections after changing the model). `auto` prefixes are also decided from the folder name (granite has no prefix).
+- Text only. It cannot be combined with `image_input = true` (startup error).
+- **Where to compute** (`local_embedding_device`): `cpu` (default), `cuda` (NVIDIA), `directml` (DirectX 12 GPU of Windows; NVIDIA, AMD, Intel),
+  `auto` (the first usable of cuda -> directml -> cpu). GPUs need another onnxruntime package, and only one can be installed in an environment
+  (`onnxruntime`, `onnxruntime-gpu` and `onnxruntime-directml` install the same `onnxruntime` module):
+
+  ```cmd
+  :: cuda (about 2GB; the CUDA and cuDNN DLLs are installed by pip too)
+  python -m pip uninstall -y onnxruntime onnxruntime-directml
+  python -m pip install "onnxruntime-gpu[cuda,cudnn]==1.31.1"
+  :: directml
+  python -m pip uninstall -y onnxruntime onnxruntime-gpu
+  python -m pip install onnxruntime-directml==1.24.4
+  ```
+
+  Running `pip install -r requirements.txt` after installing a GPU package overwrites it with the CPU package, so run the 2 lines above again in that case.
+  If `cuda` or `directml` is chosen but cannot be used (wrong package, the driver or CUDA DLLs cannot be loaded), it errors out instead of silently switching
+  to the CPU (the CPU is an order of magnitude slower and ingestion would take long without anyone noticing; only `auto` switches to the CPU and logs it).
+  With several GPUs, choose one with `local_embedding_device_id`. Measured on the development PC (Core Ultra 5 225, RTX 5060 Ti; fp32 97m, chunks of about 600-700 tokens):
+
+  | Where | Speed | Vectors |
+  |---|---|---|
+  | `cpu` (5 threads = default / 10 threads) | about 9 / 11 chunks per second | — |
+  | `directml` (RTX 5060 Ti) | about 80-90 chunks per second | same as the CPU (cosine 1.00000) |
+  | `cuda` (RTX 5060 Ti) | about 130 chunks per second | same as the CPU (cosine 1.00000) |
+
+- **CPU threads** (`local_embedding_threads`): 0 (default) means half the number of physical cores (rounded up), to share the CPU with ingestion preparation
+  (reading PDF and Office files) and chat responses. Measured on 10 cores, half the cores gives about 80% of the speed of all cores, and more barely helps.
+- **Parallelism**: one model computes one request at a time (requests arriving together wait their turn), so raising `ingest_embed_requests` does not make it faster.
+  In measurements, CUDA was not faster in parallel (one computation already uses the whole GPU), the CPU was only about 17% faster with 4 in parallel, and DirectML
+  crashed the process when computing in parallel. Because it is one at a time, the memory peak is set by a single computation (the memory limits below apply as is).
+- **Memory limits** (`local_embedding_ram_limit_mb` = RAM with cpu, `local_embedding_vram_limit_mb` = VRAM with cuda / directml; default 4096, 0 means no limit, which is not recommended because it can use tens of GB when long texts are mixed in):
+  the memory of one computation is mostly "model weights + count x tokens squared" (the attention of ModernBERT grows with the square of the tokens).
+  It is estimated from `config.json` of the model (heads, width) and the size of the weights (`estimate_memory()`); to stay within the limit, texts that are too long are
+  truncated (to a length that does not exceed the limit by itself), and texts of similar length are grouped and computed in counts that fit (`plan_batches()`, which also reduces padding).
+  The coefficients are set a little above the peaks measured with 97m.
+  - With CUDA the limit is also passed to onnxruntime (`gpu_mem_limit`), so that even if the estimate is off it stops with an error instead of overflowing VRAM and running
+    tens of times slower in shared memory (RAM) (in a measurement without a limit, 16 texts x 4096 tokens overflowed the 16GB VRAM, used 21GB of RAM and became about 40 times slower).
+  - DirectML keeps the VRAM it allocated for each input shape (count x tokens; it does not grow for the same shape, but piles up each time another length comes), so
+    lengths are rounded up to multiples of 512 tokens and computations are planned with half the limit (so fewer texts per computation and slower than CUDA).
+  - Even on the GPU, onnxruntime etc. use about 1-2GB of RAM.
+  - Measured peaks with the worst input (16 long texts over 8192 tokens and 64 chunks of about 700 tokens):
+
+    | Where | Limit | Max tokens per text | Peak |
+    |---|---|---|---|
+    | `cpu` | 2048 / 4096 MB | about 3,000 / about 4,900 | RAM about 1,700-1,900 / 3,500 MB (whole process) |
+    | `cuda` | 2048 / 4096 MB | about 2,900 / about 4,800 | VRAM about 1,600 / 3,200 MB |
+    | `directml` | 2048 / 4096 MB | 1,536 / 2,560 | VRAM about 900 / 2,400 MB |
+
+  When sharing the GPU with the chat inference server, leave the VRAM it uses.
+- The quantized version (`onnx/model_quint8_avx2.onnx`) drifts to a cosine of about 0.96 from fp32 and gives different results for the same text depending on the batch,
+  so the fp32 version (`onnx/model.onnx`) is used by default (other `*.onnx` files are used only when `onnx/model.onnx` is missing).
+- They cost nothing, so they are not counted in the embedding tokens of "Usage & cost".
+
 ### Preparing and configuring the embedding server
 
 Embeddings are computed with OpenAI-compatible `/v1/embeddings` by starting, with llama-server, an embedding model separate from the chat model
@@ -1857,7 +1933,14 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[vector_db]` | `qdrant_max_retries` | Number of retries when Qdrant cannot be reached, closes the connection, times out or returns 5xx, 408 or 429 (default 5; `-1` is unlimited, `0` does not retry; ingestion and copying can be stopped with "Stop" while waiting for a retry; searches are retried at most once regardless). **Shared by all instances** (cannot be overridden per instance; can be changed in "Admin settings" of the settings dashboard) | `VECTOR_DB_QDRANT_MAX_RETRIES` |
 | `[vector_db]` | `qdrant_retry_interval_seconds` | Interval in seconds between the retries above (default 10; at most 1 for searches). **Shared by all instances** (cannot be overridden per instance; can be changed in "Admin settings" of the settings dashboard) | `VECTOR_DB_QDRANT_RETRY_INTERVAL_SECONDS` |
 | `[vector_db]` | `qdrant_preset` | Settings of Qdrant collections by scale of chunk count (`none` default = Qdrant's default / `1m` / `2m` / ... / `10m` = for up to 1-10 million. HNSW, int8 quantization, putting vectors on disk, number of segments, `hnsw_ef` when searching). Applied to existing collections on the next ingestion (no rebuild needed). See "Using Qdrant" | `VECTOR_DB_QDRANT_PRESET` |
-| `[vector_db]` | `embedding_url` | Endpoints that compute embeddings (`/v1/embeddings`). Same format as `[llm] main_url`; all elements must have the same `model`, and `start`/`end` cannot be specified. Required when `enabled = true` (`[]` means not set) | `VECTOR_DB_EMBEDDING_URL` |
+| `[vector_db]` | `embedding_url` | Endpoints that compute embeddings (`/v1/embeddings`). Same format as `[llm] main_url`; all elements must have the same `model`, and `start`/`end` cannot be specified. If empty (`[]`), the built-in embeddings (`local_embedding_model`) are used; an error if neither exists with `enabled = true` | `VECTOR_DB_EMBEDDING_URL` |
+| `[vector_db]` | `local_embedding_model` | Folder of the built-in embedding model (CPU) used when `embedding_url` is empty (`onnx/model.onnx`, `tokenizer.json`; default `models/embedding/granite-embedding-97m-multilingual-r2`; empty disables it; see "Built-in embeddings (CPU)") | `VECTOR_DB_LOCAL_EMBEDDING_MODEL` |
+| `[vector_db]` | `local_embedding_device` | Where the built-in embeddings are computed (`cpu` default / `cuda` / `directml` / `auto`; GPUs need another onnxruntime package) | `VECTOR_DB_LOCAL_EMBEDDING_DEVICE` |
+| `[vector_db]` | `local_embedding_device_id` | Number of the GPU used with `cuda` / `directml` (default 0) | `VECTOR_DB_LOCAL_EMBEDDING_DEVICE_ID` |
+| `[vector_db]` | `local_embedding_threads` | CPU threads of the built-in embeddings (default 0 = half the physical cores; with `cpu`) | `VECTOR_DB_LOCAL_EMBEDDING_THREADS` |
+| `[vector_db]` | `local_embedding_ram_limit_mb` | Upper limit of RAM for one computation with `cpu` (MB, default 4096, 0 = no limit). Long texts are truncated and counts split to fit | `VECTOR_DB_LOCAL_EMBEDDING_RAM_LIMIT_MB` |
+| `[vector_db]` | `local_embedding_vram_limit_mb` | Upper limit of VRAM for one computation with `cuda` / `directml` (MB, default 4096, 0 = no limit) | `VECTOR_DB_LOCAL_EMBEDDING_VRAM_LIMIT_MB` |
+| `[vector_db]` | `local_embedding_max_tokens` | Tokens a chunk is truncated to by the built-in embeddings (default 8192) | `VECTOR_DB_LOCAL_EMBEDDING_MAX_TOKENS` |
 | `[vector_db]` | `embedding_routing_strategy` | How to choose when `embedding_url` has several entries (`round_robin` default / `random` / `priority_failover`; `round_robin` and `priority_failover` check for free capacity with GET /slots for llama_cpp and GET /metrics for vllm, and skip full endpoints). With any strategy, an error makes it resend to the next endpoint (see "Preparing and configuring the embedding server") | `VECTOR_DB_EMBEDDING_ROUTING_STRATEGY` |
 | `[vector_db]` | `embedding_max_retries` | Number of retries when all endpoints error during ingestion (default 3). `0` repeats indefinitely until it succeeds. No retry if only 4xx other than 408/429 | `VECTOR_DB_EMBEDDING_MAX_RETRIES` |
 | `[vector_db]` | `search_embedding_max_retries` | Number of retries likewise for search (`search_documents`) (default 2). `0` does not retry (unlimited cannot be specified) | `VECTOR_DB_SEARCH_EMBEDDING_MAX_RETRIES` |
@@ -2171,7 +2254,7 @@ The left sidebar of the `config.ini` tab has preset buttons that narrow the disp
 - **Parallelism**: `[llm] max_concurrent_requests`, `[graph] max_parallel`, `[subagent] max_parallel`
 - **Token control**: `[graph] token_guard_soft_threshold`, `[subagent] token_guard_soft_threshold`, `token_guard_hard_threshold`, `[context_trim] enabled`, `trigger_total_tokens`, `[context_compaction] enabled`, `token_threshold`, `single_request_token_threshold`, `pre_note_threshold`
 - **Skills**: `[paths] project_locohane_dir`, `[subagent] agent_type_run_script_allowlist`, `[main_agent_tool_guard] allow_entries`, `[plan] plan_approval_exempt_scripts`, each key of `[skill_creator]`, `[skill_lab] instance_locohane_dir`
-- **Vector DB**: `enabled`, `backend`, `distance`, `qdrant_url`, `qdrant_preset`, `embedding_url`, `embedding_routing_strategy`, `embedding_max_retries`, `search_embedding_max_retries`, `embedding_retry_interval_seconds`, `embedding_encoding_format`, `query_prefix`, `document_prefix`, `image_input`, `image_input_extensions`, `embedded_images`, `embedded_image_min_px`, `image_dpi`, `office_timeout_seconds`, `ingest_temp_dir`, `ingest_workers`, `ingest_processes`, `ingest_embed_requests`, `scan_workers`, `max_files_per_collection`, `chunk_size`, `chunk_overlap`, `max_file_mb`, `top_k`, `max_result_chars`, `min_score`, `image_min_score`, `path_min_score`, `rrf_weight_text`, `rrf_weight_keyword`, `rrf_weight_image`, `rrf_weight_path_keyword` of `[vector_db]`
+- **Vector DB**: `enabled`, `backend`, `distance`, `qdrant_url`, `qdrant_preset`, `embedding_url`, `local_embedding_model`, `local_embedding_device`, `local_embedding_device_id`, `local_embedding_ram_limit_mb`, `local_embedding_vram_limit_mb`, `local_embedding_threads`, `local_embedding_max_tokens`, `embedding_routing_strategy`, `embedding_max_retries`, `search_embedding_max_retries`, `embedding_retry_interval_seconds`, `embedding_encoding_format`, `query_prefix`, `document_prefix`, `image_input`, `image_input_extensions`, `embedded_images`, `embedded_image_min_px`, `image_dpi`, `office_timeout_seconds`, `ingest_temp_dir`, `ingest_workers`, `ingest_processes`, `ingest_embed_requests`, `scan_workers`, `max_files_per_collection`, `chunk_size`, `chunk_overlap`, `max_file_mb`, `top_k`, `max_result_chars`, `min_score`, `image_min_score`, `path_min_score`, `rrf_weight_text`, `rrf_weight_keyword`, `rrf_weight_image`, `rrf_weight_path_keyword` of `[vector_db]`
 
 Presets consisting only of keys not shown for that kind of instance are not shown (skill tuning workers show few keys, so they have no presets).
 When the dashboard is displayed in English, the description of each key comes from the English catalog `admin/ini_catalog_en.py` (the Japanese comments in config.ini are authoritative).
@@ -2766,14 +2849,14 @@ This software is under the **MIT License**. For details, see [LICENSE](LICENSE).
 
 ### Dependencies (commercial use OK)
 
-License breakdown of all 160 packages, the runtime transitive dependencies reachable from the direct dependencies in
+License breakdown of all 173 packages, the runtime transitive dependencies reachable from the direct dependencies in
 `requirements.txt` (pip):
 
 | License type | Count | Commercial use |
 |---|---:|---|
-| Apache 2.0 | 74 | ✅ |
-| MIT | 55 | ✅ |
-| BSD | 26 | ✅ |
+| Apache 2.0 | 78 | ✅ |
+| MIT | 60 | ✅ |
+| BSD | 30 | ✅ |
 | PSF | 3 | ✅ |
 | MPL 2.0 | 2 | ✅ (as long as used unmodified) |
 
@@ -2791,6 +2874,9 @@ check the licenses in `frontend/package-lock.json` separately.
 
 Note that `frontend/public/favicon.svg` (distributed as `public/build/favicon.svg`) uses as is
 the default favicon bundled with [Chainlit](https://github.com/Chainlit/chainlit) (Apache 2.0).
+
+The model of the built-in embeddings (CPU) is not in the repository; an administrator downloads it from Hugging Face with `tools/download_embedding_model.py`.
+The default [granite-embedding-97m-multilingual-r2](https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2) and granite-embedding-311m-multilingual-r2 of `--model 311m` are both Apache 2.0 (IBM) and can be used commercially. When using another model with `--model <org>/<name>`, check its license (`README.md` in the downloaded folder).
 
 ### About external communication (complete offline guarantee)
 
@@ -2810,7 +2896,7 @@ or `[mcp] enabled = false`), nothing is started, and the offline guarantee does 
 However, whether MCP servers added by users themselves communicate over the network internally depends on
 the implementation of each MCP server and is outside the scope of this project.
 
-When the vector DB (`[vector_db]`, disabled by default) is enabled, embeddings are sent to the inference server of `embedding_url`,
+When the vector DB (`[vector_db]`, disabled by default) is enabled, embeddings are sent to the inference server of `embedding_url` (if empty, they are computed by the built-in embeddings (CPU) and not sent; only `tools/download_embedding_model.py`, when an administrator runs it, connects to Hugging Face to download the model),
 and with `backend = qdrant` vectors are sent to the Qdrant server of `qdrant_url` (including the chunk text of ingested documents).
 Both assume local or in-LAN servers, and the default `backend = sqlite_vec` saves only to local files.
 

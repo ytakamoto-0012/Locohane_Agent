@@ -12,6 +12,18 @@
 
 ## [Unreleased]
 
+### 追加
+
+- ナレッジ（ベクターDB）の埋め込みを、外部の埋め込みサーバー無しで CPU で計算できるようにしました（内蔵の埋め込み）。
+  `[vector_db] embedding_url` が空なら、`[vector_db] local_embedding_model` のフォルダの ONNX のモデルを Locohane の中で動かします（通信はしません）。
+  モデルは `python tools\download_embedding_model.py` で1回だけ取得します（既定は多言語・日本語対応の
+  granite-embedding-97m-multilingual-r2、Apache 2.0、約 400MB。精度優先の `--model 311m` も選べます）。テキストのみで、`image_input = true` とは併用できません。
+  GPU でも計算できます（`local_embedding_device` = `cuda`（NVIDIA）/ `directml`（Windows の DirectX 12 の GPU）/ `auto`。
+  onnxruntime の代わりに onnxruntime-gpu・onnxruntime-directml を入れます。CPU のおよそ 10 倍・7 倍の速さで、ベクターは CPU と同じです）。
+  使うメモリーは `local_embedding_ram_limit_mb`（CPU の RAM）・`local_embedding_vram_limit_mb`（GPU の VRAM。どちらも既定 4096MB）に収まるよう、
+  長すぎる文の切り詰めと一度に計算する件数を自動で調整します。CPU のスレッド数（`local_embedding_threads`）は既定で物理コア数の半分です。
+  依存パッケージに onnxruntime・tokenizers・numpy を追加したため、更新後は `pip install -r requirements.txt` を実行してください。
+
 ### 修正
 
 - 並列のツール呼び出しで、登録済みのパスメモリー（`@N`）がときどき「未登録」と判定される問題を直しました。レジストリを一時ファイルからの差し替えで書き、読み込み側は一時的に読めないときに読み直します。壊れたレジストリは `<名前>.corrupt-<時刻>` へ退避してから作り直します。

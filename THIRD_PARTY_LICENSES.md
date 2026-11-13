@@ -1,7 +1,7 @@
 # 第三者ライセンス告知 (THIRD_PARTY_LICENSES)
 
 本ファイルは Locohane が実行時に利用する第三者オープンソース
-パッケージとそのライセンスの一覧です（tools/gen_licenses.py で自動生成 / 生成日: 2026-10-28）。
+パッケージとそのライセンスの一覧です（tools/gen_licenses.py で自動生成 / 生成日: 2026-11-12）。
 対象は requirements.txt の直接依存から到達する実行時の推移的依存集合です。
 
 再生成:
@@ -15,12 +15,12 @@ python tools/gen_licenses.py
 
 | ライセンス種別 | パッケージ数 |
 |---|---:|
-| Apache 2.0 | 74 |
-| MIT | 57 |
-| BSD | 26 |
+| Apache 2.0 | 78 |
+| MIT | 60 |
+| BSD | 30 |
 | PSF | 3 |
 | MPL 2.0 | 2 |
-| **合計** | **162** |
+| **合計** | **173** |
 
 > いずれも寛容ライセンス（MIT / Apache 2.0 / BSD / PSF / ISC）または
 > ファイル単位の弱いコピーレフト（MPL 2.0）であり、改変せず依存として利用する
@@ -60,14 +60,21 @@ python tools/gen_licenses.py
 | et-xmlfile | 2.0.0 | MIT License | https://foss.heptapod.net/openpyxl/et_xmlfile |
 | exceptiongroup | 1.3.1 | MIT License | https://github.com/agronholm/exceptiongroup |
 | fastapi | 0.139.0 | MIT | https://github.com/fastapi/fastapi |
+| filelock | 4.0.8 | MIT | https://github.com/tox-dev/py-filelock |
 | filetype | 1.2.0 | MIT License | https://github.com/h2non/filetype.py |
+| flatbuffers | 25.12.19 | Apache Software License | https://google.github.io/flatbuffers/ |
 | frozenlist | 1.8.0 | Apache-2.0 | https://github.com/aio-libs/frozenlist |
+| fsspec | 2026.9.0 | BSD-3-Clause | https://github.com/fsspec/filesystem_spec |
 | googleapis-common-protos | 1.75.0 | Apache Software License | https://github.com/googleapis/google-cloud-python/tree/main/packages/googleapis-common-protos |
 | grpcio | 1.82.1 | Apache-2.0 | https://grpc.io |
 | h11 | 0.16.0 | MIT License | https://github.com/python-hyper/h11 |
+| hf-xet | 1.6.0 | Apache-2.0 | https://github.com/huggingface/xet-core |
 | httpcore | 1.0.9 | BSD-3-Clause | https://www.encode.io/httpcore/ |
+| httpcore2 | 2.13.1 | BSD-3-Clause | https://github.com/pydantic/httpx2 |
 | httpx | 0.28.1 | BSD License | https://github.com/encode/httpx |
 | httpx-sse | 0.4.3 | MIT | https://github.com/florimondmanca/httpx-sse |
+| httpx2 | 2.13.1 | BSD-3-Clause | https://github.com/pydantic/httpx2 |
+| huggingface-hub | 2.1.1 | Apache Software License | https://github.com/huggingface/huggingface_hub |
 | idna | 3.18 | BSD-3-Clause | https://github.com/kjd/idna |
 | inflection | 0.5.1 | MIT License | https://github.com/jpvanhal/inflection |
 | jinja2 | 3.1.6 | BSD License | https://github.com/pallets/jinja/ |
@@ -95,6 +102,8 @@ python tools/gen_licenses.py
 | multidict | 6.7.1 | Apache License 2.0 | https://github.com/aio-libs/multidict |
 | mypy-extensions | 1.1.0 | MIT | https://github.com/python/mypy_extensions |
 | nest-asyncio | 1.6.0 | BSD License | https://github.com/erdewit/nest_asyncio |
+| numpy | 2.3.5 | BSD License | https://numpy.org |
+| onnxruntime | 1.31.1 | MIT License | https://onnxruntime.ai |
 | openai | 2.54.0 | Apache Software License | https://github.com/openai/openai-python |
 | openpyxl | 3.1.5 | MIT License | https://openpyxl.readthedocs.io |
 | opentelemetry-api | 1.43.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python/tree/main/opentelemetry-api |
@@ -155,7 +164,7 @@ python tools/gen_licenses.py
 | pydantic-core | 2.46.4 | MIT | https://github.com/pydantic/pydantic |
 | pydantic-settings | 2.14.2 | MIT | https://github.com/pydantic/pydantic-settings |
 | pyjwt | 2.13.0 | MIT | https://github.com/jpadilla/pyjwt |
-| pypdf | 6.21.2 | BSD-3-Clause | https://github.com/py-pdf/pypdf |
+| pypdf | 6.21.4 | BSD-3-Clause | https://github.com/py-pdf/pypdf |
 | pypdfium2 | 4.30.0 | (Apache-2.0 OR BSD-3-Clause) AND LicenseRef-P | https://github.com/pypdfium2-team/pypdfium2 |
 | python-calamine | 0.9.0 | MIT | https://github.com/dimastbk/python-calamine |
 | python-docx | 1.2.0 | MIT License | https://github.com/python-openxml/python-docx |
@@ -180,9 +189,11 @@ python tools/gen_licenses.py
 | syncer | 2.0.3 | MIT License | https://github.com/miyakogi/syncer |
 | tenacity | 9.1.4 | Apache Software License | https://github.com/jd/tenacity |
 | tiktoken | 0.13.0 | MIT License | https://github.com/openai/tiktoken |
+| tokenizers | 0.23.3 | Apache Software License | https://github.com/huggingface/tokenizers |
 | tomli | 2.4.1 | MIT | https://github.com/hukkin/tomli |
 | tqdm | 4.68.4 | MPL-2.0 AND MIT | https://tqdm.github.io |
 | traceloop-sdk | 0.62.1 | Apache-2.0 | https://github.com/traceloop/openllmetry |
+| truststore | 0.10.4 | MIT | https://github.com/sethmlarson/truststore |
 | typing-extensions | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 | typing-inspect | 0.9.0 | MIT License | https://github.com/ilevkivskyi/typing_inspect |
 | typing-inspection | 0.4.2 | MIT | https://github.com/pydantic/typing-inspection |

@@ -1,4 +1,4 @@
-"""埋め込み（embedding）を推論サーバーの /v1/embeddings で計算する。"""
+"""埋め込み（embedding）を推論サーバーの /v1/embeddings、または内蔵の埋め込み（CPU。local_embeddings.py）で計算する。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..config import Config, LLMEndpoint
+from ..config import LOCAL_EMBEDDING_PROVIDER, Config, LLMEndpoint
 from ..embedding_usage import EmbeddingMeter, tokens_of
 
 logger = logging.getLogger(__name__)
@@ -171,6 +171,8 @@ def embed_texts(
     # 検索は AI の応答を待たせるため、接続先が埋まっていても空きを待たずに送る。
     if wait_when_busy is None:
         wait_when_busy = kind == "document"
+    if endpoints[0].provider == LOCAL_EMBEDDING_PROVIDER:
+        return _embed_local(cfg, inputs, batch_size)
     with _client_scope(cfg, client, transport) as http:
         for start in range(0, len(inputs), batch_size):
             vectors.extend(
@@ -203,12 +205,41 @@ def embed_images(
     endpoints = cfg.vector_db_embedding_endpoints
     if not endpoints:
         raise EmbeddingError("[vector_db].embedding_url is not set.")
+    if endpoints[0].provider == LOCAL_EMBEDDING_PROVIDER:
+        raise EmbeddingError("The built-in embeddings (CPU) cannot embed images. Set image_input = false, or set embedding_url to a server with an image embedding model.")
     vectors: list[list[float]] = []
     with _client_scope(cfg, client, transport) as http:
         for png in pngs:
             url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
             batch = [{"content": [{"type": "image_url", "image_url": {"url": url}}]}]
             vectors.extend(_embed_batch(cfg, http, endpoints, batch, cfg.vector_db_embedding_max_retries or None, should_stop, True, meter))
+    return vectors
+
+
+def _embed_local(cfg: Config, inputs: list[str], batch_size: int) -> list[list[float]]:
+    """内蔵の埋め込み（CPU。src/vector_db/local_embeddings.py）で inputs を batch_size 件ずつ埋め込む。
+
+    サーバーへ送らないため、接続先の選び方・空きの確認・試し直しは使わない。料金がかからないため meter
+    （「利用量・料金」の台帳）には加算しない（台帳はサーバーの埋め込みと区別できず、埋め込みの単価が付いてしまう）。
+    """
+    from . import local_embeddings
+
+    vectors: list[list[float]] = []
+    for start in range(0, len(inputs), batch_size):
+        try:
+            batch_vectors, _tokens = local_embeddings.embed(
+                cfg.vector_db_local_embedding_model,
+                inputs[start : start + batch_size],
+                threads=cfg.vector_db_local_embedding_threads,
+                max_tokens=cfg.vector_db_local_embedding_max_tokens,
+                device=cfg.vector_db_local_embedding_device,
+                device_id=cfg.vector_db_local_embedding_device_id,
+                ram_limit_mb=cfg.vector_db_local_embedding_ram_limit_mb,
+                vram_limit_mb=cfg.vector_db_local_embedding_vram_limit_mb,
+            )
+        except local_embeddings.LocalEmbeddingError as e:
+            raise EmbeddingError(f"Could not compute the embeddings: {e}") from e
+        vectors.extend(batch_vectors)
     return vectors
 
 

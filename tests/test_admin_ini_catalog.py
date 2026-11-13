@@ -164,6 +164,7 @@ def test_choices_match_src_config_constants():
         LLM_ROUTING_STRATEGIES,
         MAIN_AGENT_TOOL_GUARD_MODES,
         MAIN_AGENT_TOOL_GUARD_VISIBILITY_MODES,
+        LOCAL_EMBEDDING_DEVICES,
         UI_DEFAULT_LANGUAGES,
         VECTOR_DB_BACKENDS,
     )
@@ -181,6 +182,7 @@ def test_choices_match_src_config_constants():
         ("ui", "default_language"): set(UI_DEFAULT_LANGUAGES),
         ("vector_db", "backend"): set(VECTOR_DB_BACKENDS),
         ("vector_db", "embedding_routing_strategy"): LLM_ROUTING_STRATEGIES,
+        ("vector_db", "local_embedding_device"): set(LOCAL_EMBEDDING_DEVICES),
     }
     for pair, values in expected.items():
         info = by_pair[pair]

@@ -269,6 +269,7 @@ Sign-in, conversation logs, data locations and deletion, adding skills, etc. are
   may those communicate externally.
 - If you enable internal document search (vector DB), the contents of ingested documents are sent to the embedding
   inference server specified by the administrator and (when using Qdrant) the Qdrant server. Specify servers inside your company for both.
+  If no embedding server is specified, embeddings are computed by the app's built-in embeddings (CPU) and sent nowhere.
 
 For details, see [README_DETAIL.en.md "About external communication (complete offline guarantee)"](README_DETAIL.en.md#about-external-communication-complete-offline-guarantee).
 

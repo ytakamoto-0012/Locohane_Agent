@@ -93,6 +93,8 @@ _KEY_CHOICES: dict[tuple[str, str], tuple[str, ...]] = {
     # src/config.py の VECTOR_DB_QDRANT_PRESETS と同じ値・順序。
     ("vector_db", "qdrant_preset"): ("none", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "10m"),
     ("vector_db", "embedding_encoding_format"): ("base64", "float"),
+    # src/config.py の LOCAL_EMBEDDING_DEVICES と同じ値・順序。
+    ("vector_db", "local_embedding_device"): ("cpu", "cuda", "directml", "auto"),
     ("thinking_loop_guard", "target"): ("all", "content_only", "thinking_only"),
     ("thinking_control", "default_level"): _THINKING_LEVEL_CHOICES,
     # rule_* は false＝ルール無効。

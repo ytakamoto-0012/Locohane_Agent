@@ -8,6 +8,9 @@ import tempfile
 
 # 開発者の手元の「管理者設定」（instances/admin_settings.json）がテストの設定に混ざらないよう、無いファイルを指す。
 os.environ.setdefault("ADMIN_SETTINGS_PATH", str(Path(tempfile.gettempdir()) / "locohane_tests_no_admin_settings.json"))
+# 開発者の手元に内蔵の埋め込みのモデル（models/embedding/…）があるかどうかで、embedding_url が空のときの設定が変わらないよう、
+# 既定では内蔵の埋め込みを使わない（使うテストは VECTOR_DB_LOCAL_EMBEDDING_MODEL を自分で設定する）。
+os.environ.setdefault("VECTOR_DB_LOCAL_EMBEDDING_MODEL", "")
 
 import pytest  # noqa: E402
 
