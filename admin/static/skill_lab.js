@@ -201,7 +201,7 @@ function openCreateThemeModal(container, name, labs) {
 /* ------------------------------------------------------------ テーマ詳細 */
 
 const THEME_SUBVIEWS = [
-  ["overview", _t("研究内容")],
+  ["overview", _t("テーマの設定")],
   ["runs", _t("実行の記録")],
   ["review", _t("レビュー・昇格")],
   ["history", _t("履歴")],
@@ -256,7 +256,6 @@ function renderThemeHeader(state, header, container) {
     buttons.push(
       el("button", { class: "primary", text: _t("スキル調整ループを開始"), disabled: startDisabled, onclick: () => startTheme(state, "loop") }),
       el("button", { text: _t("トライアウトだけ実行"), disabled: startDisabled, onclick: () => startTheme(state, "tryout") }),
-      el("button", { text: _t("テーマの設定"), onclick: () => openThemeSettingsModal(state) }),
       el("button", {
         text: _t("取りやめ"),
         onclick: async () => {
@@ -325,7 +324,7 @@ function renderThemeHeader(state, header, container) {
   if (LAB_CLOSED.includes(d.status)) {
     notes.push(el("p", { class: "hint", text: _t("このテーマは終わっています。「再開して編集」を押すと準備中に戻り、研究内容を直してスキル調整ループをもう一度回せます。") }));
   }
-  if (editable && missing.length) notes.push(el("p", { class: "warn-box", text: _t(`開始に必要なもの（研究内容のページで入れてください）: {0}`, missing.join(_t("、"))) }));
+  if (editable && missing.length) notes.push(el("p", { class: "warn-box", text: _t(`開始に必要なもの（「テーマの設定」タブで入れてください）: {0}`, missing.join(_t("、"))) }));
   header.replaceChildren(
     el("div", { class: "theme-title-row" }, [el("h3", { text: d.title }), statusBadge(d.status)]),
     el("div", { class: "hint", text: _t(`対象インスタンス: {0} ／ 担当の スキル調整ワーカー: {1} ／ 反復 {2} 回 ／ 作成 {3} {4}`, d.instance, lab ? lab.display_name : _t("未選択"), (d.iterations || []).length, d.created_by || "", fmtTime(d.created_at)) }),
@@ -406,41 +405,51 @@ async function deleteTheme(name, theme, onDone) {
   if (await labAction(() => api(themePath(name, theme.id), { method: "DELETE" }))) onDone();
 }
 
-function openThemeSettingsModal(state) {
+// 「テーマの設定」タブの先頭の節: テーマ名・担当のスキル調整ワーカー・トライアウトの回数
+// （admin/skill_lab/api.py の update_theme）。ループの実行中・開始待ちは担当と回数を変えられない。
+function renderThemeSettings(state, box) {
   const d = state.data;
-  const title = el("input", { type: "text" });
+  const closed = LAB_CLOSED.includes(d.status);
+  const active = LAB_ACTIVE.includes(d.status);
+  const title = el("input", { type: "text", disabled: closed ? "disabled" : null });
   title.value = d.title;
   const lab = labSelect(d.labs, d.lab);
+  lab.disabled = closed || active;
   // トライアウトの回数（このテーマだけ。空欄なら対象インスタンスの [skill_lab] tryout_repeats）
   const repeats = el("input", { type: "number", min: 1, max: 1000, class: "narrow", placeholder: _t("既定 {0}", d.tryout_repeats_default) });
   repeats.value = d.tryout_repeats || "";
-  const ok = el("button", { class: "primary", type: "button", text: _t("保存") });
-  const m = labModal(
-    _t("テーマの設定"),
-    [
-      el("label", {}, [_t("テーマ名"), title]),
-      el("label", {}, [_t("担当の スキル調整ワーカー"), lab]),
-      el("label", {}, [
-        _t("トライアウトの回数（各ケースをこの回数ずつ実行し、全回合格で合格。空欄なら既定の {0} 回）", d.tryout_repeats_default),
-        repeats,
-      ]),
-    ],
-    { actions: [ok] },
-  );
-  ok.addEventListener("click", async () => {
+  repeats.disabled = closed || active;
+  const err = el("div", { class: "error" });
+  const save = el("button", { class: "primary", type: "button", text: _t("保存"), disabled: closed ? "disabled" : null });
+  save.addEventListener("click", async () => {
+    err.textContent = "";
     const n = repeats.value.trim() ? Number(repeats.value) : null;
     if (n !== null && !(Number.isInteger(n) && n >= 1 && n <= 1000)) {
-      m.errorBox.textContent = _t("トライアウトの回数は 1〜1000 の整数にしてください（空欄なら既定の回数）。");
+      err.textContent = _t("トライアウトの回数は 1〜1000 の整数にしてください（空欄なら既定の回数）。");
       return;
     }
-    const res = await labAction(
-      () => api(themePath(state.name, state.id), { method: "PUT", body: { title: title.value, lab: lab.value, tryout_repeats: n } }),
-      m.errorBox,
-    );
+    const body = { title: title.value };
+    if (!active) Object.assign(body, { lab: lab.value, tryout_repeats: n }); // 実行中は担当・回数を送らない（サーバーも断る）
+    const res = await labAction(() => api(themePath(state.name, state.id), { method: "PUT", body }), err);
     if (!res) return;
-    m.close();
     await state.reload();
+    box.innerHTML = "";
+    state.sections.settings.guard = renderThemeSettings(state, box);
   });
+  box.append(
+    el("h4", { text: _t("テーマの設定") }),
+    el("label", {}, [_t("テーマ名"), title]),
+    el("label", {}, [_t("担当の スキル調整ワーカー"), lab]),
+    el("label", {}, [
+      _t("トライアウトの回数（各ケースをこの回数ずつ実行し、全回合格で合格。空欄なら既定の {0} 回）", d.tryout_repeats_default),
+      repeats,
+    ]),
+    active ? el("p", { class: "hint", text: _t("ループ・トライアウトの実行中・開始待ちの間は、担当とトライアウトの回数を変えられません。先に停止してください。") }) : null,
+    closed ? el("p", { class: "hint", text: _t("このテーマは終わっています。「再開して編集」で戻すと変えられます。") }) : null,
+    err,
+    el("div", { class: "inline-form" }, [save]),
+  );
+  return inputsChanged(box);
 }
 
 async function startTheme(state, mode) {
@@ -458,10 +467,11 @@ function renderThemeSub(state, body) {
   return fn(state, body);
 }
 
-/* 「研究内容」は節ごとに描き直す（1か所を変えるたびに全体を描き直すと、編集中の仕様が消えるため）。
+/* 「テーマの設定」タブは節ごとに描き直す（1か所を変えるたびに全体を描き直すと、編集中の仕様が消えるため）。
  * 各節の描画関数は、描き直してはいけない状態かを返す関数 dirty と、利用者の操作による描き直しでも
  * 守るか（protect）を返してよい。 */
 const OVERVIEW_SECTIONS = [
+  ["settings", renderThemeSettings],
   ["targets", renderThemeTargets],
   ["spec", renderThemeSpec],
   ["cases", renderThemeCases],
@@ -1517,9 +1527,7 @@ function renderThemeRuns(state, body) {
     }),
     dataTable([_t("反復"), _t("種類"), _t("判定"), _t("ケースごとの合格"), _t("AI 修正"), ""], rows, _t("まだ実行していません。")),
   );
-  // 実行中は状況を出し、クリアは押せなくする（サーバー側でも断る）
-  const progress = labProgressBox(state);
-  if (progress) body.prepend(progress);
+  // 実行中の状況はテーマ詳細の見出しに出す（labProgressBox）。ここでは、クリアを押せなくする（サーバー側でも断る）。
   const d = state.data;
   const busy = LAB_ACTIVE.includes(d.status) || (d.tasks || []).some((t) => t.type === "trial" && ["queued", "running"].includes(t.status));
   const closed = LAB_CLOSED.includes(d.status);

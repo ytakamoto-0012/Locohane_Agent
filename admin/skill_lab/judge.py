@@ -16,9 +16,12 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import re
+import threading
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from src.config import Config
@@ -288,53 +291,80 @@ def review_rules(config: Config, result: dict, excerpt_chars: int) -> dict | Non
     return {**verdict, "how": "ai", "rules": sorted(failed)}
 
 
+def _judge_one(config: Config, spec: str, r: dict, excerpt_chars: int) -> dict:
+    """1回分の結果の最終判定（機械判定 → 表記ゆれ・LLM の見直し → AI judge）。"""
+    outcome = evaluation.classify(r)
+    entry = {"case_id": r.get("case_id"), "repeat_index": r.get("repeat_index", 1), "outcome": outcome}
+    failed_checks: dict = {}
+    if outcome == "fail":
+        review = review_rules(config, r, excerpt_chars)
+        if review is not None:
+            entry["rule_review"] = review
+            if review["pass"]:
+                outcome = "judge" if r.get("judge") else "pass"
+            elif r.get("judge"):
+                # 言葉・引数の照合（表記ゆれのありうる条件）だけで落ち、「AI が判断する点」が書かれているなら、
+                # AI judge まで進めてその判断を優先する（落ちた照合も見せる）。以前はここで不合格が確定し、
+                # 「意味が同じなら合格」等の判断の観点が一度も使われなかった。
+                outcome = "judge"
+                # サブエージェントの中で満たしていた条件は見せない（review の rules は残った条件だけ）。
+                failed_checks = {
+                    k: {key: v.get(key) for key in ("detail", "missing", "found", "expected") if v.get(key) is not None}
+                    for k, v in (r.get("rule_results") or {}).items()
+                    if isinstance(v, dict) and not v.get("pass") and k in review.get("rules", [])
+                }
+            entry["outcome"] = outcome
+    if outcome == "judge":
+        ai = judge_run(
+            config,
+            spec=spec,
+            judge_instruction=r.get("judge") or "",
+            result=r,
+            excerpt_chars=excerpt_chars,
+            failed_checks=failed_checks,
+        )
+        entry["ai_judge"] = ai
+        entry["outcome"] = "pass" if ai["pass"] else "fail"
+    return entry
+
+
 def judge_results(
-    config: Config, *, spec: str, results: list[dict], excerpt_chars: int, on_progress: Callable[[int, int, str], None] | None = None
+    config: Config,
+    *,
+    spec: str,
+    results: list[dict],
+    excerpt_chars: int,
+    on_progress: Callable[[int, int, str], None] | None = None,
+    max_workers: int = 1,
 ) -> list[dict]:
-    """全回の結果を判定し、各回の最終判定（outcome: pass/fail/error と AI judge の結果）を返す。
+    """全回の結果を判定し、各回の最終判定（outcome: pass/fail/error と AI judge の結果）を返す（結果と同じ順）。
 
     機械判定の文字列・引数の照合だけで落ちた回は review_rules() で見直し、中身が合っていれば
     judge（あれば）へ進める。見直しの結果は rule_review に残す（人がレビューで確認するため）。
-    on_progress: 各回の判定を始める前に (何件目, 全件数, ケース ID) で呼ぶ（画面に進み具合を出すため）。
+    on_progress: 各回の判定が終わるたびに (終わった件数, 全件数, そのケース ID) で呼ぶ（画面に進み具合を出すため）。
+    max_workers: 同時に判定する数。評価の LLM を持つスキル調整ワーカーの [llm] max_concurrent_requests
+        （推論サーバーの同時実行数）。1 以下なら1件ずつ。試験問題・トライアウトの回数が多いとき、判定を待つ時間を縮める。
     """
-    verdicts = []
-    for i, r in enumerate(results, start=1):
+    total = len(results)
+    done = 0
+    lock = threading.Lock()
+
+    def _run(r: dict) -> dict:
+        nonlocal done
+        entry = _judge_one(config, spec, r, excerpt_chars)
         if on_progress is not None:
-            on_progress(i, len(results), str(r.get("case_id") or ""))
-        outcome = evaluation.classify(r)
-        entry = {"case_id": r.get("case_id"), "repeat_index": r.get("repeat_index", 1), "outcome": outcome}
-        failed_checks: dict = {}
-        if outcome == "fail":
-            review = review_rules(config, r, excerpt_chars)
-            if review is not None:
-                entry["rule_review"] = review
-                if review["pass"]:
-                    outcome = "judge" if r.get("judge") else "pass"
-                elif r.get("judge"):
-                    # 言葉・引数の照合（表記ゆれのありうる条件）だけで落ち、「AI が判断する点」が書かれているなら、
-                    # AI judge まで進めてその判断を優先する（落ちた照合も見せる）。以前はここで不合格が確定し、
-                    # 「意味が同じなら合格」等の判断の観点が一度も使われなかった。
-                    outcome = "judge"
-                    # サブエージェントの中で満たしていた条件は見せない（review の rules は残った条件だけ）。
-                    failed_checks = {
-                        k: {key: v.get(key) for key in ("detail", "missing", "found", "expected") if v.get(key) is not None}
-                        for k, v in (r.get("rule_results") or {}).items()
-                        if isinstance(v, dict) and not v.get("pass") and k in review.get("rules", [])
-                    }
-                entry["outcome"] = outcome
-        if outcome == "judge":
-            ai = judge_run(
-                config,
-                spec=spec,
-                judge_instruction=r.get("judge") or "",
-                result=r,
-                excerpt_chars=excerpt_chars,
-                failed_checks=failed_checks,
-            )
-            entry["ai_judge"] = ai
-            entry["outcome"] = "pass" if ai["pass"] else "fail"
-        verdicts.append(entry)
-    return verdicts
+            with lock:
+                done += 1
+                on_progress(done, total, str(r.get("case_id") or ""))
+        return entry
+
+    workers = min(max(int(max_workers), 1), max(total, 1))
+    if workers <= 1:
+        return [_run(r) for r in results]
+    # ContextVar（使用量の記録・出力言語・切り詰めの設定）はスレッドへ引き継がれないため、呼び出し側の文脈で動かす。
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lab-judge") as pool:
+        futures = [pool.submit(contextvars.copy_context().run, _run, r) for r in results]
+        return [f.result() for f in futures]
 
 
 def all_passed(verdicts: list[dict]) -> bool:

@@ -517,6 +517,7 @@ class Worker:
             results=run["results"],
             excerpt_chars=self.config.skill_lab_transcript_excerpt_chars,
             on_progress=self._judge_progress(directory, "judging", n=n, phase=phase),
+            max_workers=self._judge_workers(),
         )
         passed = judge.all_passed(verdicts)
         per_case: dict[str, dict[str, int]] = {}
@@ -655,6 +656,11 @@ class Worker:
         except Exception as e:  # noqa: BLE001 - 進み具合を書けなくても処理は続ける
             logger.debug("Could not record progress of %s: %s", directory.name, e)
 
+    def _judge_workers(self) -> int:
+        """結果の判定を同時に行う数（このワーカーの [llm] max_concurrent_requests。0 以下は制限なし = 判定する件数まで）。"""
+        value = int(getattr(self.config, "llm_max_concurrent_requests", 1))
+        return value if value > 0 else 1000
+
     def _case_progress(self, directory: Path, step: str, **fields):
         """evaluation.run の on_progress（何問目・何回目）を loop.progress へ書く関数。"""
         return lambda p: self._progress(directory, step, **fields, **p)
@@ -791,6 +797,7 @@ class Worker:
             results=run["results"],
             excerpt_chars=self.config.skill_lab_transcript_excerpt_chars,
             on_progress=self._judge_progress(directory, "baseline_judging"),
+            max_workers=self._judge_workers(),
         )
         per_case: dict[str, dict[str, int]] = {}
         for v in verdicts:
@@ -975,6 +982,11 @@ def main() -> int:
     if not meta.is_skill_lab:
         raise SystemExit(f"Instance {lab} is not a skill tuning worker (kind=skill_lab).")
     apply_instance(lab)
+    # 判定を複数スレッドで同時に行う（judge.judge_results）。LLM の同時数ガード（asyncio.Semaphore）は別々のイベントループ
+    # から使えないため、ワーカーでは外し、同時数は判定のスレッドの数（_judge_workers）で守る。
+    from src.llm import init_llm_concurrency
+
+    init_llm_concurrency(0)
 
     from src import instance_lock
     from src.config import load_config

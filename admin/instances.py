@@ -43,9 +43,18 @@ INSTANCE_KINDS = (KIND_APP, KIND_SKILL_LAB)
 
 # スキル調整ワーカーが自分の設定として持つもの。それ以外（スキル・ガード・タイムアウト・[llm] の推論パラメータ等）は
 # 研究テーマの対象インスタンスの設定を引き継ぐ（admin/skill_lab/evaluation.py・worker.py の _llm_config()）ため、
-# ワーカーの設定画面には出さず、保存もさせない。LLM の接続先は evals/instance.py の _LLM_ENDPOINT_KEYS と揃える。
+# ワーカーの設定画面には出さず、保存もさせない。LLM の接続先と並列数（推論サーバーの能力に合わせる設定）は、評価に使う LLM を
+# 持つワーカーのものを使う。evals/instance.py の _LLM_ENDPOINT_KEYS と揃える。
 SKILL_LAB_WORKER_KEYS = frozenset(
-    {("llm", "main_url"), ("llm", "sub_url"), ("llm", "main_routing_strategy"), ("llm", "sub_routing_strategy")}
+    {
+        ("llm", "main_url"),
+        ("llm", "sub_url"),
+        ("llm", "main_routing_strategy"),
+        ("llm", "sub_routing_strategy"),
+        ("llm", "max_concurrent_requests"),
+        ("graph", "max_parallel"),
+        ("subagent", "max_parallel"),
+    }
 )
 SKILL_LAB_WORKER_SECTIONS = frozenset({"skill_lab_worker", "log"})
 

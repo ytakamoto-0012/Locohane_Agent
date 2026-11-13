@@ -78,12 +78,16 @@ def apply_instance(name: str) -> None:
 
 
 # スキル調整ワーカーから差し込む LLM 接続先の設定（セクション, キー, 環境変数）。
-# モデルは本番と同じで、接続先だけを研究室専用にするため、[llm] のうちこれだけを移す。
+# モデルは本番と同じで、接続先と並列数だけを研究室専用にするため、これだけを移す。
 _LLM_ENDPOINT_KEYS = (
     ("llm", "main_url", "LLM_MAIN_URL"),
     ("llm", "sub_url", "LLM_SUB_URL"),
     ("llm", "main_routing_strategy", "LLM_MAIN_ROUTING_STRATEGY"),
     ("llm", "sub_routing_strategy", "LLM_SUB_ROUTING_STRATEGY"),
+    # 並列数は推論サーバーの能力に合わせる設定なので、LLM を持つ研究室のものを使う
+    ("llm", "max_concurrent_requests", "LLM_MAX_CONCURRENT_REQUESTS"),
+    ("graph", "max_parallel", "GRAPH_MAX_PARALLEL"),
+    ("subagent", "max_parallel", "SUBAGENT_MAX_PARALLEL"),
 )
 
 

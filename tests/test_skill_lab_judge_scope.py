@@ -130,3 +130,46 @@ def test_run_case_records_clipped_thinking():
     [entry] = run_case._serialize_messages([msg], reasoning_chars=20)
     assert entry["reasoning"].endswith("結論") and "omitted" in entry["reasoning"]
     assert "reasoning" not in run_case._serialize_messages([msg], reasoning_chars=0)[0]
+
+
+def test_judging_runs_in_parallel_with_the_workers_concurrency(monkeypatch):
+    """結果の判定は、ワーカーの並列数まで同時に行う（順序・同時数の上限・使用量の記録・進み具合を保つ）。"""
+    import threading
+    import time
+
+    seen_usage = []
+    state = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def fake_ask_json(_config, _system, user):
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        time.sleep(0.05)
+        sink = llm._USAGE_SINK.get()
+        if sink:
+            sink({"total_tokens": 1})
+        with lock:
+            state["now"] -= 1
+        return {"pass": True, "basis": "", "reason": "ok"}
+
+    monkeypatch.setattr(judge, "ask_json", fake_ask_json)
+    results = [{"case_id": f"c{i}", "repeat_index": 1, "judge": "観点", "transcript": [], "rules_pass": True} for i in range(8)]
+    progress = []
+    with llm.usage_sink(lambda u: seen_usage.append(u)):
+        verdicts = judge.judge_results(
+            None, spec="", results=results, excerpt_chars=1000, max_workers=3, on_progress=lambda done, total, cid: progress.append((done, total))
+        )
+    assert [v["case_id"] for v in verdicts] == [f"c{i}" for i in range(8)]  # 結果と同じ順
+    assert all(v["outcome"] == "pass" for v in verdicts)
+    assert 1 < state["peak"] <= 3  # 並列に動き、上限を超えない
+    assert len(seen_usage) == 8  # スレッドでも使用量の記録が呼び出し側へ届く
+    assert sorted(progress) == [(i, 8) for i in range(1, 9)]
+
+
+def test_judging_with_one_worker_is_sequential(monkeypatch):
+    order = []
+    monkeypatch.setattr(judge, "ask_json", lambda *a, **k: order.append(1) or {"pass": True, "basis": "", "reason": ""})
+    results = [{"case_id": "a", "judge": "x", "transcript": [], "rules_pass": True}] * 3
+    judge.judge_results(None, spec="", results=results, excerpt_chars=100)
+    assert len(order) == 3

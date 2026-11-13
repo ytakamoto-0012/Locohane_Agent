@@ -11,7 +11,8 @@ LLM を使う次の処理はチャットのスレッドを持たないため、�
 1つのインスタンスのように並べる（admin/usage_cost.py の monthly_usage() と同じ形を返す）。
 
 - source はスキル研究室ならスキル調整ワーカーのインスタンス名、管理アシスタントなら ASSISTANT_SOURCE。
-- スキル調整ワーカー（別プロセス）と管理ツールの両方が書くため、SQLite の UPSERT 1文で加算する。
+- スキル調整ワーカー（別プロセス。判定は複数スレッド）と管理ツールの両方が書くため、SQLite の UPSERT で加算し、書き込みの競合には
+  record() の安全策（プロセス内の排他・BEGIN IMMEDIATE・やり直し・書けなかった分の持ち越し）で備える。
 - 記録に失敗しても本来の処理は止めない（呼び出し側で握りつぶす）。
 """
 
@@ -19,6 +20,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
+import time
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
@@ -76,22 +79,106 @@ def normalize_usage(usage: dict | None) -> dict:
     return {"input": inp, "output": out, "total": total}
 
 
+# --- 書き込みの安全策 --------------------------------------------------------------
+# 台帳は、スキル調整ワーカー（判定を複数スレッドで同時に行う）・管理ツール・別のワーカー・バックアップ（読み取り）が
+# 同じ SQLite ファイルを触る。以前は呼び出しごとに接続して DDL を流し、ロックを取れないと30秒待って例外 →
+# record_safely が警告だけ出して使用量を捨てていた。次の守りを重ねる:
+# 1. 同じプロセス内は、ファイルごとのロック（_WRITE_LOCKS）で1件ずつ書く（スレッド間でロックを取り合わない）。
+# 2. 別のプロセスとは、BEGIN IMMEDIATE で最初から書き込みロックを取る（読み取りから書き込みへ格上げする形だと、
+#    相手が書いている間は待たずに即 "database is locked" になるため）。取れなければ busy_timeout で待ち、
+#    それでも駄目なら間隔を空けて数回やり直す（_RETRY_DELAYS）。
+# 3. 表の作成（DDL）はファイルごとに1回だけ（_READY）。
+# 4. 書けなかった分は捨てず、プロセス内に覚えておき（_PENDING）、次に書けたとき一緒に加算する。
+# 5. 日々の読み取り側（admin/monitor 等）が使う mode=ro の接続とバックアップ API を壊さないよう、ジャーナルモードは変えない。
+_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_WRITE_LOCKS_GUARD = threading.Lock()
+_READY: set[str] = set()
+_PENDING: dict[tuple, dict] = {}  # (db パス, 月, source, owner) → 書けなかった分 {"input","output","total","calls"}
+_BUSY_TIMEOUT_MS = 30_000
+_RETRY_DELAYS = (0.2, 0.5, 1.0, 2.0)
+
+
+def _lock_for(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _WRITE_LOCKS_GUARD:
+        return _WRITE_LOCKS.setdefault(key, threading.Lock())
+
+
+def _is_busy(exc: sqlite3.OperationalError) -> bool:
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
+
+def _write_once(path: Path, rows: list[tuple]) -> None:
+    """rows（(月, source, owner, input, output, total, calls) の並び）を1つのトランザクションで加算する。"""
+    # isolation_level=None: 暗黙のトランザクションを使わず、BEGIN IMMEDIATE を自分で発行する。
+    conn = sqlite3.connect(str(path), timeout=_BUSY_TIMEOUT_MS / 1000, isolation_level=None)
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        key = str(path.resolve())
+        if key not in _READY:
+            conn.executescript(_DDL)
+            _READY.add(key)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for month, source, owner, inp, out, total, calls in rows:
+                conn.execute(
+                    "INSERT INTO ai_usage_monthly (month, source, owner, input, output, total, calls) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(month, source, owner) DO UPDATE SET input = input + excluded.input, "
+                    "output = output + excluded.output, total = total + excluded.total, calls = calls + excluded.calls",
+                    (month, source, owner, inp, out, total, calls),
+                )
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
 def record(instances_root: Path, source: str, owner: str | None, usage: dict | None, *, calls: int = 1, when: datetime | None = None) -> None:
-    """usage（LLM 呼び出し calls 回分の合計）を当月・source・owner の行へ加算する。トークンが0なら何もしない。"""
+    """usage（LLM 呼び出し calls 回分の合計）を当月・source・owner の行へ加算する。トークンが0なら何もしない。
+
+    スレッドからも複数プロセスからも呼ばれる（上の安全策を参照）。書けなかったときは例外を送出し、その分はプロセス内に
+    覚えておいて、次に書けたとき一緒に加算する。
+    """
     u = normalize_usage(usage)
     if not any(u.values()):
         return
     path = db_path(instances_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(str(path), timeout=30)) as conn:
-        conn.executescript(_DDL)
-        conn.execute(
-            "INSERT INTO ai_usage_monthly (month, source, owner, input, output, total, calls) VALUES (?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(month, source, owner) DO UPDATE SET input = input + excluded.input, "
-            "output = output + excluded.output, total = total + excluded.total, calls = calls + excluded.calls",
-            (_month(when), source, owner or "anonymous", u["input"], u["output"], u["total"], max(int(calls or 0), 0)),
-        )
-        conn.commit()
+    key = (str(path.resolve()), _month(when), source, owner or "anonymous")
+    add = {**u, "calls": max(int(calls or 0), 0)}
+    with _lock_for(path):
+        pending = _PENDING.pop(key, None)  # 前に書けなかった同じ行の分を、今回の加算にまとめる
+        if pending:
+            add = {k: add[k] + pending.get(k, 0) for k in add}
+        other_keys = [k for k in _PENDING if k[0] == key[0]]
+        rows = [(key[1], key[2], key[3], add["input"], add["output"], add["total"], add["calls"])]
+        flushed = {k: _PENDING.pop(k) for k in other_keys}  # 別の行で書けなかった分も、同じトランザクションで一緒に
+        rows += [(k[1], k[2], k[3], v["input"], v["output"], v["total"], v["calls"]) for k, v in flushed.items()]
+        last: sqlite3.OperationalError | None = None
+        for attempt in range(len(_RETRY_DELAYS) + 1):
+            try:
+                _write_once(path, rows)
+                return
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc).lower():
+                    # DB ファイルを手で消された等。表の作成済みの覚えを捨てて、すぐにやり直す。
+                    _READY.discard(str(path.resolve()))
+                    last = exc
+                    continue
+                if not _is_busy(exc):
+                    _PENDING[key] = add  # 想定外のエラーも、使用量は捨てずに覚えておく
+                    _PENDING.update(flushed)
+                    raise
+                last = exc
+                if attempt < len(_RETRY_DELAYS):
+                    time.sleep(_RETRY_DELAYS[attempt])
+        _PENDING[key] = add
+        _PENDING.update(flushed)
+        assert last is not None
+        raise last
 
 
 def record_safely(instances_root: Path, source: str, owner: str | None, usage: dict | None, *, calls: int = 1) -> None:

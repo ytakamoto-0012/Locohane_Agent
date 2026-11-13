@@ -87,3 +87,9 @@ def test_copy_memory_types_can_be_changed_or_disabled(monkeypatch, tmp_path):
         assert "nosuch" in str(e)
     else:
         raise AssertionError("unknown memory type must be rejected")
+
+
+def test_eval_applies_the_instances_llm_concurrency():
+    """評価でも [llm] max_concurrent_requests を適用する（以前は評価だけ既定の 1 のままだった）。"""
+    source = Path("evals/run_case.py").read_text(encoding="utf-8")
+    assert "init_llm_concurrency(config.llm_max_concurrent_requests)" in source

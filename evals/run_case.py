@@ -498,7 +498,7 @@ async def _run(
     from src.agent_types import scan_agent_types
     from src.config import load_config
     from src.graph import ainvoke_ensuring_final_text, build_graph
-    from src.llm import ThinkingLoopDetected, mark_user_turn
+    from src.llm import ThinkingLoopDetected, init_llm_concurrency, mark_user_turn
     from src import skill_drafts
     from src.memory import rebuild_all_indexes
     from src.skills import scan_skills
@@ -576,6 +576,9 @@ async def _run(
         for key, value in case.env.items():
             os.environ[key] = value
         config = load_config()
+        # LLM への同時リクエスト数（[llm].max_concurrent_requests）。本番は app.py の起動時に設定する。評価でも対象インスタンスの値にする
+        # （しないと、どのインスタンスでも安全側の既定 1 のままで、並列の設定が評価に効かなかった）。
+        init_llm_concurrency(config.llm_max_concurrent_requests)
         # --skill-overlay で重ねたスキルのスクリプトは、昇格時に promote-skill が
         # インスタンスの config_overrides.json へ登録する（計画承認・
         # [main_agent_tool_guard] の免除。会話でドラフトを試したときと同じ扱い）

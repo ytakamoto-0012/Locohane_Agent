@@ -546,7 +546,7 @@ def test_config_key_applies_by_kind():
 
 
 def test_worker_created_from_app_does_not_inherit_unused_settings(lab_env):
-    """本体を複製してワーカーを作っても、ワーカーで効かない設定は持ち込まない。"""
+    """本体を複製してワーカーを作っても、ワーカーで効かない設定（推論パラメータ等）は持ち込まない。"""
     src = lab_env["root"] / "org_a" / "config_overrides.json"
     data = json.loads(src.read_text(encoding="utf-8"))
     url = '[{"base_url": "http://org-a:8080/v1", "api_key": "x", "model": "m", "provider": "llama_cpp"}]'
@@ -554,7 +554,8 @@ def test_worker_created_from_app_does_not_inherit_unused_settings(lab_env):
     src.write_text(json.dumps(data), encoding="utf-8")
     inst.create_instance(lab_env["root"], Path("config.ini"), name="lab2", copy_from="org_a", kind=inst.KIND_SKILL_LAB)
     copied = json.loads((lab_env["root"] / "lab2" / "config_overrides.json").read_text(encoding="utf-8"))
-    assert copied == {"llm": {"main_url": url}, "log": {"level": "debug"}}
+    # 接続先・並列数（推論サーバーの能力に合わせる設定）・ログはワーカーの設定として持ち込む。推論パラメータは持ち込まない。
+    assert copied == {"llm": {"main_url": url}, "graph": {"max_parallel": "2"}, "log": {"level": "debug"}}
 
 
 def test_worker_ai_uses_target_settings_with_lab_endpoints(lab_env):
@@ -1460,3 +1461,21 @@ def test_evaluation_reads_progress_lines_of_this_run_only(tmp_path):
     with open(log, "a", encoding="utf-8") as f:
         f.write("実行中: a\n[progress] 1/6 a 1/3\n[progress] 4/6 b 2/3\n")
     assert evaluation.read_progress(log, start) == {"done": 4, "total": 6, "case_id": "b", "repeat": 2, "repeats": 3}
+
+
+def test_eval_parallelism_comes_from_the_lab_worker(lab_env):
+    """並列数（LLM の同時リクエスト数・メイン／サブエージェントの並列）は、評価に使う LLM を持つ研究室ワーカーの値を使う。"""
+    from admin import instances as inst_mod
+    from evals.instance import llm_env_from_instance
+
+    lab_path = lab_env["root"] / "lab1" / "config_overrides.json"
+    data = json.loads(lab_path.read_text(encoding="utf-8"))
+    data["llm"]["max_concurrent_requests"] = "3"
+    data["graph"] = {"max_parallel": "2"}
+    data["subagent"] = {"max_parallel": "4"}
+    lab_path.write_text(json.dumps(data), encoding="utf-8")
+    env = llm_env_from_instance("lab1")
+    assert (env["LLM_MAX_CONCURRENT_REQUESTS"], env["GRAPH_MAX_PARALLEL"], env["SUBAGENT_MAX_PARALLEL"]) == ("3", "2", "4")
+    # ワーカーの設定画面に出す（本体インスタンスの値は使わない）
+    for section, key in (("llm", "max_concurrent_requests"), ("graph", "max_parallel"), ("subagent", "max_parallel")):
+        assert inst_mod.config_key_applies(inst_mod.KIND_SKILL_LAB, section, key)
