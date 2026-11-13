@@ -11,6 +11,7 @@ from ._ask_echo import ASK_TIMEOUT_MESSAGE, _echo_ask_answer
 from ._ask_echo import _is_text_ask_cancelled
 from ._ask_relay_helper import _ask_with_cross_session_relay
 from ._state import _resolve_ask_timeout
+from ..ask_relay import ask_turn
 from ..i18n import t
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,13 @@ async def ask_user_question(question: str, labels: list[str] | None = None) -> s
     """
     timeout = _resolve_ask_timeout(_state._ASK_USER_QUESTION_TIMEOUT_SECONDS)
     thread_id = cl.user_session.get("thread_id") or "_no_session"
+    # 並列に呼ばれた他の質問とは1つずつ順番に出す（src/ask_relay.py の ask_turn 参照）。
+    async with ask_turn(thread_id):
+        return await _ask_question_in_turn(thread_id, question, labels, timeout)
+
+
+async def _ask_question_in_turn(thread_id: str, question: str, labels: list[str] | None, timeout) -> str:
+    """AskUserQuestion の質問部分（ask_turn の中で呼ぶ）。"""
     if not labels:
         logger.info("ask_user_question: %s", question)
 

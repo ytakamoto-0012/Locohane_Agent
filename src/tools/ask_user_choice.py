@@ -11,6 +11,7 @@ from ._ask_echo import ASK_TIMEOUT_MESSAGE, _echo_ask_answer
 from ._ask_echo import _is_text_ask_cancelled
 from ._ask_relay_helper import _ask_with_cross_session_relay
 from ._state import _resolve_ask_timeout
+from ..ask_relay import ask_turn
 from ..i18n import t
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,13 @@ async def ask_choice(
     seconds = _state._ASK_USER_CHOICE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     timeout = _resolve_ask_timeout(seconds)
     thread_id = cl.user_session.get("thread_id") or "_no_session"
+    # 並列に呼ばれた他の質問とは1つずつ順番に出す（src/ask_relay.py の ask_turn 参照）。
+    async with ask_turn(thread_id):
+        return await _ask_choice_in_turn(thread_id, question, choices, multi_select, timeout)
+
+
+async def _ask_choice_in_turn(thread_id: str, question: str, choices: list[str], multi_select: bool, timeout) -> str:
+    """ask_choice の質問部分（ask_turn の中で呼ぶ）。"""
     if multi_select:
 
         async def _factory_multi():

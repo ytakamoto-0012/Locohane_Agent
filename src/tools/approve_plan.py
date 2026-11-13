@@ -12,6 +12,7 @@ from . import _state
 from ._ask_relay_helper import _ask_with_cross_session_relay
 from ._plan_render import _render_plan, _render_plan_payload
 from ._state import _resolve_ask_timeout
+from ..ask_relay import ask_turn
 from ..i18n import t
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,9 @@ async def approve_plan() -> str:
     def _factory():
         return cl.AskActionMessage(content=content, actions=actions, timeout=timeout).send()
 
-    res = await _ask_with_cross_session_relay(thread_id, _factory, timeout)
+    # 並列に呼ばれた他の質問とは1つずつ順番に出す（src/ask_relay.py の ask_turn 参照）。
+    async with ask_turn(thread_id):
+        res = await _ask_with_cross_session_relay(thread_id, _factory, timeout)
     approved = res is not None and res["payload"].get("value") == "approve"
     cl.user_session.set("plan_approved", approved)
     # 前回却下時に立てたフラグが誤って残らないよう、承認・タイムアウト時は

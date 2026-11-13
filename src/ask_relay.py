@@ -46,10 +46,39 @@ pending_asks[thread_id]["future"] を解決するだけなので、
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from typing import Any, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 import chainlit as cl
+
+# thread_id -> [ロック, 使用中・待機中の数]。ask系ツールの質問を1スレッドにつき1つずつ出すためのロック（ask_turn 参照）。
+_ASK_LOCKS: dict[str, list] = {}
+
+
+@contextlib.asynccontextmanager
+async def ask_turn(thread_id: str) -> AsyncIterator[None]:
+    """同じスレッドの ask系ツールの質問を1つずつ順番に出す。
+
+    LLM が同じ応答で AskUserQuestion/ask_user_choice 等を並列に呼ぶと、Chainlit は1セッションで
+    同時に1つの Ask*Message しか表示できず、pending_asks も1スレッド1件のため、後から出た質問が
+    先の質問を上書きする。上書きされた質問は画面に出ないまま応答を待ち続け、ユーザーが停止するまで
+    何もできなくなっていた（[graph].max_parallel が2以上・サブエージェント・読む量の確認など、
+    ツール呼び出しのセマフォを通らない経路で起きる）。ask_user_choice の「その他」→自由記述のように
+    続けて聞く質問は、全体を1回のこのブロックで囲む（間に別の質問が割り込まないように）。
+    """
+    entry = _ASK_LOCKS.get(thread_id)
+    if entry is None:
+        entry = [asyncio.Lock(), 0]
+        _ASK_LOCKS[thread_id] = entry
+    entry[1] += 1
+    try:
+        async with entry[0]:
+            yield
+    finally:
+        entry[1] -= 1
+        if entry[1] == 0 and _ASK_LOCKS.get(thread_id) is entry:
+            _ASK_LOCKS.pop(thread_id, None)
 
 # thread_id -> 応答待ち（approve_plan/ask_user_question/ask_user_choice の
 # Ask*Message）の引き継ぎ用状態。
