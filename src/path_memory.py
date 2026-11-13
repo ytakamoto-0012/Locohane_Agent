@@ -19,18 +19,26 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import math
 import msvcrt
 import os
 import re
+import threading
 import time
 import unicodedata
 from collections import Counter
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 _TOKEN_RE = re.compile(r"^@(\d+)$")
 _LOCK_TIMEOUT_SECONDS = 5.0
 _LOCK_POLL_INTERVAL_SECONDS = 0.05
+# レジストリの読み直し・差し替えの再試行（_read_entries / _save）。
+_READ_RETRIES = 20
+_REPLACE_RETRIES = 100
+_RETRY_INTERVAL_SECONDS = 0.02
 
 
 @contextlib.contextmanager
@@ -95,21 +103,78 @@ def _registry_path(thread_id: str, path_memory_dir: Path) -> Path:
     return path_memory_dir / f"{thread_id}.json"
 
 
+class _RegistryUnreadable(Exception):
+    """レジストリファイルは在るが、読み直しても読めない（壊れている）。"""
+
+
+def _read_entries(registry_path: Path) -> list[dict]:
+    """レジストリを読む。無ければ空。一時的に読めない場合は少し待って読み直す。
+
+    書き込みは _save() が一時ファイルからの差し替えで行うため、途中まで書かれた
+    JSON を読むことは無いが、Windows では差し替えの瞬間に開くとアクセス拒否に
+    なることがある。以前はここで空リストを返していたため、並列のツール呼び出しで
+    登録済みの `@N` が「未登録」と判定された（3000回中119回の実測）。
+
+    Raises:
+        _RegistryUnreadable: 読み直しても読めない（ファイルが壊れている）場合。
+    """
+    for attempt in range(_READ_RETRIES):
+        if not registry_path.is_file():
+            return []
+        try:
+            data = json.loads(registry_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            if attempt + 1 < _READ_RETRIES:
+                time.sleep(_RETRY_INTERVAL_SECONDS)
+            continue
+        if not isinstance(data, list):
+            break
+        return [e for e in data if isinstance(e, dict)]
+    raise _RegistryUnreadable(str(registry_path))
+
+
 def _load(registry_path: Path) -> list[dict]:
-    if not registry_path.is_file():
-        return []
+    """読み取り専用の呼び出し（resolve・一覧・検索）用。壊れていれば空として扱う。"""
     try:
-        data = json.loads(registry_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        return _read_entries(registry_path)
+    except _RegistryUnreadable:
+        logger.warning("Path memory registry is unreadable: %s", registry_path)
         return []
-    return data if isinstance(data, list) else []
+
+
+def _load_for_update(registry_path: Path) -> list[dict]:
+    """ロック中の書き換え用。壊れたファイルは退避してから空で始める。
+
+    壊れたまま空として上書きすると、元の内容を調べる手掛かりまで失われるため
+    `<名前>.corrupt-<時刻>` へ残す（番号は振り直しになる）。
+    """
+    try:
+        return _read_entries(registry_path)
+    except _RegistryUnreadable:
+        backup = registry_path.with_name(f"{registry_path.name}.corrupt-{time.strftime('%Y%m%d%H%M%S')}")
+        logger.warning("Path memory registry is broken; moved it to %s and started a new one", backup)
+        with contextlib.suppress(OSError):
+            os.replace(registry_path, backup)
+        return []
 
 
 def _save(registry_path: Path, entries: list[dict]) -> None:
+    """一時ファイルへ書いてから差し替える（読み込み側が書きかけの JSON を見ないように）。"""
     registry_path.parent.mkdir(parents=True, exist_ok=True)
-    registry_path.write_text(
-        json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    tmp = registry_path.with_name(f"{registry_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+    for _ in range(_REPLACE_RETRIES):
+        try:
+            os.replace(tmp, registry_path)
+            return
+        except PermissionError:
+            # Windows では読み込み中のファイルへは差し替えられないため、読み終わるのを待つ。
+            time.sleep(_RETRY_INTERVAL_SECONDS)
+    try:
+        os.replace(tmp, registry_path)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
 
 
 def register(
@@ -143,24 +208,7 @@ def register(
         並列呼び出し時のrace conditionによる登録消失を防ぐ（`_locked`
         docstring参照）。
     """
-    registry_path = _registry_path(thread_id, path_memory_dir)
-    lock_path = registry_path.parent / f"{registry_path.name}.lock"
-    with _locked(lock_path) as acquired:
-        if not acquired:
-            return None
-        entries = _load(registry_path)
-        for i, entry in enumerate(entries):
-            if entry.get("path") == path:
-                entries[i]["valid"] = Path(path).exists()
-                if description is not None:
-                    entries[i]["description"] = description
-                _save(registry_path, entries)
-                return i + 1
-        if len(entries) >= max_entries:
-            return None
-        entries.append({"path": path, "valid": Path(path).exists(), "description": description})
-        _save(registry_path, entries)
-        return len(entries)
+    return register_many(thread_id, [path], path_memory_dir, max_entries, description=description)[0]
 
 
 def register_many(
@@ -183,29 +231,41 @@ def register_many(
     """
     if not paths:
         return []
+    # 実在確認はロックの外で済ませる。UNC パス数百件ではロック中に数秒〜数十秒かかり、
+    # その間に来た別の登録がロック待ち（_LOCK_TIMEOUT_SECONDS）で諦めて None になり、
+    # パスに `@N` が付かないまま黙って進んでいたため。
+    valid_by_path = {path: _exists(path) is True for path in dict.fromkeys(paths)}
     registry_path = _registry_path(thread_id, path_memory_dir)
     lock_path = registry_path.parent / f"{registry_path.name}.lock"
     with _locked(lock_path) as acquired:
         if not acquired:
             return [None] * len(paths)
-        entries = _load(registry_path)
+        entries = _load_for_update(registry_path)
         index_by_path = {entry.get("path"): i for i, entry in enumerate(entries)}
         indexes: list[int | None] = []
+        changed = False
         for path in paths:
+            valid = valid_by_path[path]
             i = index_by_path.get(path)
             if i is not None:
-                entries[i]["valid"] = Path(path).exists()
-                if description is not None:
+                if entries[i].get("valid") != valid:
+                    entries[i]["valid"] = valid
+                    changed = True
+                if description is not None and entries[i].get("description") != description:
                     entries[i]["description"] = description
+                    changed = True
                 indexes.append(i + 1)
                 continue
             if len(entries) >= max_entries:
                 indexes.append(None)
                 continue
-            entries.append({"path": path, "valid": Path(path).exists(), "description": description})
+            entries.append({"path": path, "valid": valid, "description": description})
             index_by_path[path] = len(entries) - 1
             indexes.append(len(entries))
-        _save(registry_path, entries)
+            changed = True
+        # 何も変わらない再登録（同じファイルを読み直しただけ等）では書き直さない。
+        if changed:
+            _save(registry_path, entries)
         return indexes
 
 
@@ -299,13 +359,43 @@ def _split(normalized: str) -> tuple[str, str]:
     return folder, name
 
 
+def _strip_query(query: str) -> str:
+    """検索語の前後の空白と、LLM が付けがちな引用符・バッククォートを除く。"""
+    return query.strip().strip("\"'`").strip()
+
+
+def _is_ascii_alnum(ch: str) -> bool:
+    return ch.isascii() and ch.isalnum()
+
+
+def _contains_at_boundary(text: str, q: str) -> bool:
+    """q が text の部分文字列で、英数字の語の途中から始まったり途中で終わったりしないか。
+
+    `work` が `homework` の途中に当たる、`c` がドライブ名 `c:` に当たる、といった一致を
+    部分一致（0.8 以上）から外すための判定。日本語等は語の区切りが無いため、隣が ASCII
+    英数字でなければ区切りとみなす（`報告` は `月次報告書` に部分一致する）。
+    """
+    start = text.find(q)
+    while start != -1:
+        end = start + len(q)
+        before_ok = start == 0 or not (_is_ascii_alnum(text[start - 1]) and _is_ascii_alnum(q[0]))
+        after_ok = end == len(text) or not (_is_ascii_alnum(text[end]) and _is_ascii_alnum(q[-1]))
+        if before_ok and after_ok:
+            return True
+        start = text.find(q, start + 1)
+    return False
+
+
 def similarity(query: str, path: str, filename_weight: float = 0.7) -> float:
     """検索語と登録パスの類似度（0.0〜1.0）を返す。
 
     - 完全一致（フルパスまたはファイル名）は 1.0。
     - 部分文字列として含まれる場合は 0.8〜1.0 未満（検索語がファイル名・パスに
       占める割合が大きいほど高い）。`report.xlsx` で `old_report.xlsx` より
-      `report.xlsx` 本体を上に並べるため、完全一致とは区別する。
+      `report.xlsx` 本体を上に並べるため、完全一致とは区別する。ただし英数字の語の
+      途中に当たる一致（`work` と `homework`）と ASCII 1文字の検索語は部分一致とせず、
+      下の2-gram の類似度で比べる（`_contains_at_boundary` 参照）。
+    - 検索語の前後の空白・引用符は無視する。
     - 検索語がフルパスなら「ファイル名同士×filename_weight + フォルダ同士×残り」。
       フルパス全体で比べると、同じフォルダの無関係なファイルが共通の長い
       フォルダ部分だけで高得点になり、別フォルダの同名ファイルより上に来てしまう。
@@ -318,15 +408,17 @@ def similarity(query: str, path: str, filename_weight: float = 0.7) -> float:
         filename_weight: 検索語がフルパスの場合に、ファイル名同士の類似度に掛ける
             重み（残りはフォルダ部分同士の類似度）。
     """
-    q = _normalize(query)
+    q = _normalize(_strip_query(query))
     p = _normalize(path)
     if not q or not p:
         return 0.0
     p_folder, p_name = _split(p)
     if q in (p, p_name):
         return 1.0
-    if q in p:
-        return 0.8 + 0.2 * len(q) / len(p_name if q in p_name else p)
+    # ASCII 1文字（`a`・`c`・`.`）はほぼ全パスに含まれ雑音になるため部分一致にしない。
+    # 漢字1文字（`表`）は検索語として意味を持つため対象に残す。
+    if (len(q) >= 2 or not q.isascii()) and _contains_at_boundary(p, q):
+        return 0.8 + 0.2 * len(q) / len(p_name if _contains_at_boundary(p_name, q) else p)
     q_folder, q_name = _split(q)
     q_grams = _bigrams(q_name)
     name_score = _cosine(q_grams, _bigrams(p_name))
@@ -343,7 +435,7 @@ def difference_label(query: str, path: str) -> str:
     エラー時の候補提示で、LLM が候補を指定パスの言い換えだと誤解して
     そのまま置き換えないよう、何が違うかを明示するために使う。
     """
-    q_folder, q_name = _split(_normalize(query))
+    q_folder, q_name = _split(_normalize(_strip_query(query)))
     p_folder, p_name = _split(_normalize(path))
     folder_differs = bool(q_folder) and q_folder != p_folder
     name_differs = q_name != p_name
@@ -398,7 +490,7 @@ def _update_valid(thread_id: str, path_memory_dir: Path, changes: list[tuple[int
     with _locked(lock_path) as acquired:
         if not acquired:
             return
-        entries = _load(registry_path)
+        entries = _load_for_update(registry_path)
         updated = False
         for index, path, valid in changes:
             if 1 <= index <= len(entries) and entries[index - 1].get("path") == path:

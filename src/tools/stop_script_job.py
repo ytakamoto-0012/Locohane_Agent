@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
+import asyncio
+
 from . import _script_job
+from ._proc_tree import kill_process_tree
 from ._script_job import _format_job_result, _resolve_job
 
 
@@ -33,6 +36,7 @@ async def stop_script_job(job_id: str) -> str:
         return f"Error: job_id '{job_id}' has already finished (status={job.status}). " "Get the result with check_script_job."
 
     job.status = "killed"
+    await asyncio.to_thread(kill_process_tree, getattr(job.process, "pid", None))
     try:
         job.process.kill()
     except ProcessLookupError:

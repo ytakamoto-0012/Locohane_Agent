@@ -82,12 +82,53 @@ def _safe_path(relative: str, op: skill_drafts.DraftOp = "read") -> Path:
         if not candidate.is_relative_to(root):
             raise ValueError(f"Access outside the skills directory is not allowed: {relative}")
         candidates.append(candidate)
+    candidates = _pin_to_discovered_skill(candidates)
+    for candidate in candidates:
         if candidate.exists():
             draft_error = skill_drafts.access_error(candidate, op, _state._LLM_CONFIG, skill_drafts.current_draft_user())
             if draft_error:
                 raise ValueError(draft_error.removeprefix("Error: "))
             return candidate
     return candidates[0]
+
+
+def _pin_to_discovered_skill(candidates: list[Path]) -> list[Path]:
+    """正式スキル名で始まるパスを、Discovery（scan_skills）で採用した版のフォルダへ固定する。
+
+    ルートを前方から「ファイル単位で」探すと、.locohane 側の上書き版の SKILL.md が
+    仕様違反で一覧から外れていても read_skill はその本文を読み、上書き版に無い
+    references/ のファイルは黙って正式版から読む、という食い違いが起きる。
+    スキル名が発見済みなら、その版のフォルダの中だけを候補にする（ドラフト置き場は
+    `<ユーザー名>/<スキル名>` で参照され、ユーザー名がスキル名と同じ場合もあるため残す）。
+    発見済みスキルの一覧が無い（init_tools に skills を渡していない）場合は従来どおり。
+    """
+    skill_dirs = _state._SKILL_DIRS
+    if not skill_dirs:
+        return candidates
+    root = _state._SKILLS_ROOTS[0]
+    parts = candidates[0].relative_to(root).parts
+    skill_dir = skill_dirs.get(parts[0]) if parts else None
+    if skill_dir is None:
+        return candidates
+    pinned = skill_dir.joinpath(*parts[1:]).resolve()
+    if not pinned.is_relative_to(skill_dir.parent):
+        raise ValueError(f"Access outside the skills directory is not allowed: {'/'.join(parts)}")
+    draft_root = _state._SKILL_DRAFT_ROOT
+    drafts = [c for c in candidates if draft_root is not None and c.is_relative_to(draft_root)]
+    return [pinned, *drafts]
+
+
+def find_script_files(scripts_root: Path, basename: str) -> list[Path]:
+    """scripts_root 配下から、ファイル名が basename に一致するファイルを浅い順に返す。
+
+    rglob(basename) は `*`・`?`・`[` をワイルドカードとして解釈し、"*.py" のような
+    値で内部モジュール（_ 始まり）等の意図しないファイルを実行してしまうため、
+    名前を文字列として比べる（Windows に合わせて大文字小文字は区別しない）。
+    """
+    target = basename.casefold()
+    matches = [p for p in scripts_root.rglob("*") if p.name.casefold() == target and p.is_file()]
+    matches.sort(key=lambda p: (len(p.relative_to(scripts_root).parts), str(p)))
+    return matches
 
 
 def _missing_skill_prefix_hint(relative_path: str) -> str:
@@ -149,10 +190,9 @@ def _resolve_script_filename(skill_name: str, script_filename: str) -> Path:
     scripts_root = _safe_path(f"{skill_name}/scripts", op="exec")
     if not scripts_root.is_dir():
         raise ValueError(f"Skill '{skill_name}' has no scripts/ directory")
-    matches = [p for p in scripts_root.rglob(basename) if p.is_file()]
+    matches = find_script_files(scripts_root, basename)
     if not matches:
         raise ValueError(f"Script not found: {basename} (skill={skill_name})")
-    matches.sort(key=lambda p: (len(p.relative_to(scripts_root).parts), str(p)))
     return matches[0]
 
 

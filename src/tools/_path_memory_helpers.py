@@ -51,6 +51,8 @@ def _resolve_path_memory_token(value: str) -> tuple[str, str | None]:
     if not rest:
         return resolved, None
     entry = Path(resolved)
+    if not entry.exists():
+        return value, f"Path memory {token} ({resolved}) no longer exists (moved or deleted). Search for the folder again with Glob."
     if not entry.is_dir():
         return value, f"Path memory {token} is a file ({resolved}); cannot append a path after it. Pass {token} alone."
     return str(entry / rest), None

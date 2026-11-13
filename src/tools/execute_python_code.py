@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 
 from . import _state
+from ._proc_tree import run_with_timeout
 from ._duplicate_guard import _track_failure_streak
 from ._python_fs_guard import _exec_guard_roots, _python_fs_guard_preamble, _register_exec_output_files
 from ._error_hints import error_hints
@@ -43,18 +44,19 @@ async def execute_python_code(code: str) -> str:
     the Python executable reuse the same settings as run_script.
 
     **Important: using path memory (@N)**
-    To use file paths obtained with Glob or other tools (@0, @1, @2...) in the code argument of
+    To use file paths obtained with Glob or other tools (@1, @2, @3...; numbering starts at 1) in the code argument of
     this tool, call `path_memory.resolve()` inside the code to expand them to real paths. The
     `src/` directory is available through the environment variable `AGENT_SRC_DIR`, so you can
     import and expand them like this:
 
       import os, sys
+      from pathlib import Path
       sys.path.insert(0, os.environ.get("AGENT_SRC_DIR", ""))
       import path_memory
       thread_id = os.environ.get("AGENT_THREAD_ID", "_no_session")
       pm_dir = os.environ.get("AGENT_PATH_MEMORY_DIR", "")
       if pm_dir:
-          resolved = path_memory.resolve(thread_id, "@0", Path(pm_dir))
+          resolved = path_memory.resolve(thread_id, "@1", Path(pm_dir))
           print(open(resolved).read()[:500])
 
     There is never any need to copy a file list into the code as a literal list.
@@ -83,7 +85,7 @@ async def execute_python_code(code: str) -> str:
 
     Args:
         code: The full Python code to run. If it contains path_memory @N tokens
-            (e.g. @0, @1), call `path_memory.resolve()` in the code to expand them to real paths
+            (e.g. @1, @2), call `path_memory.resolve()` in the code to expand them to real paths
             (see "using path memory" above).
 
     Returns:
@@ -128,17 +130,7 @@ async def execute_python_code(code: str) -> str:
     logger.info("execute_python_code: cwd=%s", workdir)
     try:
         try:
-            proc = await asyncio.to_thread(
-                subprocess.run,
-                [_state._SCRIPT_PYTHON, str(tmp_path)],
-                cwd=str(workdir),
-                capture_output=True,
-                text=True,
-                timeout=_state._SCRIPT_TIMEOUT,
-                encoding="utf-8",
-                errors="replace",
-                env=_subprocess_env(),
-            )
+            proc = await asyncio.to_thread(run_with_timeout, [_state._SCRIPT_PYTHON, str(tmp_path)], cwd=str(workdir), env=_subprocess_env(), timeout=_state._SCRIPT_TIMEOUT)
         except subprocess.TimeoutExpired:
             return f"Error: the code timed out after {_state._SCRIPT_TIMEOUT} seconds."
         except OSError as e:

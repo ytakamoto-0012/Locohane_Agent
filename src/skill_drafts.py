@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Literal
 
 from .chat_log import resolve_log_username
 from .memory import USERS_DIRNAME as _MEMORY_USERS_DIRNAME
-from .skills import Skill, _parse_frontmatter, _skill_has_scripts, _validate
+from .skills import Skill, _parse_frontmatter, _skill_has_scripts, _validate, read_definition_text
 
 if TYPE_CHECKING:
     from .config import Config
@@ -310,16 +310,22 @@ def _draft_status(skill_dir: Path) -> str | None:
 def _scan_owner_dir(owner_dir: Path) -> list[Skill]:
     """1ユーザー分のドラフトを走査する（_workspace 等 `_` 始まりは対象外）。"""
     skills: list[Skill] = []
-    for entry in sorted(owner_dir.iterdir()):
+    try:
+        entries = sorted(owner_dir.iterdir())
+    except OSError:
+        return skills
+    for entry in entries:
         if not entry.is_dir() or entry.name.startswith("_"):
             continue
         skill_md = entry / "SKILL.md"
         if not skill_md.is_file() or _draft_status(entry) in _HIDDEN_STATUSES:
             continue
-        try:
-            fm = _parse_frontmatter(skill_md.read_text(encoding="utf-8"))
-        except OSError:
+        # UTF-8 で読めないドラフトが1件あるだけで、on_message のたびの走査が例外になり
+        # そのユーザーが会話できなくなるため、読めないものはスキップする。
+        text = read_definition_text(skill_md)
+        if text is None:
             continue
+        fm = _parse_frontmatter(text)
         if fm is None:
             logger.warning("Draft %s/%s: skipping because the frontmatter cannot be read", owner_dir.name, entry.name)
             continue
@@ -350,7 +356,11 @@ def scan_visible_drafts(config: "Config | None", user: str | None) -> list[Draft
         return []
     mode = config.skill_other_users_drafts
     result: list[DraftSkill] = []
-    for owner_dir in sorted(draft_dir.iterdir(), key=lambda p: (p.name != user, p.name)):
+    try:
+        owner_dirs = sorted(draft_dir.iterdir(), key=lambda p: (p.name != user, p.name))
+    except OSError:
+        return []
+    for owner_dir in owner_dirs:
         if not owner_dir.is_dir():
             continue
         owner = owner_dir.name

@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -41,7 +42,7 @@ def _parse_frontmatter(text: str) -> dict | None:
     ここに直接複製。standalone プロセスのため Locohane 本体の `src/` は
     importしない）。区切りは行全体が `---` の行だけ（description に "---" を含んでも切れない）。
     """
-    match = _FRONTMATTER_RE.match(text.lstrip())
+    match = _FRONTMATTER_RE.match(text.lstrip().lstrip("﻿").lstrip())
     if match is None:
         return None
     try:
@@ -49,6 +50,27 @@ def _parse_frontmatter(text: str) -> dict | None:
     except yaml.YAMLError:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _read_text(path: Path) -> str | None:
+    """UTF-8（BOM 付きも可）で読む。読めなければ None（1ファイルの不備で一覧全体を落とさない）。"""
+    try:
+        return path.read_bytes().decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+    except (UnicodeDecodeError, OSError):
+        return None
+
+
+def _find_script(scripts_root: Path, basename: str) -> list[Path]:
+    """scripts_root 配下から、ファイル名が basename に一致するファイルを浅い順に返す。
+
+    rglob(basename) は `*`・`?`・`[` をワイルドカードとして解釈し、"*.py" のような
+    値で内部モジュール（_ 始まり）等の意図しないファイルを実行してしまうため、
+    名前を文字列として比べる（Windows に合わせて大文字小文字は区別しない）。
+    """
+    target = basename.casefold()
+    matches = [p for p in scripts_root.rglob("*") if p.name.casefold() == target and p.is_file()]
+    matches.sort(key=lambda p: (len(p.relative_to(scripts_root).parts), str(p)))
+    return matches
 
 
 def _safe_skill_path(skill_name: str, relative: str) -> Path | None:
@@ -92,10 +114,9 @@ def _resolve_script_path(skill_name: str, script_filename: str) -> Path:
         raise ValueError(f"access outside the skills directory is not allowed: {skill_name}")
     if not scripts_root.is_dir():
         raise ValueError(f"skill '{skill_name}' has no scripts/ directory")
-    matches = [p for p in scripts_root.rglob(basename) if p.is_file()]
+    matches = _find_script(scripts_root, basename)
     if not matches:
         raise ValueError(f"script not found: {basename} (skill={skill_name})")
-    matches.sort(key=lambda p: (len(p.relative_to(scripts_root).parts), str(p)))
     return matches[0]
 
 
@@ -120,7 +141,8 @@ def list_skills() -> str:
             skill_md = skill_dir / "SKILL.md"
             if not skill_md.is_file():
                 continue
-            fm = _parse_frontmatter(skill_md.read_text(encoding="utf-8"))
+            text = _read_text(skill_md)
+            fm = _parse_frontmatter(text) if text is not None else None
             if fm is None:
                 continue
             name = fm.get("name")
@@ -149,7 +171,7 @@ def read_skill(skill_name: str) -> str:
         return f"Error: access outside the skills directory is not allowed: {skill_name}"
     if not skill_md.is_file():
         return f"Error: SKILL.md of skill '{skill_name}' was not found."
-    return skill_md.read_text(encoding="utf-8")
+    return skill_md.read_bytes().decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def run_skill_script(skill_name: str, script_filename: str, script_args: list[str] | None = None) -> str:
@@ -182,23 +204,44 @@ def run_skill_script(skill_name: str, script_filename: str, script_args: list[st
         WORKDIR.mkdir(parents=True, exist_ok=True)
     cmd = [SCRIPT_PYTHON, str(script_path), *(script_args or [])]
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=WORKDIR,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=SCRIPT_TIMEOUT_SECONDS,
         )
-    except subprocess.TimeoutExpired:
-        return f"Error: the script timed out after {SCRIPT_TIMEOUT_SECONDS} seconds."
     except OSError as e:
         return f"Error: could not start the script: {e}"
+    try:
+        stdout, stderr = proc.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        # subprocess.run(timeout=...) は子プロセスしか止めず、孫プロセスがパイプを握っていると
+        # Windows では待ち続けて返らないため、ツリーごと止めて読み切りにも上限を設ける
+        # （src/tools/_proc_tree.py と同じ）。
+        _kill_process_tree(proc.pid)
+        proc.kill()
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        return f"Error: the script timed out after {SCRIPT_TIMEOUT_SECONDS} seconds."
 
-    parts = [f"[exit code] {result.returncode}"]
-    if result.stdout:
-        parts.append(f"[stdout]\n{result.stdout.rstrip()}")
-    if result.stderr:
-        parts.append(f"[stderr]\n{result.stderr.rstrip()}")
+    parts = [f"[exit code] {proc.returncode}"]
+    if stdout:
+        parts.append(f"[stdout]\n{stdout.rstrip()}")
+    if stderr:
+        parts.append(f"[stderr]\n{stderr.rstrip()}")
     return "\n".join(parts)
+
+
+def _kill_process_tree(pid: int) -> None:
+    """pid のプロセスを子孫ごと強制終了する（Windows は taskkill /T）。"""
+    if sys.platform != "win32":
+        return
+    try:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass

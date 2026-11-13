@@ -74,9 +74,38 @@ class Skill:
 _FRONTMATTER_RE = re.compile(r"---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|$)", re.DOTALL | re.MULTILINE)
 
 
+def _universal_newlines(text: str) -> str:
+    """read_text() と同じく改行を \\n に揃える（read_bytes() からデコードした場合用）。"""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def read_text_lenient(path: Path) -> str:
+    """read_skill/read_skill_file 用。BOM を除き、UTF-8 でない部分は置換文字にして読む。"""
+    return _universal_newlines(path.read_bytes().decode("utf-8-sig", errors="replace"))
+
+
+def read_definition_text(path: Path) -> str | None:
+    """SKILL.md・agents/*.md 等の定義ファイルを UTF-8（BOM 付きも可）で読む。
+
+    UTF-8 として読めない（cp932 で保存された等）・読み込みに失敗した場合は警告を
+    出して None を返す。走査中の1ファイルの不備で起動や会話全体を止めないため、
+    呼び出し側はそのファイルだけをスキップする。
+    """
+    try:
+        return _universal_newlines(path.read_bytes().decode("utf-8-sig"))
+    except UnicodeDecodeError:
+        logger.warning("Skipping because the file is not UTF-8 (save it as UTF-8): %s", path)
+    except OSError as e:
+        logger.warning("Skipping because the file cannot be read (%s): %s", e, path)
+    return None
+
+
 def _split_frontmatter_text(text: str) -> tuple[str, str] | None:
-    """(frontmatter の YAML 文字列, 本文) を返す。frontmatter が無い・閉じていなければ None。"""
-    stripped = text.lstrip()
+    """(frontmatter の YAML 文字列, 本文) を返す。frontmatter が無い・閉じていなければ None。
+
+    先頭の BOM（メモ帳等で UTF-8 保存した場合に付く）は空白と同じく読み飛ばす。
+    """
+    stripped = text.lstrip().lstrip("﻿").lstrip()
     match = _FRONTMATTER_RE.match(stripped)
     if match is None:
         return None
@@ -198,7 +227,12 @@ def _skill_has_scripts(dir_path: Path) -> bool:
 def _scan_one(root: Path) -> list[Skill]:
     """1つのディレクトリ直下を走査し、有効な Skill の一覧を返す（内部ヘルパー）。"""
     skills: list[Skill] = []
-    for entry in sorted(root.iterdir()):
+    try:
+        entries = sorted(root.iterdir())
+    except OSError as e:
+        logger.warning("Skipping the skills directory because it cannot be listed (%s): %s", e, root)
+        return skills
+    for entry in entries:
         if not entry.is_dir():
             continue
         skill_md = entry / "SKILL.md"
@@ -209,7 +243,9 @@ def _scan_one(root: Path) -> list[Skill]:
                 logger.warning("Skipping because there is no SKILL.md: %s", entry.name)
             continue
 
-        text = skill_md.read_text(encoding="utf-8")
+        text = read_definition_text(skill_md)
+        if text is None:
+            continue
         fm = _parse_frontmatter(text)
         if fm is None:
             logger.warning("Skipping because the frontmatter cannot be read: %s", entry.name)

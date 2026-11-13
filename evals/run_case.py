@@ -591,6 +591,7 @@ async def _run(
             plan_auto_approve=config.plan_auto_approve,
             allow_sandbox_dirs=config.allow_sandbox_dirs,
             skill_names=[s.name for s in skills],
+            skill_dirs={s.name: s.dir_path for s in skills},
         )
         # install_headless_chainlit() 単体では approve_plan/ask_user_choice/
         # AskUserQuestion の _ask_with_cross_session_relay 差し替えが

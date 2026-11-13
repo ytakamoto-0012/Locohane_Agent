@@ -7,6 +7,7 @@ init_tools() による注入処理。
 from __future__ import annotations
 
 from collections.abc import Iterable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from langchain_core.messages import ToolMessage
@@ -328,6 +329,11 @@ class ResolvedAgentType:
 # 複数ディレクトリ対応（scan_skills()/scan_agent_types() と同じマージ設計。
 # 例: [*reversed(locohane_skills_dirs), skills_dir]。前方のディレクトリが優先される）。
 _SKILLS_ROOTS: list[Path] | None = None
+# Discovery（scan_skills）で採用した版の {スキル名: スキルフォルダ（解決済み）}。
+# _safe_path() が正式スキルのパスをこの版のフォルダに固定するのに使う（空なら固定しない）。
+_SKILL_DIRS: dict[str, Path] = {}
+# ユーザー別ドラフト置き場（解決済み。[skill_creator].draft_dir 未設定なら None）。
+_SKILL_DRAFT_ROOT: Path | None = None
 _SCRIPT_PYTHON: str = "python"
 _SCRIPT_TIMEOUT: int = 60
 _CODE_EXEC_ENABLED: bool = False
@@ -436,6 +442,7 @@ def init_tools(
     path_memory_search_min_score: float = 0.3,
     path_memory_search_filename_weight: float = 0.7,
     skill_names: Sequence[str] = (),
+    skill_dirs: Mapping[str, Path] | None = None,
 ) -> None:
     """ツールが使う設定を注入する（app 起動時に一度だけ呼ぶ）。
 
@@ -623,11 +630,14 @@ def init_tools(
         skill_names: scan_skills() が返した有効なスキル名の並び。read_skill の
             skill_name 引数をこの選択肢（enum）に制約する（read_skill.py の
             apply_skill_name_enum）。空の場合は制約しない。
+        skill_dirs: scan_skills() が採用した {スキル名: スキルフォルダ}。指定すると
+            read_skill/read_skill_file/run_script のパス解決をその版のフォルダに
+            固定する（_safe_path.py の _pin_to_discovered_skill）。省略時は固定しない。
 
     Returns:
         None。副作用としてモジュール globals を更新するのみ。
     """
-    global _SKILLS_ROOTS, _SCRIPT_PYTHON, _SCRIPT_TIMEOUT
+    global _SKILLS_ROOTS, _SKILL_DIRS, _SKILL_DRAFT_ROOT, _SCRIPT_PYTHON, _SCRIPT_TIMEOUT
     global _CODE_EXEC_ENABLED
     global _SCRIPT_BACKGROUND_MAX_RUNTIME_SECONDS, _SCRIPT_BACKGROUND_JOB_RETENTION_SECONDS
     global _SCRIPT_BACKGROUND_MIN_POLL_INTERVAL_SECONDS, _SCRIPT_BACKGROUND_MIN_POLL_MESSAGE
@@ -661,6 +671,8 @@ def init_tools(
     _draft_dir = getattr(llm_config, "skill_draft_dir", None)
     if _draft_dir is not None and Path(_draft_dir).resolve() not in _SKILLS_ROOTS:
         _SKILLS_ROOTS.append(Path(_draft_dir).resolve())
+    _SKILL_DRAFT_ROOT = Path(_draft_dir).resolve() if _draft_dir is not None else None
+    _SKILL_DIRS = {name: Path(d).resolve() for name, d in (skill_dirs or {}).items()}
     _SCRIPT_PYTHON = script_python
     _SCRIPT_TIMEOUT = script_timeout
     _CODE_EXEC_ENABLED = code_exec_enabled

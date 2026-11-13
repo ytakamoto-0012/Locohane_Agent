@@ -10,6 +10,9 @@ from .. import path_memory
 
 from . import _state
 
+_DEFAULT_TOP_K = 5
+_MAX_TOP_K = 50
+
 
 @tool
 def search_path_memory(query: str = "", top_k: int = 5) -> str:
@@ -23,7 +26,7 @@ def search_path_memory(query: str = "", top_k: int = 5) -> str:
     Args:
         query: Part of the file/folder name to look for, or a path.
             If empty, returns the top_k most recently registered entries.
-        top_k: The maximum number of entries to return (default 5).
+        top_k: The maximum number of entries to return (default 5, at most 50).
 
     Returns:
         A JSON string `{"entries": [{"index", "path", "valid", "description", "score"}, ...]}`
@@ -33,6 +36,9 @@ def search_path_memory(query: str = "", top_k: int = 5) -> str:
     """
     if _state._PATH_MEMORY_DIR is None:
         return json.dumps({"entries": []}, ensure_ascii=False)
+    # 0以下だと必ず空になり「一致なし」と誤って案内してしまう。大きすぎる値は
+    # 候補の実在確認（UNC では1件ずつ遅い）が増えるだけなので上限を設ける。
+    top_k = _DEFAULT_TOP_K if not isinstance(top_k, int) or top_k < 1 else min(top_k, _MAX_TOP_K)
     thread_id = cl.user_session.get("thread_id") or "_no_session"
     if query.strip():
         entries = path_memory.search_entries(

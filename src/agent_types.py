@@ -19,7 +19,7 @@ from pathlib import Path
 
 import yaml
 
-from .skills import _split_frontmatter_text
+from .skills import _split_frontmatter_text, read_definition_text
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +149,9 @@ def _scan_one(root: Path) -> list[AgentType]:
     """1つのディレクトリ直下の `*.md` を走査し、有効な AgentType の一覧を返す（内部ヘルパー）。"""
     agent_types: list[AgentType] = []
     for entry in sorted(root.glob("*.md")):
-        text = entry.read_text(encoding="utf-8")
+        text = read_definition_text(entry)
+        if text is None:
+            continue
         parsed = _parse_frontmatter(text)
         if parsed is None:
             logger.warning("Skipping because the frontmatter cannot be read: %s", entry.name)

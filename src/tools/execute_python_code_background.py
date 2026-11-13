@@ -47,18 +47,19 @@ async def execute_python_code_background(code: str) -> str:
     The limit before a background job is forcibly stopped is 3600 seconds by default.
 
     **Important: using path memory (@N)**
-    To use file paths obtained with Glob or other tools (@0, @1, @2...) in the code argument of
+    To use file paths obtained with Glob or other tools (@1, @2, @3...; numbering starts at 1) in the code argument of
     this tool, call `path_memory.resolve()` inside the code to expand them to real paths. The
     `src/` directory is available through the environment variable `AGENT_SRC_DIR`, so you can
     import and expand them like this:
 
       import os, sys
+      from pathlib import Path
       sys.path.insert(0, os.environ.get("AGENT_SRC_DIR", ""))
       import path_memory
       thread_id = os.environ.get("AGENT_THREAD_ID", "_no_session")
       pm_dir = os.environ.get("AGENT_PATH_MEMORY_DIR", "")
       if pm_dir:
-          resolved = path_memory.resolve(thread_id, "@0", Path(pm_dir))
+          resolved = path_memory.resolve(thread_id, "@1", Path(pm_dir))
           print(open(resolved).read()[:500])
 
     There is never any need to copy a file list into the code as a literal list.

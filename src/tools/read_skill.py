@@ -10,7 +10,7 @@ from langchain_core.tools import tool
 from pydantic import Field, create_model
 import logging
 
-from ..skills import strip_frontmatter, wrap_skill_content
+from ..skills import read_text_lenient, strip_frontmatter, wrap_skill_content
 from ._duplicate_guard import _check_file_tools_duplicate
 from ._path_memory_helpers import _register_path_memory
 from ._safe_path import _safe_path
@@ -22,6 +22,14 @@ _REFERENCES_LIST_MAX = 50
 
 # apply_skill_name_enum() で制約した正式スキル名（session_read_skill() がドラフト名を足す土台）。
 _BASE_SKILL_NAMES: tuple[str, ...] = ()
+
+
+def _mtime_ns(path: Path) -> int:
+    """重複呼び出しガードの署名に含める更新時刻（取れなければ 0）。"""
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
 
 
 def _render_references_section(skill_name: str, skill_dir: Path) -> str:
@@ -74,11 +82,13 @@ def read_skill(skill_name: str) -> str:
         return f"Error: {e}"
     if not skill_md.is_file():
         return f"Error: SKILL.md of skill '{skill_name}' not found."
-    dup_error = _check_file_tools_duplicate("read_skill", f"read_skill\x00{skill_name}")
+    # 更新時刻を含めるのは、会話中に編集されたドラフト等を「結果は変わらない」として
+    # 再読込拒否しないため（同じ内容の読み直しだけを重複として数える）。
+    dup_error = _check_file_tools_duplicate("read_skill", f"read_skill\x00{skill_name}\x00{_mtime_ns(skill_md)}")
     if dup_error:
         return dup_error
     logger.info("read_skill: %s", skill_name)
-    body = strip_frontmatter(skill_md.read_text(encoding="utf-8"))
+    body = strip_frontmatter(read_text_lenient(skill_md))
     references = _render_references_section(skill_name, skill_md.parent)
     if references:
         body = f"{body}\n\n{references}"

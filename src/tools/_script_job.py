@@ -14,6 +14,7 @@ from pathlib import Path
 import chainlit as cl
 
 from . import _state
+from ._proc_tree import kill_process_tree, run_with_timeout
 from ._duplicate_guard import _track_failure_streak
 from ._path_memory_helpers import _resolve_path_memory_token
 from ._python_fs_guard import _register_exec_output_files
@@ -81,7 +82,7 @@ def _resolve_run_script_command(skill_name: str, script_filename: str, script_ar
         return f"Error: {e}"
 
     # .py は設定の Python で、それ以外はそのまま実行を試みる。
-    if script_path.suffix == ".py":
+    if script_path.suffix.lower() == ".py":
         return [_script_python_for(script_path), str(script_path), *args]
     return [str(script_path), *args]
 
@@ -165,17 +166,7 @@ async def _run_script_impl(skill_name: str, script_filename: str, script_args: l
     try:
         # 承認待ちの await 済みで別スレッドの必要はないが、subprocess.run 自体は
         # ブロッキング呼び出しのため、to_thread でイベントループのブロックを避ける。
-        proc = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            cwd=str(workdir),
-            capture_output=True,
-            text=True,
-            timeout=_state._SCRIPT_TIMEOUT,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-        )
+        proc = await asyncio.to_thread(run_with_timeout, cmd, cwd=str(workdir), env=env, timeout=_state._SCRIPT_TIMEOUT)
     except subprocess.TimeoutExpired:
         return f"Error: the script timed out after {_state._SCRIPT_TIMEOUT} seconds."
     except OSError as e:
@@ -349,6 +340,7 @@ async def _run_background_job(job: "_BackgroundJob", job_id: str) -> None:
                 timeout=_state._SCRIPT_BACKGROUND_MAX_RUNTIME_SECONDS,
             )
         except asyncio.TimeoutError:
+            await asyncio.to_thread(kill_process_tree, getattr(job.process, "pid", None))
             job.process.kill()
             await job.process.wait()
             if job.status != "killed":
@@ -490,6 +482,8 @@ async def cancel_background_script_jobs_for_thread(thread_id: str) -> bool:
             job.skill_name,
             job.script_filename,
         )
+        # 孫プロセスがパイプを握ったままだと出力の読み取りが終わらず停止が完了しないため、ツリーごと止める。
+        await asyncio.to_thread(kill_process_tree, getattr(job.process, "pid", None))
         try:
             job.process.kill()
         except ProcessLookupError:

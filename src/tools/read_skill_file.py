@@ -8,10 +8,12 @@ import logging
 from pathlib import Path
 
 from .. import skill_drafts
+from ..skills import read_text_lenient
 from . import _state
 from ._duplicate_guard import _check_file_tools_duplicate
 from ._path_memory_helpers import _PATH_MEMORY_TOKEN_RE, _resolve_path_memory_token
 from ._safe_path import _missing_skill_prefix_hint, _safe_path
+from .read_skill import _mtime_ns
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +76,18 @@ def read_skill_file(relative_path: str) -> str:
         # ディレクトリのファイル名をそのまま渡す誤りが実際にあった）。
         hint = _missing_skill_prefix_hint(relative_path)
         return f"Error: file not found: {relative_path}{hint}{_WORKDIR_FILE_HINT}"
-    dup_error = _check_file_tools_duplicate("read_skill_file", f"read_skill_file\x00{path}")
+    if _is_secret_file(path):
+        # web-search の scripts/.env（API キー）等。スクリプトが実行時に読むためのもので、
+        # LLM が読む必要は無い（読むと会話ログ・回答へ漏れうる）。
+        return f"Error: {relative_path} is a secrets file (.env) and cannot be read."
+    dup_error = _check_file_tools_duplicate("read_skill_file", f"read_skill_file\x00{path}\x00{_mtime_ns(path)}")
     if dup_error:
         return dup_error
     logger.info("read_skill_file: %s", relative_path)
-    return path.read_text(encoding="utf-8", errors="replace")
+    return read_text_lenient(path)
+
+
+def _is_secret_file(path: Path) -> bool:
+    """秘密情報を置く .env 系のファイル（.env・.env.local 等。.env.example は除く）か。"""
+    name = path.name.casefold()
+    return (name == ".env" or name.startswith(".env.")) and not name.endswith((".example", ".sample"))

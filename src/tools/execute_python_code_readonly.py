@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 
 from . import _state
+from ._proc_tree import run_with_timeout
 from ._python_fs_guard import _python_fs_guard_preamble
 from ._error_hints import error_hints
 from ._subprocess_env import _subprocess_env
@@ -61,17 +62,7 @@ async def execute_python_code_readonly(code: str) -> str:
     logger.info("execute_python_code_readonly: cwd=%s", workdir)
     try:
         try:
-            proc = await asyncio.to_thread(
-                subprocess.run,
-                [_state._SCRIPT_PYTHON, str(tmp_path)],
-                cwd=str(workdir),
-                capture_output=True,
-                text=True,
-                timeout=_state._SCRIPT_TIMEOUT,
-                encoding="utf-8",
-                errors="replace",
-                env=_subprocess_env(),
-            )
+            proc = await asyncio.to_thread(run_with_timeout, [_state._SCRIPT_PYTHON, str(tmp_path)], cwd=str(workdir), env=_subprocess_env(), timeout=_state._SCRIPT_TIMEOUT)
         except subprocess.TimeoutExpired:
             return f"Error: the code timed out after {_state._SCRIPT_TIMEOUT} seconds."
         except OSError as e:
