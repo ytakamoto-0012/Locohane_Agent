@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -274,9 +275,18 @@ class _StubWorker:
     """Worker の評価・修正だけを差し替えて、ループの状態遷移を確かめる。"""
 
 
+def _set_target_skill_lab(lab_env, instance="org_a", **values):
+    """対象インスタンスの [skill_lab] を config_overrides.json に書く（ループの上限は対象インスタンスの設定）。"""
+    path = lab_env["root"] / instance / "config_overrides.json"
+    data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    data.setdefault("skill_lab", {}).update(values)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
 def _make_worker(monkeypatch, lab_env, outcomes, max_iterations=8):
     from admin.skill_lab import worker as worker_mod
 
+    _set_target_skill_lab(lab_env, max_iterations=max_iterations)
     w = worker_mod.Worker.__new__(worker_mod.Worker)
     w.lab = "lab1"
     w.base_env = dict(os.environ)
@@ -286,8 +296,7 @@ def _make_worker(monkeypatch, lab_env, outcomes, max_iterations=8):
         "C",
         (),
         {
-            "skill_lab_max_iterations": max_iterations,
-            "skill_lab_max_hours": 6,
+            "skill_lab_max_hours": 6,  # run_theme の外で _evaluate を直接呼ぶテスト用（ループでは対象インスタンスの値）
             "skill_lab_transcript_excerpt_chars": 1000,
             "skill_lab_fixer_max_file_chars": 1000,
             "skill_lab_poll_interval_seconds": 1,
@@ -531,11 +540,11 @@ def test_config_key_applies_by_kind():
     """ワーカーは接続先・[skill_lab_worker]・[log] だけ、本体には [skill_lab_worker] を出さない。"""
     lab, app = inst.KIND_SKILL_LAB, inst.KIND_APP
     assert inst.config_key_applies(lab, "llm", "main_url") and inst.config_key_applies(lab, "llm", "sub_url")
-    assert inst.config_key_applies(lab, "skill_lab_worker", "max_iterations") and inst.config_key_applies(lab, "log", "level")
+    assert inst.config_key_applies(lab, "skill_lab_worker", "poll_interval_seconds") and inst.config_key_applies(lab, "log", "level")
     assert not inst.config_key_applies(lab, "llm", "reasoning_effort")
     assert not inst.config_key_applies(lab, "graph", "token_guard_soft_threshold")
     assert not inst.config_key_applies(lab, "skill_lab", "instance_locohane_dir")
-    assert not inst.config_key_applies(app, "skill_lab_worker", "max_iterations")
+    assert not inst.config_key_applies(app, "skill_lab_worker", "poll_interval_seconds")
     assert inst.config_key_applies(app, "skill_lab", "instance_locohane_dir") and inst.config_key_applies(app, "llm", "reasoning_effort")
     # インスタンス別の上書きが無視されるキー（[admin]・[data_backup]・管理者設定のキー）はどちらにも出さない。
     for k in (app, lab):
@@ -796,13 +805,10 @@ def test_config_patch_rejects_malformed_items():
 def _lab_worker(lab_env):
     from admin.skill_lab import worker as worker_mod
 
+    _set_target_skill_lab(lab_env, max_iterations=3)
     w = worker_mod.Worker.__new__(worker_mod.Worker)
     w.lab, w.instances_root, w.shutdown, w.base_env = "lab1", lab_env["root"], False, dict(os.environ)
-    w.config = type(
-        "C",
-        (),
-        {"skill_lab_max_iterations": 3, "skill_lab_max_hours": 6, "skill_lab_transcript_excerpt_chars": 100, "skill_lab_fixer_max_file_chars": 100},
-    )()
+    w.config = type("C", (), {"skill_lab_transcript_excerpt_chars": 100, "skill_lab_fixer_max_file_chars": 100})()
     return w
 
 
@@ -1596,3 +1602,106 @@ def test_fix_snapshots_the_current_state_even_if_an_old_before_fix_remains(lab_e
     worker_mod.Worker._fix(w, "org_a", directory, {"iteration": {"n": 1}, "run": {"results": []}, "verdicts": []})
     assert (stale / "SKILL.md").read_text(encoding="utf-8") == current
     assert (directory / "assets" / "skills" / "my-skill" / "SKILL.md").read_text(encoding="utf-8") == new_md
+
+
+# --- ループの上限は対象インスタンスの設定・テーマごとの上級者向け設定（2026-11-14 ユーザー指摘） -----------------
+
+
+def test_loop_limits_come_from_the_target_instance_and_theme_overrides_them(lab_env, monkeypatch):
+    directory = _theme(lab_env)
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_QUEUED, "loop": {"mode": "loop"}}))
+    w, calls = _make_worker(monkeypatch, lab_env, [False] * 10, max_iterations=4)
+    w.run_theme("org_a", directory)
+    assert len(calls["eval"]) == 4  # 対象インスタンスの [skill_lab] max_iterations
+
+    # テーマの上級者向け設定があればそちらを使う（再開すると数え直す）
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_QUEUED, "loop": {"mode": "loop"}, "loop_settings": {"max_iterations": 2}}))
+    w, calls = _make_worker(monkeypatch, lab_env, [False] * 10, max_iterations=4)
+    w.run_theme("org_a", directory)
+    data = themes.read(directory)
+    assert len(calls["eval"]) == 2
+    assert data["status"] == themes.STATUS_EXHAUSTED and "(2)" in data["loop"]["message"]
+
+
+def test_theme_loop_settings_override_worker_settings(lab_env):
+    from admin.skill_lab import worker as worker_mod
+
+    directory = _theme(lab_env)
+    themes.update(directory, lambda d: d.update({"loop_settings": {"fixer_max_reverts": 0, "excerpt_user_chars": 5, "bogus": 1}}))
+    base = type("C", (), {"skill_lab_fixer_max_reverts": 3, "skill_lab_excerpt_user_chars": 800, "skill_lab_poll_interval_seconds": 10})()
+    cfg = themes.loop_config(base, _cfg(lab_env, "org_a"), themes.read(directory))
+    assert cfg.skill_lab_fixer_max_reverts == 0 and cfg.skill_lab_excerpt_user_chars == 5
+    assert cfg.skill_lab_poll_interval_seconds == 10  # テーマで変えられない項目はワーカーの値
+    assert cfg.skill_lab_max_iterations == _cfg(lab_env, "org_a").skill_lab_max_iterations
+    from admin.skill_lab import evaluation
+
+    assert evaluation.ExcerptLimits.from_config(cfg).user_chars == 5
+    assert worker_mod.Worker  # import の確認
+
+
+def test_validate_loop_settings():
+    clean, errors = themes.validate_loop_settings(
+        {"max_iterations": 3, "max_hours": 0.5, "evaluate_baseline": False, "excerpt_user_chars": None, "fixer_max_reverts": ""}
+    )
+    assert clean == {"max_iterations": 3, "max_hours": 0.5, "evaluate_baseline": False} and errors == []
+    _, errors = themes.validate_loop_settings({"max_iterations": 0, "max_hours": "x", "evaluate_baseline": 1, "nope": 1, "fixer_max_reverts": 1.5})
+    assert len(errors) == 5
+
+
+def test_one_iteration_time_limit_cuts_off_the_evaluation(lab_env, monkeypatch):
+    from admin.skill_lab import evaluation
+
+    directory = _theme(lab_env)
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_QUEUED, "loop": {"mode": "loop"}}))
+    w, _ = _make_worker(monkeypatch, lab_env, [])
+
+    def slow_evaluate(instance, d, repeat, phase):
+        w._start_step_clock()
+        w._step_deadline = time.monotonic() - 1  # 期限を過ぎた状態にする
+        assert w._should_stop_step(d)
+        raise evaluation.EvaluationStopped()
+
+    monkeypatch.setattr(w, "_evaluate", slow_evaluate)
+    w.run_theme("org_a", directory)
+    data = themes.read(directory)
+    assert data["status"] == themes.STATUS_EXHAUSTED
+    assert "time limit of one iteration" in data["loop"]["message"]
+    assert data["loop"]["active"] is False
+
+
+def test_api_saves_theme_loop_settings(client, lab_env):
+    theme = client.post("/api/instances/org_a/skill-lab/themes", json={"title": "t", "lab": "lab1"}).json()
+    base = f"/api/instances/org_a/skill-lab/themes/{theme['id']}"
+    specs = {s["key"]: s for s in client.get(base).json()["loop_setting_specs"]}
+    assert specs["max_iterations"]["source"] == "instance" and specs["max_iterations"]["default"] == _cfg(lab_env, "org_a").skill_lab_max_iterations
+    assert specs["fixer_max_reverts"]["source"] == "worker" and "poll_interval_seconds" not in specs
+    assert client.put(base, json={"loop_settings": {"max_iterations": 0}}).status_code == 400
+    assert client.put(base, json={"loop_settings": {"max_iterations": 3, "evaluate_baseline": False}}).status_code == 200
+    assert client.get(base).json()["loop_settings"] == {"max_iterations": 3, "evaluate_baseline": False}
+    # 名前だけ変えても上級者向け設定は消えない。空で送ると既定に戻す
+    assert client.put(base, json={"title": "t2"}).status_code == 200
+    assert client.get(base).json()["loop_settings"] == {"max_iterations": 3, "evaluate_baseline": False}
+    assert client.put(base, json={"loop_settings": {}}).status_code == 200
+    assert "loop_settings" not in client.get(base).json()
+    # 実行中・開始待ちは変えられない
+    themes.update(themes.theme_dir(themes.themes_root(_cfg(lab_env, "org_a").common_data_dir), theme["id"]), lambda d: d.update({"status": themes.STATUS_QUEUED}))
+    assert client.put(base, json={"loop_settings": {"max_iterations": 5}}).status_code == 409
+
+
+def test_api_applies_the_ai_proposed_case_instruction(client, lab_env):
+    """AI 修正が「ケースの指示が原因」と報告し直した指示の案を添えたら、人の承認でケースに書き込める（AI は自分では変えない）。"""
+    import yaml as _yaml
+
+    theme = client.post("/api/instances/org_a/skill-lab/themes", json={"title": "t", "lab": "lab1"}).json()
+    base = f"/api/instances/org_a/skill-lab/themes/{theme['id']}"
+    assert client.put(f"{base}/cases/c1", json={"data": {"turns": ["このスキルを呼んで"], "judge": "j"}}).status_code == 200
+    directory = themes.theme_dir(themes.themes_root(_cfg(lab_env, "org_a").common_data_dir), theme["id"])
+    blocker = {"kind": "case", "case_id": "c1", "problem": "名前が無い", "suggestion": "名前を書く", "new_instruction": "my-skill を呼んで"}
+    # 止まっていないテーマには適用できない
+    themes.update(directory, lambda d: d.update({"loop": {"blockers": [blocker]}}))
+    assert client.post(f"{base}/blockers/0/apply").status_code == 409
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_BLOCKED}))
+    assert client.post(f"{base}/blockers/0/apply").status_code == 200
+    case = _yaml.safe_load((directory / "cases" / "c1.yaml").read_text(encoding="utf-8"))
+    assert case["turns"] == ["my-skill を呼んで"] and case["judge"] == "j"
+    assert themes.read(directory)["loop"]["blockers"][0]["applied"] is True

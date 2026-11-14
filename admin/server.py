@@ -456,8 +456,8 @@ def restart_instance(
 # スキル調整ワーカーの設定画面の先頭に出す説明（ワーカーに出すキーは inst.config_key_applies() 参照）。
 _SKILL_LAB_SCOPE_NOTE = (
     "スキル調整ワーカーの設定は、LLM の接続先（[llm] main_url・sub_url・routing_strategy）、"
-    "ループの上限（[skill_lab_worker]）、ワーカー自身のログ（[log]）だけです。"
-    "評価・AI 修正・judge・下書きは、研究テーマの対象インスタンスの設定をそのまま使います。"
+    "ループの進め方（[skill_lab_worker]）、ワーカー自身のログ（[log]）だけです。"
+    "評価・AI 修正・judge・下書きとループの上限（[skill_lab] max_iterations・max_hours）は、研究テーマの対象インスタンスの設定をそのまま使います。"
 )
 
 

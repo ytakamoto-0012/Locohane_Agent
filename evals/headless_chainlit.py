@@ -25,7 +25,23 @@ from __future__ import annotations
 
 import chainlit as cl
 
-_state = {"auto_approve": True, "scripted_text_answers": []}
+_state = {"auto_approve": True, "scripted_text_answers": [], "scripted_choice_answers": []}
+
+
+def _pick_scripted_choice(labels: list[str]) -> tuple[int | None, str | None]:
+    """scripted_choice_answers の次の1件に合う選択肢の位置（一致 → 含む → 含まれる の順）と、その回答。
+
+    回答が無ければ (None, None)、どれにも合わなければ (None, 回答)。
+    """
+    answers = _state["scripted_choice_answers"]
+    if not answers or not labels:
+        return None, None
+    answer = answers.pop(0).strip()
+    for test in (lambda lb: lb == answer, lambda lb: answer in lb, lambda lb: lb and lb in answer):
+        for i, label in enumerate(labels):
+            if test(str(label).strip()):
+                return i, answer
+    return None, answer
 
 
 class _FakeUserSession:
@@ -63,6 +79,18 @@ class _FakeAskActionMessage:
             payload = getattr(action, "payload", None) or {}
             if payload.get("value") == target:
                 return {"payload": payload, "label": getattr(action, "label", "")}
+        # 承認/拒否ではない選択肢（ask_user_choice）: ケースの scripted_choice_answers に合うものを選ぶ
+        picked, answer = _pick_scripted_choice([getattr(a, "label", "") for a in self.actions])
+        if picked is None and answer is not None:
+            # どの選択肢にも合わない回答は「その他」を選び、続く自由記述の質問にその回答で答える
+            other = next((i for i, a in enumerate(self.actions) if getattr(a, "name", "") == "other"), None)
+            if other is not None:
+                _state["scripted_text_answers"].insert(0, answer)
+                picked = other
+        if picked is not None:
+            chosen = self.actions[picked]
+            payload = getattr(chosen, "payload", None) or {}
+            return {"payload": payload, "label": getattr(chosen, "label", "")}
         chosen = self.actions[0] if _state["auto_approve"] else self.actions[-1]
         payload = getattr(chosen, "payload", None) or {}
         return {"payload": payload, "label": getattr(chosen, "label", "")}
@@ -129,7 +157,8 @@ class _FakeAskElementMessage:
             choices = props.get("choices") or []
             if not choices or not _state["auto_approve"]:
                 return {"submitted": False}
-            return {"submitted": True, "values": [choices[0]], "other": ""}
+            picked, _ = _pick_scripted_choice([c.get("label", "") if isinstance(c, dict) else str(c) for c in choices])
+            return {"submitted": True, "values": [choices[picked if picked is not None else 0]], "other": ""}
         return None
 
     async def update(self):
@@ -168,7 +197,9 @@ class _FakeMessage:
         self.content += token
 
 
-def install(auto_approve: bool = True, scripted_text_answers: list[str] | None = None) -> None:
+def install(
+    auto_approve: bool = True, scripted_text_answers: list[str] | None = None, scripted_choice_answers: list[str] | None = None
+) -> None:
     """chainlit モジュールの属性をヘッドレス用スタブへ差し替える。
 
     run_case.py の冒頭、src.tools の関数を呼ぶより前に一度だけ呼ぶ。
@@ -179,9 +210,12 @@ def install(auto_approve: bool = True, scripted_text_answers: list[str] | None =
         scripted_text_answers: AskUserQuestion が呼ばれるたびに消費して返す
             回答のリスト。labels 省略時（単一質問）は1件、labels 指定時は
             その件数だけまとめて消費する。尽きればタイムアウト扱い（None）。
+        scripted_choice_answers: ask_user_choice が呼ばれるたびに1件ずつ消費し、ラベルが合う選択肢を選ぶ回答の
+            リスト。尽きた・合うものが無いときは従来どおり（auto_approve なら先頭）。
     """
     _state["auto_approve"] = auto_approve
     _state["scripted_text_answers"] = list(scripted_text_answers or [])
+    _state["scripted_choice_answers"] = list(scripted_choice_answers or [])
 
     cl.user_session = _FakeUserSession()
     cl.AskActionMessage = _FakeAskActionMessage

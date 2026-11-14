@@ -920,6 +920,109 @@ def tryout_repeats(data: dict, cfg) -> int:
     return cfg.skill_lab_tryout_repeats
 
 
+# テーマごとに変えられるループの設定（「テーマの設定」の上級者向け設定。theme.json の loop_settings）。
+# キー: (種類, 最小値, 既定値の出どころ)。Config の属性名は "skill_lab_" + キー。
+# 既定値は、ループの上限（max_iterations・max_hours）は対象インスタンスの [skill_lab]、ほかは担当のスキル調整ワーカーの [skill_lab_worker]。
+# ワーカー全体に効く [skill_lab_worker] poll_interval_seconds は含めない。
+LOOP_SETTING_INSTANCE = "instance"
+LOOP_SETTING_WORKER = "worker"
+LOOP_SETTINGS: dict[str, tuple[str, float, str]] = {
+    "max_iterations": ("int", 1, LOOP_SETTING_INSTANCE),
+    "max_hours": ("float", 0.01, LOOP_SETTING_INSTANCE),
+    "tryout_stop_on_first_failure": ("bool", 0, LOOP_SETTING_WORKER),
+    "evaluate_baseline": ("bool", 0, LOOP_SETTING_WORKER),
+    "restore_best_state": ("bool", 0, LOOP_SETTING_WORKER),
+    "report_ai_summary": ("bool", 0, LOOP_SETTING_WORKER),
+    "fixer_agent": ("bool", 0, LOOP_SETTING_WORKER),
+    "fixer_agent_max_steps": ("int", 1, LOOP_SETTING_WORKER),
+    "fixer_agent_max_trials": ("int", 0, LOOP_SETTING_WORKER),
+    "fixer_agent_trial_repeats": ("int", 1, LOOP_SETTING_WORKER),
+    "fixer_agent_read_chars": ("int", 1000, LOOP_SETTING_WORKER),
+    "fixer_agent_context_chars": ("int", 10000, LOOP_SETTING_WORKER),
+    "fixer_max_files_per_fix": ("int", 0, LOOP_SETTING_WORKER),
+    "fixer_max_reverts": ("int", 0, LOOP_SETTING_WORKER),
+    "fixer_failed_runs_per_case": ("int", 0, LOOP_SETTING_WORKER),
+    "fixer_history_iterations": ("int", 0, LOOP_SETTING_WORKER),
+    "fixer_max_file_chars": ("int", 1, LOOP_SETTING_WORKER),
+    "transcript_excerpt_chars": ("int", 1, LOOP_SETTING_WORKER),
+    "excerpt_user_chars": ("int", 0, LOOP_SETTING_WORKER),
+    "excerpt_thinking_chars": ("int", 0, LOOP_SETTING_WORKER),
+    "excerpt_ai_text_chars": ("int", 0, LOOP_SETTING_WORKER),
+    "excerpt_ai_note_chars": ("int", 0, LOOP_SETTING_WORKER),
+    "excerpt_tool_args_chars": ("int", 0, LOOP_SETTING_WORKER),
+    "excerpt_tool_result_chars": ("int", 0, LOOP_SETTING_WORKER),
+    "excerpt_subagent_args_chars": ("int", 0, LOOP_SETTING_WORKER),
+    "excerpt_subagent_result_chars": ("int", 0, LOOP_SETTING_WORKER),
+    "judge_spec_chars": ("int", 0, LOOP_SETTING_WORKER),
+    "judge_answer_chars": ("int", 0, LOOP_SETTING_WORKER),
+    "judge_checks_chars": ("int", 0, LOOP_SETTING_WORKER),
+    "judge_criteria_chars": ("int", 0, LOOP_SETTING_WORKER),
+}
+
+
+def validate_loop_settings(values: dict) -> tuple[dict, list[str]]:
+    """画面から来たテーマのループ設定を確かめる。(使える値だけの dict, 問題の一覧)。None・空文字は「既定に戻す」で入れない。"""
+    clean: dict = {}
+    errors: list[str] = []
+    for key, value in (values or {}).items():
+        spec = LOOP_SETTINGS.get(key)
+        if spec is None:
+            errors.append(f"unknown setting: {key}")
+            continue
+        if value is None or value == "":
+            continue
+        kind, minimum, _ = spec
+        if kind == "bool":
+            if not isinstance(value, bool):
+                errors.append(f"{key}: true or false")
+                continue
+            clean[key] = value
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or (kind == "int" and value != int(value)):
+            errors.append(f"{key}: {'an integer' if kind == 'int' else 'a number'}")
+            continue
+        if value < minimum:
+            errors.append(f"{key}: {minimum} or more")
+            continue
+        clean[key] = int(value) if kind == "int" else float(value)
+    return clean, errors
+
+
+def loop_settings(data: dict) -> dict:
+    """テーマに保存されたループ設定（壊れた値は無視する）。"""
+    clean, _ = validate_loop_settings({k: v for k, v in (data.get("loop_settings") or {}).items() if k in LOOP_SETTINGS})
+    return clean
+
+
+def loop_setting_defaults(target_cfg, lab_cfg) -> dict:
+    """テーマの設定が空欄のときに使う値（ループの上限は対象インスタンス、ほかは担当ワーカーの設定。lab_cfg が None なら対象インスタンスの値）。"""
+    result = {}
+    for key, (_, _, source) in LOOP_SETTINGS.items():
+        cfg = target_cfg if source == LOOP_SETTING_INSTANCE or lab_cfg is None else lab_cfg
+        result[key] = getattr(cfg, f"skill_lab_{key}", None)
+    return result
+
+
+class LoopConfig:
+    """ワーカーの設定に、ループの上限（対象インスタンス）とテーマのループ設定を重ねて見せる（ほかの属性はワーカーの設定のまま）。"""
+
+    def __init__(self, base, overrides: dict):
+        self._base = base
+        self._overrides = overrides
+
+    def __getattr__(self, name: str):
+        overrides = self.__dict__.get("_overrides") or {}
+        if name in overrides:
+            return overrides[name]
+        return getattr(self.__dict__["_base"], name)
+
+
+def loop_config(lab_cfg, target_cfg, data: dict) -> LoopConfig:
+    overrides = {f"skill_lab_{k}": getattr(target_cfg, f"skill_lab_{k}") for k, (_, _, src) in LOOP_SETTINGS.items() if src == LOOP_SETTING_INSTANCE}
+    overrides.update({f"skill_lab_{k}": v for k, v in loop_settings(data).items()})
+    return LoopConfig(lab_cfg, overrides)
+
+
 def snapshot_targets(directory: Path, dest: Path) -> None:
     """AI 修正が直せるもの（assets/ と config_patch.json）を dest へ写す（一番よかった状態・直す前の状態の控え）。
 
@@ -933,10 +1036,17 @@ def snapshot_targets(directory: Path, dest: Path) -> None:
     patch = directory / CONFIG_PATCH_FILENAME
     if patch.is_file():
         shutil.copy2(patch, dest / CONFIG_PATCH_FILENAME)
+    # ケース（cases/*.yaml）も控える: AI 修正は評価中の質問への自動回答（scripted_*_answers）を書き換えられる。
+    # 入力ファイル（cases/fixtures/）は AI が変えられないので控えない。
+    cases = sorted((directory / CASES_DIRNAME).glob("*.yaml"))
+    if cases:
+        (dest / CASES_DIRNAME).mkdir()
+        for case in cases:
+            shutil.copy2(case, dest / CASES_DIRNAME / case.name)
 
 
 def restore_targets(directory: Path, src: Path, *, actor: str, message: str) -> None:
-    """snapshot_targets() で控えた状態へ assets/ と config_patch.json を戻す（ケース・仕様は触らない）。"""
+    """snapshot_targets() で控えた状態へ assets/・config_patch.json・ケース（控えにあるもの）を戻す（仕様・入力ファイルは触らない）。"""
     if not (src / ASSETS_DIRNAME).is_dir():
         raise ThemeError(f"No saved state to restore: {src}")
     assets = directory / ASSETS_DIRNAME
@@ -948,6 +1058,10 @@ def restore_targets(directory: Path, src: Path, *, actor: str, message: str) -> 
         shutil.copy2(src / CONFIG_PATCH_FILENAME, patch)
     elif patch.is_file():
         patch.write_text("{}\n", encoding="utf-8")
+    # 控えにあるケースだけ戻す（控えた後に人が足したケースは消さない。以前の控えにはケースが無い）
+    if (src / CASES_DIRNAME).is_dir():
+        for case in sorted((src / CASES_DIRNAME).glob("*.yaml")):
+            shutil.copy2(case, directory / CASES_DIRNAME / case.name)
     mark_changed(directory, actor, message)
 
 

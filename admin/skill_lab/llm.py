@@ -57,21 +57,16 @@ class LabLLMError(RuntimeError):
     """研究室の LLM から使える応答が得られなかった。"""
 
 
-async def _ainvoke(config: Config, system: str, user_messages: list[tuple[str, str]]) -> str:
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-
-    from src.llm import build_model
-
+def with_output_language(system: str) -> str:
+    """システムプロンプトの末尾に、今の出力言語の指示を足す（設定されていれば）。"""
     from admin.i18n import output_language_rule
 
-    model = await build_model(config)
     lang = _OUTPUT_LANG.get()
-    if lang:
-        system += output_language_rule(lang)
-    messages = [SystemMessage(content=system)]
-    for role, text in user_messages:
-        messages.append(HumanMessage(content=text) if role == "user" else AIMessage(content=text))
-    response = await model.ainvoke(messages)
+    return system + output_language_rule(lang) if lang else system
+
+
+def record_usage(response) -> None:
+    """応答の usage_metadata を、ワーカーが設定した台帳へ渡す（usage_sink()）。"""
     sink = _USAGE_SINK.get()
     meta = getattr(response, "usage_metadata", None)
     if sink is not None and isinstance(meta, dict):
@@ -79,6 +74,24 @@ async def _ainvoke(config: Config, system: str, user_messages: list[tuple[str, s
             sink(dict(meta))
         except Exception:  # noqa: BLE001 - 集計の失敗で研究室の処理を止めない
             pass
+
+
+def strip_thinking(text: str) -> str:
+    """本文に混ざった思考（<think>…</think>）を除く。"""
+    return _THINK_BLOCK_RE.sub("", text)
+
+
+async def _ainvoke(config: Config, system: str, user_messages: list[tuple[str, str]]) -> str:
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    from src.llm import build_model
+
+    model = await build_model(config)
+    messages = [SystemMessage(content=with_output_language(system))]
+    for role, text in user_messages:
+        messages.append(HumanMessage(content=text) if role == "user" else AIMessage(content=text))
+    response = await model.ainvoke(messages)
+    record_usage(response)
     content = response.content if isinstance(response.content, str) else str(response.content)
     # 思考（<think>…</think>）を本文に混ぜて返す接続先でも、思考を答えとして扱わない。
     return _THINK_BLOCK_RE.sub("", content)

@@ -45,14 +45,17 @@ def lab_env(tmp_path, monkeypatch):
 
 
 def _worker(lab_env, **config):
+    # ループの上限は対象インスタンス（org_a）の [skill_lab] から読む
+    overrides = lab_env["root"] / "org_a" / "config_overrides.json"
+    data = json.loads(overrides.read_text(encoding="utf-8"))
+    data.setdefault("skill_lab", {})["max_iterations"] = config.pop("skill_lab_max_iterations", 10)
+    overrides.write_text(json.dumps(data), encoding="utf-8")
     w = worker_mod.Worker.__new__(worker_mod.Worker)
     w.lab, w.instances_root, w.shutdown, w.base_env = "lab1", lab_env["root"], False, dict(os.environ)
     w.config = type(
         "C",
         (),
         {
-            "skill_lab_max_iterations": 10,
-            "skill_lab_max_hours": 6,
             "skill_lab_transcript_excerpt_chars": 1000,
             "skill_lab_fixer_max_file_chars": 1000,
             "skill_lab_report_ai_summary": False,

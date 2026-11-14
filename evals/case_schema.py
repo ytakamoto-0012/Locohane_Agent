@@ -56,6 +56,9 @@ class EvalCase:
         auto_approve: run_script/execute_python_code/approve_plan の
             承認ダイアログを自動承認するか拒否するか
             （evals/headless_chainlit.install に渡す）。
+        scripted_choice_answers: ask_user_choice（選択肢の質問）が呼ばれるたびに1件ずつ消費し、
+            ラベルが一致（無ければ含む）する選択肢を選ぶ回答のリスト。尽きたら・合うものが無ければ先頭を選ぶ
+            （以前からの動き）。スキル研究室の AI 修正も、評価中の質問で止まったときにここへ書ける。
         scripted_text_answers: AskUserQuestion が labels 省略（単一質問）で
             呼ばれるたびに1件ずつ消費して返す回答のリスト。
         work_dir: run_script/execute_python_code/view_image が使う作業
@@ -91,6 +94,7 @@ class EvalCase:
     judge: str | None
     auto_approve: bool
     scripted_text_answers: list[str]
+    scripted_choice_answers: list[str]
     work_dir: str | None
     env: dict[str, str]
     timeout_seconds: int | None
@@ -180,6 +184,7 @@ def parse_case(text: str, path: Path) -> EvalCase:
         judge=judge,
         auto_approve=bool(data.get("auto_approve", True)),
         scripted_text_answers=[str(a) for a in (data.get("scripted_text_answers", []) or [])],
+        scripted_choice_answers=[str(a) for a in (data.get("scripted_choice_answers", []) or [])],
         work_dir=str(data["work_dir"]) if data.get("work_dir") else None,
         env=env,
         timeout_seconds=int(data["timeout_seconds"]) if data.get("timeout_seconds") else None,

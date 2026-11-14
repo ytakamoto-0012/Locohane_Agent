@@ -1247,6 +1247,14 @@ class Config:
     skill_lab_evaluate_baseline: bool
     skill_lab_restore_best_state: bool
     skill_lab_report_ai_summary: bool
+    # AI 修正を Agent（ツールで調べ、修正案を試してから結論を出す）で行うか、と Agent の手数・試しの回数等
+    # （admin/skill_lab/fixer_agent.py）。false なら従来の1回の LLM 呼び出し（fixer.propose）。
+    skill_lab_fixer_agent: bool
+    skill_lab_fixer_agent_max_steps: int
+    skill_lab_fixer_agent_max_trials: int
+    skill_lab_fixer_agent_trial_repeats: int
+    skill_lab_fixer_agent_read_chars: int
+    skill_lab_fixer_agent_context_chars: int
 
     # --- 評価の一時フォルダ（[skill_lab].temp_*、evals/temp_dirs.py） ---
     # [skill_lab] tryout_repeats（スキル安定化トライアウトの回数の既定値。研究テーマごとに変えられる）
@@ -3672,9 +3680,9 @@ def load_config(
             ),
         ),
         skill_lab_max_iterations=_positive_int(
-            os.getenv("SKILL_LAB_MAX_ITERATIONS", skill_lab_worker_section.get("max_iterations", 8)), "[skill_lab_worker].max_iterations"
+            os.getenv("SKILL_LAB_MAX_ITERATIONS", skill_lab_section.get("max_iterations", 8)), "[skill_lab].max_iterations"
         ),
-        skill_lab_max_hours=_positive_float(os.getenv("SKILL_LAB_MAX_HOURS", skill_lab_worker_section.get("max_hours", 6)), "[skill_lab_worker].max_hours"),
+        skill_lab_max_hours=_positive_float(os.getenv("SKILL_LAB_MAX_HOURS", skill_lab_section.get("max_hours", 6)), "[skill_lab].max_hours"),
         skill_lab_poll_interval_seconds=_positive_float(
             os.getenv("SKILL_LAB_POLL_INTERVAL_SECONDS", skill_lab_worker_section.get("poll_interval_seconds", 10)),
             "[skill_lab_worker].poll_interval_seconds",
@@ -3684,44 +3692,44 @@ def load_config(
             "[skill_lab_worker].fixer_max_file_chars",
         ),
         skill_lab_transcript_excerpt_chars=_positive_int(
-            os.getenv("SKILL_LAB_TRANSCRIPT_EXCERPT_CHARS", skill_lab_worker_section.get("transcript_excerpt_chars", 6000)),
+            os.getenv("SKILL_LAB_TRANSCRIPT_EXCERPT_CHARS", skill_lab_worker_section.get("transcript_excerpt_chars", 20000)),
             "[skill_lab_worker].transcript_excerpt_chars",
         ),
         skill_lab_excerpt_user_chars=_non_negative_int(
-            os.getenv("SKILL_LAB_EXCERPT_USER_CHARS", skill_lab_worker_section.get("excerpt_user_chars", 800)), "[skill_lab_worker].excerpt_user_chars"
+            os.getenv("SKILL_LAB_EXCERPT_USER_CHARS", skill_lab_worker_section.get("excerpt_user_chars", 2048)), "[skill_lab_worker].excerpt_user_chars"
         ),
         skill_lab_excerpt_thinking_chars=_non_negative_int(
-            os.getenv("SKILL_LAB_EXCERPT_THINKING_CHARS", skill_lab_worker_section.get("excerpt_thinking_chars", 600)), "[skill_lab_worker].excerpt_thinking_chars"
+            os.getenv("SKILL_LAB_EXCERPT_THINKING_CHARS", skill_lab_worker_section.get("excerpt_thinking_chars", 4000)), "[skill_lab_worker].excerpt_thinking_chars"
         ),
         skill_lab_excerpt_ai_text_chars=_non_negative_int(
-            os.getenv("SKILL_LAB_EXCERPT_AI_TEXT_CHARS", skill_lab_worker_section.get("excerpt_ai_text_chars", 1500)), "[skill_lab_worker].excerpt_ai_text_chars"
+            os.getenv("SKILL_LAB_EXCERPT_AI_TEXT_CHARS", skill_lab_worker_section.get("excerpt_ai_text_chars", 4000)), "[skill_lab_worker].excerpt_ai_text_chars"
         ),
         skill_lab_excerpt_ai_note_chars=_non_negative_int(
-            os.getenv("SKILL_LAB_EXCERPT_AI_NOTE_CHARS", skill_lab_worker_section.get("excerpt_ai_note_chars", 400)), "[skill_lab_worker].excerpt_ai_note_chars"
+            os.getenv("SKILL_LAB_EXCERPT_AI_NOTE_CHARS", skill_lab_worker_section.get("excerpt_ai_note_chars", 1000)), "[skill_lab_worker].excerpt_ai_note_chars"
         ),
         skill_lab_excerpt_tool_args_chars=_non_negative_int(
-            os.getenv("SKILL_LAB_EXCERPT_TOOL_ARGS_CHARS", skill_lab_worker_section.get("excerpt_tool_args_chars", 600)), "[skill_lab_worker].excerpt_tool_args_chars"
+            os.getenv("SKILL_LAB_EXCERPT_TOOL_ARGS_CHARS", skill_lab_worker_section.get("excerpt_tool_args_chars", 2000)), "[skill_lab_worker].excerpt_tool_args_chars"
         ),
         skill_lab_excerpt_tool_result_chars=_non_negative_int(
-            os.getenv("SKILL_LAB_EXCERPT_TOOL_RESULT_CHARS", skill_lab_worker_section.get("excerpt_tool_result_chars", 700)), "[skill_lab_worker].excerpt_tool_result_chars"
+            os.getenv("SKILL_LAB_EXCERPT_TOOL_RESULT_CHARS", skill_lab_worker_section.get("excerpt_tool_result_chars", 3000)), "[skill_lab_worker].excerpt_tool_result_chars"
         ),
         skill_lab_excerpt_subagent_args_chars=_non_negative_int(
-            os.getenv("SKILL_LAB_EXCERPT_SUBAGENT_ARGS_CHARS", skill_lab_worker_section.get("excerpt_subagent_args_chars", 400)), "[skill_lab_worker].excerpt_subagent_args_chars"
+            os.getenv("SKILL_LAB_EXCERPT_SUBAGENT_ARGS_CHARS", skill_lab_worker_section.get("excerpt_subagent_args_chars", 1000)), "[skill_lab_worker].excerpt_subagent_args_chars"
         ),
         skill_lab_excerpt_subagent_result_chars=_non_negative_int(
-            os.getenv("SKILL_LAB_EXCERPT_SUBAGENT_RESULT_CHARS", skill_lab_worker_section.get("excerpt_subagent_result_chars", 300)), "[skill_lab_worker].excerpt_subagent_result_chars"
+            os.getenv("SKILL_LAB_EXCERPT_SUBAGENT_RESULT_CHARS", skill_lab_worker_section.get("excerpt_subagent_result_chars", 1000)), "[skill_lab_worker].excerpt_subagent_result_chars"
         ),
         skill_lab_judge_spec_chars=_non_negative_int(
-            os.getenv("SKILL_LAB_JUDGE_SPEC_CHARS", skill_lab_worker_section.get("judge_spec_chars", 6000)), "[skill_lab_worker].judge_spec_chars"
+            os.getenv("SKILL_LAB_JUDGE_SPEC_CHARS", skill_lab_worker_section.get("judge_spec_chars", 12000)), "[skill_lab_worker].judge_spec_chars"
         ),
         skill_lab_judge_answer_chars=_non_negative_int(
-            os.getenv("SKILL_LAB_JUDGE_ANSWER_CHARS", skill_lab_worker_section.get("judge_answer_chars", 4000)), "[skill_lab_worker].judge_answer_chars"
+            os.getenv("SKILL_LAB_JUDGE_ANSWER_CHARS", skill_lab_worker_section.get("judge_answer_chars", 8000)), "[skill_lab_worker].judge_answer_chars"
         ),
         skill_lab_judge_checks_chars=_non_negative_int(
-            os.getenv("SKILL_LAB_JUDGE_CHECKS_CHARS", skill_lab_worker_section.get("judge_checks_chars", 4000)), "[skill_lab_worker].judge_checks_chars"
+            os.getenv("SKILL_LAB_JUDGE_CHECKS_CHARS", skill_lab_worker_section.get("judge_checks_chars", 6000)), "[skill_lab_worker].judge_checks_chars"
         ),
         skill_lab_judge_criteria_chars=_non_negative_int(
-            os.getenv("SKILL_LAB_JUDGE_CRITERIA_CHARS", skill_lab_worker_section.get("judge_criteria_chars", 2000)), "[skill_lab_worker].judge_criteria_chars"
+            os.getenv("SKILL_LAB_JUDGE_CRITERIA_CHARS", skill_lab_worker_section.get("judge_criteria_chars", 4000)), "[skill_lab_worker].judge_criteria_chars"
         ),
         skill_lab_fixer_failed_runs_per_case=_non_negative_int(
             os.getenv("SKILL_LAB_FIXER_FAILED_RUNS_PER_CASE", skill_lab_worker_section.get("fixer_failed_runs_per_case", 2)), "[skill_lab_worker].fixer_failed_runs_per_case"
@@ -3739,6 +3747,24 @@ def load_config(
         skill_lab_evaluate_baseline=_as_bool(os.getenv("SKILL_LAB_EVALUATE_BASELINE", skill_lab_worker_section.get("evaluate_baseline", "true"))),
         skill_lab_restore_best_state=_as_bool(os.getenv("SKILL_LAB_RESTORE_BEST_STATE", skill_lab_worker_section.get("restore_best_state", "true"))),
         skill_lab_report_ai_summary=_as_bool(os.getenv("SKILL_LAB_REPORT_AI_SUMMARY", skill_lab_worker_section.get("report_ai_summary", "true"))),
+        skill_lab_fixer_agent=_as_bool(os.getenv("SKILL_LAB_FIXER_AGENT", skill_lab_worker_section.get("fixer_agent", "true"))),
+        skill_lab_fixer_agent_max_steps=_positive_int(
+            os.getenv("SKILL_LAB_FIXER_AGENT_MAX_STEPS", skill_lab_worker_section.get("fixer_agent_max_steps", 40)), "[skill_lab_worker].fixer_agent_max_steps"
+        ),
+        skill_lab_fixer_agent_max_trials=_non_negative_int(
+            os.getenv("SKILL_LAB_FIXER_AGENT_MAX_TRIALS", skill_lab_worker_section.get("fixer_agent_max_trials", 3)), "[skill_lab_worker].fixer_agent_max_trials"
+        ),
+        skill_lab_fixer_agent_trial_repeats=_positive_int(
+            os.getenv("SKILL_LAB_FIXER_AGENT_TRIAL_REPEATS", skill_lab_worker_section.get("fixer_agent_trial_repeats", 3)),
+            "[skill_lab_worker].fixer_agent_trial_repeats",
+        ),
+        skill_lab_fixer_agent_read_chars=_positive_int(
+            os.getenv("SKILL_LAB_FIXER_AGENT_READ_CHARS", skill_lab_worker_section.get("fixer_agent_read_chars", 12000)), "[skill_lab_worker].fixer_agent_read_chars"
+        ),
+        skill_lab_fixer_agent_context_chars=_positive_int(
+            os.getenv("SKILL_LAB_FIXER_AGENT_CONTEXT_CHARS", skill_lab_worker_section.get("fixer_agent_context_chars", 150000)),
+            "[skill_lab_worker].fixer_agent_context_chars",
+        ),
         skill_lab_tryout_repeats=_positive_int(
             # SKILL_TRYOUT_REPEATS は [skill_creator] にあったころの環境変数（旧い .env でも効くように読む）
             os.getenv("SKILL_LAB_TRYOUT_REPEATS") or os.getenv("SKILL_TRYOUT_REPEATS") or skill_lab_section.get("tryout_repeats", 10),

@@ -100,7 +100,7 @@ def test_thinking_and_text_with_tool_calls_reach_the_ai_and_limits_are_configura
     result = {
         "transcript": [
             {"type": "HumanMessage", "content": "合言葉を教えて"},
-            {"type": "AIMessage", "content": "スキルを読みます", "reasoning": "前置き" * 300 + "合言葉のスキルがあるので読む",
+            {"type": "AIMessage", "content": "スキルを読みます", "reasoning": "前置き" * 1500 + "合言葉のスキルがあるので読む",
              "tool_calls": [{"name": "read_skill", "args": {"skill_name": "secret-word"}}]},
         ]
     }
@@ -118,7 +118,7 @@ def test_limits_come_from_config(monkeypatch, tmp_path):
     monkeypatch.setenv("SKILL_LAB_EXCERPT_THINKING_CHARS", "123")
     monkeypatch.setenv("SKILL_LAB_FIXER_HISTORY_ITERATIONS", "9")
     limits = evaluation.ExcerptLimits.from_config(load_config())
-    assert limits.thinking_chars == 123 and limits.fixer_history_iterations == 9 and limits.judge_spec_chars == 6000
+    assert limits.thinking_chars == 123 and limits.fixer_history_iterations == 9 and limits.judge_spec_chars == 12000
 
 
 def test_run_case_records_clipped_thinking():

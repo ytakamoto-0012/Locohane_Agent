@@ -1173,6 +1173,8 @@ const CONFIG_PRESETS = [
       "skill_creator.archive_dir",
       "skill_lab.instance_locohane_dir",
       "skill_lab.tryout_repeats",
+      "skill_lab.max_iterations",
+      "skill_lab.max_hours",
     ],
   },
   {

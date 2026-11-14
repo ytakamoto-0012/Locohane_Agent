@@ -46,12 +46,16 @@ def build_command(
     stop_on_fail: bool = False,
     assets_base: Path | None = None,
     config_patch: bool = True,
+    config_patch_file: Path | None = None,
+    cases_dir: Path | None = None,
 ) -> list[str]:
     """評価のコマンド。
 
     stop_on_fail: 不合格の回が出たら残りを回さない（トライアウトの早期打ち切り）。
     assets_base: 重ねる資産の置き場（既定はテーマの assets/。改良前の版を評価するときは baseline/assets/）。
     config_patch: 設定パッチを重ねるか（改良前の版の評価では重ねない）。
+    config_patch_file: 重ねる設定パッチ（既定はテーマの config_patch.json。AI 修正が修正案を試すときは案の置き場のもの）。
+    cases_dir: ケースの置き場（既定はテーマの cases/。AI 修正がケースの指示を変えて原因を確かめるときは写しの置き場）。
     """
     base = assets_base or (directory / themes.ASSETS_DIRNAME)
     assets = themes.assets_in(base)
@@ -60,7 +64,7 @@ def build_command(
         str(PROJECT_ROOT / "evals" / "run_all.py"),
         *(case_ids or []),
         "--cases-dir",
-        str(directory / themes.CASES_DIRNAME),
+        str(cases_dir or directory / themes.CASES_DIRNAME),
         "--instance",
         instance,
         "--repeat",
@@ -71,7 +75,7 @@ def build_command(
         lab,
     ]
     if config_patch:
-        cmd += ["--config-patch", str(directory / themes.CONFIG_PATCH_FILENAME)]
+        cmd += ["--config-patch", str(config_patch_file or directory / themes.CONFIG_PATCH_FILENAME)]
     if stop_on_fail:
         cmd.append("--stop-on-fail")
     for name in assets["skills"]:
@@ -104,6 +108,8 @@ def run(
     assets_base: Path | None = None,
     config_patch: bool = True,
     on_progress: Callable[[dict], None] | None = None,
+    config_patch_file: Path | None = None,
+    cases_dir: Path | None = None,
 ) -> dict:
     """評価を1回（各ケース repeat 回）行い、結果をまとめて返す。
 
@@ -117,7 +123,7 @@ def run(
         EvaluationStopped: should_stop() が True になった（子プロセスは止める）。
         RuntimeError: 評価が結果を出さずに終わった。
     """
-    if not list((directory / themes.CASES_DIRNAME).glob("*.yaml")):
+    if not list((cases_dir or directory / themes.CASES_DIRNAME).glob("*.yaml")):
         raise RuntimeError("There are no cases. Create cases before running.")
     results_root.mkdir(parents=True, exist_ok=True)
     before = {p.name for p in results_root.iterdir()}
@@ -131,6 +137,8 @@ def run(
         stop_on_fail=stop_on_fail,
         assets_base=assets_base,
         config_patch=config_patch,
+        config_patch_file=config_patch_file,
+        cases_dir=cases_dir,
     )
     log_path = log_path or (results_root / "run_all.log")
     log_start = log_path.stat().st_size if log_path.is_file() else 0  # ログは追記するので、今回の分だけを読む
@@ -227,18 +235,18 @@ class ExcerptLimits:
     既定値は config.ini と同じ。ワーカーがタスク・テーマの処理の間だけ limits() で設定する。
     """
 
-    user_chars: int = 800
-    thinking_chars: int = 600
-    ai_text_chars: int = 1500
-    ai_note_chars: int = 400
-    tool_args_chars: int = 600
-    tool_result_chars: int = 700
-    subagent_args_chars: int = 400
-    subagent_result_chars: int = 300
-    judge_spec_chars: int = 6000
-    judge_answer_chars: int = 4000
-    judge_checks_chars: int = 4000
-    judge_criteria_chars: int = 2000
+    user_chars: int = 2048
+    thinking_chars: int = 4000
+    ai_text_chars: int = 4000
+    ai_note_chars: int = 1000
+    tool_args_chars: int = 2000
+    tool_result_chars: int = 3000
+    subagent_args_chars: int = 1000
+    subagent_result_chars: int = 1000
+    judge_spec_chars: int = 12000
+    judge_answer_chars: int = 8000
+    judge_checks_chars: int = 6000
+    judge_criteria_chars: int = 4000
     fixer_failed_runs_per_case: int = 2
     fixer_history_iterations: int = 6
 

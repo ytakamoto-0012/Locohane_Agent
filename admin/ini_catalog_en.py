@@ -824,17 +824,13 @@ DESCRIPTIONS: dict[str, str] = {
         "${instance_dir} is the instance's settings folder ([admin].instances_dir/<instance name>, default instances/<instance name>); ${instance} and ${common_data_dir} can also be used.\n"
         "The default instances/<instance name>/ is deleted together with the instance (the admin tool's delete dialog warns about it)."
     ),
-    'skill_lab_worker.max_iterations': (
+    'skill_lab_worker.poll_interval_seconds': (
         'Settings of the skill tuning worker itself (an instance whose kind is set to "skill tuning worker" in the admin tool; admin/skill_lab/worker.py). Override them in the worker\'s config_overrides.json (they do not appear on the settings screen of main instances).\n'
         'The worker evaluates research themes (a bundle of skills, sub-agents and cases, placed in ${common_data_dir}/skill_lab/themes/ of the target instance), and runs a loop in which the AI fixes failures and evaluates again.\n'
         "Evaluation, AI fixes, judging and drafting inherit the settings of the research theme's target instance as they are (skills, guards, timeouts, the inference parameters of [llm], etc.).\n"
-        "The worker has only these of its own: the LLM endpoints ([llm] main_url / sub_url / main_routing_strategy / sub_routing_strategy), the loop limits of this section, and the worker's own logs ([log]) (only these appear on the worker's settings screen in the admin tool too).\n"
-        'Maximum number of iterations of the skill tuning loop (1 iteration = 1 evaluation + 1 fix on failure). When exceeded, it stops with "limit reached" and waits for a human decision.'
-    ),
-    'skill_lab_worker.max_hours': (
-        'Maximum time (hours, decimals allowed) one theme\'s loop may use. When exceeded, it stops with "limit reached".'
-    ),
-    'skill_lab_worker.poll_interval_seconds': (
+        "The worker has only these of its own: the LLM endpoints ([llm] main_url / sub_url / main_routing_strategy / sub_routing_strategy), how the loop runs (this section), and the worker's own logs ([log]) (only these appear on the worker's settings screen in the admin tool too).\n"
+        "The loop limits (number of iterations, time of one iteration) are [skill_lab] max_iterations and max_hours of the target instance.\n"
+        'The items other than poll_interval_seconds, and the loop limits, can be overridden per theme in the Skill Lab under "Theme settings" → "Advanced settings" (empty means the value here).\n'
         'Interval (seconds) at which the worker looks for themes waiting to be processed.'
     ),
     'skill_lab_worker.fixer_max_file_chars': (
@@ -888,6 +884,27 @@ DESCRIPTIONS: dict[str, str] = {
     'skill_lab_worker.fixer_history_iterations': (
         'Number of past iterations (the contents of the fixes tried and the cases that still failed after them) shown when asking for a fix (newest first).'
     ),
+    'skill_lab_worker.fixer_agent': (
+        'Whether the AI fix is done by an agent (true) or by one LLM call (false).\n'
+        'The agent investigates with tools (the evaluation records in full, comparisons between runs, how often words appear, the system prompt '
+        'the assistant actually received, the other skills and sub-agents), tries candidate fixes a few times on a copy of the research targets, '
+        'and then reports a fix or a problem in the case, the spec or the environment.'
+    ),
+    'skill_lab_worker.fixer_agent_max_steps': (
+        'Maximum steps (LLM calls) of the agent. When used up, it must conclude at that point.'
+    ),
+    'skill_lab_worker.fixer_agent_max_trials': (
+        'How many trial evaluations of a candidate fix or of a changed case instruction the agent may run (per fix). 0 runs none.'
+    ),
+    'skill_lab_worker.fixer_agent_trial_repeats': (
+        'Default runs per case in a trial evaluation (the agent may ask for up to twice this).'
+    ),
+    'skill_lab_worker.fixer_agent_read_chars': (
+        'Maximum characters the agent reads from a file or record at once (it reads the rest again when needed).'
+    ),
+    'skill_lab_worker.fixer_agent_context_chars': (
+        "When the agent's conversation exceeds this many characters, older tool results are shortened (match it to the model's context length)."
+    ),
     'skill_lab_worker.fixer_max_files_per_fix': (
         'Number of files one AI fix may change (one cause per iteration; a proposal that changes more is asked again once without evaluating again). 0 means no limit.'
     ),
@@ -913,6 +930,15 @@ DESCRIPTIONS: dict[str, str] = {
         'each case is repeated this many times and passes only if every run passes. In the Skill Lab the number can be changed per research theme ("Theme settings"; empty means this value). An integer of 1 or more.\n'
         'It used to be in [skill_creator] (the old entries in config_overrides.json and the environment variable SKILL_TRYOUT_REPEATS are still read).'
     ),
+    'skill_lab.max_iterations': (
+        'Maximum number of iterations of the Skill Lab\'s skill tuning loop (1 iteration = 1 evaluation + 1 fix on failure). When exceeded, it stops with "limit reached" and waits for a human decision.\n'
+        "The value of the research theme's target instance is used (not the settings of the skill tuning worker in charge). Resuming counts again from zero.\n"
+        'max_iterations and max_hours can be overridden per theme under "Theme settings" → "Advanced settings".'
+    ),
+    'skill_lab.max_hours': (
+        'Maximum time (hours, decimals allowed) one iteration may use (1 evaluation + 1 fix on failure; the evaluation of the version before the changes and a tryout also count as one each).\n'
+        'If exceeded during an evaluation, that evaluation is cut off; if exceeded during judging or a fix, it stops with "limit reached" once that finishes. The whole loop takes about max_iterations × this value at most.'
+    ),
     'skill_lab.temp_dir': (
         'Where evaluations (evals/run_all.py and run_case.py, including the Skill Lab loop, single trials and tryouts, and skill-creator evaluations) create temporary folders while they run. The settings of the instance being evaluated are used.\n'
         'The working folders of cases (copies of input files and the outputs), the memory and path memory isolated for the evaluation, the copies of skills and cases fixed during the evaluation, and the backups of Skill Lab AI fixes are created here and removed when done.\n'
@@ -920,7 +946,7 @@ DESCRIPTIONS: dict[str, str] = {
     ),
     'skill_lab.temp_retention_hours': (
         'Temporary folders left behind by a forced or abnormal exit are deleted automatically once this many hours (decimals allowed) have passed since they were last updated (including updates of the files inside). '
-        'Make it longer than [skill_lab_worker].max_hours so that folders of running evaluations are not deleted. 0 or less disables the automatic deletion.\n'
+        'Make it longer than max_hours so that folders of running evaluations are not deleted. 0 or less disables the automatic deletion.\n'
         "They are deleted at the start of an evaluation, when the instance (main) starts and at the interval below, and by the skill tuning worker at the interval below (for all instances it serves)."
     ),
     'skill_lab.temp_cleanup_interval_hours': (

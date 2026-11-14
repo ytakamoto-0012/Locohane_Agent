@@ -175,6 +175,7 @@ judge: |                             # 自由記述の判定基準（省略可�
 auto_approve: true                   # run_script/execute_python_code/approve_plan の
                                       # 承認ダイアログを自動承認(true)/拒否(false)するか
 scripted_text_answers: []            # AskUserQuestion が labels 省略で呼ばれるたびに1件ずつ消費して返す回答
+scripted_choice_answers: []          # ask_user_choice が呼ばれるたびに1件ずつ消費し、ラベルが合う選択肢を選ぶ（合わなければ「その他」で答える。無ければ先頭）
 work_dir: "evals/fixtures/xxx"       # run_script/execute_python_code/analyze_image の既定
                                       # 作業ディレクトリをこのケース専用に固定したい場合の
                                       # プロジェクトルート相対パス（省略可、既定は config.ini

@@ -81,8 +81,21 @@ Rules:
   and have the script print what the model needs (and report problems it detects).
 - The frontmatter name of SKILL.md and agent definitions must be the same as the folder name / file name.
 - On success, scripts print one line of JSON to stdout with exit code 0; on failure, they print the reason to stderr with exit code 1.
-- Do not edit, delete or add cases (cases/) or their input files; report problems with cases in "blockers".
-- Paths you can fix: assets/skills/<name>/... and assets/agents/<name>.md of existing research targets, config_patch.json
+- Do not edit, delete or add cases (cases/) or their input files, except the automatic answers to questions (below);
+  report other problems with cases in "blockers".
+- Questions during the evaluation: no person is present, so when the assistant asks the user (ask_user_choice, AskUserQuestion)
+  the harness answers automatically. A choice question gets the next "scripted_choice_answers" entry of the case (the choice whose
+  label matches; an answer matching no choice is given as the "Other" free text) or, if there is none, the FIRST choice; a free
+  text question gets the next "scripted_text_answers" entry or no answer (the assistant sees a timeout).
+  If a run went wrong because of such a question, decide which it is:
+  - the question was reasonable (the instruction leaves out something a real user would simply tell when asked): set the
+    answers a real user with the case's intent would give, with {"path": "cases/<id>.yaml", "answers": {"scripted_choice_answers": [...],
+    "scripted_text_answers": [...]}} (the lists replace the current ones, in the order the questions are asked). Never put the
+    result the assistant should produce, or hints about how to do the work, into the answers.
+  - the question was unnecessary (the spec or the instruction already says what to do): fix the research target so it does
+    not ask (for example state the default to use).
+- Paths you can fix: assets/skills/<name>/... and assets/agents/<name>.md of existing research targets, config_patch.json,
+  and only the automatic answers of cases/<id>.yaml
   (you cannot create new skills or sub-agents, and you cannot delete SKILL.md or agent definitions themselves)
 - Keep the language of the files you edit (do not translate existing text); write text you add to a file in the same language as that file.
   This takes precedence over the output language below for file contents. Write "analysis" in the output language.
@@ -90,12 +103,19 @@ Rules:
 Output only JSON in the following format:
 {"analysis": "the cause of the failure and how to fix it",
  "blockers": [{"kind": "case" or "spec" or "environment", "case_id": "<ID of the case concerned (empty if not about one case)>",
-               "problem": "what is wrong, in the dashboard terms above (concrete)", "suggestion": "what a person should do, in the dashboard terms above"}],
+               "problem": "what is wrong, in the dashboard terms above (concrete)", "suggestion": "what a person should do, in the dashboard terms above",
+               "new_instruction": "for kind case, when the user instruction is the problem: the corrected first user instruction (optional; a person approves it)"}],
  "edits": [
    {"path": "assets/skills/<name>/SKILL.md", "old": "the original string to replace (must match exactly one place in the file)", "new": "the new string"},
    {"path": "assets/skills/<name>/scripts/run.py", "content": "the new content of the whole file"},
-   {"path": "assets/skills/<name>/references/old.md", "delete": true}
+   {"path": "assets/skills/<name>/references/old.md", "delete": true},
+   {"path": "cases/<id>.yaml", "answers": {"scripted_choice_answers": ["label of the choice"], "scripted_text_answers": ["reply"]}}
  ]}"""
+
+
+def knowledge_text() -> str:
+    """AI 修正の Agent 版に渡す、直し方の知識（_SYSTEM の出力形式より前の部分）。"""
+    return _SYSTEM.split("Output only JSON")[0].rstrip() + "\n"
 
 
 def _read_limited(path: Path, limit: int) -> str:
@@ -221,7 +241,12 @@ def history_text(iterations: list[dict], limit: int | None = None) -> str:
 
 def too_many_files(edits: list, max_files: int) -> str | None:
     """1回の修正で触るファイルが多すぎれば理由を返す（1回の反復で直すのは原因1つ。tune-prompt と同じ規則）。"""
-    paths = {e["path"].replace("\\", "/").strip("/") for e in edits if isinstance(e, dict) and isinstance(e.get("path"), str)}
+    # ケースの自動回答（answers）は研究対象の直しではないので数えない
+    paths = {
+        e["path"].replace("\\", "/").strip("/")
+        for e in edits
+        if isinstance(e, dict) and isinstance(e.get("path"), str) and "answers" not in e
+    }
     if max_files > 0 and len(paths) > max_files:
         return (
             f"The fix changes {len(paths)} files ({', '.join(sorted(paths))}); change at most {max_files} file(s) per iteration "
@@ -283,7 +308,12 @@ def _blockers(raw, known_cases: set[str]) -> list[dict]:
             continue
         if case_id not in known_cases:
             case_id = ""
-        blockers.append({"kind": kind, "case_id": case_id, "problem": problem, "suggestion": str(item.get("suggestion") or "").strip()})
+        blocker = {"kind": kind, "case_id": case_id, "problem": problem, "suggestion": str(item.get("suggestion") or "").strip()}
+        # ケースの指示の書き直し案（画面のボタンで、人が承認してケースに書き込み、ループを再開できる）
+        new_instruction = item.get("new_instruction")
+        if kind == "case" and case_id and isinstance(new_instruction, str) and new_instruction.strip():
+            blocker["new_instruction"] = new_instruction.strip()
+        blockers.append(blocker)
     return blockers
 
 
@@ -299,7 +329,10 @@ def _forbidden(directory: Path, rel: str, path: Path, *, delete: bool) -> str | 
         return "The AI cannot change the input files of cases"
     if parts[0] == themes.CASES_DIRNAME:
         # ケースに問題があれば blockers で報告させ、ループを止めて人に直してもらう（AI はケースを書き換えない）。
-        return "The AI cannot change cases (report problems with a case in blockers instead)"
+        return (
+            "The AI can change only the automatic answers of a case "
+            '({"path": "cases/<id>.yaml", "answers": {...}}); report other problems with a case in blockers'
+        )
     if parts[0] == themes.ASSETS_DIRNAME:
         asset = path if parts[1] == "agents" else directory / themes.ASSETS_DIRNAME / "skills" / parts[2]
         exists = asset.is_file() if parts[1] == "agents" else (asset / "SKILL.md").is_file()
@@ -310,10 +343,47 @@ def _forbidden(directory: Path, rel: str, path: Path, *, delete: bool) -> str | 
     return None
 
 
+# AI 修正がケースで変えてよい項目（評価中にアシスタントが利用者へ質問したときの自動回答）
+CASE_ANSWER_KEYS = ("scripted_choice_answers", "scripted_text_answers")
+
+
+def _case_with_answers(current: str | None, answers) -> tuple[str | None, str | None]:
+    """ケースの yaml の自動回答（CASE_ANSWER_KEYS）だけを書き換えた内容。(新しい内容, エラー)。
+
+    評価中にアシスタントが質問（選択肢・自由記述）して止まると、回答が無い・意図と違う選択肢が選ばれる。
+    その場面の答えは人ではなく AI 修正が用意できるようにする（2026-11-15 ユーザー指摘）。
+    指示（turns）・採点の条件は変えさせない。
+    """
+    import yaml
+
+    if current is None:
+        return None, "the case does not exist"
+    if not isinstance(answers, dict) or not answers:
+        return None, f"answers must be an object with {' and/or '.join(CASE_ANSWER_KEYS)}"
+    unknown = [k for k in answers if k not in CASE_ANSWER_KEYS]
+    if unknown:
+        return None, f"only {', '.join(CASE_ANSWER_KEYS)} can be changed (not {unknown})"
+    try:
+        data = yaml.safe_load(current) or {}
+    except yaml.YAMLError as e:
+        return None, f"the case cannot be read: {e}"
+    for key, value in answers.items():
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            return None, f"{key} must be a list of strings"
+        if value:
+            data[key] = value
+        else:
+            data.pop(key, None)
+    return yaml.safe_dump(data, allow_unicode=True, sort_keys=False), None
+
+
 def apply_edits(
-    directory: Path, edits: list, *, known_tools: list[str] | None, temp_root: Path | None = None
+    directory: Path, edits: list, *, known_tools: list[str] | None, temp_root: Path | None = None, record: bool = True
 ) -> tuple[list[str], list[str]]:
     """edits をすべて適用する（1つでも失敗したら全部元に戻す）。(適用したパス, エラー) を返す。
+
+    record: テーマの変更として記録する（トライアウトを無効にする）。AI 修正が修正案を試すために
+        テーマの外の写し（theme.json が無い）へ適用するときは False。
 
     temp_root: 元に戻すためのバックアップを置く場所（対象インスタンスの [skill_lab].temp_dir）。
         省略時はテーマの runs/ の下（OS の一時フォルダは使わない）。
@@ -334,7 +404,8 @@ def apply_edits(
         except themes.ThemeError as e:
             errors.append(str(e))
             continue
-        forbidden = _forbidden(directory, rel, path, delete=bool(edit.get("delete")))
+        is_answers = rel.startswith(f"{themes.CASES_DIRNAME}/") and rel.count("/") == 1 and "answers" in edit
+        forbidden = None if is_answers else _forbidden(directory, rel, path, delete=bool(edit.get("delete")))
         if forbidden:
             errors.append(f"{rel}: {forbidden}")
             continue
@@ -343,7 +414,12 @@ def apply_edits(
         except UnicodeDecodeError:
             errors.append(f"{rel}: not a text file, so the AI cannot fix it")
             continue
-        if edit.get("delete"):
+        if is_answers:
+            new_content, error = _case_with_answers(current, edit.get("answers"))
+            if error:
+                errors.append(f"{rel}: {error}")
+                continue
+        elif edit.get("delete"):
             new_content = None
         elif isinstance(edit.get("content"), str):
             new_content = edit["content"]
@@ -401,5 +477,6 @@ def apply_edits(
                     shutil.copy2(backup, path)
             return [], [f"Failed to write files: {e}"]
     applied = list(dict.fromkeys(rel for rel, _, _ in planned))
-    themes.mark_changed(directory, "AI", "AI fix: " + ", ".join(applied))
+    if record:
+        themes.mark_changed(directory, "AI", "AI fix: " + ", ".join(applied))
     return applied, []

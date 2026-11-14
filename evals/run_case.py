@@ -828,6 +828,9 @@ async def _run(
                 "token_usage_total": token_usage_total,
                 "token_usage_max_per_call": token_usage_max_per_call,
                 "turn_timings": turn_timings,
+                # アシスタントが実際に受け取ったシステムプロンプト（スキル一覧の説明文を含む）。スキル研究室の AI 修正が
+                # 「どのスキルと取り違えたか・指示のどこに従ったか」を調べるのに読む（admin/skill_lab/fixer_agent.py）。
+                "system_prompt": system_prompt,
             }
             if subagent_calls:
                 out["subagent_tool_calls"] = subagent_calls
@@ -905,7 +908,7 @@ def main() -> int:
         _apply_config_patch(args.config_patch.resolve())
 
     case = load_case(args.case_path)
-    install_headless_chainlit(case.auto_approve, case.scripted_text_answers)
+    install_headless_chainlit(case.auto_approve, case.scripted_text_answers, case.scripted_choice_answers)
 
     try:
         result = asyncio.run(

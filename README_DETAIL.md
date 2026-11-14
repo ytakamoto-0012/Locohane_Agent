@@ -1889,18 +1889,19 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[skill_creator]` | `archive_dir` | 昇格したドラフトの退避先（既定 `${common_data_dir}/skill_drafts_archive`）。スキル走査対象・`draft_dir` と重なると起動時エラー | `SKILL_ARCHIVE_DIR` |
 | `[skill_lab]` | `tryout_repeats` | スキル安定化トライアウトの回数の既定値（正式スキルへの昇格（スキル研究室・promote-skill）で各ケースをこの回数だけ繰り返し、全回合格で合格。既定10）。スキル研究室ではテーマごとに「テーマの設定」で変えられる（空欄ならこの値）。以前は `[skill_creator]` にあった（旧い `config_overrides.json` の書き方・環境変数 `SKILL_TRYOUT_REPEATS` も読む） | `SKILL_LAB_TRYOUT_REPEATS` |
 | `[skill_lab]` | `instance_locohane_dir` | インスタンス専用の拡張ディレクトリで、スキル研究室・promote-skill の昇格先（既定 `${instance_dir}` = `instances/<インスタンス名>`。`skills/`・`agents/`・回帰テスト用の `evals/<テーマID>/` を置く）。昇格先（対象）のインスタンスの値が使われる。本体も `project_locohane_dir` と同じく `skills/`・`agents/`・`LOCOHANE.md` を検知し、そのどれよりも後方（最優先）で常に走査する（`project_locohane_dir` を上書きしても外れない） | `INSTANCE_LOCOHANE_DIR` |
-| `[skill_lab_worker]` | `max_iterations` | スキル調整ワーカーの スキル調整ループの最大反復回数（既定8）。このセクションはスキル調整ワーカーの設定画面にだけ出る（本体には出ない） | `SKILL_LAB_MAX_ITERATIONS` |
-| `[skill_lab_worker]` | `max_hours` | 1テーマのループに使ってよい最大時間（既定6時間） | `SKILL_LAB_MAX_HOURS` |
-| `[skill_lab_worker]` | `poll_interval_seconds` | ワーカーが処理待ちのテーマを探す間隔（既定10秒） | `SKILL_LAB_POLL_INTERVAL_SECONDS` |
+| `[skill_lab]` | `max_iterations` | スキル調整ループの最大反復回数（既定8）。研究テーマの対象インスタンスの値が使われる（担当ワーカーの設定ではない）。再開すると数え直す。テーマごとに「上級者向け設定」で上書きできる | `SKILL_LAB_MAX_ITERATIONS` |
+| `[skill_lab]` | `max_hours` | 反復1回（評価1回 + 失敗時の修正1回）に使ってよい最大時間（既定6時間。評価の途中で超えたら打ち切る）。対象インスタンスの値が使われ、テーマごとに上書きできる | `SKILL_LAB_MAX_HOURS` |
+| `[skill_lab_worker]` | `poll_interval_seconds` | ワーカーが処理待ちのテーマを探す間隔（既定10秒）。このセクションはスキル調整ワーカーの設定画面にだけ出る（本体には出ない）。これ以外の項目は、スキル研究室の「テーマの設定」→「上級者向け設定」でテーマごとに上書きできる（空欄ならワーカーの値） | `SKILL_LAB_POLL_INTERVAL_SECONDS` |
 | `[skill_lab_worker]` | `fixer_max_file_chars` | AI に渡す資産ファイル1つあたりの最大文字数（既定20000） | `SKILL_LAB_FIXER_MAX_FILE_CHARS` |
-| `[skill_lab_worker]` | `transcript_excerpt_chars` | AI に渡す実行の記録の抜粋の最大文字数（1回分、既定6000） | `SKILL_LAB_TRANSCRIPT_EXCERPT_CHARS` |
-| `[skill_lab_worker]` | `excerpt_user_chars` / `excerpt_thinking_chars` / `excerpt_ai_text_chars` / `excerpt_ai_note_chars` / `excerpt_tool_args_chars` / `excerpt_tool_result_chars` / `excerpt_subagent_args_chars` / `excerpt_subagent_result_chars` | 上の抜粋の項目ごとの最大文字数（利用者の指示800・思考600（末尾から。0で渡さない）・最終本文1500・ツールを呼ぶときの本文400・ツールの引数600・結果700・サブエージェントの中の引数400・結果300） | `SKILL_LAB_EXCERPT_*` |
-| `[skill_lab_worker]` | `judge_spec_chars` / `judge_answer_chars` / `judge_checks_chars` / `judge_criteria_chars` | AI judge・機械判定の見直しに渡す仕様6000・最終回答4000・落ちた照合4000・ケースの judge 2000 の最大文字数 | `SKILL_LAB_JUDGE_*` |
+| `[skill_lab_worker]` | `transcript_excerpt_chars` | AI に渡す実行の記録の抜粋の最大文字数（1回分、既定20000） | `SKILL_LAB_TRANSCRIPT_EXCERPT_CHARS` |
+| `[skill_lab_worker]` | `excerpt_user_chars` / `excerpt_thinking_chars` / `excerpt_ai_text_chars` / `excerpt_ai_note_chars` / `excerpt_tool_args_chars` / `excerpt_tool_result_chars` / `excerpt_subagent_args_chars` / `excerpt_subagent_result_chars` | 上の抜粋の項目ごとの最大文字数（利用者の指示2048・思考4000（末尾から。0で渡さない）・最終本文4000・ツールを呼ぶときの本文1000・ツールの引数2000・結果3000・サブエージェントの中の引数1000・結果1000） | `SKILL_LAB_EXCERPT_*` |
+| `[skill_lab_worker]` | `judge_spec_chars` / `judge_answer_chars` / `judge_checks_chars` / `judge_criteria_chars` | AI judge・機械判定の見直しに渡す仕様12000・最終回答8000・落ちた照合6000・ケースの judge 4000 の最大文字数 | `SKILL_LAB_JUDGE_*` |
+| `[skill_lab_worker]` | `fixer_agent` / `fixer_agent_max_steps` / `fixer_agent_max_trials` / `fixer_agent_trial_repeats` / `fixer_agent_read_chars` / `fixer_agent_context_chars` | AI 修正を Agent（記録を調べ、修正案を試してから直す）で行うか（既定 true。false で1回の LLM 呼び出し）、Agent の手数の上限（既定40）、修正案を試しに評価できる回数（1回の修正あたり、既定3。0で試さない）、試しで各ケースを実行する回数（既定3）、1回で読める文字数（既定12000）、会話がこの文字数を超えたら古い結果から短くする（既定150000） | `SKILL_LAB_FIXER_AGENT` 等 |
 | `[skill_lab_worker]` | `fixer_max_files_per_fix` / `fixer_max_reverts` | 1回の AI 修正で変えてよいファイルの数（既定2。0で制限なし）と、合格していたケースを壊した直しの取り消しが何回に達したら止めるか（既定3。0で止めない） | `SKILL_LAB_FIXER_MAX_FILES_PER_FIX` / `SKILL_LAB_FIXER_MAX_REVERTS` |
 | `[skill_lab_worker]` | `tryout_stop_on_first_failure` / `evaluate_baseline` / `restore_best_state` / `report_ai_summary` | トライアウトを最初の不合格で打ち切る・改良前の版を最初に評価する・止まったとき一番よかった内容に戻す・終わったとき AI に総括を書かせる（どれも既定 true） | `SKILL_LAB_TRYOUT_STOP_ON_FIRST_FAILURE` 等 |
 | `[skill_lab_worker]` | `fixer_failed_runs_per_case` / `fixer_history_iterations` | 修正を頼むときに見せる、ケースごとの落ちた回の数（既定2）と、これまでの反復の数（試した直しの中身・その後も落ちたケース。既定6） | `SKILL_LAB_FIXER_FAILED_RUNS_PER_CASE` / `SKILL_LAB_FIXER_HISTORY_ITERATIONS` |
 | `[skill_lab]` | `temp_dir` | 評価（`evals/run_all.py`・`run_case.py`、スキル研究室のループ・1回試行・トライアウトを含む）が実行中に使う一時フォルダの置き場（既定 `${common_data_dir}/evals_temp`）。評価対象インスタンスの値が使われる。OS の一時フォルダは使わない。`[data_backup]` の対象外 | `SKILL_LAB_TEMP_DIR` |
-| `[skill_lab]` | `temp_retention_hours` | 強制終了等で残った一時フォルダを、最後の更新（中のファイルを含む）からこの時間を過ぎたら自動削除する（既定24。`[skill_lab_worker].max_hours` より長くする。0以下で削除しない）。評価の開始時、本体の起動時と下記の間隔ごと、スキル調整ワーカーの下記の間隔ごとに行う | `SKILL_LAB_TEMP_RETENTION_HOURS` |
+| `[skill_lab]` | `temp_retention_hours` | 強制終了等で残った一時フォルダを、最後の更新（中のファイルを含む）からこの時間を過ぎたら自動削除する（既定24。`max_hours` より長くする。0以下で削除しない）。評価の開始時、本体の起動時と下記の間隔ごと、スキル調整ワーカーの下記の間隔ごとに行う | `SKILL_LAB_TEMP_RETENTION_HOURS` |
 | `[skill_lab]` | `temp_cleanup_interval_hours` | 上記の自動削除のチェック間隔（時間、既定1） | `SKILL_LAB_TEMP_CLEANUP_INTERVAL_HOURS` |
 | `[skill_lab]` | `copy_memory_types` | 評価の開始時に本番のメモリーから写す種類（カンマ区切り、既定 `glossary`）。評価のメモリーは毎回空から始まる（カンニング防止）が、社内の用語辞書が無いと本番と同じように言葉を解釈できないため。写すのは本番でも誰でも読めるもの（共通・各ユーザーの共有のもの。個人用・機密の目印があるものは除く）だけ。空欄なら写さない | `SKILL_LAB_COPY_MEMORY_TYPES` |
 | `[skill_lab]` | `verify_timeout_seconds` | ケースの `verify_script`（会話の後に作業フォルダの生成物を確かめるスクリプト）の制限時間（秒、既定120） | `SKILL_LAB_VERIFY_TIMEOUT_SECONDS` |
@@ -2733,8 +2734,12 @@ AI には「キーの一覧は検索で選んだ一部なので、一覧に無�
 
 - LLM の接続先: `[llm] main_url`・`sub_url`・`main_routing_strategy`・`sub_routing_strategy`（モデルは本番と同じものを想定。
   本番と別の接続先にすれば、研究室の処理が本番の利用者を待たせない）
-- ループの上限等: `[skill_lab_worker]`（反復回数・時間の上限・待ち間隔・AI に渡す文字数）
+- ループの進め方: `[skill_lab_worker]`（待ち間隔・AI に渡す文字数・修正の回し方）
 - ワーカー自身のログ: `[log]`
+
+ループの上限（反復回数・反復1回の時間）は、スキルが属する対象インスタンスの `[skill_lab] max_iterations`・`max_hours`。
+ループの上限と `[skill_lab_worker]` の各項目（`poll_interval_seconds` を除く）は、「テーマの設定」→「上級者向け設定」でテーマごとに上書きできる
+（空欄なら上の値。theme.json の `loop_settings` に保存し、ループ・1回試行・下書きの開始時に読む。実行中・開始待ちの間は変えられない）。
 
 本体インスタンスを複製してワーカーを作った場合も、複製元の設定のうち上の3つ以外は持ち込まない。ワーカーが複数あるときは、テーマごとに担当を選ぶ。
 
@@ -2801,9 +2806,23 @@ Excel は見た目の要約付き）を渡す。試験問題で「使うファ�
    その理由を次の反復に渡す。試験に通るだけの直し方を防ぐため、AI はケース・入力ファイル（`cases/fixtures/`）の変更、
    研究対象そのもの（SKILL.md・エージェント定義）の削除、研究対象に無いスキル・サブエージェントの新規作成はできない。
    評価で使う LLM に接続できない（`llm_unreachable`）ときは、AI 修正に回さず「エラー」で止める。
+   - AI 修正は既定で Agent が行う（`[skill_lab_worker] fixer_agent`、`admin/skill_lab/fixer_agent.py`）。1回の LLM 呼び出しで
+     直し方を出させるのではなく、人が原因を調べる手順どおりにツールで調べてから結論を出す: 評価の各回の流れの一覧と1回分の全文
+     （合格した回と落ちた回の比較）、全部の回からの言葉の出現回数、アシスタントが実際に受け取ったシステムプロンプト
+     （評価の記録 `results.json` の `system_prompt`。スキル一覧の説明文・規則）、研究対象以外のスキル・サブエージェント（取り違えの相手）、
+     テーマのファイル。仮説を、修正案を研究対象の写し（`runs/<反復>/agent/`）に当てて落ちたケースを数回だけ評価して確かめ
+     （`fixer_agent_max_trials` 回まで、各 `fixer_agent_trial_repeats` 回）、ケースの不備が疑わしいときは指示だけを変えた写しで評価して
+     裏付けを取る。調べた手順は `runs/<反復>/fixer_agent.json` に残る。手数（`fixer_agent_max_steps`）を使い切ったらその時点の結論を出させ、
+     結論を出せなかったときは1回呼び出しの修正で続ける。
+   - 評価中にアシスタントが利用者に質問したら（選択肢の `ask_user_choice`・自由記述の `AskUserQuestion`）、ケースの自動回答
+     （`scripted_choice_answers`・`scripted_text_answers`）で答える（無ければ選択肢は先頭、自由記述は応答なし）。質問で評価が
+     おかしくなったときは、AI 修正がケースの自動回答だけを書き換えられる（実際の利用者が答える内容に限る。指示・採点の条件は変えられない）。
+     質問が不要なら研究対象を直して質問させないようにする。
    - 研究対象を直しても合格しない原因（ケース: 利用者の指示にスキルを使う理由が無い・名前の綴り違い・採点の条件が満たせない、
      仕様: 自己矛盾、環境: ライブラリが無い・毎回時間切れ等）を AI が見つけたら、研究対象を書き換えずに「人の見直しが必要」で
-     止め、原因の種類・問題点・直し方の提案を表示する（指摘が誤りならそのまま開始し直せる）。
+     止め、原因の種類・問題点・直し方の提案を表示する（指摘が誤りならそのまま開始し直せる）。ケースの指示が原因のときは、
+     AI が直した指示の案（試しの評価で確かめた結果つき）を添え、テーマ詳細の「この指示でケースを直して再開」で、人の承認のうえ
+     ケースに書き込んでループを再開できる（AI は自分ではケースの指示を変えない）。
    - AI 修正の後の内容が、このループで評価して不合格だった内容と同じに戻ったら（同じ直しの繰り返し・行ったり来たり・
      直せないまま2回続いた・取り消した直しをまた入れた）、「修正が行き詰まり」で止める。
    - 直しで、それまで全回合格していたケースが落ちたら、その直しを取り消し（直す前の内容を `runs/<反復>/before_fix/` に控えている）、
@@ -2812,7 +2831,7 @@ Excel は見た目の要約付き）を渡す。試験問題で「使うファ�
 2. 全ケースに合格したら、テーマのトライアウトの回数（「テーマの設定」。空欄なら対象インスタンスの `[skill_lab] tryout_repeats`）ずつ
    トライアウトを行い、全回合格で「レビュー待ち」にする
    （不合格の回が出たら残りを回さずに打ち切る。`[skill_lab_worker] tryout_stop_on_first_failure`）。
-3. `[skill_lab_worker] max_iterations`・`max_hours` に達したら「上限到達」で止まる（手で直して再開できる。最後の評価で落ちた
+3. `[skill_lab] max_iterations`（反復の回数。対象インスタンスの設定、テーマごとに上書き可）に達するか、反復1回が `max_hours` を超えたら「上限到達」で止まる（手で直して再開できる。再開すると回数は数え直す。最後の評価で落ちた
    ケースと、トライアウトなら何回中何回合格したかを添える）。上限到達・行き詰まり・人の見直しが必要で止まったときは、研究対象を
    このループで一番合格の多かった内容（`runs/best/`）に戻す（`[skill_lab_worker] restore_best_state`）。
    終わったときは総括（反復ごとの結果・直したファイル・取り消し・改良前との比較と、AI のまとめ）をテーマ詳細に出す

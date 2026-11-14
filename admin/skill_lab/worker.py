@@ -23,7 +23,6 @@ import signal
 import sys
 import time
 import traceback
-from datetime import datetime, timedelta
 from pathlib import Path
 
 from evals import temp_dirs
@@ -69,7 +68,46 @@ def _score(iteration: dict) -> tuple[int, float]:
     return full, ratio
 
 
+def _wilson_lower(passes: int, runs: int, z: float = 1.96) -> float:
+    """合格率の信頼下限（Wilson）。回数が少ない結果ほど割り引く（1回中1回合格 ≒ 0.21、10回中10回 ≒ 0.72）。"""
+    if runs <= 0:
+        return 0.0
+    p = passes / runs
+    denom = 1 + z * z / runs
+    centre = p + z * z / (2 * runs)
+    margin = z * ((p * (1 - p) / runs + z * z / (4 * runs * runs)) ** 0.5)
+    return (centre - margin) / denom
+
+
+def _state_confidence(iterations: list[dict], state_sha: str) -> float:
+    """同じ内容（state_sha）を評価した反復の結果を合算した、ケースごとの合格率の信頼下限の合計。一番よかった内容を選ぶのに使う。
+
+    以前は反復ごとの (全回合格したケースの数, 合格率) で比べていたため、評価1回で1回合格した最初の版が、トライアウト6回中
+    5回合格した直した版より「よい」とされ、止まったときに最初の版へ戻していた（2026-11-15 仮想研究室で発覚）。
+    """
+    totals: dict[str, list[int]] = {}
+    for it in iterations:
+        if it.get("state_sha") != state_sha:
+            continue
+        for cid, c in (it.get("cases") or {}).items():
+            t = totals.setdefault(cid, [0, 0])
+            t[0] += int(c.get("pass") or 0)
+            t[1] += int(c.get("pass") or 0) + int(c.get("fail") or 0) + int(c.get("error") or 0)
+    return round(sum(_wilson_lower(p, n) for p, n in totals.values()), 6)
+
+
 class Worker:
+    # 処理中のテーマのループの設定（run_theme で作る themes.LoopConfig。ワーカーの設定に、対象インスタンスの
+    # [skill_lab] max_iterations・max_hours と、テーマの上級者向け設定を重ねたもの）。テーマの外では None。
+    _loop_cfg = None
+    # 実行中の反復（評価1回と、続く AI 修正）の期限（time.monotonic()）。反復の外では None。
+    _step_deadline: float | None = None
+
+    @property
+    def _cfg(self):
+        """処理中のテーマのループの設定（run_theme の外ではワーカーの設定）。"""
+        return self._loop_cfg if self._loop_cfg is not None else self.config
+
     def __init__(self, lab: str, base_env: dict[str, str]):
         from src.config import load_config, resolve_instances_root
 
@@ -278,19 +316,23 @@ class Worker:
             setting = None
         return output_language_code(setting, requested)
 
+    def _theme_cfg(self, instance: str, directory: Path):
+        """テーマの設定（ワーカーの設定 + 対象インスタンスのループの上限 + テーマの上級者向け設定）。"""
+        return themes.loop_config(self.config, self._target_config(instance), themes.read(directory))
+
     def _run_task(self, instance: str, directory: Path, task: dict) -> None:
         owner = task.get("by")
         with (
             usage_sink(lambda usage: self._record_usage(owner, usage)),
             output_language(self._output_lang(instance, task.get("lang"))),
-            evaluation.limits(evaluation.ExcerptLimits.from_config(self.config)),
+            evaluation.limits(evaluation.ExcerptLimits.from_config(self._theme_cfg(instance, directory))),
         ):
             self._run_task_inner(instance, directory, task)
 
     def _run_task_inner(self, instance: str, directory: Path, task: dict) -> None:
         self._set_task(directory, task["id"], status="running", started_at=themes.now_iso())
         params = task.get("params") or {}
-        cfg = self.config
+        cfg = self._theme_cfg(instance, directory)
         try:
             if task["type"] != "trial":
                 target_cfg = self._target_config(instance)
@@ -347,7 +389,10 @@ class Worker:
         self._record_eval_usage(task.get("by"), run["results"])
         spec = (directory / themes.SPEC_FILENAME).read_text(encoding="utf-8")
         verdicts = judge.judge_results(
-            self._llm_config(instance), spec=spec, results=run["results"], excerpt_chars=self.config.skill_lab_transcript_excerpt_chars
+            self._llm_config(instance),
+            spec=spec,
+            results=run["results"],
+            excerpt_chars=self._theme_cfg(instance, directory).skill_lab_transcript_excerpt_chars,
         )
         r = run["results"][0] if run["results"] else {}
         return {
@@ -386,18 +431,23 @@ class Worker:
         return bool(loop.get("stop_requested"))
 
     def run_theme(self, instance: str, directory: Path) -> None:
-        cfg = self.config
         data = themes.read(directory)
         loop = data.get("loop") or {}
         mode = loop.get("mode", "loop")
-        if not loop.get("deadline"):
+        # active: ワーカーの停止で中断したループの続き（反復の回数を数え直さない）。
+        # deadline は以前の版がループ全体の期限として書いていた印（同じく続きを表す）。
+        if not loop.get("active") and not loop.get("deadline"):
             loop = {
                 **loop,
                 "mode": mode,
                 "started_at": themes.now_iso(),
-                "deadline": (datetime.now().astimezone() + timedelta(hours=cfg.skill_lab_max_hours)).isoformat(timespec="seconds"),
+                "active": True,
                 "iterations_used": 0,
             }
+        loop.pop("deadline", None)
+        self._step_deadline = None
+        # ループの上限はスキルが属するインスタンスの設定、ほかはワーカーの設定。どちらもテーマの上級者向け設定で上書きできる。
+        self._loop_cfg = themes.loop_config(self.config, self._target_config(instance), data)
 
         picked = {"ok": False, "stopped": False}
 
@@ -426,7 +476,7 @@ class Worker:
         with (
             usage_sink(lambda usage: self._record_usage(owner, usage)),
             output_language(lang),
-            evaluation.limits(evaluation.ExcerptLimits.from_config(self.config)),
+            evaluation.limits(evaluation.ExcerptLimits.from_config(self._cfg)),
         ):
             self._run_theme_body(instance, directory, mode)
 
@@ -441,6 +491,9 @@ class Worker:
         except (evaluation.EvaluationStopped, _Stop):
             if self.shutdown:
                 self._finish(directory, themes.STATUS_QUEUED, "interrupted because the lab stopped (resumes where it left off when restarted)")
+            elif self._step_timed_out() and not self._stop_requested(directory):
+                # 反復1回の制限時間を過ぎて評価を打ち切った（その回は記録しない）
+                self._finish(directory, themes.STATUS_EXHAUSTED, self._time_limit_message())
             else:
                 self._finish(directory, themes.STATUS_STOPPED, "interrupted by a stop request")
         except Exception as e:  # noqa: BLE001 - テーマ単位で失敗させ、ワーカーは続ける
@@ -457,7 +510,8 @@ class Worker:
             if d.get("loop"):
                 d["loop"]["stop_requested"] = False
                 if status != themes.STATUS_QUEUED:
-                    d["loop"]["deadline"] = None
+                    d["loop"]["active"] = False
+                    d["loop"].pop("deadline", None)
                 d["loop"]["message"] = detail
                 d["loop"]["progress"] = None
                 if restored:
@@ -472,11 +526,11 @@ class Worker:
         data = themes.read(directory)
         loop = data.get("loop") or {}
         message = None
-        if loop.get("iterations_used", 0) >= self.config.skill_lab_max_iterations:
-            message = f"Reached the iteration limit ({self.config.skill_lab_max_iterations})"
-        deadline = loop.get("deadline")
-        if not message and deadline and datetime.now().astimezone() > datetime.fromisoformat(deadline):
-            message = f"Reached the time limit ({self.config.skill_lab_max_hours} hours)"
+        if loop.get("iterations_used", 0) >= self._cfg.skill_lab_max_iterations:
+            message = f"Reached the iteration limit ({self._cfg.skill_lab_max_iterations})"
+        if not message and self._step_timed_out():
+            # 判定・AI 修正は途中で打ち切れないため、終わった後のここで止める
+            message = self._time_limit_message()
         if message:
             # 最後の評価で落ちたケース（トライアウトなら何回中何回合格したか）を添える。ほとんど合格しているなら
             # 答えがゆらいでいる（トライアウトの回数が厳しすぎる・ケースの条件が細かすぎる）見込みが高い。
@@ -485,6 +539,23 @@ class Worker:
             if failed:
                 message += f". Failed cases in the last evaluation ({last.get('phase')}): {failed}"
         return message
+
+    def _start_step_clock(self) -> None:
+        """反復1回（評価1回と、失敗したときに続く AI 修正）の制限時間（対象インスタンスの [skill_lab] max_hours）を測り始める。
+
+        以前はループ全体の期限だったが、反復の数で使える時間が変わり見積もれないため、1回ごとにした（2026-11-14 ユーザー指摘）。
+        """
+        self._step_deadline = time.monotonic() + self._cfg.skill_lab_max_hours * 3600
+
+    def _step_timed_out(self) -> bool:
+        return self._step_deadline is not None and time.monotonic() > self._step_deadline
+
+    def _time_limit_message(self) -> str:
+        return f"Reached the time limit of one iteration ({self._cfg.skill_lab_max_hours} hours)"
+
+    def _should_stop_step(self, directory: Path) -> bool:
+        """評価を打ち切るか（人の停止・ワーカーの停止・反復1回の制限時間）。"""
+        return self._stop_requested(directory) or self._step_timed_out()
 
     def _evaluate(self, instance: str, directory: Path, repeat: int, phase: str) -> dict:
         """評価して AI judge まで行い、反復として記録する。
@@ -497,6 +568,7 @@ class Worker:
         run_dir = directory / themes.RUNS_DIRNAME / f"{n:03d}"
         # 評価した内容（研究対象・ケース・設定パッチ）。AI 修正が同じ内容に戻したかの判定に使う（_stop_if_stalled）。
         state_sha = themes.state_sha256(directory)
+        self._start_step_clock()
         self._progress(directory, phase, n=n, repeat_count=repeat)
         run = evaluation.run(
             directory,
@@ -505,8 +577,8 @@ class Worker:
             repeat=repeat,
             results_root=run_dir,
             base_env=self.base_env,
-            should_stop=lambda: self._stop_requested(directory),
-            stop_on_fail=phase == "tryout" and bool(getattr(self.config, "skill_lab_tryout_stop_on_first_failure", True)),
+            should_stop=lambda: self._should_stop_step(directory),
+            stop_on_fail=phase == "tryout" and bool(getattr(self._cfg, "skill_lab_tryout_stop_on_first_failure", True)),
             on_progress=self._case_progress(directory, phase, n=n, repeat_count=repeat),
         )
         self._record_eval_usage(self._usage_owner(data), run["results"])
@@ -515,7 +587,7 @@ class Worker:
             self._llm_config(instance),
             spec=spec,
             results=run["results"],
-            excerpt_chars=self.config.skill_lab_transcript_excerpt_chars,
+            excerpt_chars=self._cfg.skill_lab_transcript_excerpt_chars,
             on_progress=self._judge_progress(directory, "judging", n=n, phase=phase),
             max_workers=self._judge_workers(),
         )
@@ -539,7 +611,11 @@ class Worker:
             iteration["stopped_early"] = True
         score = _score(iteration)
         best = ((data.get("loop") or {}).get("best") or {}) if data.get("loop") else None
-        new_best = best is not None and (not best or tuple(best.get("score") or (0, 0)) < score)
+        # 同じ内容の評価を合算し、回数の少ない結果を割り引いて比べる（_state_confidence）
+        evaluated = [*self._loop_iterations(data), iteration]
+        confidence = _state_confidence(evaluated, state_sha)
+        best_confidence = _state_confidence(evaluated, best["state_sha"]) if best and best.get("state_sha") else -1.0
+        new_best = best is not None and (not best or confidence > best_confidence or best.get("state_sha") == state_sha)
         if new_best:
             themes.snapshot_targets(directory, directory / themes.RUNS_DIRNAME / BEST_DIRNAME)
 
@@ -548,7 +624,7 @@ class Worker:
             if d.get("loop") is not None:
                 d["loop"]["iterations_used"] = d["loop"].get("iterations_used", 0) + 1
                 if new_best:
-                    d["loop"]["best"] = {"n": n, "phase": phase, "score": list(score), "state_sha": state_sha}
+                    d["loop"]["best"] = {"n": n, "phase": phase, "score": list(score), "state_sha": state_sha, "confidence": confidence}
             if phase == "tryout" and passed:
                 d["tryout"] = {
                     **run["tryout"],
@@ -571,7 +647,7 @@ class Worker:
         直す前の内容を runs/<反復>/before_fix/ に控える（次の評価で合格していたケースが落ちたら戻す。_revert_if_regressed）。
         提案を適用できなかったとき（触るファイルが多すぎる・置き換え元が見つからない等）は、評価し直さずに1回だけ出し直させる。
         """
-        cfg = self.config
+        cfg = self._cfg
         data = themes.read(directory)
         n = outcome["iteration"]["n"]
         run_dir = directory / themes.RUNS_DIRNAME / f"{n:03d}"
@@ -586,17 +662,30 @@ class Worker:
         try:
             previous_errors: list[str] | None = None
             for attempt in (1, 2):
-                proposal = fixer.propose(
-                    self._llm_config(instance),
-                    directory,
-                    failures=failures,
-                    history=history,
-                    max_file_chars=cfg.skill_lab_fixer_max_file_chars,
-                    previous_errors=previous_errors,
-                )
+                proposal = None
+                if attempt == 1 and getattr(cfg, "skill_lab_fixer_agent", False):
+                    try:
+                        proposal = self._propose_with_agent(instance, directory, outcome, run_dir, history, max_files)
+                        fix_extra = {"agent": True, "agent_steps": proposal["steps"], "agent_trials": proposal["trials"]}
+                    except (evaluation.EvaluationStopped, _Stop):
+                        raise
+                    except Exception as e:  # noqa: BLE001 - Agent の失敗でループごと止めない
+                        # Agent が結論を出せなかった（手数切れ・ツールを呼ばなくなった・LLM の接続エラー等）: 1回呼び出しの修正で続ける
+                        logger.warning("The fixing agent failed (%s); falling back to a single-call fix.", e)
+                        previous_errors = [f"(the investigating agent could not conclude: {e})"]
+                if proposal is None:
+                    proposal = fixer.propose(
+                        self._llm_config(instance),
+                        directory,
+                        failures=failures,
+                        history=history,
+                        max_file_chars=cfg.skill_lab_fixer_max_file_chars,
+                        previous_errors=previous_errors,
+                    )
+                    fix_extra = {}
                 if proposal["blockers"]:
                     # 原因が研究対象の外（ケース・仕様・環境）にあると、いくら直しても合格しない。研究対象は書き換えずに止める。
-                    fix = {"analysis": proposal["analysis"], "applied": [], "errors": [], "edits": 0, "blockers": proposal["blockers"]}
+                    fix = {"analysis": proposal["analysis"], "applied": [], "errors": [], "edits": 0, "blockers": proposal["blockers"], **fix_extra}
                     break
                 limit_error = fixer.too_many_files(proposal["edits"], max_files)
                 if limit_error:
@@ -611,7 +700,7 @@ class Worker:
                         known_tools=list(sources.subagent_tool_names()),
                         temp_root=temp_dirs.config_root(self._target_config(instance)),
                     )
-                fix = {"analysis": proposal["analysis"], "applied": applied, "errors": errors, "edits": len(proposal["edits"])}
+                fix = {"analysis": proposal["analysis"], "applied": applied, "errors": errors, "edits": len(proposal["edits"]), **fix_extra}
                 if applied:
                     fix["edit_summary"] = fixer.edit_summary(proposal["edits"])
                 if applied or attempt == 2:
@@ -637,6 +726,78 @@ class Worker:
 
         themes.update(directory, _apply)
         return fix.get("blockers") or []
+
+    def _propose_with_agent(self, instance: str, directory: Path, outcome: dict, run_dir: Path, history: str, max_files: int) -> dict:
+        """AI 修正を Agent で行う（admin/skill_lab/fixer_agent.py）。調べた手順は runs/<反復>/fixer_agent.json に残す。"""
+        from . import fixer_agent
+
+        cfg = self._cfg
+        target_cfg = self._target_config(instance)
+        llm_cfg = self._llm_config(instance, target_cfg)
+        spec = (directory / themes.SPEC_FILENAME).read_text(encoding="utf-8")
+        data = themes.read(directory)
+        n = outcome["iteration"]["n"]
+
+        def evaluate(*, case_ids, repeat, results_root, assets_base=None, config_patch_file=None, cases_dir=None):
+            run = evaluation.run(
+                directory,
+                instance=instance,
+                lab=self.lab,
+                repeat=repeat,
+                results_root=results_root,
+                case_ids=case_ids,
+                base_env=self.base_env,
+                should_stop=lambda: self._should_stop_step(directory),
+                assets_base=assets_base,
+                config_patch_file=config_patch_file,
+                cases_dir=cases_dir,
+            )
+            self._record_eval_usage(self._usage_owner(data), run["results"])
+            verdicts = judge.judge_results(
+                llm_cfg, spec=spec, results=run["results"], excerpt_chars=cfg.skill_lab_transcript_excerpt_chars, max_workers=self._judge_workers()
+            )
+            return run["results"], verdicts
+
+        def on_step(step: int, tool: str) -> None:
+            self._progress(directory, "fixing", n=n, agent_step=step, agent_tool=tool)
+
+        # 今回の評価（取り消した直しの記録の代わりに、直す前の状態の評価を使うこともある）を必ず含める
+        iterations = self._loop_iterations(data)
+        if not any(it.get("n") == n for it in iterations):
+            iterations.append(outcome["iteration"])
+        failed = fixer.failed_cases_text(outcome["iteration"])
+        task = (
+            f"# Iterations so far in this loop (the fixes already tried, and the cases that still failed after them)\n{history}\n\n"
+            f"# This evaluation\nIteration {outcome['iteration']['n']} ({outcome['iteration'].get('phase')}) failed: {failed}.\n"
+            "Investigate with the tools (start with run_overview of this iteration), find the root cause, test your fix, "
+            "then conclude with submit_fix or report_blockers."
+        )
+        proposal = fixer_agent.propose(
+            llm_cfg,
+            directory,
+            system_knowledge=fixer.knowledge_text(),
+            task=task,
+            work_dir=run_dir / fixer_agent.AGENT_DIRNAME,
+            target_cfg=target_cfg,
+            iterations=iterations,
+            runner=fixer_agent.Runner(evaluate=evaluate, should_stop=lambda: self._should_stop_step(directory), on_step=on_step),
+            limits=fixer_agent.AgentLimits(
+                max_steps=int(getattr(cfg, "skill_lab_fixer_agent_max_steps", 40)),
+                max_trials=int(getattr(cfg, "skill_lab_fixer_agent_max_trials", 3)),
+                trial_repeats=int(getattr(cfg, "skill_lab_fixer_agent_trial_repeats", 3)),
+                read_chars=int(getattr(cfg, "skill_lab_fixer_agent_read_chars", 12000)),
+                context_chars=int(getattr(cfg, "skill_lab_fixer_agent_context_chars", 150000)),
+            ),
+            known_tools=list(sources.subagent_tool_names()),
+            temp_root=temp_dirs.config_root(target_cfg),
+            max_files=max_files,
+        )
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "fixer_agent.json").write_text(
+            json.dumps({"trials": proposal["trials"], "steps": proposal["steps"], "log": proposal["log"]}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return proposal
 
     def _progress(self, directory: Path, step: str, **fields) -> None:
         """いまどの段階か（loop.progress）を記録する。画面の「実行の記録」と見出しに出す。
@@ -725,7 +886,7 @@ class Worker:
     def _stop_for_reverts(self, directory: Path) -> bool:
         """直しの取り消しが続いたら止める（ケースどうしがぶつかる・答えがゆらいでいる見込みが高い）。"""
         data = themes.read(directory)
-        limit = int(getattr(self.config, "skill_lab_fixer_max_reverts", 3))
+        limit = int(getattr(self._cfg, "skill_lab_fixer_max_reverts", 3))
         reverts = (data.get("loop") or {}).get("reverts", 0)
         if limit <= 0 or reverts < limit:
             return False
@@ -747,7 +908,7 @@ class Worker:
         最後の直しは評価されていないことが多く、それまでの直しで悪くなっていることもあるため、上限到達・行き詰まり・
         人の見直しが必要で止まったときは、評価で確かめた一番よい内容を残す（一度も合格が無ければ戻さない）。
         """
-        if not getattr(self.config, "skill_lab_restore_best_state", True):
+        if not getattr(self._cfg, "skill_lab_restore_best_state", True):
             return None
         data = themes.read(directory)
         best = (data.get("loop") or {}).get("best") or {}
@@ -771,7 +932,7 @@ class Worker:
         取り込んだ資産（正式スキル・ドラフトの複製）が無い・ケースが前回の評価から変わっていないときは評価しない。
         新しく作った資産は改良前には無いものとして評価する（設定パッチも重ねない）。
         """
-        if not getattr(self.config, "skill_lab_evaluate_baseline", True):
+        if not getattr(self._cfg, "skill_lab_evaluate_baseline", True):
             return
         base = directory / themes.BASELINE_DIRNAME / themes.ASSETS_DIRNAME
         assets = themes.assets_in(base)
@@ -781,6 +942,7 @@ class Worker:
         cases_sha = themes.content_hashes(directory)["cases"]
         if (data.get("baseline_eval") or {}).get("cases_sha") == cases_sha:
             return
+        self._start_step_clock()
         self._progress(directory, "baseline")
         run = evaluation.run(
             directory,
@@ -789,7 +951,7 @@ class Worker:
             repeat=1,
             results_root=directory / themes.RUNS_DIRNAME / "baseline",
             base_env=self.base_env,
-            should_stop=lambda: self._stop_requested(directory),
+            should_stop=lambda: self._should_stop_step(directory),
             assets_base=base,
             config_patch=False,
             on_progress=self._case_progress(directory, "baseline"),
@@ -799,7 +961,7 @@ class Worker:
             self._llm_config(instance),
             spec=(directory / themes.SPEC_FILENAME).read_text(encoding="utf-8"),
             results=run["results"],
-            excerpt_chars=self.config.skill_lab_transcript_excerpt_chars,
+            excerpt_chars=self._cfg.skill_lab_transcript_excerpt_chars,
             on_progress=self._judge_progress(directory, "baseline_judging"),
             max_workers=self._judge_workers(),
         )
@@ -848,7 +1010,7 @@ class Worker:
             "baseline": {k: v for k, v in (data.get("baseline_eval") or {}).items() if k in ("cases", "score", "at")} or None,
             "message": loop.get("message"),
         }
-        if getattr(self.config, "skill_lab_report_ai_summary", True) and rows:
+        if getattr(self._cfg, "skill_lab_report_ai_summary", True) and rows:
             self._progress(directory, "report")
             try:
                 report["summary"] = ask_text(

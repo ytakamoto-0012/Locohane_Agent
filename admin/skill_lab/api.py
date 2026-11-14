@@ -43,6 +43,8 @@ class UpdateThemeBody(BaseModel):
     # トライアウトの回数（このテーマだけ）。null を送ると設定を外して既定（[skill_lab] tryout_repeats）に戻す。
     # 送らなければ変えない（model_fields_set で見分ける）。
     tryout_repeats: int | None = None
+    # ループの上級者向け設定（このテーマだけ。themes.LOOP_SETTINGS のキー）。送ると丸ごと置き換える（無いキー・null は既定）。
+    loop_settings: dict[str, Any] | None = None
 
 
 class AddAssetBody(BaseModel):
@@ -178,6 +180,24 @@ def build_router(
             except Exception as exc:  # noqa: BLE001
                 row["endpoint_error"] = str(exc)
             lab.update(row)
+
+    def _loop_setting_specs(name: str, data: dict) -> list[dict]:
+        """上級者向け設定の項目（キー・種類・最小値・既定値の出どころ・空欄のときの値）。"""
+        lab = data.get("lab")
+        if not lab:
+            labs = _labs()
+            lab = labs[0]["name"] if len(labs) == 1 else None
+        lab_cfg = None
+        if lab:
+            try:
+                lab_cfg = promotion.instance_config(instances_root, lab)
+            except Exception:  # noqa: BLE001 - ワーカーの設定を読めなければ既定値は対象インスタンスの値で見せる
+                lab_cfg = None
+        defaults = themes.loop_setting_defaults(_cfg(name), lab_cfg)
+        return [
+            {"key": key, "kind": kind, "min": minimum, "source": source, "default": defaults.get(key)}
+            for key, (kind, minimum, source) in themes.LOOP_SETTINGS.items()
+        ]
 
     def _check_lab(lab: str | None) -> None:
         if lab and lab not in {x["name"] for x in _labs()}:
@@ -331,6 +351,8 @@ def build_router(
             # トライアウトの回数の既定（対象インスタンスの [skill_lab] tryout_repeats）と、このテーマで使う回数
             "tryout_repeats_default": _cfg(name).skill_lab_tryout_repeats,
             "tryout_repeats_effective": themes.tryout_repeats(data, _cfg(name)),
+            # 上級者向け設定の項目と、空欄のときに使う値（ループの上限は対象インスタンス、ほかは担当ワーカーの設定）
+            "loop_setting_specs": _loop_setting_specs(name, data),
             "start_missing": _start_missing(name, directory),
             "case_reference_problems": _reference_problems(name, directory),
         }
@@ -351,6 +373,15 @@ def build_router(
             if themes.read(directory).get("status") in themes.ACTIVE_STATUSES and body.tryout_repeats != themes.read(directory).get("tryout_repeats"):
                 # 実行中に変えると、ループの途中で合格の基準が変わる。
                 raise HTTPException(status_code=409, detail=_t("ループ・トライアウトの実行中・開始待ちの間はトライアウトの回数を変えられません。先に停止してください。"))
+        new_loop_settings = None
+        if body.loop_settings is not None:
+            new_loop_settings, errors = themes.validate_loop_settings(body.loop_settings)
+            if errors:
+                raise HTTPException(status_code=400, detail=_t("上級者向け設定の値が正しくありません: {0}", " / ".join(errors)))
+            current = themes.read(directory)
+            if current.get("status") in themes.ACTIVE_STATUSES and new_loop_settings != themes.loop_settings(current):
+                # ワーカーはループの開始時に読むため、途中で変えても効かない（効いたように見えて紛らわしい）。
+                raise HTTPException(status_code=409, detail=_t("ループ・トライアウトの実行中・開始待ちの間は上級者向け設定を変えられません。先に停止してください。"))
 
         def _apply(d: dict) -> None:
             if body.title is not None and body.title.strip():
@@ -362,7 +393,15 @@ def build_router(
                     d.pop("tryout_repeats", None)
                 else:
                     d["tryout_repeats"] = body.tryout_repeats
-            themes.add_history(d, user, "update", f"title={d['title']} lab={d.get('lab')} tryout_repeats={d.get('tryout_repeats') or 'default'}")
+            if new_loop_settings is not None:
+                if new_loop_settings:
+                    d["loop_settings"] = new_loop_settings
+                else:
+                    d.pop("loop_settings", None)
+            settings = ",".join(f"{k}={v}" for k, v in (d.get("loop_settings") or {}).items()) or "default"
+            themes.add_history(
+                d, user, "update", f"title={d['title']} lab={d.get('lab')} tryout_repeats={d.get('tryout_repeats') or 'default'} loop_settings={settings}"
+            )
 
         themes.update(directory, _apply)
         _audit(request, user, name, "skill_lab_theme_update", theme=theme_id)
@@ -669,7 +708,8 @@ def build_router(
             if d.get("status") == themes.STATUS_QUEUED or (d.get("status") == themes.STATUS_RUNNING and not worker_alive):
                 d["status"] = themes.STATUS_STOPPED
                 if d.get("loop"):
-                    d["loop"].update({"deadline": None, "stop_requested": False, "message": "Stopped"})
+                    d["loop"].update({"active": False, "stop_requested": False, "message": "Stopped"})
+                    d["loop"].pop("deadline", None)
             elif d.get("status") == themes.STATUS_RUNNING:
                 d["loop"] = {**(d.get("loop") or {}), "stop_requested": True}
             else:
@@ -678,6 +718,43 @@ def build_router(
 
         themes.update(directory, _apply)
         _audit(request, user, name, "skill_lab_stop", theme=theme_id)
+        return {"success": True}
+
+    @router.post("/api/instances/{name}/skill-lab/themes/{theme_id}/blockers/{index}/apply")
+    def apply_blocker_instruction(
+        name: str, theme_id: str, index: int, request: Request, user: str = Depends(require_login), _c=Depends(require_csrf)
+    ):
+        """AI 修正が「ケースの指示が原因」と報告したときの、直した指示の案（new_instruction）を人の承認でケースに書き込む。
+
+        ケースの指示は採点の前提なので AI は自分では変えない（試験に通るだけの直し方を防ぐ）。AI が試しの評価で確かめた案を、
+        人がボタン1つで適用し、そのままループを再開できるようにする（2026-11-15 ユーザー指摘「自立してスキルを完成させる」）。
+        """
+        directory = _theme(name, theme_id)
+        data = _guard_editable(directory)
+        blockers = (data.get("loop") or {}).get("blockers") or []
+        if data.get("status") != themes.STATUS_BLOCKED or not 0 <= index < len(blockers):
+            raise HTTPException(status_code=409, detail=_t("適用できる提案がありません。画面を更新してください。"))
+        blocker = blockers[index]
+        instruction = blocker.get("new_instruction")
+        case_id = blocker.get("case_id")
+        if not instruction or not case_id:
+            raise HTTPException(status_code=400, detail=_t("この指摘には、直した指示の案がありません。"))
+        rel = f"{themes.CASES_DIRNAME}/{case_id}.yaml"
+        try:
+            case = yaml.safe_load(themes.read_text(directory, rel)) or {}
+            turns = case.get("turns") or []
+            case["turns"] = [instruction, *turns[1:]] if isinstance(turns, list) and turns else [instruction]
+            themes.write_text(directory, rel, yaml.safe_dump(case, allow_unicode=True, sort_keys=False), actor=user)
+        except (themes.ThemeError, yaml.YAMLError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        def _apply(d: dict) -> None:
+            for b in ((d.get("loop") or {}).get("blockers") or [])[index : index + 1]:
+                b["applied"] = True
+            themes.add_history(d, user, "apply_case_instruction", f"{case_id}: {instruction}"[:500])
+
+        themes.update(directory, _apply)
+        _audit(request, user, name, "skill_lab_apply_case_instruction", theme=theme_id, case=case_id)
         return {"success": True}
 
     @router.post("/api/instances/{name}/skill-lab/themes/{theme_id}/cancel")
@@ -741,7 +818,8 @@ def build_router(
                 d.setdefault("previous_returns", []).append(d.pop("returned"))
             d["status"] = themes.STATUS_DRAFT
             if d.get("loop"):
-                d["loop"].update({"deadline": None, "stop_requested": False, "message": None})
+                d["loop"].update({"active": False, "stop_requested": False, "message": None})
+                d["loop"].pop("deadline", None)
             themes.add_history(d, user, "reopen", changed["from"])
 
         themes.update(directory, _apply)

@@ -306,11 +306,13 @@ function renderThemeHeader(state, header, container) {
         el(
           "ul",
           {},
-          loop.blockers.map((p) =>
+          loop.blockers.map((p, i) =>
             el("li", {}, [
               el("strong", { text: `[${kindLabel[p.kind] || kindLabel.case}${p.case_id ? " " + p.case_id : ""}] ` }),
               p.problem,
               p.suggestion ? el("div", { class: "hint", text: _t("直し方の提案: {0}", p.suggestion) }) : null,
+              // AI が試しの評価で確かめた、直した指示の案（admin/skill_lab/api.py の apply_blocker_instruction）
+              p.new_instruction ? blockerInstruction(state, p, i) : null,
             ]),
           ),
         ),
@@ -405,8 +407,104 @@ async function deleteTheme(name, theme, onDone) {
   if (await labAction(() => api(themePath(name, theme.id), { method: "DELETE" }))) onDone();
 }
 
-// 「テーマの設定」タブの先頭の節: テーマ名・担当のスキル調整ワーカー・トライアウトの回数
-// （admin/skill_lab/api.py の update_theme）。ループの実行中・開始待ちは担当と回数を変えられない。
+// 上級者向け設定（テーマのループ設定。admin/skill_lab/themes.py の LOOP_SETTINGS）の項目名
+const LOOP_SETTING_LABELS = {
+  max_iterations: () => _t("ループの最大反復回数（1反復 = 評価1回 + 失敗時の修正1回）"),
+  max_hours: () => _t("反復1回の制限時間（時間。評価の途中で超えたら打ち切る）"),
+  tryout_stop_on_first_failure: () => _t("トライアウトを最初の不合格で打ち切る"),
+  evaluate_baseline: () => _t("最初に改良前の版を評価する"),
+  restore_best_state: () => _t("止まったとき一番よかった内容に戻す"),
+  report_ai_summary: () => _t("終わったとき AI に総括を書かせる"),
+  fixer_agent: () => _t("AI 修正を Agent で行う（記録を調べ、修正案を試してから直す）"),
+  fixer_agent_max_steps: () => _t("Agent の手数の上限（LLM を呼ぶ回数）"),
+  fixer_agent_max_trials: () => _t("Agent が修正案を試しに評価できる回数（1回の修正あたり。0 で試さない）"),
+  fixer_agent_trial_repeats: () => _t("試しの評価で各ケースを実行する回数"),
+  fixer_agent_read_chars: () => _t("Agent がファイル・記録を1回で読める最大文字数"),
+  fixer_agent_context_chars: () => _t("Agent の会話がこの文字数を超えたら古い結果から短くする"),
+  fixer_max_files_per_fix: () => _t("1回の AI 修正で変えてよいファイルの数（0 で制限なし）"),
+  fixer_max_reverts: () => _t("合格していたケースを壊した直しの取り消しが何回に達したら止めるか（0 で止めない）"),
+  fixer_failed_runs_per_case: () => _t("修正を頼むときに見せる、ケースごとの落ちた回の数"),
+  fixer_history_iterations: () => _t("修正を頼むときに見せる、これまでの反復の数"),
+  fixer_max_file_chars: () => _t("AI に渡す資産ファイル1つあたりの最大文字数"),
+  transcript_excerpt_chars: () => _t("AI に渡す実行の記録の抜粋の最大文字数（1回分）"),
+  excerpt_user_chars: () => _t("抜粋: 利用者の指示の最大文字数"),
+  excerpt_thinking_chars: () => _t("抜粋: アシスタントの思考の最大文字数（0 で渡さない）"),
+  excerpt_ai_text_chars: () => _t("抜粋: アシスタントの最終的な本文の最大文字数"),
+  excerpt_ai_note_chars: () => _t("抜粋: ツールを呼ぶときの本文の最大文字数"),
+  excerpt_tool_args_chars: () => _t("抜粋: ツールの引数の最大文字数"),
+  excerpt_tool_result_chars: () => _t("抜粋: ツールの結果の最大文字数"),
+  excerpt_subagent_args_chars: () => _t("抜粋: サブエージェントの中の引数の最大文字数"),
+  excerpt_subagent_result_chars: () => _t("抜粋: サブエージェントの中の結果の最大文字数"),
+  judge_spec_chars: () => _t("判定に渡す仕様の最大文字数"),
+  judge_answer_chars: () => _t("判定に渡す最終回答の最大文字数"),
+  judge_checks_chars: () => _t("判定に渡す落ちた照合の最大文字数"),
+  judge_criteria_chars: () => _t("判定に渡すケースの judge の最大文字数"),
+};
+
+// 上級者向け設定の入力欄を作る。read() で画面の値（空欄・既定は入れない）を返す。
+function loopSettingsEditor(d, disabled) {
+  const current = d.loop_settings || {};
+  const inputs = [];
+  const rows = (d.loop_setting_specs || []).map((spec) => {
+    const value = current[spec.key];
+    const source = spec.source === "instance" ? `[skill_lab] ${spec.key}` : `[skill_lab_worker] ${spec.key}`;
+    let input;
+    if (spec.kind === "bool") {
+      const def = spec.default === true ? _t("はい") : spec.default === false ? _t("いいえ") : "?";
+      input = el("select", {}, [
+        el("option", { value: "", text: _t("既定（{0}）", def) }),
+        el("option", { value: "true", text: _t("はい") }),
+        el("option", { value: "false", text: _t("いいえ") }),
+      ]);
+      input.value = value === true ? "true" : value === false ? "false" : "";
+    } else {
+      input = el("input", {
+        type: "number",
+        min: spec.min,
+        step: spec.kind === "int" ? 1 : "any",
+        class: "narrow",
+        placeholder: _t("既定 {0}", spec.default ?? "?"),
+      });
+      input.value = value ?? "";
+    }
+    input.disabled = disabled;
+    inputs.push({ spec, input });
+    const label = LOOP_SETTING_LABELS[spec.key] ? LOOP_SETTING_LABELS[spec.key]() : spec.key;
+    return el("label", { title: source }, [`${label}（${source}）`, input]);
+  });
+  const details = el("details", { class: "theme-advanced" }, [
+    el("summary", { text: _t("上級者向け設定（このテーマだけ。空欄なら既定）") }),
+    el("p", {
+      class: "hint",
+      text: _t("ループの上限の既定は対象インスタンスの [skill_lab]、ほかは担当の スキル調整ワーカーの [skill_lab_worker] の値です。ループの開始時に読むため、実行中は変えられません。"),
+    }),
+    ...rows,
+  ]);
+  if (Object.keys(current).length) details.open = true;
+  const read = () => {
+    const result = {};
+    const errors = [];
+    for (const { spec, input } of inputs) {
+      const raw = input.value.trim();
+      if (!raw) continue;
+      if (spec.kind === "bool") {
+        result[spec.key] = raw === "true";
+        continue;
+      }
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < spec.min || (spec.kind === "int" && !Number.isInteger(n))) {
+        errors.push(LOOP_SETTING_LABELS[spec.key] ? LOOP_SETTING_LABELS[spec.key]() : spec.key);
+        continue;
+      }
+      result[spec.key] = n;
+    }
+    return { values: result, errors };
+  };
+  return { details, read };
+}
+
+// 「テーマの設定」タブの先頭の節: テーマ名・担当のスキル調整ワーカー・トライアウトの回数・上級者向け設定
+// （admin/skill_lab/api.py の update_theme）。ループの実行中・開始待ちは担当・回数・上級者向け設定を変えられない。
 function renderThemeSettings(state, box) {
   const d = state.data;
   const closed = LAB_CLOSED.includes(d.status);
@@ -419,6 +517,7 @@ function renderThemeSettings(state, box) {
   const repeats = el("input", { type: "number", min: 1, max: 1000, class: "narrow", placeholder: _t("既定 {0}", d.tryout_repeats_default) });
   repeats.value = d.tryout_repeats || "";
   repeats.disabled = closed || active;
+  const advanced = loopSettingsEditor(d, closed || active);
   const err = el("div", { class: "error" });
   const save = el("button", { class: "primary", type: "button", text: _t("保存"), disabled: closed ? "disabled" : null });
   save.addEventListener("click", async () => {
@@ -428,8 +527,14 @@ function renderThemeSettings(state, box) {
       err.textContent = _t("トライアウトの回数は 1〜1000 の整数にしてください（空欄なら既定の回数）。");
       return;
     }
+    const loopSettings = advanced.read();
+    if (loopSettings.errors.length) {
+      err.textContent = _t("上級者向け設定の値が正しくありません: {0}", loopSettings.errors.join(" / "));
+      return;
+    }
     const body = { title: title.value };
-    if (!active) Object.assign(body, { lab: lab.value, tryout_repeats: n }); // 実行中は担当・回数を送らない（サーバーも断る）
+    // 実行中は担当・回数・上級者向け設定を送らない（サーバーも断る）
+    if (!active) Object.assign(body, { lab: lab.value, tryout_repeats: n, loop_settings: loopSettings.values });
     const res = await labAction(() => api(themePath(state.name, state.id), { method: "PUT", body }), err);
     if (!res) return;
     await state.reload();
@@ -444,12 +549,35 @@ function renderThemeSettings(state, box) {
       _t("トライアウトの回数（各ケースをこの回数ずつ実行し、全回合格で合格。空欄なら既定の {0} 回）", d.tryout_repeats_default),
       repeats,
     ]),
-    active ? el("p", { class: "hint", text: _t("ループ・トライアウトの実行中・開始待ちの間は、担当とトライアウトの回数を変えられません。先に停止してください。") }) : null,
+    advanced.details,
+    active ? el("p", { class: "hint", text: _t("ループ・トライアウトの実行中・開始待ちの間は、担当・トライアウトの回数・上級者向け設定を変えられません。先に停止してください。") }) : null,
     closed ? el("p", { class: "hint", text: _t("このテーマは終わっています。「再開して編集」で戻すと変えられます。") }) : null,
     err,
     el("div", { class: "inline-form" }, [save]),
   );
   return inputsChanged(box);
+}
+
+// AI が提案した「直したケースの指示」を見せ、承認したらケースに書き込んでスキル調整ループを再開する。
+function blockerInstruction(state, p, index) {
+  const box = el("div", { class: "hint" }, [
+    el("div", { text: _t("直した指示の案: {0}", p.new_instruction) }),
+    p.verified ? el("div", { text: _t("AI が試した結果: {0}", p.verified) }) : null,
+  ]);
+  if (p.applied) {
+    box.append(el("div", { text: _t("（ケースに適用済み）") }));
+    return box;
+  }
+  const button = el("button", { type: "button", text: _t("この指示でケースを直して再開") });
+  button.addEventListener("click", async () => {
+    if (!confirm(_t("ケース {0} の利用者の指示を「{1}」に書き換え、スキル調整ループを再開します。よろしいですか？", p.case_id, p.new_instruction))) return;
+    const applied = await labAction(() => api(themePath(state.name, state.id, `/blockers/${index}/apply`), { method: "POST" }));
+    if (!applied) return;
+    await labAction(() => api(themePath(state.name, state.id, "/start"), { method: "POST", body: { mode: "loop" } }));
+    await state.reload();
+  });
+  box.append(el("div", { class: "inline-form" }, [button]));
+  return box;
 }
 
 async function startTheme(state, mode) {
@@ -1298,6 +1426,12 @@ async function openCaseEditor(state, caseId) {
   workDir.value = data.work_dir || "";
   const answers = el("textarea", { rows: 2, placeholder: _t("AI がユーザーに質問したときに返す答え（1行に1つ、順に使う）") });
   answers.value = (data.scripted_text_answers || []).join("\n");
+  // 選択肢の質問（ask_user_choice）で選ぶ答え。AI 修正も評価中の質問で止まったときに書き込む（evals/headless_chainlit.py）
+  const choiceAnswers = el("textarea", {
+    rows: 2,
+    placeholder: _t("選択肢で質問されたときに選ぶ答え（1行に1つ、順に使う。どの選択肢にも合わなければ「その他」として答える）"),
+  });
+  choiceAnswers.value = (data.scripted_choice_answers || []).join("\n");
   const autoApprove = el("input", { type: "checkbox" });
   autoApprove.checked = data.auto_approve !== false;
   const timeout = el("input", { type: "number", min: 60, placeholder: _t("既定900"), class: "narrow" });
@@ -1336,6 +1470,7 @@ async function openCaseEditor(state, caseId) {
         el("label", {}, [_t("使ってはいけない機能（ツール名）"), notCalled]),
         el("p", { class: "hint", text: _t("やり取りが続く場合: 利用者の指示に --- だけの行をはさむと、そこから先が2回目以降の発言になります。") }),
         el("label", {}, [_t("AI が利用者に質問してきたときの返事（1行に1つ、順に使う）"), answers]),
+        el("label", {}, [_t("AI が選択肢で質問してきたときに選ぶ答え（1行に1つ、順に使う。空なら先頭の選択肢）"), choiceAnswers]),
         el("label", { class: "checkbox" }, [autoApprove, _t(" 「実行してよいか」の確認には自動で「はい」と答える")]),
         el("label", {}, [_t("制限時間（秒）"), timeout]),
         el("label", {}, [_t("メモ"), notes]),
@@ -1388,6 +1523,7 @@ async function openCaseEditor(state, caseId) {
       work_dir: workDir.value || null,
       verify_script: verifyScript.value.trim() || null,
       scripted_text_answers: linesOf(answers.value),
+      scripted_choice_answers: linesOf(choiceAnswers.value),
       auto_approve: autoApprove.checked,
       timeout_seconds: timeout.value ? Number(timeout.value) : null,
       notes: notes.value.trim() || null,
@@ -1455,7 +1591,9 @@ function labProgressText(p, d) {
     report: _t("総括を書いています"),
   };
   const since = p.since ? _t("（{0} から）", fmtTime(p.since)) : "";
-  return `${steps[p.step] || p.step}${repeat}${q} ${since}`.trim();
+  // AI 修正の Agent が調べている途中（何手目・使っているツール。admin/skill_lab/fixer_agent.py）
+  const agent = p.step === "fixing" && p.agent_step ? _t("（{0} 手目: {1}）", p.agent_step, p.agent_tool || "") : "";
+  return `${steps[p.step] || p.step}${repeat}${q}${agent} ${since}`.trim();
 }
 
 // 実行中の状況。結果が出るまで何も出ないと動いているか分からないため、段階・何問目か・経過を出す。
