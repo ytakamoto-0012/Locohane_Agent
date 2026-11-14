@@ -147,7 +147,9 @@ def list_skills() -> str:
                 continue
             name = fm.get("name")
             description = fm.get("description")
-            if isinstance(name, str) and isinstance(description, str):
+            # read_skill / run_skill_script はフォルダ名で引くため、name がフォルダ名と違うスキルは載せない
+            # （一覧の名前で呼んでも見つからない。本体の src/skills.py も同じ条件でスキップする）。
+            if isinstance(name, str) and name == skill_dir.name and isinstance(description, str):
                 seen.add(skill_dir.name)
                 lines.append(f"{name}: {description}")
     return "\n".join(lines)

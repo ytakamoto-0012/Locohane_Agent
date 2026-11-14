@@ -48,7 +48,8 @@ def main() -> int:
     rel = PurePosixPath(args.path.replace("\\", "/"))
     if rel.is_absolute() or ".." in rel.parts or ":" in args.path or not rel.parts:
         raise SkillCreatorError(f"Specify --path relative to the skill folder: {args.path!r}")
-    if rel.as_posix() in ("SKILL.md", DRAFT_META_FILENAME):
+    # Windows は大文字小文字を区別しないため、skill.md も SKILL.md そのものを指す（区別せずに比べる）。
+    if rel.as_posix().casefold() in ("skill.md", DRAFT_META_FILENAME.casefold()):
         raise SkillCreatorError(f"{rel.as_posix()} cannot be deleted on its own (to delete the whole draft, omit --path).")
     target = ref.dir.joinpath(*rel.parts)
     if not target.is_file():

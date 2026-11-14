@@ -16,7 +16,7 @@ from ..tool_errors import looks_like_error
 from ..tool_args_guard import find_unknown_tool_args, unknown_tool_args_error
 from ..tool_loop_guard import find_leaked_tool_markup, leaked_tool_markup_error
 from . import _state
-from ._safe_path import _is_guard_exempt_script, _safe_path
+from ._safe_path import _is_guard_exempt_script, _safe_path, find_script_entry
 from ._duplicate_guard import _record_and_check_duplicate
 from ._read_volume_guard import ask_after_survey, guard_read_volume, survey_recorder
 from ._state import _IN_SUBAGENT, _tool_call_semaphore_wrap
@@ -303,8 +303,9 @@ def _guard_main_agent_tool_limit(input):  # noqa: A002
         signature = name
         guard_max_calls = entries_by_key[name]
     elif name in ("run_script", "run_script_background"):
-        pair = (args.get("skill_name"), args.get("script_filename"))
-        if pair in entries_by_key:
+        # スクリプトの探し方（ファイル名部分だけ・大文字小文字を区別しない）と同じ規則で登録を引く
+        pair = find_script_entry(entries_by_key, args.get("skill_name"), args.get("script_filename"))
+        if pair is not None:
             signature = f"{name}:{pair[0]}/{pair[1]}"
             guard_max_calls = entries_by_key[pair]
     if signature is None:

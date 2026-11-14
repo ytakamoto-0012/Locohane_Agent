@@ -384,17 +384,23 @@ def _promote(
                         backup = backup_root / name / asset_type / src.name
                         backup.parent.mkdir(parents=True, exist_ok=True)
                         shutil.move(str(target), str(backup))
+                    # 退避した直後に記録する（以前は複製の後に記録していたため、複製に失敗すると
+                    # 退避した元のスキルが戻らないまま「元に戻しました」と表示していた）。
+                    placed.append((target, backup))
                     target.parent.mkdir(parents=True, exist_ok=True)
                     if asset_type == "skills":
                         shutil.copytree(src, target, ignore=shutil.ignore_patterns("__pycache__"))
                     else:
                         shutil.copy2(src, target)
-                    placed.append((target, backup))
                     placement.setdefault("placed_sha256", {})[str(target)] = _path_sha256(target)
-            # 回帰テスト用のケース一式
+            # 回帰テスト用のケース一式（前の昇格で置いたものは消さずに退避し、失敗したら戻す）
             cases_dest = dest / "evals" / data["id"]
+            cases_backup = None
             if cases_dest.exists():
-                shutil.rmtree(cases_dest)
+                cases_backup = backup_root / name / "evals" / data["id"]
+                cases_backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(cases_dest), str(cases_backup))
+            placed.append((cases_dest, cases_backup))
             cases_dest.mkdir(parents=True)
             for case in sorted((directory / themes.CASES_DIRNAME).glob("*.yaml")):
                 shutil.copy2(case, cases_dest / case.name)
@@ -404,7 +410,6 @@ def _promote(
             for extra in (themes.SPEC_FILENAME, themes.CONFIG_PATCH_FILENAME):
                 if (directory / extra).is_file():
                     shutil.copy2(directory / extra, cases_dest / extra)
-            placed.append((cases_dest, None))
         for name in result.placements:
             updates, _ = compute_updates(instances_root, name, register)
             if not updates:
@@ -490,8 +495,10 @@ def archive_draft(draft: Path, archive_dir: Path, *, extra: dict | None = None) 
     meta_path = draft / DRAFT_META_FILENAME
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
     meta.update({"status": "promoted", "promoted_at": themes.now_iso(), "archived_from": str(draft), **(extra or {})})
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 先に移してから、移した先の来歴に「昇格済み」を書く。以前は移す前に書いていたため、移せなかった
+    # （作成者がファイルを開いている等）ドラフトが、元の場所に残ったまま作成者の一覧から消えていた。
     shutil.move(str(draft), str(dest))
+    (dest / DRAFT_META_FILENAME).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     workspace = draft.parent / WORKSPACE_DIRNAME / draft.name
     if workspace.is_dir():
         shutil.move(str(workspace), str(dest / WORKSPACE_DIRNAME))

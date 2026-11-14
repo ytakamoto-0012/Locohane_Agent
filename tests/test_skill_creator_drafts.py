@@ -72,11 +72,21 @@ def test_scaffold_requires_session_user(draft_env):
     assert result.returncode == 1 and "The draft location is not available" in result.stderr
 
 
-@pytest.mark.parametrize("path", ["../escape.txt", "_draft_meta.json", "C:/abs.txt"])
+@pytest.mark.parametrize("path", ["../escape.txt", "_draft_meta.json", "_Draft_Meta.json", "C:/abs.txt"])
 def test_write_draft_file_rejects_paths_outside_skill(draft_env, path):
     _scaffold(draft_env)
     result = _run("write_draft_file.py", "--name", "my-tool", "--path", path, "--content", "x", env=draft_env["env"])
     assert result.returncode == 1
+
+
+@pytest.mark.parametrize("path", ["SKILL.md", "skill.md", "_DRAFT_META.json"])
+def test_delete_draft_refuses_skill_md_and_meta_in_any_case(draft_env, path):
+    """Windows は大文字小文字を区別しないため、skill.md の削除も SKILL.md を消してしまう。"""
+    _scaffold(draft_env)
+    skill_dir = draft_env["drafts"] / "tanaka" / "my-tool"
+    result = _run("delete_draft.py", "--name", "my-tool", "--path", path, env=draft_env["env"])
+    assert result.returncode == 1
+    assert (skill_dir / "SKILL.md").is_file() and (skill_dir / "_draft_meta.json").is_file()
 
 
 def test_write_draft_file_rolls_back_invalid_skill_md(draft_env):

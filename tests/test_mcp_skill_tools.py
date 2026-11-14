@@ -51,3 +51,13 @@ def test_parse_frontmatter_keeps_triple_dash_in_description() -> None:
     """MCP サーバー側も、行全体が --- の行だけを区切りにする（本体の src/skills.py と同じ）。"""
     text = "---\nname: monthly-check\ndescription: Monthly check --- use when closing\n---\n\n# Body\n"
     assert skill_tools._parse_frontmatter(text) == {"name": "monthly-check", "description": "Monthly check --- use when closing"}
+
+
+def test_list_skills_skips_skills_whose_name_differs_from_the_folder(skills_root) -> None:
+    """read_skill はフォルダ名で引くため、name がフォルダ名と違うスキルは一覧に載せない（載せても呼べない）。"""
+    other = skills_root / "folder-name"
+    other.mkdir()
+    (other / "SKILL.md").write_text("---\nname: other-name\ndescription: Mismatch.\n---\n", encoding="utf-8")
+    listed = skill_tools.list_skills()
+    assert "demo-skill: Demo." in listed
+    assert "other-name" not in listed and "folder-name" not in listed

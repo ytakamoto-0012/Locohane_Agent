@@ -37,7 +37,8 @@ def _target_path(skill_dir: Path, raw: str) -> Path:
     rel = PurePosixPath(raw.replace("\\", "/"))
     if not raw.strip() or rel.is_absolute() or ".." in rel.parts or ":" in raw:
         raise SkillCreatorError(f"Specify --path relative to the skill folder: {raw!r}")
-    if rel.parts[0] == DRAFT_META_FILENAME:
+    # Windows は大文字小文字を区別しないため、_Draft_Meta.json も来歴そのものを指す。
+    if rel.parts[0].casefold() == DRAFT_META_FILENAME.casefold():
         raise SkillCreatorError(f"{DRAFT_META_FILENAME} cannot be rewritten.")
     target = (skill_dir / Path(*rel.parts)).resolve()
     if not target.is_relative_to(skill_dir.resolve()):

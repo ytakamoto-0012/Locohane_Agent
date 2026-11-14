@@ -257,6 +257,7 @@ EN: dict[str, str] = {
     "パスが不正です: {0!r}": "Invalid path: {0!r}",
     "このパスは扱えません: {0}": "This path cannot be handled: {0}",
     "テーマの外を指すパスです: {0}": "The path points outside the theme: {0}",
+    "SKILL.md は大文字で SKILL.md と指定してください: {0}": "Write SKILL.md in capitals exactly as SKILL.md: {0}",
     "スキルのフォルダそのものではなく、その中のファイルを指定してください。": "Specify a file inside the skill folder, not the folder itself.",
     "入力ファイルは cases/fixtures/<フォルダ名>/ の中に置いてください。": "Put input files inside cases/fixtures/<folder name>/.",
     "同じ名前のフォルダがあります: {0}": "A folder with the same name exists: {0}",

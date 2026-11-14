@@ -131,6 +131,9 @@ def draft_spec(config: Config, directory: Path, *, max_file_chars: int, request:
 
 def draft_cases(config: Config, directory: Path, *, max_file_chars: int, count: int, request: str = "") -> list[str]:
     existing = {c["id"] for c in themes.list_cases(directory)}
+    # Windows ではファイル名の大文字小文字を区別しないため、ID の重なりも区別せずに確かめる
+    # （区別すると 001_Basic が既存の 001_basic.yaml を上書きした）。
+    taken = {i.casefold() for i in existing}
     user = (
         f"## Research targets\n{targets_brief(directory)}\n\n"
         f"{theme_context(directory, max_file_chars)}\n\n"
@@ -152,7 +155,7 @@ def draft_cases(config: Config, directory: Path, *, max_file_chars: int, count: 
         case_id = re.sub(r"[^A-Za-z0-9_-]+", "_", str(item.get("id") or "")).strip("_-")[:48]
         n = 1
         base_id = case_id or "case"
-        while not case_id or case_id in existing:
+        while not case_id or case_id.casefold() in taken:
             case_id = f"{base_id}_{n}"
             n += 1
         turns = item.get("turns") or []
@@ -168,7 +171,7 @@ def draft_cases(config: Config, directory: Path, *, max_file_chars: int, count: 
         except themes.ThemeError as e:
             errors.append(str(e))
             continue
-        existing.add(case_id)
+        taken.add(case_id.casefold())
         created.append(case_id)
     if not created:
         raise LabLLMError("No cases could be saved: " + " / ".join(errors))

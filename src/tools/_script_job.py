@@ -18,7 +18,7 @@ from ._proc_tree import kill_process_tree, run_with_timeout
 from ._duplicate_guard import _track_failure_streak
 from ._path_memory_helpers import _resolve_path_memory_token
 from ._python_fs_guard import _register_exec_output_files
-from ._safe_path import _is_guard_exempt_script, _resolve_script_filename
+from ._safe_path import _is_guard_exempt_script, _resolve_script_filename, find_script_entry
 from ._state import _SUBAGENT_AGENT_TYPE
 from ._subprocess_env import _run_script_guard_env
 from ._workdir import _resolve_workdir
@@ -57,7 +57,7 @@ def _resolve_run_script_command(skill_name: str, script_filename: str, script_ar
     """
     current_agent_type = _SUBAGENT_AGENT_TYPE.get()
     allowed = _state._AGENT_TYPE_RUN_SCRIPT_ALLOWLIST.get(current_agent_type) if current_agent_type else None
-    if allowed is not None and skill_name not in allowed and (skill_name, script_filename) not in allowed:
+    if allowed is not None and skill_name not in allowed and find_script_entry(allowed, skill_name, script_filename) is None:
         return (
             f"Error: the run_script skills/scripts callable from agent_type=\"{current_agent_type}\" are limited to "
             f"{sorted(str(a) for a in allowed)} "
@@ -131,7 +131,7 @@ def _prepare_script_execution(skill_name: str, script_filename: str, script_args
     # ドラフトスキル・skill-creator 本体のスクリプトは plan_approval_exempt_scripts の
     # 登録に関係なく常に免除する（作成者はスキル開発の専門家とは限らず、
     # config.ini を自分で編集できないため。書き込み先はガードで制限される）。
-    is_plan_exempt = (skill_name, script_filename) in _state._PLAN_APPROVAL_EXEMPT_SCRIPTS or _is_guard_exempt_script(
+    is_plan_exempt = find_script_entry(_state._PLAN_APPROVAL_EXEMPT_SCRIPTS, skill_name, script_filename) is not None or _is_guard_exempt_script(
         skill_name, script_filename
     )
     if not is_plan_exempt and not cl.user_session.get("plan_approved"):

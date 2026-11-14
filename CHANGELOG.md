@@ -78,6 +78,19 @@
 
 ### 修正
 
+- スキル研究室の昇格で、置き換えるスキル・サブエージェントを退避した後に複製が失敗すると、「元に戻しました」と表示しながら
+  元のものが退避先に残ったままになっていた不具合を直しました。もう一度昇格するときの回帰テスト用ケース一式
+  （`evals/<テーマID>/`）も、消さずに退避し、失敗したら戻します。
+- スキル研究室で `skill.md` のように大文字小文字を変えて指定すると、Windows では SKILL.md そのものを指すのに、frontmatter の検証と
+  削除の禁止（画面の保存・削除と AI 修正）をすり抜けていた不具合を直しました（SKILL.md と正確に書くよう断ります）。
+  skill-creator の `delete_draft.py`・`write_draft_file.py` も、SKILL.md・`_draft_meta.json` を大文字小文字を区別せずに守ります。
+- スキル研究室の AI によるケースの下書きが、大文字小文字だけ違う ID（`001_Basic` と `001_basic`）で既存のケースを上書きしていた不具合を直しました。
+- 昇格でドラフトをアーカイブするとき、移せなかったドラフトの来歴が「昇格済み」になり、元の場所に残ったまま作成者の一覧から消えていた不具合を直しました。
+- AI 修正の取り消しで、「実行の記録をクリア」で消し残った前の回の控え（`runs/<反復>/before_fix/`）に戻してしまうことがあった不具合を直しました。
+- `run_script` の許可・免除（`[main_agent_tool_guard] allow_entries`・`[plan] plan_approval_exempt_scripts`・
+  `[subagent] agent_type_run_script_allowlist`）を、スクリプトの探し方と同じく、ファイル名部分だけ・大文字小文字を区別せずに比べるようにしました
+  （`scripts/x.py`・`X.py` と書くと、同じスクリプトが動くのに断られていました）。
+- MCP サーバーの `list_skills` が、name がフォルダ名と違うスキル（`read_skill` で呼べないもの）も一覧に載せていた不具合を直しました。
 - 評価（スキル研究室・`evals/run_all.py`）で、LLM の同時リクエスト数（`[llm] max_concurrent_requests`）が設定されず、常に既定の 1 になっていた
   不具合を直しました。あわせて、並列数の設定（`[llm] max_concurrent_requests`・`[graph] max_parallel`・`[subagent] max_parallel`）は、
   評価の LLM を持つスキル調整ワーカーの値を使うようにしました（推論サーバーの能力に合わせる設定のため。ワーカーの設定画面で変えられます）。

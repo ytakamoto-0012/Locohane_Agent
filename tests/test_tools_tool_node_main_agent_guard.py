@@ -309,3 +309,27 @@ def test_list_blocked_tool_names_for_hint_excludes_run_script_names() -> None:
     result = tool_node.list_blocked_tool_names_for_hint(tools, cfg)
 
     assert result == []
+
+
+@pytest.mark.parametrize("script_filename", ["scripts/render_pdf_pages.py", "Render_PDF_Pages.py", r"scripts\render_pdf_pages.py"])
+def test_run_script_pair_matches_like_the_script_lookup(monkeypatch, script_filename) -> None:
+    """run_script はファイル名部分だけ・大文字小文字を区別せずにスクリプトを探すので、許可の判定も同じ規則で比べる。
+
+    以前は文字列のまま比べており、同じスクリプトが動くのに "scripts/x.py" や "X.py" では断られていた。
+    """
+    _setup(monkeypatch, entries=[(("pdf-tools", "render_pdf_pages.py"), 1)])
+    args = {"skill_name": "pdf-tools", "script_filename": script_filename}
+    assert tool_node._guard_main_agent_tool_limit(_make_input("run_script", args)) is None
+    # 回数は書き方の違いをまたいで同じ登録として数える
+    blocked = tool_node._guard_main_agent_tool_limit(_make_input("run_script", {**args, "script_filename": "render_pdf_pages.py"}))
+    assert blocked is not None and "call limit" in blocked["messages"][0].content
+
+
+def test_find_script_entry_ignores_other_skills_and_dummy_entries() -> None:
+    from src.tools._safe_path import find_script_entry
+
+    entries = {("pdf-tools", "render.py"), ("excel-read", ""), "excel-read"}
+    assert find_script_entry(entries, "pdf-tools", "sub/RENDER.py") == ("pdf-tools", "render.py")
+    assert find_script_entry(entries, "docx-read", "render.py") is None
+    assert find_script_entry(entries, "excel-read", "") is None
+    assert find_script_entry(entries, None, "render.py") is None

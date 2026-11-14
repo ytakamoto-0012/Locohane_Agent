@@ -580,6 +580,9 @@ class Worker:
         history = fixer.history_text(data.get("iterations") or [])
         max_files = int(getattr(cfg, "skill_lab_fixer_max_files_per_fix", 2))
         fix: dict = {}
+        # この _fix の中で直す前の内容を控えたか。フォルダの有無で判定すると、「実行の記録をクリア」で
+        # 消し残った前の回の runs/<反復>/before_fix/ を今の控えとみなし、取り消しで古い内容に戻してしまう。
+        snapshotted = False
         try:
             previous_errors: list[str] | None = None
             for attempt in (1, 2):
@@ -599,8 +602,9 @@ class Worker:
                 if limit_error:
                     applied, errors = [], [limit_error]
                 else:
-                    if not (run_dir / BEFORE_FIX_DIRNAME).is_dir():
+                    if not snapshotted:
                         themes.snapshot_targets(directory, run_dir / BEFORE_FIX_DIRNAME)
+                        snapshotted = True
                     applied, errors = fixer.apply_edits(
                         directory,
                         proposal["edits"],

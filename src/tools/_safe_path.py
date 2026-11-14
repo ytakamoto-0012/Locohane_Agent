@@ -131,6 +131,32 @@ def find_script_files(scripts_root: Path, basename: str) -> list[Path]:
     return matches
 
 
+def find_script_entry(entries, skill_name: object, script_filename: object):
+    """entries（許可リスト等）から、(skill_name, script_filename) の呼び出しに当たる [スキル名, スクリプト名] の要素を返す。
+
+    run_script はスクリプトを「ファイル名部分だけ・大文字小文字を区別せず」探す（_resolve_script_filename /
+    find_script_files）。許可・免除の判定がそのまま文字列で比べると、"scripts/x.py" や "X.py" で同じスクリプトが
+    動くのに許可リストでは断られるため、ここでも同じ規則で比べる。script_filename が空の要素（スキル一覧に
+    載せるためだけのダミー）は対象にしない。見つからなければ None。
+    """
+    if not isinstance(skill_name, str) or not isinstance(script_filename, str):
+        return None
+    basename = os.path.basename(script_filename.replace("\\", "/")).casefold()
+    if not basename:
+        return None
+    for entry in entries:
+        if (
+            isinstance(entry, tuple)
+            and len(entry) == 2
+            and entry[0] == skill_name
+            and isinstance(entry[1], str)
+            and entry[1]
+            and entry[1].casefold() == basename
+        ):
+            return entry
+    return None
+
+
 def _missing_skill_prefix_hint(relative_path: str) -> str:
     """read_skill_file が見つからなかった際、スキル名プレフィックス漏れを疑うヒントを返す。
 

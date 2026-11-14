@@ -1479,3 +1479,120 @@ def test_eval_parallelism_comes_from_the_lab_worker(lab_env):
     # ワーカーの設定画面に出す（本体インスタンスの値は使わない）
     for section, key in (("llm", "max_concurrent_requests"), ("graph", "max_parallel"), ("subagent", "max_parallel")):
         assert inst_mod.config_key_applies(inst_mod.KIND_SKILL_LAB, section, key)
+
+
+# --- 大文字小文字・巻き戻し・控えの回帰テスト（2026-11-14 のバグチェック） ----------------------------
+
+
+@pytest.mark.parametrize("name", ["skill.md", "Skill.md", "SKILL.MD"])
+def test_skill_md_in_other_case_cannot_bypass_validation_or_delete_guard(lab_env, name):
+    """Windows では skill.md が SKILL.md そのものを指す。名前の比べ方は大文字小文字を区別するため、
+    以前は frontmatter の検証・削除の禁止（画面と AI 修正の両方）をすり抜けて SKILL.md を壊せた。"""
+    directory = _theme(lab_env)
+    _add_skill(directory)
+    skill_md = directory / "assets" / "skills" / "my-skill" / "SKILL.md"
+    before = skill_md.read_text(encoding="utf-8")
+    with pytest.raises(themes.ThemeError, match="SKILL.md"):
+        themes.write_text(directory, f"assets/skills/my-skill/{name}", "frontmatter なし", actor="admin")
+    with pytest.raises(themes.ThemeError):
+        themes.delete_path(directory, f"assets/skills/my-skill/{name}", actor="admin")
+    applied, errors = fixer.apply_edits(directory, [{"path": f"assets/skills/my-skill/{name}", "delete": True}], known_tools=None)
+    assert applied == [] and errors
+    applied, errors = fixer.apply_edits(directory, [{"path": f"assets/skills/my-skill/{name}", "content": "壊れた"}], known_tools=None)
+    assert applied == [] and errors
+    assert skill_md.read_text(encoding="utf-8") == before
+
+
+def test_drafted_case_does_not_overwrite_a_case_differing_only_in_case(lab_env, monkeypatch):
+    """AI の下書きが 001_Basic を出しても、既存の 001_basic.yaml（Windows では同じファイル）を上書きしない。"""
+    from admin.skill_lab import drafting
+
+    directory = _theme(lab_env)
+    _add_skill(directory)
+    themes.write_text(directory, "cases/001_basic.yaml", _CASE.format(id="001_basic"), actor="admin")
+    human = (directory / "cases" / "001_basic.yaml").read_text(encoding="utf-8")
+    monkeypatch.setattr(drafting, "ask_json", lambda *_a, **_k: [{"id": "001_Basic", "turns": ["AI のケース"], "judge": "x"}])
+    created = drafting.draft_cases(None, directory, max_file_chars=1000, count=1)
+    assert created and created[0].casefold() != "001_basic"
+    assert (directory / "cases" / "001_basic.yaml").read_text(encoding="utf-8") == human
+    assert len(list((directory / "cases").glob("*.yaml"))) == 2
+
+
+def test_promote_failure_restores_the_assets_and_cases_it_replaced(lab_env, monkeypatch):
+    """置き換えるスキルを退避した後に複製が失敗しても、退避した元のスキルと前回の回帰テスト用ケースを戻す。
+
+    以前は退避した組を巻き戻しの記録に入れる前に複製していたため、「元に戻しました」と表示しながら
+    元のスキルが退避先に残ったままになり、前回のケース一式も消えていた。
+    """
+    monkeypatch.setattr(promotion, "PROMOTION_LOG", lab_env["tmp"] / "promotion_log.md")
+    monkeypatch.setattr(promotion, "PROMOTE_HISTORY_DIR", lab_env["tmp"] / "history")
+    directory, _ = _ready_theme(lab_env, with_draft=False)
+    _add_skill(directory)
+    themes.update(directory, lambda d: d.update({"tryout": _tryout_for(directory), "status": themes.STATUS_REVIEW}))
+    _promote(lab_env, directory)
+    dest = _cfg(lab_env, "org_a").instance_locohane_dir
+    placed_skill = dest / "skills" / "my-skill"
+    first = (placed_skill / "SKILL.md").read_text(encoding="utf-8")
+    assert (dest / "evals" / directory.name / "001.yaml").is_file()
+
+    # 再開して直したことにして、もう一度昇格する（今度はスキルの複製が失敗する）
+    def _reopen(d):
+        d.setdefault("previous_promotions", []).append(d.pop("promotion"))
+        d["status"] = themes.STATUS_DRAFT
+
+    themes.update(directory, _reopen)
+    themes.write_text(directory, "assets/skills/my-skill/SKILL.md", _skill_md("my-skill", "直したスキル。"), actor="admin")
+    themes.update(directory, lambda d: d.update({"tryout": _tryout_for(directory), "status": themes.STATUS_REVIEW}))
+    real_copytree = promotion.shutil.copytree
+
+    def failing_copytree(src, dst, *a, **k):
+        if Path(dst) == placed_skill:
+            raise OSError("ディスクがいっぱい（模擬）")
+        return real_copytree(src, dst, *a, **k)
+
+    monkeypatch.setattr(promotion.shutil, "copytree", failing_copytree)
+    with pytest.raises(promotion.PromotionError, match="元に戻しました"):
+        _promote(lab_env, directory)
+    assert (placed_skill / "SKILL.md").read_text(encoding="utf-8") == first
+    assert (dest / "evals" / directory.name / "001.yaml").is_file()
+
+
+def test_archive_failure_does_not_hide_the_draft_from_its_author(lab_env, monkeypatch):
+    """移せなかったドラフトの来歴を「昇格済み」にしない（作成者の一覧から消え、アーカイブもされない状態を防ぐ）。"""
+    draft = _draft(lab_env)
+
+    def boom(*_a, **_k):
+        raise OSError("使用中")
+
+    monkeypatch.setattr(promotion.shutil, "move", boom)
+    with pytest.raises(OSError):
+        promotion.archive_draft(draft, _cfg(lab_env, "org_a").skill_archive_dir)
+    assert json.loads((draft / "_draft_meta.json").read_text(encoding="utf-8"))["status"] == "draft"
+
+
+def test_fix_snapshots_the_current_state_even_if_an_old_before_fix_remains(lab_env, monkeypatch):
+    """「実行の記録をクリア」で消し残った runs/<反復>/before_fix/ を、今回の直す前の控えとして使わない。"""
+    from admin.skill_lab import worker as worker_mod
+
+    directory = _theme(lab_env)
+    _add_skill(directory)
+    stale = directory / "runs" / "001" / "before_fix" / "assets" / "skills" / "my-skill"
+    stale.mkdir(parents=True)
+    (stale / "SKILL.md").write_text(_skill_md("my-skill", "前の回の古い内容"), encoding="utf-8")
+    themes.update(directory, lambda d: d.update({"iterations": [{"n": 1, "phase": "eval", "verdict": "fail", "cases": {}}]}))
+
+    w, _ = _make_worker(monkeypatch, lab_env, [])
+    monkeypatch.setattr(w, "_llm_config", lambda *_a, **_k: None)
+    monkeypatch.setattr(w, "_target_config", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker_mod.temp_dirs, "config_root", lambda _cfg: lab_env["tmp"] / "lab_tmp")
+    monkeypatch.setattr(worker_mod.sources, "subagent_tool_names", lambda: ())
+    new_md = _skill_md("my-skill", "AI が直した")
+    monkeypatch.setattr(
+        worker_mod.fixer,
+        "propose",
+        lambda *_a, **_k: {"analysis": "a", "blockers": [], "edits": [{"path": "assets/skills/my-skill/SKILL.md", "content": new_md}]},
+    )
+    current = (directory / "assets" / "skills" / "my-skill" / "SKILL.md").read_text(encoding="utf-8")
+    worker_mod.Worker._fix(w, "org_a", directory, {"iteration": {"n": 1}, "run": {"results": []}, "verdicts": []})
+    assert (stale / "SKILL.md").read_text(encoding="utf-8") == current
+    assert (directory / "assets" / "skills" / "my-skill" / "SKILL.md").read_text(encoding="utf-8") == new_md

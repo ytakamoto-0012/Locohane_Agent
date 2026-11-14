@@ -291,6 +291,10 @@ def resolve_path(directory: Path, rel: str, *, for_write: bool = False) -> Path:
     if parts in (["spec.md"], ["config_patch.json"]):
         ok = True
     elif parts[0] == ASSETS_DIRNAME and len(parts) >= 3 and parts[1] == "skills":
+        if len(parts) == 4 and parts[3].casefold() == "skill.md" and parts[3] != "SKILL.md":
+            # Windows は大文字小文字を区別しないため、skill.md は SKILL.md そのものを指す。名前の比べ方
+            # （検証・削除禁止）は区別するので、そのまま通すと SKILL.md の検証と削除禁止をすり抜けた。
+            raise ThemeError(_t("SKILL.md は大文字で SKILL.md と指定してください: {0}", rel))
         ok = bool(NAME_RE.match(parts[2])) and "__pycache__" not in parts
     elif parts[0] == ASSETS_DIRNAME and len(parts) == 3 and parts[1] == "agents":
         ok = parts[2].endswith(".md") and bool(NAME_RE.match(parts[2][:-3]))
