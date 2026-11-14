@@ -484,7 +484,7 @@ async function renderThemeOverview(state, body) {
     el("p", {
       class: "theme-intro",
       text:
-        _t("上から順に埋めます。① で直す（作る）スキルを選び、② で採点の基準を書き、③ で試験問題を作ります。") +
+        _t("上から順に埋めます。① で直す（作る）スキルを選び、② で採点の基準を書き、③ でケースを作ります。") +
         _t("「スキル調整ループを開始」を押すと、AI が ③ の試験を解き、② に照らして不合格ならスキルを直して解き直します。"),
     }),
   );
@@ -657,7 +657,7 @@ async function renderThemeSpec(state, box) {
       class: "hint",
       text:
         _t("このスキルに何をしてほしいかを、ふつうの文章で書きます。AI はここを正解として、スキルを直し、試験の合否を決めます（AI がここを書き換えることはありません）。") +
-        _t("③ の試験問題は例にすぎないため、ここが無いと、AI が試験にだけ通る直し方をしても見分けられません。"),
+        _t("③ のケースは例にすぎないため、ここが無いと、AI が試験にだけ通る直し方をしても見分けられません。"),
     }),
   );
   let read;
@@ -1113,11 +1113,11 @@ async function openAgentEditor(state, agent) {
 
 /* --- ケース --- */
 
-// 試験問題（cases/<ID>.yaml）を消す（admin/skill_lab/api.py の delete_file。ループ中・終わったテーマでは断られる）。
+// ケース（cases/<ID>.yaml）を消す（admin/skill_lab/api.py の delete_file。ループ中・終わったテーマでは断られる）。
 // 入力ファイル（fixtures/）は他の問題でも使えるので消さない。トライアウトの結果は無効になる。
 async function deleteCase(state, c, err) {
   const instruction = (c.turns || []).join(" → ");
-  let message = _t("試験問題 {0} を削除します。元に戻せません。よろしいですか？", c.id);
+  let message = _t("ケース {0} を削除します。元に戻せません。よろしいですか？", c.id);
   if (instruction) message += "\n" + _t("利用者の指示: {0}", instruction.length > 80 ? instruction.slice(0, 80) + "…" : instruction);
   if (!confirm(message)) return;
   if (await labAction(() => api(themePath(state.name, state.id, `/files?path=${encodeURIComponent(c.path)}`), { method: "DELETE" }), err)) {
@@ -1159,14 +1159,14 @@ function renderThemeCases(state, body) {
     ]),
   ]);
   body.append(
-    el("h4", {}, [requiredLabel(_t("③ 試験問題（1問以上）"), true)]),
+    el("h4", {}, [requiredLabel(_t("③ ケース（1件以上）"), true)]),
     el("p", { class: "hint", text: _t("② のとおりに動くかを、実際に試すための問題です。1問ごとに「利用者が打ちそうな指示」と「どうなっていれば合格か」を決めます。") }),
     el("p", { class: "hint", text: _t("例: 指示「この見積書をチェックして」（見積書のファイルを添えて）→ 合格の条件「回答に計算ミスの箇所が書かれている」") }),
     el("p", {
       class: "hint",
       text: _t("「スキル調整ループを開始」を押すと、AI がこの試験を何度も解き、不合格ならスキルを直して解き直します。AI は問題を書き換えません。問題そのもの（指示・合格の決め方）に原因があると AI が判断したときは、ループを止めて知らせます。"),
     }),
-    dataTable(["ID", _t("利用者の指示"), _t("使うファイル"), _t("AI が判断する点"), ""], rows, _t("まだ試験問題はありません。")),
+    dataTable(["ID", _t("利用者の指示"), _t("使うファイル"), _t("AI が判断する点"), ""], rows, _t("まだケースはありません。")),
     err,
   );
   if (editable) {
@@ -1174,7 +1174,7 @@ function renderThemeCases(state, body) {
     const request = el("input", { type: "text", placeholder: _t("AI への補足（任意）") });
     body.append(
       el("div", { class: "inline-form" }, [
-        el("button", { class: "primary", text: _t("＋ 試験問題を自分で作る"), onclick: () => openCaseEditor(state, null) }),
+        el("button", { class: "primary", text: _t("＋ ケースを自分で作る"), onclick: () => openCaseEditor(state, null) }),
       ]),
       el("div", { class: "inline-form" }, [
         el("span", { class: "hint", text: _t("または ① と ② をもとに AI に") }),
@@ -1190,8 +1190,8 @@ function renderThemeCases(state, body) {
   }
 
   body.append(
-    el("h5", {}, [requiredLabel(_t("試験問題で使うファイル"), false)]),
-    el("p", { class: "hint", text: _t("見積書など、試験問題で AI に渡すファイルをここに置きます。試験のたびに写しを使うので、元のファイルは変わりません。") }),
+    el("h5", {}, [requiredLabel(_t("ケースで使うファイル"), false)]),
+    el("p", { class: "hint", text: _t("見積書など、ケースで AI に渡すファイルをここに置きます。試験のたびに写しを使うので、元のファイルは変わりません。") }),
   );
   const fixtureFiles = d.files.filter((f) => f.path.startsWith("cases/fixtures/"));
   body.append(
@@ -1230,7 +1230,7 @@ function renderThemeCases(state, body) {
           },
         }),
       ]),
-      el("p", { class: "hint", text: _t("フォルダ名を付けてアップロードし、試験問題の「使うファイル」でそのフォルダ（fixtures/<フォルダ名>）を選びます。") }),
+      el("p", { class: "hint", text: _t("フォルダ名を付けてアップロードし、ケースの「使うファイル」でそのフォルダ（fixtures/<フォルダ名>）を選びます。") }),
     );
   }
   return inputsChanged(body);
@@ -1306,7 +1306,7 @@ async function openCaseEditor(state, caseId) {
   notes.value = data.notes || "";
   const save = el("button", { class: "primary", text: _t("保存"), disabled: editable ? null : "disabled" });
   const m = labModal(
-    caseId ? _t(`試験問題 {0}`, caseId) : _t("新しい試験問題"),
+    caseId ? _t(`ケース {0}`, caseId) : _t("新しいケース"),
     [
       el("p", { class: "hint", text: _t("必須なのは「利用者の指示」と、合格の決め方（言葉の条件か AI が判断する点の、どちらか1つ）だけです。ほかは空欄のままで構いません。") }),
       el("label", {}, [requiredLabel(_t("利用者の指示（AI に打つ文章）"), true), turns]),
@@ -1324,7 +1324,7 @@ async function openCaseEditor(state, caseId) {
           verifyScript,
         ]),
       ]),
-      el("label", {}, [requiredLabel(_t("使うファイル（「試験問題で使うファイル」でアップロードしたフォルダ）"), false), workDir]),
+      el("label", {}, [requiredLabel(_t("使うファイル（「ケースで使うファイル」でアップロードしたフォルダ）"), false), workDir]),
       el("details", { class: "theme-advanced" }, [
         el("summary", { text: _t("細かい設定（任意。通常はそのままで構いません）") }),
         el("label", {}, [_t("問題の名前（英数字・-・_）"), id]),
@@ -1491,7 +1491,7 @@ async function clearRuns(state, button) {
     info.tryout ? _t("・トライアウトの合格記録（昇格には、もう一度トライアウトが必要になります）") : null,
     _t("・保存している評価の詳細ファイル: {0} 個（{1}）", info.files, size),
     "",
-    _t("研究対象・仕様・試験問題・入力ファイル・設定パッチ・履歴は消えません。"),
+    _t("研究対象・仕様・ケース・入力ファイル・設定パッチ・履歴は消えません。"),
     info.resets_status ? _t("状態は「準備中」に戻ります。") : null,
     "",
     _t("よろしいですか？"),

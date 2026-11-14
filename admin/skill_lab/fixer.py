@@ -34,6 +34,14 @@ a skill, tool or sub-agent), "[AI]" is the text it wrote, and "[sub-agent N ...]
 settings, missing Python libraries, time limits). Use them to tell setting and environment problems from mistakes of the model:
 do not "fix" a refusal by a setting or a missing library by rewriting the skill's wording.
 
+Words for people (applies to "analysis" and to every "problem" and "suggestion"): the reader is a person who only sees the dashboard,
+not these files. Use the dashboard's own terms and never the internal ones. Say "case" (the dashboard's word for a test), "case XXX"
+with its ID, "user instruction" (not "turns"), "what the AI judges" (not "judge"), "word conditions" (not "expect"),
+"what it should do (grading criteria)" (not "spec"), "research target" (the skill or sub-agent being improved).
+In Japanese: ケース（「試験問題」とは書かない）、利用者の指示、AI が判断する点、言葉の条件、やってほしいこと（採点の基準）、研究対象。
+Write plainly: what is wrong, why that makes it impossible to pass, and the exact new wording or value to use. Do not quote
+file names, keys or code unless the person must edit them. Do not write "blockers".
+
 First decide whether the failure can be fixed by editing the research targets or config_patch.json at all.
 It cannot when the cause is one of these "blockers" (no reasonable fix of the assets makes it pass):
 - kind "case" (the case itself is defective):
@@ -82,7 +90,7 @@ Rules:
 Output only JSON in the following format:
 {"analysis": "the cause of the failure and how to fix it",
  "blockers": [{"kind": "case" or "spec" or "environment", "case_id": "<ID of the case concerned (empty if not about one case)>",
-               "problem": "what is wrong (concrete)", "suggestion": "what a person should do"}],
+               "problem": "what is wrong, in the dashboard terms above (concrete)", "suggestion": "what a person should do, in the dashboard terms above"}],
  "edits": [
    {"path": "assets/skills/<name>/SKILL.md", "old": "the original string to replace (must match exactly one place in the file)", "new": "the new string"},
    {"path": "assets/skills/<name>/scripts/run.py", "content": "the new content of the whole file"},

@@ -762,11 +762,11 @@ def start_missing(directory: Path) -> list[str]:
         missing.append(_t("② やってほしいことの「目的」"))
     cases = list_cases(directory)
     if not cases:
-        missing.append(_t("③ 試験問題（1問以上）"))
+        missing.append(_t("③ ケース（1件以上）"))
     broken = [c["id"] for c in cases if c.get("error")]
     if broken:
         # 読めないケースがあると評価がエラーになり、AI 修正の手がかりにもならない。
-        missing.append(_t("③ 試験問題の直し（読めない・条件や使うファイルが足りない・合格できない条件がある: {0}）", ', '.join(broken)))
+        missing.append(_t("③ ケースの直し（読めない・条件や使うファイルが足りない・合格できない条件がある: {0}）", ', '.join(broken)))
     return missing
 
 
@@ -859,7 +859,7 @@ def runs_summary(directory: Path) -> dict:
 def clear_runs(directory: Path, *, actor: str) -> dict:
     """実行の記録（反復・1回試行・改良前の版の評価・ループの総括・トライアウトの合格記録と runs/ の中身）を消す。
 
-    研究対象・仕様・試験問題・入力ファイル・設定パッチ・履歴（theme.json の history）は残す。
+    研究対象・仕様・ケース・入力ファイル・設定パッチ・履歴（theme.json の history）は残す。
     ワーカーが runs/ に書いている間（実行中・開始待ち・1回試行の処理中）と終わったテーマでは断る。確かめてから消し終わるまで
     テーマの排他（_locked）を持ち続け、その間にループの開始・1回試行の依頼が割り込まないようにする。
 

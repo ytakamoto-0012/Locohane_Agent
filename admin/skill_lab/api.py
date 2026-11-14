@@ -214,7 +214,7 @@ def build_router(
         missing = themes.start_missing(directory)
         problems = _reference_problems(name, directory)
         if problems:
-            missing.append(_t("③ 試験問題の直し（存在しない名前を確かめている: {0}）", ", ".join(sorted(problems))))
+            missing.append(_t("③ ケースの直し（存在しない名前を確かめている: {0}）", ", ".join(sorted(problems))))
         return missing
 
     def _summary(directory: Path) -> dict:
@@ -551,7 +551,7 @@ def build_router(
         directory = _theme(name, theme_id)
         _guard_editable(directory)
         if create and (directory / themes.CASES_DIRNAME / f"{case_id}.yaml").exists():
-            raise HTTPException(status_code=409, detail=_t("同じ名前の試験問題（{0}）が既にあります。別の名前にしてください。", case_id))
+            raise HTTPException(status_code=409, detail=_t("同じ名前のケース（{0}）が既にあります。別の名前にしてください。", case_id))
         data = {"id": case_id, "target": "skill_lab", **{k: v for k, v in body.data.items() if k not in ("id", "target")}}
         data = {k: v for k, v in data.items() if v not in (None, "", [], {})}
         content = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
@@ -766,7 +766,7 @@ def build_router(
     def clear_runs(name: str, theme_id: str, request: Request, user: str = Depends(require_login), _c=Depends(require_csrf)):
         """実行の記録（反復・1回試行・改良前の版の評価・ループの総括・トライアウトの合格記録と runs/ の中身）を消す。
 
-        研究対象・仕様・試験問題・入力ファイル・設定パッチ・履歴は残す。実行中・開始待ち・1回試行の処理中・終わったテーマは断る
+        研究対象・仕様・ケース・入力ファイル・設定パッチ・履歴は残す。実行中・開始待ち・1回試行の処理中・終わったテーマは断る
         （確かめるのと消すのはテーマの排他の中で行う。themes.clear_runs）。
         """
         directory = _theme(name, theme_id)

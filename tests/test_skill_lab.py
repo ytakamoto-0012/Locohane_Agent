@@ -1319,7 +1319,7 @@ def test_history_shows_what_was_tried():
 
 
 def test_api_deletes_a_case_but_not_during_a_loop(client, lab_env):
-    """試験問題は一覧の「削除」（ファイル削除の API）で消せる。ループ中は消せない（2026-11-13 ユーザー報告: 画面に削除が無かった）。"""
+    """ケースは一覧の「削除」（ファイル削除の API）で消せる。ループ中は消せない（2026-11-13 ユーザー報告: 画面に削除が無かった）。"""
     theme = client.post("/api/instances/org_a/skill-lab/themes", json={"title": "A", "lab": "lab1"}).json()
     base = f"/api/instances/org_a/skill-lab/themes/{theme['id']}"
     for cid in ("c1", "c2"):
