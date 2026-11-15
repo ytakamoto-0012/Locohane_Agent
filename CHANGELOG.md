@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-11-15
+
 ### 移行時の注意
 
 - スキル安定化トライアウトの回数 `tryout_repeats` を `[skill_creator]` から `[skill_lab]` へ移しました（正式化の合格基準で、
@@ -62,7 +64,7 @@
   しました。長い記録で、実際に呼んだツール（provide_download 等）を AI judge が「記録に無い」として不合格にしていました。
 - 評価のケースが制限時間を過ぎたとき、サブプロセスごと止めて記録を捨てるのではなく、`run_case.py` 自身が時間を守り、
   そこまでの記録を付けて「時間切れ」を返すようにしました（`--time-limit`。外側の強制停止は後始末の時間を足した保険）。
-  スキル研究室の AI 修正は、進んでいたのに時間で切れたケースの制限時間（`timeout_seconds`、60〜3600秒）を延ばせます。
+  スキル研究室の AI 修正は、進んでいたのに時間で切れたケースの制限時間（`timeout_seconds`、60秒以上、0で無制限）を延ばせます。
 - 評価・スキル研究室の時間の既定を「時間がかかっても完遂させる」側にしました。ケースの会話の制限時間は
   `[skill_lab] case_timeout_seconds`（既定4時間、0で無制限。以前は固定の900秒）で、ケースの `timeout_seconds` が長ければそちら。
   反復1回の上限 `[skill_lab] max_hours` は既定0（無制限）。AI 修正がケースの制限時間を延ばすときの上限も撤廃しました。
@@ -1440,7 +1442,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.6...HEAD
+[0.7.6]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.2...v0.7.3
