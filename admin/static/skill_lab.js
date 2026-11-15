@@ -415,6 +415,7 @@ const LOOP_SETTING_LABELS = {
   evaluate_baseline: () => _t("最初に改良前の版を評価する"),
   restore_best_state: () => _t("止まったとき一番よかった内容に戻す"),
   report_ai_summary: () => _t("終わったとき AI に総括を書かせる"),
+  eval_parallel_runs: () => _t("評価で同時に流す回の数（推論サーバーの同時処理枠に合わせる）"),
   fixer_agent: () => _t("AI 修正を Agent で行う（記録を調べ、修正案を試してから直す）"),
   fixer_agent_max_steps: () => _t("Agent の手数の上限（LLM を呼ぶ回数）"),
   fixer_agent_max_trials: () => _t("Agent が修正案を試しに評価できる回数（1回の修正あたり。0 で試さない）"),
@@ -1592,7 +1593,10 @@ function labProgressText(p, d) {
   };
   const since = p.since ? _t("（{0} から）", fmtTime(p.since)) : "";
   // AI 修正の Agent が調べている途中（何手目・使っているツール。admin/skill_lab/fixer_agent.py）
-  const agent = p.step === "fixing" && p.agent_step ? _t("（{0} 手目: {1}）", p.agent_step, p.agent_tool || "") : "";
+  const agent =
+    p.step === "fixing" && p.agent_step
+      ? _t("（{0} 手目: {1}）", p.agent_step, p.agent_tool || "") + (p.agent_trial ? _t("（修正案を試しに評価中）") : "")
+      : "";
   return `${steps[p.step] || p.step}${repeat}${q}${agent} ${since}`.trim();
 }
 

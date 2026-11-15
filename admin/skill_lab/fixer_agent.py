@@ -90,6 +90,12 @@ Investigate before deciding, the way the person who tuned this assistant for mon
 - Do not repeat a fix that was already tried in this loop (list_runs shows them) or undo an earlier fix; if the same case
   keeps failing for the same reason after several different fixes, the cause is elsewhere: look again at steps 1 to 3.
 
+## Speed
+Finishing correctly always comes first; never trade it for speed. Among ways that finish correctly, prefer the one that needs
+fewer steps and less time (run_overview shows the time and LLM calls of each run): avoid searching or reading more than the
+procedure needs, repeated delegations of the same work, and checks that add nothing. When every case passes but runs are slow,
+a fix that removes needless work is welcome.
+
 ## 5. Conclude
 - submit_fix with the change (preferably one that passed in try_fix) and an analysis a person can follow: the cause, the
   evidence (runs and counts) and why the change addresses it. One cause per fix.
@@ -206,6 +212,17 @@ def _short(value, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def _run_cost(r: dict) -> str:
+    """回の所要時間と LLM 呼び出し回数（速くできる所を見つけるため。evals/run_case.py の turn_timings）。"""
+    seconds = calls = 0.0
+    for t in r.get("turn_timings") or []:
+        llm = [c.get("total_seconds") or 0 for c in t.get("llm_calls") or []]
+        tools = [c.get("total_seconds") or 0 for c in t.get("tool_calls") or []]
+        seconds += sum(llm) + sum(tools)
+        calls += len(llm)
+    return f" (about {seconds:.0f} s, {calls:.0f} LLM calls)" if seconds else ""
+
+
 def _tool_flow(r: dict) -> list[str]:
     """回の中の流れ（ツール呼び出しの順。引数は短く）。"""
     flow = []
@@ -299,7 +316,7 @@ def _run_overview(state: _State, source: str) -> str:
     for r in results:
         v = vmap.get((r.get("case_id"), r.get("repeat_index", 1)), {})
         ref = f"{source}/{r.get('case_id')}/{r.get('repeat_index', 1)}"
-        row = f"- {ref}: {_outcome(v, r)}\n  flow: {' → '.join(_tool_flow(r)) or '(no tool calls)'}"
+        row = f"- {ref}: {_outcome(v, r)}{_run_cost(r)}\n  flow: {' → '.join(_tool_flow(r)) or '(no tool calls)'}"
         row += f"\n  final answer: {_short(r.get('final_answer') or '', 160)}"
         reason = (v.get("ai_judge") or {}).get("reason") or (v.get("rule_review") or {}).get("reason")
         if reason and _outcome(v, r) != "pass":

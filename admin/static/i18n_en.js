@@ -722,6 +722,7 @@ const I18N_EN = {
   "AI が選択肢で質問してきたときに選ぶ答え（1行に1つ、順に使う。空なら先頭の選択肢）":
     "Answers to choose when the AI asks with choices (one per line, in order; empty = the first choice)",
   "（{0} 手目: {1}）": " (step {0}: {1})",
+  "（修正案を試しに評価中）": " (evaluating a candidate fix)",
   "直した指示の案: {0}": "Proposed instruction: {0}",
   "AI が試した結果: {0}": "Result of the AI's trial: {0}",
   "（ケースに適用済み）": "(applied to the case)",
@@ -736,6 +737,7 @@ const I18N_EN = {
   "最初に改良前の版を評価する": "Evaluate the version before the changes first",
   "止まったとき一番よかった内容に戻す": "Restore the best version when it stops",
   "終わったとき AI に総括を書かせる": "Have the AI write a report when it ends",
+  "評価で同時に流す回の数（推論サーバーの同時処理枠に合わせる）": "Runs evaluated at the same time (match the inference server's parallel slots)",
   "AI 修正を Agent で行う（記録を調べ、修正案を試してから直す）": "Fix with an agent (investigates the records and tries candidate fixes before fixing)",
   "Agent の手数の上限（LLM を呼ぶ回数）": "Maximum steps of the agent (LLM calls)",
   "Agent が修正案を試しに評価できる回数（1回の修正あたり。0 で試さない）": "Trial evaluations the agent may run per fix (0 = none)",

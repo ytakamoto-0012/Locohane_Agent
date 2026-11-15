@@ -378,6 +378,7 @@ class Worker:
     def _trial(self, instance: str, directory: Path, case_id: str, task_id: str) -> dict:
         run = evaluation.run(
             directory,
+            jobs=int(getattr(self._theme_cfg(instance, directory), "skill_lab_eval_parallel_runs", 1)),
             instance=instance,
             lab=self.lab,
             repeat=1,
@@ -547,7 +548,9 @@ class Worker:
 
         以前はループ全体の期限だったが、反復の数で使える時間が変わり見積もれないため、1回ごとにした（2026-11-14 ユーザー指摘）。
         """
-        self._step_deadline = time.monotonic() + self._cfg.skill_lab_max_hours * 3600
+        hours = float(self._cfg.skill_lab_max_hours or 0)
+        # 0 以下は無制限（時間がかかっても完遂させる）
+        self._step_deadline = time.monotonic() + hours * 3600 if hours > 0 else None
 
     def _step_timed_out(self) -> bool:
         return self._step_deadline is not None and time.monotonic() > self._step_deadline
@@ -574,6 +577,7 @@ class Worker:
         self._progress(directory, phase, n=n, repeat_count=repeat)
         run = evaluation.run(
             directory,
+            jobs=int(getattr(self._cfg, "skill_lab_eval_parallel_runs", 1)),
             instance=instance,
             lab=self.lab,
             repeat=repeat,
@@ -747,6 +751,7 @@ class Worker:
         def evaluate(*, case_ids, repeat, results_root, assets_base=None, config_patch_file=None, cases_dir=None):
             run = evaluation.run(
                 directory,
+                jobs=int(getattr(self._cfg, "skill_lab_eval_parallel_runs", 1)),
                 instance=instance,
                 lab=self.lab,
                 repeat=repeat,
@@ -757,6 +762,8 @@ class Worker:
                 assets_base=assets_base,
                 config_patch_file=config_patch_file,
                 cases_dir=cases_dir,
+                # 試しの評価の間も、何件目を実行中かを画面に出す（以前は1時間以上「try_fix」のまま止まって見えた）
+                on_progress=lambda p: self._progress(directory, "fixing", n=n, agent_trial=True, **p),
             )
             self._record_eval_usage(self._usage_owner(data), run["results"])
             verdicts = judge.judge_results(
@@ -765,7 +772,10 @@ class Worker:
             return run["results"], verdicts
 
         def on_step(step: int, tool: str) -> None:
-            self._progress(directory, "fixing", n=n, agent_step=step, agent_tool=tool)
+            # 前の試しの評価の「何件目」は消す（次のツールに移った）
+            self._progress(
+                directory, "fixing", n=n, agent_step=step, agent_tool=tool, agent_trial=False, done=None, total=None, case_id=None, repeat=None, repeats=None
+            )
 
         # 今回の評価（取り消した直しの記録の代わりに、直す前の状態の評価を使うこともある）を必ず含める
         iterations = self._loop_iterations(data)
@@ -952,6 +962,7 @@ class Worker:
         self._progress(directory, "baseline")
         run = evaluation.run(
             directory,
+            jobs=int(getattr(self._cfg, "skill_lab_eval_parallel_runs", 1)),
             instance=instance,
             lab=self.lab,
             repeat=1,

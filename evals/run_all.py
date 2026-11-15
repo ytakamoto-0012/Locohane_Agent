@@ -40,6 +40,8 @@ import argparse
 import json
 import shutil
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -60,7 +62,7 @@ from evals.skill_tree import FIXTURES_DIRNAME, cases_sha256, file_sha256, tree_s
 # タイムアウト扱いになることがある（tune-prompt iter13で確認）。実運用の
 # app.py にはこの制限は存在しないため、テストハーネス側の都合として
 # 900秒に緩和する。
-CASE_TIMEOUT_SECONDS = 900
+CASE_TIMEOUT_SECONDS = 14400  # インスタンスの設定（[skill_lab] case_timeout_seconds）を読めないときの既定
 # 会話の制限時間（run_case.py の --time-limit）を過ぎてから、記録の後始末・判定・生成物の確認を終えるまで待つ秒数。
 CASE_TIMEOUT_GRACE_SECONDS = 300
 
@@ -104,6 +106,23 @@ def _iter_case_paths(target: str, case_ids: list[str] | None = None, cases_dir: 
     return [by_stem[cid] for cid in case_ids]
 
 
+_CASE_TIMEOUT_CACHE: dict[str, int] = {}
+
+
+def _case_timeout_default(instance_name: str) -> int:
+    """評価対象インスタンスの [skill_lab] case_timeout_seconds（読めなければ CASE_TIMEOUT_SECONDS）。"""
+    if instance_name not in _CASE_TIMEOUT_CACHE:
+        try:
+            from src.config import load_config, resolve_instances_root
+
+            overrides = resolve_instances_root() / instance_name / "config_overrides.json"
+            cfg = load_config(overrides_path=overrides if overrides.is_file() else None, instance_name=instance_name)
+            _CASE_TIMEOUT_CACHE[instance_name] = int(cfg.skill_lab_case_timeout_seconds)
+        except Exception:  # noqa: BLE001 - 設定を読めなくても評価は既定の時間で続ける
+            _CASE_TIMEOUT_CACHE[instance_name] = CASE_TIMEOUT_SECONDS
+    return _CASE_TIMEOUT_CACHE[instance_name]
+
+
 def _run_one(case_path: Path, instance_name: str, extra_args: list[str] | None = None) -> dict:
     """1ケースを run_case.py のサブプロセスとして実行し、結果 dict を返す。
 
@@ -123,17 +142,19 @@ def _run_one(case_path: Path, instance_name: str, extra_args: list[str] | None =
     # ケースが timeout_seconds を指定していればそちらを優先する（大量ファイルを
     # 扱う重量級ケース等、既定値では完走できないケース専用の上書き）。
     case = load_case(case_path)
-    timeout = case.timeout_seconds or CASE_TIMEOUT_SECONDS
+    # 既定（[skill_lab] case_timeout_seconds）より短くはしない。0 は無制限（時間がかかっても完遂させる）
+    default = _case_timeout_default(instance_name)
+    timeout = None if default == 0 else max(case.timeout_seconds or 0, default)
     # 会話の制限時間は run_case.py 自身が守り、時間切れでもそこまでの記録を返す。ここでの強制停止は、後始末・判定の時間を
     # 足した保険（以前はここで止めて記録が空になり、スキル研究室の AI 修正が時間切れの原因を調べられなかった）。
     proc = subprocess.run(
-        [sys.executable, "-m", "evals.run_case", str(case_path), "--instance", instance_name, "--time-limit", str(timeout), *(extra_args or [])],
+        [sys.executable, "-m", "evals.run_case", str(case_path), "--instance", instance_name, *(["--time-limit", str(timeout)] if timeout else []), *(extra_args or [])],
         cwd=str(PROJECT_ROOT),
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=timeout + CASE_TIMEOUT_GRACE_SECONDS,
+        timeout=timeout + CASE_TIMEOUT_GRACE_SECONDS if timeout else None,
     )
     if proc.stderr:
         print(proc.stderr, file=sys.stderr, end="")
@@ -301,6 +322,12 @@ def main() -> int:
     parser.add_argument("--skill-overlay", action="append", default=[], help="run_case.py の --skill-overlay へ渡す（複数可）")
     parser.add_argument("--exclude-skill", action="append", default=[], help="run_case.py の --exclude-skill へ渡す（複数可）")
     parser.add_argument("--agent-overlay", action="append", default=[], help="run_case.py の --agent-overlay へ渡す（複数可）")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="同時に流す回の数（ケース・繰り返しの回をまとめて並列に流す。推論サーバーの同時処理枠に合わせる。既定1）",
+    )
     parser.add_argument("--config-patch", type=Path, help="run_case.py の --config-patch へ渡す")
     parser.add_argument("--llm-from-instance", help="run_case.py の --llm-from-instance へ渡す")
     parser.add_argument(
@@ -395,44 +422,60 @@ def main() -> int:
             "llm_from_instance": args.llm_from_instance,
         }
 
-        results = []
         stopped_early = False
         # 同じケースを続けて回すより、ケースを一巡してから次の回へ進む方が、
         # 途中で打ち切っても全ケースの回数が揃う（各結果には repeat_index を付ける）。
-        for repeat_index in range(1, args.repeat + 1):
-            if stopped_early:
-                break
-            for path in run_paths:
+        jobs = [(repeat_index, path) for repeat_index in range(1, args.repeat + 1) for path in run_paths]
+        total = len(jobs)
+        lock = threading.Lock()
+        started = [0]
+        done: dict[int, dict] = {}
+
+        def _job(index: int) -> None:
+            nonlocal stopped_early
+            repeat_index, path = jobs[index]
+            with lock:
+                if stopped_early:
+                    return
+                started[0] += 1
                 label = f"（{repeat_index}/{args.repeat}回目）" if args.repeat > 1 else ""
                 print(f"実行中: {path.name}{label}", file=sys.stderr)
                 # スキル研究室のワーカーが画面に進み具合を出すための行（admin/skill_lab/evaluation.py の read_progress）
-                print(
-                    f"[progress] {len(results) + 1}/{len(run_paths) * args.repeat} {path.stem} {repeat_index}/{args.repeat}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                run_args = extra_args
-                if args.keep_outputs:
-                    kept_name = path.stem + (f"_r{repeat_index}" if args.repeat > 1 else "")
-                    run_args = [*extra_args, "--keep-outputs", str(kept_outputs / kept_name)]
-                try:
-                    result = _run_one(path, instance_name, run_args)
-                except subprocess.TimeoutExpired as e:
-                    result = {
-                        # 集計キーを run_case.py の結果（yaml の id）と揃える。
-                        "case_id": load_case(path).id,
-                        "instance": instance_name,
-                        "error": "timeout",
-                        "detail": f"{e.timeout:.0f}秒でタイムアウトしました。",
-                    }
-                if args.repeat > 1:
-                    result["repeat_index"] = repeat_index
-                results.append(result)
-                if args.stop_on_fail and _classify(result) in ("fail", "error"):
-                    # 1回でも落ちればトライアウトは不合格。残りの回（既定10回×ケース数）を回す時間を使わない。
+                print(f"[progress] {started[0]}/{total} {path.stem} {repeat_index}/{args.repeat}", file=sys.stderr, flush=True)
+            run_args = extra_args
+            if args.keep_outputs:
+                kept_name = path.stem + (f"_r{repeat_index}" if args.repeat > 1 else "")
+                run_args = [*extra_args, "--keep-outputs", str(kept_outputs / kept_name)]
+            try:
+                result = _run_one(path, instance_name, run_args)
+            except subprocess.TimeoutExpired as e:
+                result = {
+                    # 集計キーを run_case.py の結果（yaml の id）と揃える。
+                    "case_id": load_case(path).id,
+                    "instance": instance_name,
+                    "error": "timeout",
+                    "detail": f"{e.timeout:.0f}秒でタイムアウトしました。",
+                }
+            if args.repeat > 1:
+                result["repeat_index"] = repeat_index
+            with lock:
+                done[index] = result
+                if args.stop_on_fail and _classify(result) in ("fail", "error") and not stopped_early:
+                    # 1回でも落ちればトライアウトは不合格。まだ始めていない回（既定10回×ケース数）は回さない。
                     print(f"不合格のため打ち切り: {path.name}（{repeat_index}回目）", file=sys.stderr)
                     stopped_early = True
+
+        # --jobs: 同時に流す回の数（推論サーバーの同時処理枠に合わせる。1 なら従来どおり1件ずつ）
+        if args.jobs <= 1:
+            for index in range(total):
+                if stopped_early:
                     break
+                _job(index)
+        else:
+            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+                for future in [pool.submit(_job, i) for i in range(total)]:
+                    future.result()
+        results = [done[i] for i in sorted(done)]
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_root = args.results_dir.resolve() if args.results_dir else PROJECT_ROOT / "evals" / "results" / target

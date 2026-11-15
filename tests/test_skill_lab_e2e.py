@@ -241,3 +241,18 @@ def test_case_time_limit_keeps_the_record_so_far(lab_env, tmp_path):
     result = json.loads(proc.stdout.strip().splitlines()[-1])
     assert result["error"] == "timeout", result
     assert any(e["type"] == "HumanMessage" and "ゆっくり" in str(e["content"]) for e in result["transcript"])
+
+
+def test_theme_reaches_review_with_parallel_runs(lab_env):
+    """評価で同時に流す回の数（eval_parallel_runs）を増やしても、結果の数・順番が揃いレビュー待ちまで進む。"""
+    JUDGE_SYSTEMS.clear()
+    directory = _draft_theme(lab_env, None)
+    themes.update(directory, lambda d: d.update({
+        "status": themes.STATUS_QUEUED, "tryout_repeats": 3, "loop_settings": {"eval_parallel_runs": 2},
+        "loop": {"mode": "loop", "by": "admin", "lang": "ja"},
+    }))
+    _worker(lab_env).run_theme("org_a", directory)
+    data = themes.read(directory)
+    assert data["status"] == themes.STATUS_REVIEW, json.dumps(data.get("loop"), ensure_ascii=False, default=str)[:2000]
+    tryout = data["iterations"][-1]
+    assert tryout["phase"] == "tryout" and tryout["cases"]["001"]["pass"] == 3

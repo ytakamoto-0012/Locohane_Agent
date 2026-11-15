@@ -96,7 +96,8 @@ Rules:
     not ask (for example state the default to use).
 - Time limit of a case: a run that was still making progress (no loop, no repeated failing calls) but was cut off by the
   case's time limit (error "timeout", the record ends mid-work) may need more time on this machine. You may raise it with
-  {"path": "cases/<id>.yaml", "answers": {"timeout_seconds": <60 to 3600>}} (the default is 900). Do not raise it when the time
+  {"path": "cases/<id>.yaml", "answers": {"timeout_seconds": <seconds, 0 = no limit>}} (the default is several hours). Finishing
+  matters more than speed: never accept a cut-off run as the result. Do not raise it when the time
   was wasted (loops, retries, needless work): fix the target so it does less instead.
 - Paths you can fix: assets/skills/<name>/... and assets/agents/<name>.md of existing research targets, config_patch.json,
   and only the automatic answers and the time limit (timeout_seconds) of cases/<id>.yaml
@@ -349,8 +350,7 @@ def _forbidden(directory: Path, rel: str, path: Path, *, delete: bool) -> str | 
 
 # AI 修正がケースで変えてよい項目（評価中にアシスタントが利用者へ質問したときの自動回答）
 CASE_ANSWER_KEYS = ("scripted_choice_answers", "scripted_text_answers", "timeout_seconds")
-# AI 修正が延ばせる会話の制限時間の上限（秒）。重いケースが進んでいるのに時間で切れるときのため（採点の前提ではなく評価環境の設定）
-CASE_TIMEOUT_MAX_SECONDS = 3600
+# AI 修正がケースの会話の制限時間を延ばせる。上限は設けない（時間がかかっても完遂させる。0 は無制限）
 
 
 def _case_with_answers(current: str | None, answers) -> tuple[str | None, str | None]:
@@ -375,8 +375,8 @@ def _case_with_answers(current: str | None, answers) -> tuple[str | None, str | 
         return None, f"the case cannot be read: {e}"
     for key, value in answers.items():
         if key == "timeout_seconds":
-            if isinstance(value, bool) or not isinstance(value, int) or not 60 <= value <= CASE_TIMEOUT_MAX_SECONDS:
-                return None, f"timeout_seconds must be an integer from 60 to {CASE_TIMEOUT_MAX_SECONDS}"
+            if isinstance(value, bool) or not isinstance(value, int) or not (value == 0 or value >= 60):
+                return None, "timeout_seconds must be 0 (no limit) or an integer of 60 or more"
             data[key] = value
             continue
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):

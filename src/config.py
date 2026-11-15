@@ -1223,6 +1223,8 @@ class Config:
     # --- スキル調整ワーカー（[skill_lab_worker]、admin/skill_lab/worker.py） ---
     skill_lab_max_iterations: int
     skill_lab_max_hours: float
+    # [skill_lab] case_timeout_seconds（評価の1ケースの会話の制限時間。0 で無制限。ケースの timeout_seconds が長ければそちら）
+    skill_lab_case_timeout_seconds: int
     skill_lab_poll_interval_seconds: float
     skill_lab_fixer_max_file_chars: int
     skill_lab_transcript_excerpt_chars: int
@@ -1250,6 +1252,8 @@ class Config:
     # AI 修正を Agent（ツールで調べ、修正案を試してから結論を出す）で行うか、と Agent の手数・試しの回数等
     # （admin/skill_lab/fixer_agent.py）。false なら従来の1回の LLM 呼び出し（fixer.propose）。
     skill_lab_fixer_agent: bool
+    # [skill_lab_worker] eval_parallel_runs（評価で同時に流す回の数。推論サーバーの同時処理枠に合わせる）
+    skill_lab_eval_parallel_runs: int
     skill_lab_fixer_agent_max_steps: int
     skill_lab_fixer_agent_max_trials: int
     skill_lab_fixer_agent_trial_repeats: int
@@ -3682,7 +3686,10 @@ def load_config(
         skill_lab_max_iterations=_positive_int(
             os.getenv("SKILL_LAB_MAX_ITERATIONS", skill_lab_section.get("max_iterations", 8)), "[skill_lab].max_iterations"
         ),
-        skill_lab_max_hours=_positive_float(os.getenv("SKILL_LAB_MAX_HOURS", skill_lab_section.get("max_hours", 6)), "[skill_lab].max_hours"),
+        skill_lab_max_hours=max(0.0, _as_float(os.getenv("SKILL_LAB_MAX_HOURS", skill_lab_section.get("max_hours", 0)), "[skill_lab].max_hours")),
+        skill_lab_case_timeout_seconds=_non_negative_int(
+            os.getenv("SKILL_LAB_CASE_TIMEOUT_SECONDS", skill_lab_section.get("case_timeout_seconds", 14400)), "[skill_lab].case_timeout_seconds"
+        ),
         skill_lab_poll_interval_seconds=_positive_float(
             os.getenv("SKILL_LAB_POLL_INTERVAL_SECONDS", skill_lab_worker_section.get("poll_interval_seconds", 10)),
             "[skill_lab_worker].poll_interval_seconds",
@@ -3747,6 +3754,9 @@ def load_config(
         skill_lab_evaluate_baseline=_as_bool(os.getenv("SKILL_LAB_EVALUATE_BASELINE", skill_lab_worker_section.get("evaluate_baseline", "true"))),
         skill_lab_restore_best_state=_as_bool(os.getenv("SKILL_LAB_RESTORE_BEST_STATE", skill_lab_worker_section.get("restore_best_state", "true"))),
         skill_lab_report_ai_summary=_as_bool(os.getenv("SKILL_LAB_REPORT_AI_SUMMARY", skill_lab_worker_section.get("report_ai_summary", "true"))),
+        skill_lab_eval_parallel_runs=_positive_int(
+            os.getenv("SKILL_LAB_EVAL_PARALLEL_RUNS", skill_lab_worker_section.get("eval_parallel_runs", 1)), "[skill_lab_worker].eval_parallel_runs"
+        ),
         skill_lab_fixer_agent=_as_bool(os.getenv("SKILL_LAB_FIXER_AGENT", skill_lab_worker_section.get("fixer_agent", "true"))),
         skill_lab_fixer_agent_max_steps=_positive_int(
             os.getenv("SKILL_LAB_FIXER_AGENT_MAX_STEPS", skill_lab_worker_section.get("fixer_agent_max_steps", 40)), "[skill_lab_worker].fixer_agent_max_steps"

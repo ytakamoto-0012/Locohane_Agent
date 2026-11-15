@@ -48,6 +48,7 @@ def build_command(
     config_patch: bool = True,
     config_patch_file: Path | None = None,
     cases_dir: Path | None = None,
+    jobs: int = 1,
 ) -> list[str]:
     """評価のコマンド。
 
@@ -78,6 +79,9 @@ def build_command(
         cmd += ["--config-patch", str(config_patch_file or directory / themes.CONFIG_PATCH_FILENAME)]
     if stop_on_fail:
         cmd.append("--stop-on-fail")
+    if jobs > 1:
+        # 同時に流す回の数（推論サーバーの同時処理枠に合わせる。[skill_lab_worker] eval_parallel_runs）
+        cmd += ["--jobs", str(jobs)]
     for name in assets["skills"]:
         cmd += ["--skill-overlay", str(base / "skills" / name)]
     for name in assets["agents"]:
@@ -110,6 +114,7 @@ def run(
     on_progress: Callable[[dict], None] | None = None,
     config_patch_file: Path | None = None,
     cases_dir: Path | None = None,
+    jobs: int = 1,
 ) -> dict:
     """評価を1回（各ケース repeat 回）行い、結果をまとめて返す。
 
@@ -139,6 +144,7 @@ def run(
         config_patch=config_patch,
         config_patch_file=config_patch_file,
         cases_dir=cases_dir,
+        jobs=jobs,
     )
     log_path = log_path or (results_root / "run_all.log")
     log_start = log_path.stat().st_size if log_path.is_file() else 0  # ログは追記するので、今回の分だけを読む

@@ -884,6 +884,10 @@ DESCRIPTIONS: dict[str, str] = {
     'skill_lab_worker.fixer_history_iterations': (
         'Number of past iterations (the contents of the fixes tried and the cases that still failed after them) shown when asking for a fix (newest first).'
     ),
+    'skill_lab_worker.eval_parallel_runs': (
+        'How many runs an evaluation (loop, tryout, trial of an AI fix) runs at the same time. Match it to the parallel slots of the inference server '
+        '(e.g. llama.cpp -np) to finish evaluations with many runs, such as tryouts, sooner. Keep 1 when the server has one slot (more would only queue).'
+    ),
     'skill_lab_worker.fixer_agent': (
         'Whether the AI fix is done by an agent (true) or by one LLM call (false).\n'
         'The agent investigates with tools (the evaluation records in full, comparisons between runs, how often words appear, the system prompt '
@@ -936,8 +940,13 @@ DESCRIPTIONS: dict[str, str] = {
         'max_iterations and max_hours can be overridden per theme under "Theme settings" → "Advanced settings".'
     ),
     'skill_lab.max_hours': (
-        'Maximum time (hours, decimals allowed) one iteration may use (1 evaluation + 1 fix on failure; the evaluation of the version before the changes and a tryout also count as one each).\n'
-        'If exceeded during an evaluation, that evaluation is cut off; if exceeded during judging or a fix, it stops with "limit reached" once that finishes. The whole loop takes about max_iterations × this value at most.'
+        'Maximum time (hours, decimals allowed) one iteration may use (1 evaluation + 1 fix on failure; the evaluation of the version before the changes and a tryout also count as one each). 0 means no limit (the default).\n'
+        'Finishing is preferred over speed, so it does not cut off by default. When set, an evaluation that exceeds it is cut off, and judging or a fix that exceeds it stops with "limit reached" once it finishes.'
+    ),
+    'skill_lab.case_timeout_seconds': (
+        'Seconds the conversation of one evaluation case may use (evals/run_all.py and run_case.py; shared by the Skill Lab evaluations, tryouts and tune-prompt). 0 means no limit.\n'
+        'Cutting runs off by time hides whether they would have finished and does not lead to improvements, so this is long and serves only as a safety net for runs that really hang.\n'
+        "A case's timeout_seconds is used when it is longer (it never shortens this)."
     ),
     'skill_lab.temp_dir': (
         'Where evaluations (evals/run_all.py and run_case.py, including the Skill Lab loop, single trials and tryouts, and skill-creator evaluations) create temporary folders while they run. The settings of the instance being evaluated are used.\n'
@@ -946,7 +955,7 @@ DESCRIPTIONS: dict[str, str] = {
     ),
     'skill_lab.temp_retention_hours': (
         'Temporary folders left behind by a forced or abnormal exit are deleted automatically once this many hours (decimals allowed) have passed since they were last updated (including updates of the files inside). '
-        'Make it longer than max_hours so that folders of running evaluations are not deleted. 0 or less disables the automatic deletion.\n'
+        'Folders of running evaluations are kept because they keep being updated. 0 or less disables the automatic deletion.\n'
         "They are deleted at the start of an evaluation, when the instance (main) starts and at the interval below, and by the skill tuning worker at the interval below (for all instances it serves)."
     ),
     'skill_lab.temp_cleanup_interval_hours': (

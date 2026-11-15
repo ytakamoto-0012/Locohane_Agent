@@ -328,7 +328,7 @@ def test_subagent_llm_connection_failures_are_an_environment_problem():
 def test_fix_can_raise_the_time_limit_of_a_case_within_bounds(theme):
     applied, errors = fixer.apply_edits(theme, [{"path": "cases/a.yaml", "answers": {"timeout_seconds": 1800}}], known_tools=None)
     assert errors == [] and yaml.safe_load((theme / "cases/a.yaml").read_text(encoding="utf-8"))["timeout_seconds"] == 1800
-    for bad in (30, 99999, "600", True):
+    for bad in (30, -1, "600", True):
         _, errors = fixer.apply_edits(theme, [{"path": "cases/a.yaml", "answers": {"timeout_seconds": bad}}], known_tools=None)
         assert errors, bad
 

@@ -928,11 +928,12 @@ LOOP_SETTING_INSTANCE = "instance"
 LOOP_SETTING_WORKER = "worker"
 LOOP_SETTINGS: dict[str, tuple[str, float, str]] = {
     "max_iterations": ("int", 1, LOOP_SETTING_INSTANCE),
-    "max_hours": ("float", 0.01, LOOP_SETTING_INSTANCE),
+    "max_hours": ("float", 0, LOOP_SETTING_INSTANCE),  # 0 で無制限
     "tryout_stop_on_first_failure": ("bool", 0, LOOP_SETTING_WORKER),
     "evaluate_baseline": ("bool", 0, LOOP_SETTING_WORKER),
     "restore_best_state": ("bool", 0, LOOP_SETTING_WORKER),
     "report_ai_summary": ("bool", 0, LOOP_SETTING_WORKER),
+    "eval_parallel_runs": ("int", 1, LOOP_SETTING_WORKER),
     "fixer_agent": ("bool", 0, LOOP_SETTING_WORKER),
     "fixer_agent_max_steps": ("int", 1, LOOP_SETTING_WORKER),
     "fixer_agent_max_trials": ("int", 0, LOOP_SETTING_WORKER),
