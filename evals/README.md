@@ -183,7 +183,7 @@ work_dir: "evals/fixtures/xxx"       # run_script/execute_python_code/analyze_im
 memory_seed: "evals/fixtures/xxx"    # ケース開始時に使い捨てのメモリーディレクトリへ写す
                                       # メモリー一式（<type>/<name>.md。省略可、既定は空の
                                       # メモリー。work_dir と同じ規則で解決する）
-timeout_seconds: 3600                # run_all.py がサブプロセス実行する際のタイムアウト秒数
+timeout_seconds: 3600                # 会話の制限時間（既定900秒）。run_case.py が守り、過ぎたらそこまでの記録付きで error=timeout を返す（run_all.py の強制停止はさらに300秒後）
                                       # （省略可、既定は run_all.py の CASE_TIMEOUT_SECONDS=900。
                                       # 大量ファイルを扱う重量級ケースの上書き用）
 verify_script: "fixtures/xxx/check.py"  # 会話の後に作業フォルダを確かめるスクリプト（省略可。work_dir と同じ規則で解決）。

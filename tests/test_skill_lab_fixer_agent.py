@@ -280,3 +280,81 @@ def test_best_state_discounts_few_runs_and_merges_the_same_state():
     assert _state_confidence(iterations[:1], "v0") < _state_confidence(iterations[3:], "v1")
     # 同じ内容の評価は合算する（v0 は 6回中4回）
     assert _state_confidence(iterations, "v0") < _state_confidence(iterations, "v1")
+
+
+def test_lab_llm_call_retries_after_a_repetition_loop(monkeypatch):
+    """研究室の LLM 呼び出しが反復ループで打ち切られたら、作り直してやり直す（以前はテーマごとエラーで止まっていた）。"""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    import src.llm.routing
+    from admin.skill_lab import llm as lab_llm
+    from src.llm import ThinkingLoopDetected
+
+    closed = []
+
+    async def fake_close(model):
+        closed.append(model)
+
+    monkeypatch.setattr(src.llm.routing, "aclose_model_client", fake_close)
+    calls = []
+
+    class Model:
+        async def ainvoke(self, messages):
+            calls.append(messages)
+            if len(calls) == 1:
+                raise ThinkingLoopDetected("loop", snippet="x")
+            return AIMessage(content="ok")
+
+    async def build():
+        return Model()
+
+    response = asyncio.run(lab_llm.invoke_resilient(build, [HumanMessage(content="q")]))
+    assert response.content == "ok" and len(closed) == 1
+    assert "repetition loop" in str(calls[1][-1].content)
+
+
+def test_subagent_llm_connection_failures_are_an_environment_problem():
+    """全部の回でサブエージェントの LLM 呼び出しが接続エラーで止まったら、AI 修正に回さず環境の問題として止める。"""
+    from admin.skill_lab import evaluation
+
+    failed = {"case_id": "a", "rules_pass": False, "transcript": [
+        {"type": "ToolMessage", "content": "[Sub-agent: stopped because the LLM call timed out(Connection error.)]"}]}
+    ok = {"case_id": "b", "rules_pass": True, "transcript": [{"type": "ToolMessage", "content": "fine"}]}
+    assert "inference server" in evaluation.infra_error([failed, dict(failed, case_id="c")])
+    assert evaluation.infra_error([failed, ok]) is None
+    assert any("environment problem" in n for n in evaluation.harness_notes(failed))
+
+
+def test_fix_can_raise_the_time_limit_of_a_case_within_bounds(theme):
+    applied, errors = fixer.apply_edits(theme, [{"path": "cases/a.yaml", "answers": {"timeout_seconds": 1800}}], known_tools=None)
+    assert errors == [] and yaml.safe_load((theme / "cases/a.yaml").read_text(encoding="utf-8"))["timeout_seconds"] == 1800
+    for bad in (30, 99999, "600", True):
+        _, errors = fixer.apply_edits(theme, [{"path": "cases/a.yaml", "answers": {"timeout_seconds": bad}}], known_tools=None)
+        assert errors, bad
+
+
+def test_run_case_keeps_the_record_when_the_time_limit_is_hit():
+    """会話が制限時間を過ぎたら、そこまでの記録を付けて error=timeout を返す（evals/run_case.py の time_limit）。"""
+    import inspect
+
+    from evals import run_all, run_case
+
+    assert "time_limit" in inspect.signature(run_case._run).parameters
+    assert run_all.CASE_TIMEOUT_GRACE_SECONDS > 0
+
+
+def test_agent_blockers_can_carry_allowed_case_settings(theme):
+    state = fixer_agent._State(
+        directory=theme, work_dir=theme / "runs" / "agent", target_cfg=None, iterations=[], limits=fixer_agent.AgentLimits(),
+        runner=fixer_agent.Runner(evaluate=lambda **kw: ([], [])), known_tools=None, temp_root=None, max_files=2,
+    )
+    blocker = [{"kind": "case", "case_id": "a", "problem": "p", "suggestion": "s"}]
+    out = fixer_agent._report_blockers(state, "a", blocker, [{"path": "assets/skills/my-skill/SKILL.md", "content": "x"}])
+    assert out.startswith("error") and state.final is None
+    out = fixer_agent._report_blockers(state, "a", blocker, [{"path": "cases/a.yaml", "answers": {"timeout_seconds": 5}}])
+    assert out.startswith("error: the case settings cannot be applied")
+    setting = {"path": "cases/a.yaml", "answers": {"timeout_seconds": 1500}}
+    assert fixer_agent._report_blockers(state, "a", blocker, [setting]) == "accepted"
+    assert state.final["edits"] == [setting] and state.final["blockers"][0]["case_id"] == "a"
+    # 研究対象・ケースはまだ書き換えない（ワーカーが止めた後に適用する）
+    assert "timeout_seconds" not in (theme / "cases/a.yaml").read_text(encoding="utf-8")

@@ -102,6 +102,8 @@ class Worker:
     _loop_cfg = None
     # 実行中の反復（評価1回と、続く AI 修正）の期限（time.monotonic()）。反復の外では None。
     _step_deadline: float | None = None
+    # AI 修正が「研究対象の外の原因」を報告したときに、止めた後で適用するケースの設定（制限時間・自動回答）
+    _pending_case_settings: list = []
 
     @property
     def _cfg(self):
@@ -685,7 +687,11 @@ class Worker:
                     fix_extra = {}
                 if proposal["blockers"]:
                     # 原因が研究対象の外（ケース・仕様・環境）にあると、いくら直しても合格しない。研究対象は書き換えずに止める。
+                    # AI が変えてよいケースの設定（制限時間・自動回答）だけは、止めた後に適用する（_stop_for_blockers）。
+                    self._pending_case_settings = [e for e in proposal["edits"] if isinstance(e, dict) and "answers" in e]
                     fix = {"analysis": proposal["analysis"], "applied": [], "errors": [], "edits": 0, "blockers": proposal["blockers"], **fix_extra}
+                    if self._pending_case_settings:
+                        fix["case_settings"] = fixer.edit_summary(self._pending_case_settings)
                     break
                 limit_error = fixer.too_many_files(proposal["edits"], max_files)
                 if limit_error:
@@ -1072,6 +1078,13 @@ class Worker:
             for p in problems
         ]
         self._finish(directory, themes.STATUS_BLOCKED, "\n".join(lines)[:2000])
+        # 一番よかった版へ戻した後に、AI が変えてよいケースの設定（制限時間・自動回答）を入れる。人がケースを直して
+        # 再開したとき、同じ時間切れ・質問で落ちないように（先に入れると、戻す処理で巻き戻る）
+        settings, self._pending_case_settings = self._pending_case_settings, []
+        if settings:
+            _, errors = fixer.apply_edits(directory, settings, known_tools=None)
+            if errors:
+                logger.warning("Could not apply the case settings of the AI fix: %s", errors)
         return True
 
     def _loop(self, instance: str, directory: Path, tryout_repeats: int) -> None:

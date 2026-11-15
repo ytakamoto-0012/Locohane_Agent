@@ -94,8 +94,12 @@ Rules:
     result the assistant should produce, or hints about how to do the work, into the answers.
   - the question was unnecessary (the spec or the instruction already says what to do): fix the research target so it does
     not ask (for example state the default to use).
+- Time limit of a case: a run that was still making progress (no loop, no repeated failing calls) but was cut off by the
+  case's time limit (error "timeout", the record ends mid-work) may need more time on this machine. You may raise it with
+  {"path": "cases/<id>.yaml", "answers": {"timeout_seconds": <60 to 3600>}} (the default is 900). Do not raise it when the time
+  was wasted (loops, retries, needless work): fix the target so it does less instead.
 - Paths you can fix: assets/skills/<name>/... and assets/agents/<name>.md of existing research targets, config_patch.json,
-  and only the automatic answers of cases/<id>.yaml
+  and only the automatic answers and the time limit (timeout_seconds) of cases/<id>.yaml
   (you cannot create new skills or sub-agents, and you cannot delete SKILL.md or agent definitions themselves)
 - Keep the language of the files you edit (do not translate existing text); write text you add to a file in the same language as that file.
   This takes precedence over the output language below for file contents. Write "analysis" in the output language.
@@ -344,7 +348,9 @@ def _forbidden(directory: Path, rel: str, path: Path, *, delete: bool) -> str | 
 
 
 # AI 修正がケースで変えてよい項目（評価中にアシスタントが利用者へ質問したときの自動回答）
-CASE_ANSWER_KEYS = ("scripted_choice_answers", "scripted_text_answers")
+CASE_ANSWER_KEYS = ("scripted_choice_answers", "scripted_text_answers", "timeout_seconds")
+# AI 修正が延ばせる会話の制限時間の上限（秒）。重いケースが進んでいるのに時間で切れるときのため（採点の前提ではなく評価環境の設定）
+CASE_TIMEOUT_MAX_SECONDS = 3600
 
 
 def _case_with_answers(current: str | None, answers) -> tuple[str | None, str | None]:
@@ -368,6 +374,11 @@ def _case_with_answers(current: str | None, answers) -> tuple[str | None, str | 
     except yaml.YAMLError as e:
         return None, f"the case cannot be read: {e}"
     for key, value in answers.items():
+        if key == "timeout_seconds":
+            if isinstance(value, bool) or not isinstance(value, int) or not 60 <= value <= CASE_TIMEOUT_MAX_SECONDS:
+                return None, f"timeout_seconds must be an integer from 60 to {CASE_TIMEOUT_MAX_SECONDS}"
+            data[key] = value
+            continue
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
             return None, f"{key} must be a list of strings"
         if value:

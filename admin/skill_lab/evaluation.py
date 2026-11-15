@@ -211,6 +211,14 @@ def infra_error(results: list[dict]) -> str | None:
     このまま AI 修正に回すと、関係のないところを書き換えて反復を使い切ってしまう。
     """
     unreachable = [r for r in results if r.get("error") == "llm_unreachable"]
+    failed = [r for r in results if classify(r) in ("error", "fail") or r.get("error")]
+    if not unreachable and failed and all(_llm_connection_failed(r) for r in results):
+        # 全部の回でサブエージェントの LLM 呼び出しが接続エラー・時間切れで止まった: 推論サーバーの問題で、スキルを直しても
+        # 解決しない（2026-11-13 yt001 のテーマで、AI 修正が的外れな直しに回っていた）
+        return (
+            "Sub-agent LLM calls failed with connection errors or timeouts in every run of the evaluation "
+            "(the inference server may be overloaded or down). Check the server and its parallel settings, then start again."
+        )
     if not unreachable:
         return None
     detail = unreachable[0].get("detail") or ""
@@ -331,9 +339,42 @@ def transcript_excerpt(result: dict, max_chars: int) -> str:
     tail = "\n".join(outputs)
     budget = max_chars - (len(tail) + 1 if tail else 0)
     if len(text) > budget:
+        # 途中を省くときは、省略しない呼び出しの一覧を末尾に付ける。以前は長い記録の途中が省かれ、AI judge が
+        # 実際に呼んだツール（provide_download 等）を「記録に無い」として不合格にしていた（2026-11-15 仮想研究室）。
+        calls = tool_call_list(result)
+        if len(calls) > max_chars // 2:
+            # 呼び出しが極端に多いときだけ、一覧の中ほどを省く（記録の本文を読む枠を残す）
+            keep = max_chars // 4
+            calls = f"{calls[:keep]} … (more tool calls omitted) … {calls[-keep:]}"
+        tail = f"{calls}\n{tail}" if tail else calls
+        budget = max_chars - len(tail) - 1
         head = max(budget, 0) // 3
-        text = f"{text[:head]}\n… (snip) …\n{text[-(max(budget, 0) - head):]}" if budget > 0 else ""
+        text = f"{text[:head]}\n… (snip: the middle of the record is omitted; every tool call is listed below) …\n{text[-(max(budget, 0) - head):]}" if budget > 0 else ""
     return f"{text}\n{tail}" if tail else text
+
+
+def tool_call_list(result: dict, arg_chars: int = 80) -> str:
+    """回の中の全部のツール呼び出し（委譲先の中も含む）を、引数を短くして順に並べたもの（省略しない）。"""
+
+    def short(args) -> str:
+        text = " ".join(json.dumps(args or {}, ensure_ascii=False, default=str).split())
+        return text if len(text) <= arg_chars else text[:arg_chars] + "…"
+
+    main = [
+        f"{tc.get('name')}{short(tc.get('args'))}"
+        for e in result.get("transcript") or []
+        if e.get("type") == "AIMessage"
+        for tc in e.get("tool_calls") or []
+    ]
+    lines = ["[all tool calls of the assistant, in order] " + (" → ".join(main) or "(none)")]
+    by_dispatch: dict[str, list[str]] = {}
+    for call in result.get("subagent_tool_calls") or []:
+        if isinstance(call, dict):
+            mark = " (error)" if call.get("is_error") else ""
+            by_dispatch.setdefault(str(call.get("dispatch", "?")), []).append(f"{call.get('name')}{short(call.get('args'))}{mark}")
+    for dispatch, calls in by_dispatch.items():
+        lines.append(f"[all tool calls of sub-agent {dispatch}, in order] " + " → ".join(calls))
+    return "\n".join(lines)
 
 
 # ツール結果の文言から分かる、モデルのせいではない失敗（src/tools の拒否・失敗のメッセージ）。
@@ -361,7 +402,18 @@ _HARNESS_PATTERNS = (
         re.compile(r"the script timed out after \d+ seconds|reached the limit of \d+ seconds and was forcibly stopped"),
         "a script hit the time limit ([scripts] timeout): the script may be too slow, or the machine is",
     ),
+    (
+        _SUBAGENT_LLM_FAILURE_RE := re.compile(r"Sub-agent: stopped because the LLM call (?:timed out|failed)[^\]]*"),
+        "a sub-agent stopped because its LLM call failed (connection error or timeout of the inference server): an environment "
+        "problem, not a mistake of the model or the skill",
+    ),
 )
+
+
+def _llm_connection_failed(result: dict) -> bool:
+    """回の中で、サブエージェントの LLM 呼び出しが接続エラー・時間切れで止まったか。"""
+    texts = [str(e.get("content") or "") for e in result.get("transcript") or [] if e.get("type") == "ToolMessage"]
+    return any(_SUBAGENT_LLM_FAILURE_RE.search(t) for t in texts)
 
 
 def harness_notes(result: dict) -> list[str]:

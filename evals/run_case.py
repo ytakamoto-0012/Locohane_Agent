@@ -472,8 +472,12 @@ async def _run(
     exclude_skills: list[str] | None = None,
     agent_overlays: list[Path] | None = None,
     keep_outputs: Path | None = None,
+    time_limit: float | None = None,
 ) -> dict:
     """対象ファイルを現在の内容のまま読み込み、1ケースを実行する。
+
+    time_limit: 会話（全ターン）に使ってよい秒数。超えたらそこで止め、それまでの記録を付けて error=timeout で返す
+        （以前は evals/run_all.py がサブプロセスごと止めて記録が空になり、スキル研究室の AI 修正が原因を調べられなかった）。
 
     Args:
         case: 実行する eval ケース。
@@ -725,6 +729,7 @@ async def _run(
         turn_timings: list[dict] = []
         prev_len = 0
         mid_turn_error: str | None = None
+        timed_out = False
         turn_cutoffs: list[dict] = []
 
         # checkpointer は本番 app.py と同じ AsyncSqliteSaver（シリアライズ経由）を
@@ -739,49 +744,57 @@ async def _run(
             subagent_calls, observe_subagent_call = _subagent_call_recorder()
             add_tool_call_observer(observe_subagent_call)
 
+            time_box = asyncio.timeout(time_limit)
             try:
-                for turn_index, turn in enumerate(case.turns):
-                    timing_handler.reset()
-                    try:
-                        result = await ainvoke_ensuring_final_text(
-                            graph,
-                            {"messages": [mark_user_turn(HumanMessage(content=turn))]},
-                            run_config,
-                            max_retries=config.thinking_loop_guard_empty_response_max_retries,
-                            nudge_messages=config.thinking_loop_guard_nudge_messages,
-                            loop_max_retries=config.thinking_loop_guard_max_retries,
-                            tool_loop_nudge_messages=config.tool_loop_guard_nudge_messages,
-                        )
-                    except (GraphRecursionError, ThinkingLoopDetected) as e:
-                        # 本番 app.py はこの2例外をターンごとに捕捉し、打ち切り
-                        # メッセージを出してそのターンだけ終え、会話全体は継続する
-                        # （app.py の on_message、GraphRecursionError/ThinkingLoopDetected
-                        # ハンドラ）。以前は下の except Exception で会話全体を
-                        # mid_turn_exception として中断させていたため、本番なら継続する
-                        # はずの会話が eval だけ失敗扱いになる誤検知があった。
-                        reason = "recursion_limit" if isinstance(e, GraphRecursionError) else "thinking_loop"
-                        cutoff_entry = {"turn_index": turn_index, "reason": reason}
-                        snippet = getattr(e, "snippet", "")
-                        if snippet:
-                            # thinking_loop 検知時にバッファされていた直近テキスト
-                            # （src/llm.py の ThinkingLoopDetected.snippet）。真の反復
-                            # ループか、構造化テキストによる誤検知かを事後判別するため
-                            # results.json に残す。
-                            cutoff_entry["snippet"] = snippet
-                        turn_cutoffs.append(cutoff_entry)
-                        state = await graph.aget_state(run_config)
-                        turn_messages = list(state.values.get("messages", [])) if state else []
-                        cutoff_text = f"[eval] {reason} に達したため、このターンを打ち切りました。"
-                        # 本番同様、グラフの永続状態には残さない（aupdate_state は
-                        # 呼ばない）。このケースの transcript/final_answer 用にのみ
-                        # 合成メッセージを積む。
-                        turn_messages = turn_messages + [AIMessage(content=cutoff_text)]
-                        result = {"messages": turn_messages}
+                async with time_box:
+                    for turn_index, turn in enumerate(case.turns):
+                        timing_handler.reset()
+                        try:
+                            result = await ainvoke_ensuring_final_text(
+                                graph,
+                                {"messages": [mark_user_turn(HumanMessage(content=turn))]},
+                                run_config,
+                                max_retries=config.thinking_loop_guard_empty_response_max_retries,
+                                nudge_messages=config.thinking_loop_guard_nudge_messages,
+                                loop_max_retries=config.thinking_loop_guard_max_retries,
+                                tool_loop_nudge_messages=config.tool_loop_guard_nudge_messages,
+                            )
+                        except (GraphRecursionError, ThinkingLoopDetected) as e:
+                            # 本番 app.py はこの2例外をターンごとに捕捉し、打ち切り
+                            # メッセージを出してそのターンだけ終え、会話全体は継続する
+                            # （app.py の on_message、GraphRecursionError/ThinkingLoopDetected
+                            # ハンドラ）。以前は下の except Exception で会話全体を
+                            # mid_turn_exception として中断させていたため、本番なら継続する
+                            # はずの会話が eval だけ失敗扱いになる誤検知があった。
+                            reason = "recursion_limit" if isinstance(e, GraphRecursionError) else "thinking_loop"
+                            cutoff_entry = {"turn_index": turn_index, "reason": reason}
+                            snippet = getattr(e, "snippet", "")
+                            if snippet:
+                                # thinking_loop 検知時にバッファされていた直近テキスト
+                                # （src/llm.py の ThinkingLoopDetected.snippet）。真の反復
+                                # ループか、構造化テキストによる誤検知かを事後判別するため
+                                # results.json に残す。
+                                cutoff_entry["snippet"] = snippet
+                            turn_cutoffs.append(cutoff_entry)
+                            state = await graph.aget_state(run_config)
+                            turn_messages = list(state.values.get("messages", [])) if state else []
+                            cutoff_text = f"[eval] {reason} に達したため、このターンを打ち切りました。"
+                            # 本番同様、グラフの永続状態には残さない（aupdate_state は
+                            # 呼ばない）。このケースの transcript/final_answer 用にのみ
+                            # 合成メッセージを積む。
+                            turn_messages = turn_messages + [AIMessage(content=cutoff_text)]
+                            result = {"messages": turn_messages}
 
-                    turn_messages = result["messages"]
-                    token_usage_by_turn.append(_sum_usage(_serialize_messages(turn_messages[prev_len:])))
-                    prev_len = len(turn_messages)
-                    turn_timings.append({"turn_index": turn_index, **timing_handler.summary()})
+                        turn_messages = result["messages"]
+                        token_usage_by_turn.append(_sum_usage(_serialize_messages(turn_messages[prev_len:])))
+                        prev_len = len(turn_messages)
+                        turn_timings.append({"turn_index": turn_index, **timing_handler.summary()})
+            except TimeoutError as e:
+                if not time_box.expired():
+                    mid_turn_error = f"{type(e).__name__}: {e}"
+                timed_out = time_box.expired()
+                state = await graph.aget_state(run_config)
+                result = {"messages": state.values.get("messages", [])} if state else None
             except Exception as e:  # noqa: BLE001 - コンテキスト長超過等でも途中経過を残す
                 mid_turn_error = f"{type(e).__name__}: {e}"
                 # ainvoke が例外で中断しても、checkpointer にはそこまでの状態が
@@ -838,7 +851,10 @@ async def _run(
                 out["output_files"] = output_files
             if turn_cutoffs:
                 out["turn_cutoffs"] = turn_cutoffs
-            if mid_turn_error is not None:
+            if timed_out:
+                out["error"] = "timeout"
+                out["detail"] = f"the conversation did not finish within {time_limit:.0f} seconds (the record so far is kept)"
+            elif mid_turn_error is not None:
                 # transcript は途中経過として残しつつ、正常完了ではないことを明示する。
                 out["error"] = "mid_turn_exception"
                 out["detail"] = mid_turn_error
@@ -887,6 +903,11 @@ def main() -> int:
         type=Path,
         help="作業フォルダで新しく作られた・変わった文書ファイル（xlsx/docx/pptx/pdf・スクリプト）を、一時フォルダが消える前にここへ写す",
     )
+    parser.add_argument(
+        "--time-limit",
+        type=float,
+        help="会話に使ってよい秒数。超えたらそこで止め、それまでの記録を付けて error=timeout で返す（evals/run_all.py が渡す）",
+    )
     args = parser.parse_args()
     for skill_dir in args.skill_overlay:
         if not (skill_dir / "SKILL.md").is_file():
@@ -918,6 +939,7 @@ def main() -> int:
                 args.exclude_skill,
                 [f.resolve() for f in args.agent_overlay],
                 args.keep_outputs.resolve() if args.keep_outputs else None,
+                args.time_limit,
             )
         )
     except Exception as e:  # noqa: BLE001 - モデルの幻覚呼び出し等も診断可能なJSONにする

@@ -29,7 +29,7 @@ from typing import Any, Callable
 import yaml
 
 from . import evaluation, fixer, sources, themes
-from .llm import LabLLMError, record_usage, strip_thinking, with_output_language
+from .llm import LabLLMError, invoke_resilient, strip_thinking, with_output_language
 
 # 試しの評価の置き場（runs/<反復>/ の下）
 AGENT_DIRNAME = "agent"
@@ -67,6 +67,12 @@ Investigate before deciding, the way the person who tuned this assistant for mon
 - The model ignores a restriction written only in words: enforce it with settings in config_patch.json where possible.
 - The assistant asked the user and the automatic answer led it astray (see "Questions during the evaluation"):
   set the case's automatic answers, or fix the target so it does not need to ask.
+- The run hit the case's time limit (error "timeout"; the record ends mid-work): read where the time went (the harness notes
+  give the time of each turn, the flow shows repeated or needless calls). If it was progressing normally, raise the case's
+  timeout_seconds (see "Time limit of a case"); if time was wasted (searching again and again, delegating the same work twice,
+  reading many files the procedure does not need), fix the target so it does less. Both can be needed.
+- A sub-agent's LLM call failed (harness note about a connection error or timeout of the inference server): an environment
+  problem; do not change the target because of it.
 - Unstable output format of the model (empty replies, tool calls written as text, loops cut off by the guard) in a way not
   caused by the target: not fixable by wording; if it makes the case fail every time, report it as an environment blocker.
 - The case's word conditions or judge points are wrong or stale (they require something the instruction did not ask for,
@@ -87,7 +93,9 @@ Investigate before deciding, the way the person who tuned this assistant for mon
 ## 5. Conclude
 - submit_fix with the change (preferably one that passed in try_fix) and an analysis a person can follow: the cause, the
   evidence (runs and counts) and why the change addresses it. One cause per fix.
-- or report_blockers with the evidence.
+- or report_blockers with the evidence. Even then, put the case settings you may change and found necessary (a raised
+  timeout_seconds, automatic answers) into its case_settings: they are applied, so the loop does not fail on them again
+  after a person fixes the case.
 If submit_fix or report_blockers reports a problem with your input, correct it and call again. You have a limited number of
 steps and trials (shown after each tool result); do not spend them re-reading the same things.
 """
@@ -521,7 +529,7 @@ def _submit_fix(state: _State, analysis: str, edits: list) -> str:
     return "accepted"
 
 
-def _report_blockers(state: _State, analysis: str, blockers: list) -> str:
+def _report_blockers(state: _State, analysis: str, blockers: list, case_settings: list | None = None) -> str:
     known_cases = {c["id"] for c in themes.list_cases(state.directory)}
     clean = fixer._blockers(blockers or [], known_cases)
     if not clean:
@@ -529,13 +537,27 @@ def _report_blockers(state: _State, analysis: str, blockers: list) -> str:
             "error: no valid blocker. Each needs kind (case, spec or environment), problem, suggestion, and for kind case "
             f"an existing case_id (cases: {sorted(known_cases)})."
         )
+    # 止まるときも、AI が変えてよいケースの設定（制限時間・自動回答）は適用しておく。人がケースを直して再開したときに、
+    # 同じ時間切れ・質問で落ちないように（2026-11-15 仮想研究室: 1500秒が要ると分かっていながら提案文に書くだけだった）
+    settings = [e for e in case_settings or [] if isinstance(e, dict)]
+    if any("answers" not in e or not str(e.get("path", "")).startswith(f"{themes.CASES_DIRNAME}/") for e in settings):
+        return 'error: case_settings may only contain {"path": "cases/<id>.yaml", "answers": {...}} items'
+    if settings:
+        check_dir = state.work_dir / "blocker_check"
+        themes.snapshot_targets(state.directory, check_dir)
+        try:
+            _, errors = fixer.apply_edits(check_dir, settings, known_tools=state.known_tools, temp_root=state.temp_root, record=False)
+        finally:
+            shutil.rmtree(check_dir, ignore_errors=True)
+        if errors:
+            return "error: the case settings cannot be applied; correct them and call again:\n" + "\n".join(f"- {e}" for e in errors)
     # 直した指示の案を試しで確かめていれば、その結果を添える（人が承認するときの根拠）
     for b in clean:
         if b.get("new_instruction"):
             tried = [t for t in state.trials if t.get("case_id") == b["case_id"] and t.get("instruction") == b["new_instruction"]]
             if tried:
                 b["verified"] = tried[-1]["summary"]
-    state.final = {"analysis": (analysis or "").strip(), "edits": [], "blockers": clean}
+    state.final = {"analysis": (analysis or "").strip(), "edits": settings, "blockers": clean}
     return "accepted"
 
 
@@ -601,7 +623,8 @@ def _tools(state: _State, step_ref: list[int]):
         wrap(_report_blockers, "report_blockers",
              "Finish by reporting that the cause is outside the research targets, with the evidence.",
              analysis=(str, Field(..., description="what you found, written for a person")),
-             blockers=(list[dict], Field(..., description='list of {"kind": "case" | "spec" | "environment", "case_id": "<case ID or empty>", "problem": "...", "suggestion": "...", "new_instruction": "(kind case only, optional) the corrected first user instruction, ideally one you checked with try_case_variant; a person can apply it with one click"}'))),
+             blockers=(list[dict], Field(..., description='list of {"kind": "case" | "spec" | "environment", "case_id": "<case ID or empty>", "problem": "...", "suggestion": "...", "new_instruction": "(kind case only, optional) the corrected first user instruction, ideally one you checked with try_case_variant; a person can apply it with one click"}')),
+             case_settings=(Optional[list[dict]], Field(None, description='case settings you are allowed to change and found necessary (raised time limits, automatic answers), applied now so the loop does not fail on them again after a person fixes the case: [{"path": "cases/<id>.yaml", "answers": {"timeout_seconds": 1500}}]'))),
     ]
 
 
@@ -670,8 +693,14 @@ async def _loop(config, state: _State, system: str, task: str) -> None:
     step_ref = [0]
     tools = _tools(state, step_ref)
     by_name = {t.name: t for t in tools}
-    base = await build_model(config)
-    model = base.bind_tools(tools)
+
+    async def build_all():
+        return (await build_model(config)).bind_tools(tools)
+
+    async def build_finish():
+        # 手数を使い切ったとき: 結論のツールだけを持たせて出させる
+        return (await build_model(config)).bind_tools([by_name["submit_fix"], by_name["report_blockers"]], tool_choice="required")
+
     messages: list = [SystemMessage(content=with_output_language(system)), HumanMessage(content=task)]
     nudges = 0
     finishing = 0
@@ -680,17 +709,16 @@ async def _loop(config, state: _State, system: str, task: str) -> None:
             raise evaluation.EvaluationStopped()
         step_ref[0] += 1
         if step_ref[0] > state.limits.max_steps:
-            # 手数を使い切った: 結論のツールだけを持たせて出させる
             finishing += 1
             if finishing > 2:
                 raise LabLLMError("The fixing agent did not conclude within its step budget.")
             messages.append(HumanMessage(content=_FINISH_NOW))
-            current = base.bind_tools([by_name["submit_fix"], by_name["report_blockers"]], tool_choice="required")
+            build = build_finish
         else:
-            current = model
+            build = build_all
         _compact(messages, state.limits.context_chars)
-        response = await current.ainvoke(messages)
-        record_usage(response)
+        # 応答が反復ループで打ち切られたら作り直してやり直す（llm.invoke_resilient）
+        response = await invoke_resilient(build, messages)
         messages.append(response)
         calls = getattr(response, "tool_calls", None) or []
         if not calls:

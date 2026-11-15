@@ -2739,6 +2739,7 @@ The result appears as "Review of mechanical checks" on each run. Runs the LLM ac
      without rewriting the research targets, and shows the kind of cause, the problem and a suggested fix (if the finding is wrong, just start again).
      When the case's instruction is the cause, the AI adds a corrected instruction (with the result of its trial evaluation), and "Fix the case with
      this instruction and restart" in the theme details writes it to the case after a person approves and restarts the loop (the AI never changes a case's instruction itself).
+     Even when it stops, the case settings the AI may change (the time limit `timeout_seconds`, automatic answers) that its trials showed are needed are applied.
    - When the content after an AI fix is the same as content evaluated and failed in this loop (the same fix repeated, going back and forth, no change twice
      in a row, a reverted fix put back), it stops as "fixes stalled".
    - When a fix makes a case that passed every run fail, the fix is reverted (the content before the fix is kept in `runs/<iteration>/before_fix/`) and the

@@ -173,3 +173,19 @@ def test_judging_with_one_worker_is_sequential(monkeypatch):
     results = [{"case_id": "a", "judge": "x", "transcript": [], "rules_pass": True}] * 3
     judge.judge_results(None, spec="", results=results, excerpt_chars=100)
     assert len(order) == 3
+
+
+def test_truncated_excerpt_still_lists_every_tool_call():
+    """長い記録の途中を省いても、全部のツール呼び出しの一覧は残す（以前は AI judge が、実際に呼んだ provide_download を
+    「記録に無い」として不合格にしていた）。"""
+    transcript = [{"type": "HumanMessage", "content": "作って"}]
+    for i in range(60):
+        transcript.append({"type": "AIMessage", "content": "", "tool_calls": [{"name": f"step_{i}", "args": {"i": i}}]})
+        transcript.append({"type": "ToolMessage", "tool_name": f"step_{i}", "content": "x" * 500})
+    transcript.append({"type": "AIMessage", "content": "", "tool_calls": [{"name": "provide_download", "args": {"path": "a.xlsx"}}]})
+    transcript.append({"type": "AIMessage", "content": "完了"})
+    result = {"transcript": transcript, "subagent_tool_calls": [{"dispatch": 1, "name": "search_documents", "args": {"q": "x"}}]}
+    text = evaluation.transcript_excerpt(result, 6000)
+    assert len(text) <= 6000 + 200
+    assert "(snip" in text and "step_30" in text and "provide_download" in text and "search_documents" in text
+    assert "[all tool calls of the assistant, in order]" in text

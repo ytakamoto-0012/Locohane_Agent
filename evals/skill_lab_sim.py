@@ -49,6 +49,14 @@ def setup(sim_root: Path, source_root: Path, source_instance: str, lab: str, arg
         inst.write_instance(instances, inst.InstanceMeta(name=name, display_name=name, app_port=18999 if kind == inst.KIND_APP else 0, kind=kind))
         overrides = _overrides(source_root, src)
         overrides.setdefault("paths", {})["common_data_dir"] = str(sim_root / "data" / name)
+        if kind == inst.KIND_APP:
+            # ナレッジ（ベクターDB）は元のインスタンスのものを読む（データの置き場を移すと空になり、ナレッジを使うスキルを試せない）。
+            # 評価は検索するだけで書き込まない（本番の研究室も同じ DB で評価する）。
+            from admin.skill_lab import promotion
+
+            source_cfg = promotion.instance_config(source_root, src)
+            if source_cfg.vector_db_enabled:
+                overrides.setdefault("vector_db", {})["dir"] = str(source_cfg.vector_db_dir)
         # インスタンス専用の拡張ディレクトリは本番の instances を指さないよう、仮想研究室の中にする
         overrides.setdefault("skill_lab", {})["instance_locohane_dir"] = str(instances / name)
         if kind == inst.KIND_APP:
@@ -117,6 +125,7 @@ def main() -> int:
     parser.add_argument("--max-iterations", type=int)
     parser.add_argument("--max-hours", type=float)
     parser.add_argument("--keep", action="store_true", help="前回の仮想研究室を消さない")
+    parser.add_argument("--draft-spec", action="store_true", help="仕様の目的が空なら、研究室の AI 下書きで埋めてから始める")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     os.chdir(PROJECT_ROOT)
@@ -146,6 +155,14 @@ def main() -> int:
     from admin.skill_lab.worker import Worker
 
     worker = Worker(LAB, base_env)
+    from admin.skill_lab import drafting, themes
+    from admin.skill_lab.llm import output_language
+
+    if args.draft_spec and not themes.spec_filled(directory):
+        # 画面の「AI に下書きを頼む」と同じ処理で、空の仕様を研究対象の中身から下書きする
+        with output_language("ja"):
+            drafting.draft_spec(worker._llm_config(APP), directory, max_file_chars=worker.config.skill_lab_fixer_max_file_chars)
+        print("仕様を AI が下書きしました:\n" + (directory / themes.SPEC_FILENAME).read_text(encoding="utf-8"))
     worker.run_theme(APP, directory)
     report(directory)
     return 0

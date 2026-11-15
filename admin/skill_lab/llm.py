@@ -81,17 +81,48 @@ def strip_thinking(text: str) -> str:
     return _THINK_BLOCK_RE.sub("", text)
 
 
+_LOOP_RETRY_NOTE = (
+    "Your previous output fell into a repetition loop and was stopped. Think briefly, do not repeat yourself, and answer now."
+)
+
+
+async def invoke_resilient(build: Callable, messages: list, *, retries: int = 2):
+    """build() で作ったモデルで messages を送る。応答が反復ループに陥って打ち切られたら（ThinkingLoopDetected）、
+    クライアントを閉じてモデルを作り直し、注意を添えて retries 回までやり直す。
+
+    以前は研究室の LLM 呼び出し（判定・修正・下書き）でループ検知が起きるとテーマごと「エラー」で止まっていた
+    （2026-11-13 yt001 のテーマ）。サブエージェント（src/subagent.py）と同じく、閉じてから作り直す。
+    """
+    from langchain_core.messages import HumanMessage
+
+    from src.llm import ThinkingLoopDetected
+    from src.llm.routing import aclose_model_client
+
+    model = await build()
+    current = messages
+    for attempt in range(retries + 1):
+        try:
+            response = await model.ainvoke(current)
+            record_usage(response)
+            return response
+        except ThinkingLoopDetected:
+            await aclose_model_client(getattr(model, "bound", model))
+            if attempt >= retries:
+                raise
+            model = await build()
+            current = [*messages, HumanMessage(content=_LOOP_RETRY_NOTE)]
+    raise AssertionError("unreachable")
+
+
 async def _ainvoke(config: Config, system: str, user_messages: list[tuple[str, str]]) -> str:
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
     from src.llm import build_model
 
-    model = await build_model(config)
     messages = [SystemMessage(content=with_output_language(system))]
     for role, text in user_messages:
         messages.append(HumanMessage(content=text) if role == "user" else AIMessage(content=text))
-    response = await model.ainvoke(messages)
-    record_usage(response)
+    response = await invoke_resilient(lambda: build_model(config), messages)
     content = response.content if isinstance(response.content, str) else str(response.content)
     # 思考（<think>…</think>）を本文に混ぜて返す接続先でも、思考を答えとして扱わない。
     return _THINK_BLOCK_RE.sub("", content)

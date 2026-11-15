@@ -48,6 +48,11 @@ def _reply(messages: list[dict]) -> dict:
         problem = {"case_id": "001", "problem": "指示が挨拶だけで、スキルを使う理由が無い", "suggestion": "合言葉を尋ねる指示にする"}
         return {"content": json.dumps({"analysis": "ケースの問題", "blockers": [problem], "edits": []}, ensure_ascii=False)}
     user_text = " ".join(str(m.get("content")) for m in messages if m.get("role") == "user")
+    if "ゆっくり" in user_text:
+        # 制限時間の試験用: 応答が返らないまま時間が過ぎる
+        import time
+
+        time.sleep(30)
     if "合言葉" not in user_text and SKILL_NAME not in user_text:
         # スキルと関係の無い指示には、スキルを使わずに答える（本物のモデルと同じく、使う理由が無い）
         return {"content": "こんにちは。"}
@@ -216,3 +221,23 @@ def test_loop_stops_and_reports_when_the_case_instruction_is_bad(lab_env):
     assert data["loop"]["blockers"][0]["case_id"] == "001"
     assert "スキルを使う理由が無い" in data["loop"]["message"]
     assert skill_md.read_text(encoding="utf-8") == before
+
+
+def test_case_time_limit_keeps_the_record_so_far(lab_env, tmp_path):
+    """会話が制限時間を過ぎたら、評価をサブプロセスごと止めずに、そこまでの記録を付けて error=timeout を返す
+    （以前は記録が空になり、スキル研究室の AI 修正が時間切れの原因を調べられなかった）。"""
+    import subprocess
+    import sys
+
+    from src.config import PROJECT_ROOT
+
+    case = tmp_path / "slow.yaml"
+    case.write_text("id: slow\ntarget: t\nturns: [ゆっくり答えて]\njudge: j\n", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "evals.run_case", str(case), "--instance", "org_a", "--llm-from-instance", "lab1", "--time-limit", "3"],
+        cwd=str(PROJECT_ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["error"] == "timeout", result
+    assert any(e["type"] == "HumanMessage" and "ゆっくり" in str(e["content"]) for e in result["transcript"])

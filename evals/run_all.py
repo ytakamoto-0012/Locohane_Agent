@@ -61,6 +61,8 @@ from evals.skill_tree import FIXTURES_DIRNAME, cases_sha256, file_sha256, tree_s
 # app.py にはこの制限は存在しないため、テストハーネス側の都合として
 # 900秒に緩和する。
 CASE_TIMEOUT_SECONDS = 900
+# 会話の制限時間（run_case.py の --time-limit）を過ぎてから、記録の後始末・判定・生成物の確認を終えるまで待つ秒数。
+CASE_TIMEOUT_GRACE_SECONDS = 300
 
 # Windows のコンソールコードページ（既定 cp932）でサマリの日本語が
 # 文字化けするのを防ぐ。
@@ -122,14 +124,16 @@ def _run_one(case_path: Path, instance_name: str, extra_args: list[str] | None =
     # 扱う重量級ケース等、既定値では完走できないケース専用の上書き）。
     case = load_case(case_path)
     timeout = case.timeout_seconds or CASE_TIMEOUT_SECONDS
+    # 会話の制限時間は run_case.py 自身が守り、時間切れでもそこまでの記録を返す。ここでの強制停止は、後始末・判定の時間を
+    # 足した保険（以前はここで止めて記録が空になり、スキル研究室の AI 修正が時間切れの原因を調べられなかった）。
     proc = subprocess.run(
-        [sys.executable, "-m", "evals.run_case", str(case_path), "--instance", instance_name, *(extra_args or [])],
+        [sys.executable, "-m", "evals.run_case", str(case_path), "--instance", instance_name, "--time-limit", str(timeout), *(extra_args or [])],
         cwd=str(PROJECT_ROOT),
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=timeout,
+        timeout=timeout + CASE_TIMEOUT_GRACE_SECONDS,
     )
     if proc.stderr:
         print(proc.stderr, file=sys.stderr, end="")

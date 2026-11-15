@@ -1705,3 +1705,20 @@ def test_api_applies_the_ai_proposed_case_instruction(client, lab_env):
     case = _yaml.safe_load((directory / "cases" / "c1.yaml").read_text(encoding="utf-8"))
     assert case["turns"] == ["my-skill を呼んで"] and case["judge"] == "j"
     assert themes.read(directory)["loop"]["blockers"][0]["applied"] is True
+
+
+def test_blocked_stop_still_applies_the_case_settings_the_ai_may_change(lab_env, monkeypatch):
+    """ケースの不備で止まるときも、AI が変えてよい設定（制限時間など）は、一番よかった版へ戻した後に入れておく
+    （人がケースを直して再開したときに、同じ時間切れで落ちないように）。"""
+    import yaml as _yaml
+
+    directory = _theme(lab_env)
+    _add_skill(directory)
+    themes.write_text(directory, "cases/c1.yaml", "id: c1\ntarget: skill_lab\nturns: [x]\njudge: j\n", actor="admin")
+    themes.update(directory, lambda d: d.update({"status": themes.STATUS_RUNNING, "loop": {"mode": "loop"}}))
+    w, _ = _make_worker(monkeypatch, lab_env, [])
+    w._pending_case_settings = [{"path": "cases/c1.yaml", "answers": {"timeout_seconds": 1500}}]
+    assert w._stop_for_blockers(directory, [{"kind": "case", "case_id": "c1", "problem": "p", "suggestion": "s"}])
+    assert themes.read(directory)["status"] == themes.STATUS_BLOCKED
+    assert _yaml.safe_load((directory / "cases" / "c1.yaml").read_text(encoding="utf-8"))["timeout_seconds"] == 1500
+    assert w._pending_case_settings == []
