@@ -13,7 +13,7 @@
 
 ![Locohane](public/settings/icon.png)
 
-名前の由来：**Lo**cal（ローカル環境）+ 小羽（**cohane** / 軽量さ・和名っぽさ）
+名前の由来：**Lo**cal（ローカル環境）+ 小羽（**cohane** / 和名）
 
 ## このプロジェクトの目的
 

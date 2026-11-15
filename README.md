@@ -18,7 +18,7 @@ Locohane（ロコハネ）Agentは、**社内サーバーや手元のPCだけで
   [Agent Skills 標準](https://agentskills.io/specification) に準拠）。
 - **日本語・英語に対応**: 画面と AI の回答を、利用者ごとに日本語と英語で切り替えられます。
 
-名前の由来：**Lo**cal（ローカル環境）+ 小羽（**cohane** / 軽量さ・和名っぽさ）
+名前の由来：**Lo**cal（ローカル環境）+ 小羽（**cohane** / 和名）
 
 > 設計の詳細・設定項目の一覧・ディレクトリ構成などは
 > [README_DETAIL.md](README_DETAIL.md)（管理者・開発者向け）にまとめています。

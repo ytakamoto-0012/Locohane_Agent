@@ -17,7 +17,7 @@ Excel, Word, PowerPoint and PDF files, checking images, and processing many file
   (compliant with Anthropic's [Agent Skills standard](https://agentskills.io/specification)).
 - **Japanese and English**: The screens and the AI's replies can be switched between 日本語 and English per user.
 
-Name origin: **Lo**cal (local environment) + 小羽 (**cohane**, "small feather": lightweight, with a Japanese touch)
+Name origin: **Lo**cal (local environment) + 小羽 (**cohane**, a Japanese name meaning "small feather")
 
 > Design details, the full list of settings and the directory layout are in
 > [README_DETAIL.en.md](README_DETAIL.en.md) (for administrators and developers; English translation of [README_DETAIL.md](README_DETAIL.md)).

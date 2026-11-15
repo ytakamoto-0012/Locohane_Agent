@@ -14,7 +14,7 @@ can be followed clearly from the code.
 
 ![Locohane](public/settings/icon.png)
 
-Origin of the name: **Lo**cal (the local environment) + 小羽 (**cohane**, "small feather" / lightness and a Japanese-sounding name)
+Origin of the name: **Lo**cal (the local environment) + 小羽 (**cohane**, a Japanese name meaning "small feather")
 
 ## Purpose of this project
 
