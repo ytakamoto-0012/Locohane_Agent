@@ -161,7 +161,9 @@ def register_raw_unc_paths_in_text(text: str, thread_id: str | None = None) -> s
     thread_id = thread_id or cl.user_session.get("thread_id") or "_no_session"
 
     def _replace(match: re.Match) -> str:
-        path = match.group(0)
+        path = _unc_prefix_to_register(match.group(0), text[match.end() : match.end() + 200])
+        if path is None:
+            return match.group(0)
         index = path_memory.register(
             thread_id,
             path,
@@ -169,9 +171,58 @@ def register_raw_unc_paths_in_text(text: str, thread_id: str | None = None) -> s
             _state._PATH_MEMORY_MAX_ENTRIES,
             description="user input",
         )
-        return f"@{index}" if index is not None else path
+        if index is None:
+            return match.group(0)
+        # 登録しなかった残り（最後の要素を戻した分）は @N の後ろへそのまま続ける（@N\子パス）。
+        return f"@{index}{match.group(0)[len(path):]}"
 
     return _RAW_UNC_PATH_RE.sub(_replace, text)
+
+
+# UNC パスの直後にあれば「パスはここで終わり」と言い切れる文字（パスの名前に使えない文字・改行）。
+_UNC_PATH_TERMINATORS = frozenset('\r\n"<>|*?')
+# 拡張子で終わる名前（「ファイル名はここで終わった」とみなせる）。
+_HAS_EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+# 空白の後に続く語が、ファイル名の続き（`Docs.xlsx`・`(1).pdf` 等）に見えるか。
+_FILENAME_TAIL_RE = re.compile(r"^[A-Za-z0-9_.\-()\[\]]*\.[A-Za-z0-9]{1,5}$")
+
+
+def _unc_prefix_to_register(matched: str, rest: str) -> str | None:
+    """_RAW_UNC_PATH_RE に一致した文字列のうち、@N として登録する部分を返す。
+
+    正規表現は名前を ASCII の英数字・`_`・`.`・`-` に限って拾うため、`Project Docs`・`a(1).xlsx` の
+    ように空白や括弧を含む名前では途中で切れる。切れた所で登録すると `@3 Docs\\a.xlsx` のように
+    存在しないパスの @N と残りの文字に分かれ、ユーザーの書いたパスが壊れていた。そこで、最後の
+    要素が途中で切れたと見られるときは、それを登録から外す（外した分は @N の後ろにそのまま残すので、
+    パスは失われない）。切れたと見るのは次のとき（rest は一致の直後からの本文）:
+
+    - 直後が空白で、次の語に `\\` がある（`Project Docs\\a.xlsx`）か、最後の要素に拡張子が無く
+      次の語がファイル名の続きに見える（`Project Docs.xlsx`）。
+    - 直後が空白以外の文字（括弧・日本語等）で、最後の要素に拡張子が無い（`a(1).xlsx`・`report_最終.xlsx`）。
+      拡張子で終わっていれば、そこで名前は終わったとみなす（`file.xlsxを開いて`）。
+
+    直後が文末・改行・名前に使えない記号・`\\`（続く名前が日本語等で止まった）なら、そのまま登録する。
+    外した結果 `\\\\サーバー\\共有` より短くなるなら、置き換えない（None）。
+    """
+    next_char = rest[:1]
+    last = matched.rsplit("\\", 1)[-1]
+    has_extension = bool(_HAS_EXTENSION_RE.search(last))
+    if next_char == "" or next_char == "\\" or next_char in _UNC_PATH_TERMINATORS:
+        return matched
+    if next_char.isspace():
+        next_word = rest.lstrip().split(None, 1)[0] if rest.strip() else ""
+        # 次の語の中で別の UNC パスが始まる（`を開いて、\\\\server\\...`）なら、その手前までで判断する。
+        next_word = next_word.split("\\\\", 1)[0]
+        cut = "\\" in next_word or (not has_extension and bool(_FILENAME_TAIL_RE.match(next_word)))
+    else:
+        cut = not has_extension
+    if not cut:
+        return matched
+    prefix = matched.rsplit("\\", 1)[0]
+    # "\\\\server\\share" 以上なら `\\` を3つ以上（先頭の2つ＋server と share の間の1つ）含む。
+    if prefix.count("\\") < 3:
+        return None
+    return prefix
 
 def _register_path_memory(
     paths: list[str], description: str | None = None, thread_id: str | None = None

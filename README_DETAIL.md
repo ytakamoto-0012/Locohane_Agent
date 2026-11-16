@@ -593,6 +593,8 @@ Locohane/
 | `data/<インスタンス名>/skill_drafts_archive/<ユーザー名>/<スキル名>_<日時>/` | 昇格したドラフトの退避先（`_workspace/` ごと移る。`[skill_creator] archive_dir`） | 記録が不要になったとき | フォルダを削除 |
 | `data/skill_lab/themes/<テーマID>/` | スキル研究室の研究テーマ（仕様・開発中の資産・ケース・入力ファイル・評価と AI 修正の記録 `runs/`）。対象インスタンスごとに分かれる | テーマが終わり、記録が不要になったとき | スキル研究室のテーマ一覧・テーマ詳細の「削除」（下記「スキル研究室」）。手で消す場合はテーマのフォルダを削除（実行中でないこと） |
 | `data/<インスタンス名>/evals_temp/` | 評価（スキル研究室のループ・1回試行・トライアウト、`evals/run_all.py`）が実行中に使う一時フォルダ（ケースの作業フォルダ・隔離したメモリー／パスメモリー／計画の詳細／ドラフトスキルの置き場・スキルとケースの写し・AI 修正のバックアップ）。評価対象インスタンスの `[skill_lab] temp_dir`。OS の一時フォルダは使わない | 通常は終わると自動で消える。強制終了で残ったものは、最後の更新から `[skill_lab] temp_retention_hours`（既定24時間）を過ぎると自動で消える（評価の開始時・本体の起動時と `temp_cleanup_interval_hours` ごと・スキル調整ワーカーの同じ間隔ごと） | 評価が動いていないときにフォルダ内を削除 |
+| `data/mcp_publish/` | MCP サーバー（`mcp_server/`）が Resources として配布する、機密ファイルを除いたスキル一式のコピー（サーバーごとに `skills_*/` と `skills_*.lock`）。環境変数 `LOCOHANE_MCP_SKILLS_PUBLISH_DIR`。OS の一時フォルダは使わない | サーバーの終了時に消える。強制終了で残ったものは次にサーバーが起動したときに消える | MCP サーバーが動いていないときにフォルダ内を削除 |
+| `data/<インスタンス名>/script_guard_temp/` | `run_script`/`run_script_background` の実行中だけ置く書き込みガード（`sitecustomize.py`）。`[scripts] guard_temp_dir`。OS の一時フォルダは使わない | スクリプトが終わると消える。強制終了で残ったものは本体の起動時に消える（`[scripts]` の `timeout` と `background_max_runtime_seconds` の長い方＋10分を過ぎたもの） | 本体・評価が動いていないときにフォルダ内を削除 |
 | `data/temp/_tmp_<作成時刻>_<短縮ID>/` | `execute_python_code`/`run_script` の中間生成物・`write_scratch_note`/`write_thread_note` の書き出し先。チャットでアップロードしたファイル（`uploads/<送信日時>/`。作業フォルダを指定していてもここ）。自セッション専用（`[default_workdir]` 参照）。フォルダ名先頭の作成時刻（`YYMMDDHHMMSS`）はファイラー上で作成順に並べるためのもの。短縮IDは thread_id の SHA-1 先頭10桁（パス長上限 260文字を超えにくくするため、thread_id をそのまま使わない。旧形式 `_tmp_<作成時刻>_<thread_id>` のフォルダも再開時にそのまま使われる） | セッション終了後、不要になったとき | フォルダ内を削除（`[default_workdir] retention_days`/`cleanup_interval_hours` により自動削除もされる） |
 | `data/elements/<thread_id>/` | 添付ファイル（`provide_download`/`analyze_image`の`show_in_chat=True`等）・回答本文への画像埋め込みの永続化先。スレッド再開・プロセス再起動後も表示できるようここへ実体をコピー保存する（`[elements]`参照、`src/thread_store.py`） | 添付ファイルが不要になったとき | フォルダ内を削除 |
 | `instances/_assistant_index/` | 管理ツールの「AIに相談」が検索に使う、config.ini・README_DETAIL.md・API リファレンスの段落の埋め込みのキャッシュ（埋め込みの接続先・モデルごとに1ファイル。`data/` 配下ではない） | いつでも（次の相談で作り直す。初回は数十秒かかる） | フォルダを削除 |
@@ -1831,6 +1833,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[scripts]` | `timeout` | `run_script`/`execute_python_code` 共通のタイムアウト秒 | `SCRIPT_TIMEOUT` |
 | `[scripts]` | `python` | `.py` 実行に使う Python。空欄なら本体を起動している Python（`python_env.bat` の `PYTHON_DIR`） | `SCRIPT_PYTHON` |
 | `[scripts]` | `code_execution_enabled` | `execute_python_code` ツール自体の有効/無効 | `CODE_EXECUTION_ENABLED` |
+| `[scripts]` | `guard_temp_dir` | `run_script`/`run_script_background` の書き込みガード（`sitecustomize.py`）を実行の間だけ置くフォルダ（既定 `${common_data_dir}/script_guard_temp`）。終わると消え、強制終了で残ったものは本体の起動時に消える（`timeout` と `background_max_runtime_seconds` の長い方＋10分を過ぎたもの）。OS の一時フォルダは使わない | `SCRIPT_GUARD_TEMP_DIR` |
 | `[scripts]` | `background_max_runtime_seconds` | `run_script_background` のジョブを強制終了するまでの上限秒 | `SCRIPT_BACKGROUND_MAX_RUNTIME_SECONDS` |
 | `[scripts]` | `background_job_retention_seconds` | `run_script_background` の完了済みジョブが `check_script_job` で未回収のまま残ってよい秒数 | `SCRIPT_BACKGROUND_JOB_RETENTION_SECONDS` |
 | `[scripts]` | `background_min_poll_interval_seconds` | `check_script_job` を同一ジョブへ再度呼べるまでの最短間隔秒（0以下で無効化） | `SCRIPT_BACKGROUND_MIN_POLL_INTERVAL_SECONDS` |

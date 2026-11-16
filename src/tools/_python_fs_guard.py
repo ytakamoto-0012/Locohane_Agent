@@ -244,6 +244,14 @@ import builtins as _guard_builtins
 import io as _guard_io
 import os as _guard_os
 import shutil as _guard_shutil
+import tempfile as _guard_tempfile
+
+# OS の一時フォルダ（os.open の書き込み検査で通す場所。_guard_os_open 参照）。gettempdir() は初回に
+# 書けるかを試すため（os.open・os.unlink を使う）、関数を差し替える前に決めておく。
+try:
+    _GUARD_OS_TEMP = [_guard_os.path.realpath(_guard_tempfile.gettempdir())]
+except OSError:
+    _GUARD_OS_TEMP = []
 
 _GUARD_ALLOWED = [_guard_os.path.realpath(_p) for _p in {allowed_repr}]
 _GUARD_LIB_CACHE = [_guard_os.path.realpath(_p) for _p in {lib_cache_repr}]
@@ -253,6 +261,18 @@ _GUARD_DENY_ROOTS = [_guard_os.path.realpath(_p) for _p in {deny_repr}]
 _GUARD_WRITE_DENY_ROOTS = [_guard_os.path.realpath(_p) for _p in {write_deny_repr}]
 _GUARD_LIST_DENY_ROOTS = [_guard_os.path.realpath(_p) for _p in {list_deny_repr}]
 _GUARD_OWN_TMP_NAME = "_tmp_" + (_guard_os.environ.get("AGENT_EXEC_TMP_NAME") or _guard_os.environ.get("AGENT_THREAD_ID", "_no_session"))
+
+# 書き込みを許す実行では、tempfile（mkstemp・NamedTemporaryFile 等）の置き場をこのセッションの
+# 一時フォルダ（無ければ最初の書き込み先）へ向ける。OS の一時フォルダは書き込み先の外なので、
+# 作れても閉じるときの削除（os.unlink）が拒まれ、NamedTemporaryFile 等が必ず失敗していた。
+_guard_temp_candidates = [_p for _p in _GUARD_DISPLAY if _guard_os.path.basename(_p) == _GUARD_OWN_TMP_NAME] + _GUARD_DISPLAY
+for _guard_temp_dir in _guard_temp_candidates:
+    if _guard_os.path.isdir(_guard_temp_dir):
+        _guard_tempfile.tempdir = _guard_temp_dir
+        # tempfile が書き込み先を使うので、os.open で OS の一時フォルダを特別に通す必要は無い。
+        _GUARD_OS_TEMP = []
+        break
+del _guard_temp_candidates
 
 
 def _guard_under(_target, _roots):
@@ -327,12 +347,19 @@ def _guard_check(_path, _op):
 _guard_orig_open = _guard_builtins.open
 
 
-def _guard_open(_file, _mode="r", *_args, **_kwargs):
-    if any(_c in _mode for _c in ("w", "a", "x", "+")):
-        _guard_check(_file, "write")
-    else:
-        _guard_check_foreign_tmp(_file)
-    return _guard_orig_open(_file, _mode, *_args, **_kwargs)
+def _guard_open(*_args, **_kwargs):
+    # open() の file・mode はキーワードでも渡せる（open(p, mode="w")・open(file=p)）。
+    # 位置引数だけを想定すると、キーワード指定の呼び出しが TypeError になっていた。
+    _file = _args[0] if _args else _kwargs.get("file")
+    _mode = _args[1] if len(_args) > 1 else _kwargs.get("mode", "r")
+    if not isinstance(_mode, str):
+        _mode = "r"
+    if _file is not None and not isinstance(_file, int):
+        if any(_c in _mode for _c in ("w", "a", "x", "+")):
+            _guard_check(_file, "write")
+        else:
+            _guard_check_foreign_tmp(_file)
+    return _guard_orig_open(*_args, **_kwargs)
 
 
 _guard_builtins.open = _guard_open
@@ -340,11 +367,16 @@ _guard_io.open = _guard_open
 
 for _guard_name in ("remove", "unlink", "rename", "replace", "rmdir", "removedirs", "mkdir", "makedirs", "truncate"):
     def _guard_make_os(_orig, _name):
-        def _fn(_path, *_args, **_kwargs):
-            _guard_check(_path, _name)
-            if _name in ("rename", "replace") and _args:
-                _guard_check(_args[0], _name)
-            return _orig(_path, *_args, **_kwargs)
+        def _fn(*_args, **_kwargs):
+            # 引数はキーワード（src=・dst=・path=・name=）でも渡せるため、両方から取り出す。
+            _path = _args[0] if _args else _kwargs.get("src", _kwargs.get("path", _kwargs.get("name")))
+            if _path is not None:
+                _guard_check(_path, _name)
+            if _name in ("rename", "replace"):
+                _dst = _args[1] if len(_args) > 1 else _kwargs.get("dst")
+                if _dst is not None:
+                    _guard_check(_dst, _name)
+            return _orig(*_args, **_kwargs)
 
         return _fn
 
@@ -354,11 +386,14 @@ for _guard_name in ("remove", "unlink", "rename", "replace", "rmdir", "removedir
 
 for _guard_name in ("rmtree", "move"):
     def _guard_make_shutil(_orig, _name):
-        def _fn(_src, *_args, **_kwargs):
-            _guard_check(_src, _name)
-            if _args:
-                _guard_check(_args[0], _name)
-            return _orig(_src, *_args, **_kwargs)
+        def _fn(*_args, **_kwargs):
+            _src = _args[0] if _args else _kwargs.get("src", _kwargs.get("path"))
+            if _src is not None:
+                _guard_check(_src, _name)
+            _dst = _args[1] if len(_args) > 1 else _kwargs.get("dst")
+            if _dst is not None:
+                _guard_check(_dst, _name)
+            return _orig(*_args, **_kwargs)
 
         return _fn
 
@@ -368,13 +403,16 @@ for _guard_name in ("rmtree", "move"):
 
 for _guard_name in ("copy", "copy2", "copyfile", "copytree"):
     def _guard_make_shutil_copy(_orig, _name):
-        def _fn(_src, *_args, **_kwargs):
+        def _fn(*_args, **_kwargs):
             # コピー元は読み取りのみ（open()の読み取りモードと同じ扱い）。
             # 他セッションの一時ディレクトリからの読み取りだけは引き続きブロックする。
-            _guard_check_foreign_tmp(_src)
-            if _args:
-                _guard_check(_args[0], _name)
-            return _orig(_src, *_args, **_kwargs)
+            _src = _args[0] if _args else _kwargs.get("src")
+            if _src is not None:
+                _guard_check_foreign_tmp(_src)
+            _dst = _args[1] if len(_args) > 1 else _kwargs.get("dst")
+            if _dst is not None:
+                _guard_check(_dst, _name)
+            return _orig(*_args, **_kwargs)
 
         return _fn
 
@@ -382,9 +420,8 @@ for _guard_name in ("copy", "copy2", "copyfile", "copytree"):
     if _guard_orig is not None:
         setattr(_guard_shutil, _guard_name, _guard_make_shutil_copy(_guard_orig, _guard_name))
 
-for _guard_name in ("listdir", "scandir", "open"):
-    # 一覧取得と低水準 open は読み取りだけを見る（書き込み判定は open()/os.* 側）。
-    # 読めない他ユーザーのドラフトの中身・ファイル名を漏らさないため。
+for _guard_name in ("listdir", "scandir"):
+    # 一覧取得は読み取りだけを見る。読めない他ユーザーのドラフトのファイル名を漏らさないため。
     def _guard_make_read(_orig, _check):
         def _fn(*_args, **_kwargs):
             _target = _args[0] if _args else _kwargs.get("path", ".")
@@ -396,10 +433,37 @@ for _guard_name in ("listdir", "scandir", "open"):
 
     _guard_orig = getattr(_guard_os, _guard_name, None)
     if _guard_orig is not None:
-        _check = _guard_check_deny if _guard_name == "open" else _guard_check_list
-        setattr(_guard_os, _guard_name, _guard_make_read(_guard_orig, _check))
+        setattr(_guard_os, _guard_name, _guard_make_read(_guard_orig, _guard_check_list))
 
-del _guard_name, _guard_orig, _check
+# 低水準の os.open。読み取りは他ユーザーのドラフトだけを拒み、書き込み系のフラグ付きは open() と同じく
+# 書き込み先を確かめる（以前は読み取りしか見ておらず、os.open(p, O_WRONLY|O_CREAT) で外へ書けた）。
+# ただし書き込み先が無い実行（tempfile の置き場を向けられなかった読み取り専用の実行）に限り、OS の一時フォルダは
+# 通す: tempfile（mkstemp・NamedTemporaryFile 等）は os.open で作るため、
+# ここで拒むと openpyxl の write_only 等、tempfile を内部で使うライブラリが動かなくなる。
+_GUARD_WRITE_FLAGS = 0
+for _guard_flag in ("O_WRONLY", "O_RDWR", "O_CREAT", "O_APPEND", "O_TRUNC"):
+    _GUARD_WRITE_FLAGS |= getattr(_guard_os, _guard_flag, 0)
+_guard_orig_os_open = _guard_os.open
+
+
+def _guard_os_open(*_args, **_kwargs):
+    _target = _args[0] if _args else _kwargs.get("path")
+    _flags = _args[1] if len(_args) > 1 else _kwargs.get("flags", 0)
+    if _target is not None:
+        _guard_check_deny(_target)
+        if isinstance(_flags, int) and _flags & _GUARD_WRITE_FLAGS:
+            try:
+                _real = _guard_os.path.realpath(_guard_os.fspath(_target))
+            except TypeError:
+                _real = None
+            if _real is None or not _guard_under(_real, _GUARD_OS_TEMP):
+                _guard_check(_target, "write")
+    return _guard_orig_os_open(*_args, **_kwargs)
+
+
+_guard_os.open = _guard_os_open
+
+del _guard_name, _guard_orig, _guard_flag
 
 import subprocess as _guard_subprocess
 
@@ -424,17 +488,42 @@ def _guard_cmd_basename(_arg):
     return _base
 
 
+def _guard_cmd_tokens(_args):
+    if isinstance(_args, bytes):
+        _args = _args.decode("utf-8", "replace")
+    if isinstance(_args, str):
+        return _args.strip().split()
+    if isinstance(_args, _guard_os.PathLike):
+        return [_args]
+    try:
+        return list(_args)
+    except TypeError:
+        return [_args]
+
+
+def _guard_is_python_pip(_tokens):
+    # python -m pip ... / py -m pip ...（LLM が pip を呼ぶときにいちばん多い書き方。先頭の名前だけを
+    # 見ていたため止められなかった）。
+    if not _tokens:
+        return False
+    _base = _guard_cmd_basename(_tokens[0]).strip("\\"'")
+    if not (_base.startswith("python") or _base in ("py", "pythonw")):
+        return False
+    _rest = [str(_t).strip("\\"'").lower() for _t in _tokens[1:]]
+    for _i, _t in enumerate(_rest):
+        if _t == "-m" and _i + 1 < len(_rest) and _rest[_i + 1] in ("pip", "pip3", "ensurepip"):
+            return True
+        if _t in ("-mpip", "-mpip3"):
+            return True
+    return False
+
+
 def _guard_check_cmd(_args):
-    if isinstance(_args, (str, bytes)):
-        _tokens = str(_args).strip().split()
-        _first = _tokens[0] if _tokens else ""
-    elif isinstance(_args, _guard_os.PathLike):
-        _first = _args
-    elif _args:
-        _first = _args[0]
-    else:
-        _first = ""
-    if _guard_cmd_basename(_first) in _GUARD_BLOCKED_CMDS:
+    _tokens = _guard_cmd_tokens(_args)
+    _first = _tokens[0] if _tokens else ""
+    if isinstance(_first, str):
+        _first = _first.strip("\\"'")
+    if _guard_cmd_basename(_first) in _GUARD_BLOCKED_CMDS or _guard_is_python_pip(_tokens):
         raise PermissionError(
             f"[execute_python_code guard] Running git/npm/pip commands is forbidden: {{_args}}"
             ". This is a blanket ban regardless of whether the package is installed. "

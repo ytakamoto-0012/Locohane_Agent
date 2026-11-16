@@ -112,6 +112,7 @@ mcp_server/
 | `LOCOHANE_MCP_SKILLS_SCRIPT_TIMEOUT_SECONDS` | `run_skill_script` のタイムアウト秒数 | 300 |
 | `LOCOHANE_MCP_SKILLS_PYTHON` | `run_skill_script` がスクリプト起動に使うPython実行ファイル | 未設定（`sys.executable`、このMCPサーバー自身のPython） |
 | `LOCOHANE_MCP_SKILLS_NAME` | MCPサーバー自体の名前（FastMCPインスタンス名） | `locohane-skills` |
+| `LOCOHANE_MCP_SKILLS_PUBLISH_DIR` | Resources配布用のコピー（機密ファイルを除いたスキル一式）を置くフォルダ。サーバーごとに中へ1つ作り、終了時に消す。強制終了で残ったものは次にサーバーが起動したときに消す（OS の一時フォルダは使わない） | プロジェクト直下 `data/mcp_publish` |
 
 ### 3-1. 依存追加
 

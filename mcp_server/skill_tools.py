@@ -209,6 +209,9 @@ def run_skill_script(skill_name: str, script_filename: str, script_args: list[st
         proc = subprocess.Popen(
             cmd,
             cwd=WORKDIR,
+            # 子の標準出力を UTF-8 にそろえる（下で UTF-8 として読むため）。渡さないと日本語版 Windows では
+            # 子が cp932 で書き、日本語の出力が置換文字に化けていた（本体の _subprocess_env と同じ）。
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

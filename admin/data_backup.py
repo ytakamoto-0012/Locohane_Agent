@@ -215,8 +215,11 @@ def collect_sources(
         except Exception as exc:  # noqa: BLE001 - 設定の読めないインスタンスは飛ばして他を続ける
             warnings.append(_t("インスタンス {0} の設定を読めないため、そのデータはバックアップしていません: {1}", name, exc))
             continue
-        # 評価の一時フォルダ（[skill_lab].temp_dir）は実行中だけ使う物なので、設定に関係なく入れない。
-        excludes: list[Path] = [cfg.skill_lab_temp_dir] if getattr(cfg, "skill_lab_temp_dir", None) else []
+        # 評価の一時フォルダ（[skill_lab].temp_dir）・スクリプトの書き込みガードの置き場（[scripts].guard_temp_dir）は
+        # 実行中だけ使う物なので、設定に関係なく入れない。
+        excludes: list[Path] = [
+            p for p in (getattr(cfg, "skill_lab_temp_dir", None), getattr(cfg, "script_guard_temp_dir", None)) if p
+        ]
         if settings.exclude_workdir:
             excludes.append(cfg.default_workdir)
         if settings.exclude_logs:
@@ -289,17 +292,38 @@ def _is_sqlite(path: Path) -> bool:
         return False
 
 
-def _add_sqlite(zf: zipfile.ZipFile, path: Path, arcname: str) -> None:
+_SQLITE_TMP_PREFIX = ".locohane_backup_"
+_SQLITE_TMP_SUFFIX = ".sqlite.tmp"
+
+
+def _remove_stale_sqlite_copies(directory: Path) -> None:
+    """強制終了等で残った SQLite の一時コピー（_add_sqlite が作るもの）を消す。
+
+    バックアップは BackupManager が1度に1つだけ動かすため、写す前に残っているものはどれも前回の残り。
+    """
+    for stale in directory.glob(f"{_SQLITE_TMP_PREFIX}*{_SQLITE_TMP_SUFFIX}"):
+        try:
+            stale.unlink()
+            logger.info("Data backup: removed a leftover SQLite copy: %s", stale)
+        except OSError as exc:
+            logger.warning("Data backup: cannot delete a leftover SQLite copy %s: %s", stale, exc)
+
+
+def _add_sqlite(zf: zipfile.ZipFile, path: Path, arcname: str, fallback_dir: Path) -> None:
     """使用中の SQLite も整合した状態で入れる（SQLite のバックアップ機能で一時ファイルへ写す）。
 
     一時ファイルは元の SQLite と同じフォルダに作る（大きいベクター DB をシステムの一時フォルダ（C ドライブ）へ
     写して圧迫しないため。データはローカルディスクにある。src/config.py の _validate_local_data_paths）。
+    そこに書けなければ、バックアップの保存先（fallback_dir）に作る。OS の一時フォルダは使わない
+    （強制終了で残ったものがどこにあるか管理できないため。残りは次に写すときにどちらの場所からも消す）。
     バックアップの対象のファイル一覧は先に作っているため、この一時ファイルは zip に入らない。
     """
     try:
-        fd, tmp = tempfile.mkstemp(prefix=".locohane_backup_", suffix=".sqlite.tmp", dir=str(path.parent))
+        _remove_stale_sqlite_copies(path.parent)
+        fd, tmp = tempfile.mkstemp(prefix=_SQLITE_TMP_PREFIX, suffix=_SQLITE_TMP_SUFFIX, dir=str(path.parent))
     except OSError:
-        fd, tmp = tempfile.mkstemp(prefix="locohane_backup_", suffix=".sqlite")
+        _remove_stale_sqlite_copies(fallback_dir)
+        fd, tmp = tempfile.mkstemp(prefix=_SQLITE_TMP_PREFIX, suffix=_SQLITE_TMP_SUFFIX, dir=str(fallback_dir))
     os.close(fd)
     try:
         src = sqlite3.connect(str(path), timeout=30)
@@ -385,7 +409,7 @@ def run_backup(
                     progress(i, len(files), str(path))
                 try:
                     if _is_sqlite(path):
-                        _add_sqlite(zf, path, arcname)
+                        _add_sqlite(zf, path, arcname, dest)
                     else:
                         zf.write(path, arcname)
                     total_bytes += path.stat().st_size

@@ -6,7 +6,9 @@ from pathlib import Path
 import chainlit as cl
 import logging
 import os
+import shutil
 import tempfile
+import time
 
 from .. import skill_drafts
 from . import _state
@@ -138,6 +140,49 @@ def _skill_creator_draft_roots(skill_name: str) -> list[Path]:
     return [draft_dir.resolve()] if cfg.skill_other_users_drafts == "full" else [own_dir.resolve()]
 
 
+def guard_temp_root() -> Path:
+    """run_script の書き込みガード（sitecustomize.py）を置くフォルダ（[scripts].guard_temp_dir）。
+
+    OS の一時フォルダは使わない（強制終了で残ったものがどこにあるか管理できないため）。設定が無い文脈
+    （テスト等）では default_workdir の親（既定の common_data_dir）の script_guard_temp を使う。
+
+    Raises:
+        RuntimeError: 設定も default_workdir も無い（init_tools() 前）。
+    """
+    configured = getattr(_state._LLM_CONFIG, "script_guard_temp_dir", None)
+    if configured is not None:
+        return Path(configured)
+    if _state._DEFAULT_WORKDIR is None:
+        raise RuntimeError("init_tools() has not been run")
+    return _state._DEFAULT_WORKDIR.parent / "script_guard_temp"
+
+
+def cleanup_guard_temp(root: Path, older_than_seconds: float = 0) -> int:
+    """root の下に残った書き込みガードのフォルダを消す。消した数を返す。
+
+    本体の起動時に呼ぶ。本体のスクリプトは起動時には動いていないが、同じインスタンスの設定で動く
+    評価（evals/run_case.py）のスクリプトが使用中のことがあるため、作られてから older_than_seconds
+    （スクリプトが動きうる最長の時間）を過ぎたものだけを消す。
+    """
+    removed = 0
+    limit = time.time() - older_than_seconds
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if not (entry.is_dir() and entry.name.startswith("agent_fs_guard_")) or entry.stat().st_mtime > limit:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+        removed += not entry.exists()
+    if removed:
+        logger.info("Removed %d leftover write guard folder(s) under %s", removed, root)
+    return removed
+
+
 def _run_script_guard_env(workdir: Path, skill_name: str, script_filename: str) -> tuple[dict[str, str], Path | None]:
     """run_script/run_script_background が起動するサブプロセスへ、書き込み
     サンドボックスガードを注入した環境変数を組み立てる。
@@ -196,14 +241,19 @@ def _run_script_guard_env(workdir: Path, skill_name: str, script_filename: str) 
     display_roots = list(allowed_roots)
     if _state._PATH_MEMORY_DIR is not None:
         allowed_roots.append(_state._PATH_MEMORY_DIR)
+    guard_dir: Path | None = None
     try:
-        guard_dir = Path(tempfile.mkdtemp(prefix="agent_fs_guard_"))
+        root = guard_temp_root()
+        root.mkdir(parents=True, exist_ok=True)
+        guard_dir = Path(tempfile.mkdtemp(prefix="agent_fs_guard_", dir=root))
         guard_src = _python_fs_guard_preamble(
             allowed_roots, tmp_dir_roots=_tmp_dir_parents(workdir), display_roots=display_roots
         )
         (guard_dir / "sitecustomize.py").write_text(guard_src, encoding="utf-8")
-    except OSError:
+    except (OSError, RuntimeError):
         logger.warning("run_script: failed to create the temporary file for the write guard, running without the guard.")
+        if guard_dir is not None:
+            shutil.rmtree(guard_dir, ignore_errors=True)
         return env, None
     existing_path = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(guard_dir) + (os.pathsep + existing_path if existing_path else "")

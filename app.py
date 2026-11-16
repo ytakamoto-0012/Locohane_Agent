@@ -166,6 +166,7 @@ from src.tools import (
 from src.tools.dispatch_agent_batch import BATCH_GROUP_RUN_NAME, interrupted_note_topic
 from src.tools._plan_render import _render_plan_payload
 from src.tools._path_memory_helpers import _register_path_memory
+from src.tools.provide_download import download_access_error
 from src.tools._state import SESSION_REASONING_EFFORT_KEY
 from src.tools._workdir import _build_workdir_status_info, _resolve_exec_workdir
 from src.system_prompt_builder import build_prompts, fill_session_parts
@@ -579,7 +580,10 @@ if _config.auth_enabled:
         stored_password = _config.auth_users.get(username)
         if stored_password is None:
             return None
-        if _config.auth_require_password and not hmac.compare_digest(password, stored_password):
+        # UTF-8 のバイト列で比べる（str のままだと ASCII 以外の文字を含むパスワードで TypeError になる）。
+        if _config.auth_require_password and not hmac.compare_digest(
+            password.encode("utf-8"), stored_password.encode("utf-8")
+        ):
             return None
         return cl.User(identifier=username)
 
@@ -778,6 +782,12 @@ if _config.thread_store_enabled:
     # （_reorder_locohane_routes_before_spa_catchall 参照）。
     _routes_before_registration = len(_chainlit_asgi_app.router.routes)
 
+    # /locohane/elements/{id} が inline で返す（画面にそのまま出してよい）型。スクリプトを含みうる
+    # SVG・HTML 等は入れない。
+    _INLINE_ELEMENT_MIME_TYPES = frozenset(
+        {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/bmp"}
+    )
+
     class _RenameThreadBody(BaseModel):
         name: str
 
@@ -851,6 +861,27 @@ if _config.thread_store_enabled:
                 is_waiting = False
             item["isWaitingForUser"] = is_waiting
         return {"threads": items, "nextCursor": next_cursor}
+
+    # /locohane/threads/generating は GET /locohane/threads/{thread_id} より前に登録する（Starlette は登録順に
+    # 照合するため、後ろに置くと "generating" が thread_id として扱われ、常に 404 になっていた）。
+    @_chainlit_asgi_app.get("/locohane/threads/generating")
+    async def _locohane_owner_generating_thread(
+        exclude: str | None = None,
+        current_user=Depends(_cl_get_current_user),
+    ):
+        """呼び出し元と同じ所有者が、他に生成中のスレッドを持っていないかを返す。
+
+        Composer（App.tsx）はこれをポーリングし、新規チャット・他スレッドからの
+        並列送信をフロントエンド側でも事前に防ぐ（バックエンド側の実際の拒否は
+        on_message の _generating_owner_threads チェック。ここはそのUI反映用）。
+        exclude に現在開いているスレッドIDを渡すと、それ自身が生成中でも
+        「他のスレッド」としては数えない（新規チャットから呼ぶ場合は省略可）。
+        """
+        owner = thread_store.resolve_owner(current_user)
+        conflicting_thread_id = _generating_owner_threads.get(owner)
+        if conflicting_thread_id is not None and conflicting_thread_id == exclude:
+            conflicting_thread_id = None
+        return {"threadId": conflicting_thread_id}
 
     @_chainlit_asgi_app.put("/locohane/threads/{thread_id}")
     async def _locohane_rename_thread(
@@ -954,7 +985,19 @@ if _config.thread_store_enabled:
         path = Path(row["file_path"])
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Element not found")
-        return FileResponse(path, media_type=row.get("mime") or "application/octet-stream")
+        mime = row.get("mime") or "application/octet-stream"
+        # 画面にそのまま出すのはラスター画像だけ。HTML・SVG 等を inline で返すと、LLM が作った
+        # ファイルを開いたときにアプリと同じオリジンでスクリプトが動くため、それ以外はダウンロードにする
+        # （<img> での表示は Content-Disposition に左右されない）。nosniff で型の推測もさせない。
+        inline = mime.lower() in _INLINE_ELEMENT_MIME_TYPES
+        name = (row.get("data") or {}).get("name") or path.name
+        return FileResponse(
+            path,
+            media_type=mime,
+            filename=None if inline else str(name),
+            content_disposition_type="inline" if inline else "attachment",
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
 
     @_chainlit_asgi_app.post("/locohane/threads/{thread_id}/stop")
     async def _locohane_stop_thread(thread_id: str, current_user=Depends(_cl_get_current_user)):
@@ -970,25 +1013,6 @@ if _config.thread_store_enabled:
         await _assert_owns_thread(thread_id, current_user)
         stopped = await _stop_thread_generating(thread_id)
         return {"stopped": stopped}
-
-    @_chainlit_asgi_app.get("/locohane/threads/generating")
-    async def _locohane_owner_generating_thread(
-        exclude: str | None = None,
-        current_user=Depends(_cl_get_current_user),
-    ):
-        """呼び出し元と同じ所有者が、他に生成中のスレッドを持っていないかを返す。
-
-        Composer（App.tsx）はこれをポーリングし、新規チャット・他スレッドからの
-        並列送信をフロントエンド側でも事前に防ぐ（バックエンド側の実際の拒否は
-        on_message の _generating_owner_threads チェック。ここはそのUI反映用）。
-        exclude に現在開いているスレッドIDを渡すと、それ自身が生成中でも
-        「他のスレッド」としては数えない（新規チャットから呼ぶ場合は省略可）。
-        """
-        owner = thread_store.resolve_owner(current_user)
-        conflicting_thread_id = _generating_owner_threads.get(owner)
-        if conflicting_thread_id is not None and conflicting_thread_id == exclude:
-            conflicting_thread_id = None
-        return {"threadId": conflicting_thread_id}
 
     def _reorder_locohane_routes_before_spa_catchall() -> None:
         """直前に登録した /locohane/threads* ルートを、Chainlit本体のSPA
@@ -2211,6 +2235,15 @@ async def _setup() -> None:
                 _config.skill_lab_temp_dir, _config.skill_lab_temp_retention_hours, _config.skill_lab_temp_cleanup_interval_hours
             )
         )
+
+    # run_script の書き込みガード（[scripts].guard_temp_dir）に強制終了で残ったものを消す。同じ設定で動く
+    # 評価のスクリプトが使用中のものは残すため、スクリプトが動きうる最長の時間を過ぎたものだけにする。
+    from src.tools._subprocess_env import cleanup_guard_temp as _cleanup_guard_temp
+
+    _cleanup_guard_temp(
+        _config.script_guard_temp_dir,
+        older_than_seconds=max(_config.script_timeout, _config.script_background_max_runtime_seconds) + 600,
+    )
 
     # P0-3: httpcore の cancel scope breakage 検知フィルタを登録する。
     # _setup() は一度だけ呼ばれるため、ここで登録すれば十分（冪等処理あり）。
@@ -4644,6 +4677,14 @@ async def _on_message_impl(message: cl.Message) -> None:
                             ).send()
                         if isinstance(content, str):
                             generated = extract_generated_files(content)
+                            # ツール結果の output_path(s) はどのツールでも書ける（execute_python_code が print する等）ため、
+                            # provide_download と同じ判定で、他セッションの一時フォルダ・他ユーザーのドラフトとメモリーは出さない。
+                            refused = [path for path in generated if download_access_error(path)]
+                            if refused:
+                                logging.getLogger(__name__).warning(
+                                    "Did not attach files the user may not access: %s", [str(p) for p in refused]
+                                )
+                                generated = [path for path in generated if path not in refused]
                             if generated:
                                 elements = [
                                     cl.Image(name=path.name, path=str(path), display="inline")

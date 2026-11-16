@@ -54,6 +54,20 @@ def read(path: Path) -> dict[str, dict[str, str]]:
     return data
 
 
+# preview() が検証のために書く一時ファイル。同時に別のプレビューが使っている物を消さないよう、
+# この秒数より古いもの（強制終了で残った物）だけを消す。
+_PREVIEW_TMP_PREFIX = ".config_overrides_preview_"
+_PREVIEW_TMP_SUFFIX = ".tmp"
+_PREVIEW_TMP_STALE_SECONDS = 3600
+
+
+def _mtime_or_zero(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def mtime_or_none(path: Path) -> float | None:
     """path の mtime。存在しなければ None（「まだ一度も保存されていない」)。"""
     return path.stat().st_mtime if path.is_file() else None
@@ -203,7 +217,13 @@ def preview(
     existing = read(path)
     new_data = _build_new_data(existing, updates, resets, ini_catalog)
 
-    fd, tmp_name = tempfile.mkstemp(prefix=".config_overrides_preview_", suffix=".tmp")
+    # OS の一時フォルダは使わず、config_overrides.json と同じフォルダに作る（強制終了で残ったものの
+    # 場所を管理できるように。残ったものは次のプレビューの前に消す）。
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for stale in path.parent.glob(f"{_PREVIEW_TMP_PREFIX}*{_PREVIEW_TMP_SUFFIX}"):
+        if time.time() - _mtime_or_zero(stale) > _PREVIEW_TMP_STALE_SECONDS:
+            stale.unlink(missing_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=_PREVIEW_TMP_PREFIX, suffix=_PREVIEW_TMP_SUFFIX, dir=str(path.parent))
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:

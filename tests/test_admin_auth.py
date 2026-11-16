@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from admin import auth
 
 
@@ -29,6 +31,29 @@ def test_verify_password_correct_and_incorrect():
     assert auth.verify_password(users, "alice", "secret1") is True
     assert auth.verify_password(users, "alice", "wrong") is False
     assert auth.verify_password(users, "nobody", "anything") is False
+
+
+def test_verify_password_non_ascii():
+    # str のまま hmac.compare_digest に渡すと、ASCII 以外を含むパスワードで TypeError（ログインが 500）になっていた。
+    users = {"alice": "パスワード1", "bob": "secret"}
+    assert auth.verify_password(users, "alice", "パスワード1") is True
+    assert auth.verify_password(users, "alice", "パスワード2") is False
+    assert auth.verify_password(users, "bob", "ひみつ") is False
+    assert auth.verify_password(users, "nobody", "ひみつ") is False
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ['[["alice", "s3cret-pw"', '{"alice": "s3cret-pw"}', '[["alice", "s3cret-pw", "extra"]]'],
+)
+def test_parse_auth_users_errors_do_not_show_passwords(raw):
+    """書式エラーに値そのものを載せない（起動時のエラー表示・ログにパスワードが出ていた）。"""
+    from src.config import _parse_auth_users
+
+    with pytest.raises(ValueError) as excinfo:
+        _parse_auth_users(raw)
+    assert "s3cret-pw" not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None or "s3cret-pw" not in str(excinfo.value.__cause__)
 
 
 def test_session_store_create_and_validate():

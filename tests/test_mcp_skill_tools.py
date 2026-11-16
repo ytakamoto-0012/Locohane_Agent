@@ -37,6 +37,14 @@ def test_run_skill_script_uses_english_headings(skills_root) -> None:
     assert result == "[exit code] 3\n[stdout]\nhello\n[stderr]\noops"
 
 
+def test_run_skill_script_keeps_japanese_output(skills_root, monkeypatch) -> None:
+    """子の標準出力を UTF-8 にそろえる（日本語版 Windows では cp932 で書かれ、置換文字に化けていた）。"""
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    monkeypatch.delenv("PYTHONUTF8", raising=False)
+    (skills_root / "demo-skill" / "scripts" / "jp.py").write_text("print('日本語の出力')\n", encoding="utf-8")
+    assert skill_tools.run_skill_script("demo-skill", "jp.py") == "[exit code] 0\n[stdout]\n日本語の出力"
+
+
 def test_errors_start_with_error_prefix(skills_root) -> None:
     assert skill_tools.read_skill("missing").startswith("Error: ")
     assert skill_tools.read_skill("../outside").startswith("Error: ")

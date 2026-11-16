@@ -24,6 +24,8 @@ from pathlib import Path
 import chainlit as cl
 from langchain_core.tools import tool
 
+from .. import skill_drafts
+from . import _state
 from ._file_tools_common import looks_binary
 from ._path_memory_helpers import _register_path_memory, _resolve_path_memory_token
 from ._python_fs_guard import _exec_guard_roots
@@ -58,7 +60,12 @@ def _resolve_write_path(file_path: str) -> tuple[Path | None, str | None]:
     path = path.resolve()
     tmp_error = _foreign_tmp_dir_error(path)
     if tmp_error:
-        return None, tmp_error
+        return None, tmp_error.removeprefix("Error: ")
+    # 他ユーザーのドラフトスキル・メモリーは、作業ディレクトリがそれを含んでいても書き換えさせない
+    # （execute_python_code の書き込みガードの write_deny_roots と同じ判断。以前は Write/Edit だけ素通しだった）。
+    draft_error = skill_drafts.access_error(path, "write", _state._LLM_CONFIG, skill_drafts.current_draft_user())
+    if draft_error:
+        return None, draft_error.removeprefix("Error: ")
     _, display_roots = _exec_guard_roots()
     roots = [Path(r).resolve() for r in display_roots]
     if not any(path.is_relative_to(root) for root in roots):

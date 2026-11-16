@@ -1381,6 +1381,8 @@ class Config:
     script_timeout: int
     script_python: str
     code_exec_enabled: bool
+    # [scripts].guard_temp_dir（run_script の書き込みガード sitecustomize.py の置き場。OS の一時フォルダは使わない）
+    script_guard_temp_dir: Path
 
     # --- run_script_background 用設定 ---
     script_background_max_runtime_seconds: int
@@ -2937,16 +2939,20 @@ def _parse_auth_users(value: str | None) -> dict[str, str]:
     if not value or not value.strip():
         return {}
     text = value.strip()
+    # エラーには値そのものを載せない（パスワードが起動時のエラー表示・ログに出るため）。何番目の要素かだけを示す。
     try:
         parsed = ast.literal_eval(text)
-    except (ValueError, SyntaxError) as e:
-        raise ValueError(f"AUTH_USERS must be a Python list: {text!r}") from e
+    except (ValueError, SyntaxError):
+        # from None: 元の SyntaxError は値の行をそのまま含むため、連鎖させない。
+        raise ValueError('AUTH_USERS must be a Python list like [["user", "password"], ...] (the value is not shown)') from None
     if not isinstance(parsed, list):
-        raise ValueError(f"AUTH_USERS must be a list (array): {text!r}")
+        raise ValueError(f"AUTH_USERS must be a list (array), not {type(parsed).__name__} (the value is not shown)")
     users: dict[str, str] = {}
-    for item in parsed:
+    for position, item in enumerate(parsed, start=1):
         if not (isinstance(item, (list, tuple)) and len(item) == 2):
-            raise ValueError(f"Each element of AUTH_USERS must be a two-element [username, password]: {item!r}")
+            raise ValueError(
+                f"Element {position} of AUTH_USERS must be a two-element [username, password] (the value is not shown)"
+            )
         users[str(item[0])] = str(item[1])
     return users
 
@@ -4007,6 +4013,14 @@ def load_config(
         # 空欄なら本体を起動している Python（python_env.bat で指定した環境）を使う
         script_python=os.getenv("SCRIPT_PYTHON", scripts.get("python", "")) or sys.executable,
         code_exec_enabled=_as_bool(os.getenv("CODE_EXECUTION_ENABLED", scripts.get("code_execution_enabled", True))),
+        script_guard_temp_dir=_resolve(
+            PROJECT_ROOT,
+            _sub_common_data_dir(
+                os.getenv("SCRIPT_GUARD_TEMP_DIR", scripts.get("guard_temp_dir", "${common_data_dir}/script_guard_temp")),
+                common_data_dir,
+                resolved_instance_name,
+            ),
+        ),
         script_background_max_runtime_seconds=int(
             os.getenv(
                 "SCRIPT_BACKGROUND_MAX_RUNTIME_SECONDS",

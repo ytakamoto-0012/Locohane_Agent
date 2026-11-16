@@ -85,6 +85,33 @@ def test_write_outside_allowed_roots_is_refused(env, tmp_path):
     assert not outside.exists()
 
 
+def test_write_and_edit_refuse_other_users_drafts_and_memories(env, tmp_path, monkeypatch):
+    """作業ディレクトリが他ユーザーのドラフト・メモリーを含んでいても、Write/Edit では書き換えさせない
+    （execute_python_code の書き込みガードと同じ判断。以前は Write/Edit だけ素通しだった）。"""
+    from types import SimpleNamespace
+
+    data = tmp_path / "data"
+    other_draft = data / "skill_drafts" / "bob" / "his-skill"
+    other_memory = data / "memory" / "users" / "bob" / "user"
+    other_draft.mkdir(parents=True)
+    other_memory.mkdir(parents=True)
+    (other_draft / "SKILL.md").write_text("original\n", encoding="utf-8")
+    cfg = SimpleNamespace(
+        memory_dir=data / "memory", skill_draft_dir=data / "skill_drafts", skill_other_users_drafts="readable"
+    )
+    monkeypatch.setattr(tools._state, "_LLM_CONFIG", cfg)
+    env.set("work_dir", str(data))
+
+    result = _write(file_path=str(other_memory / "note.md"), content="x")
+    assert result.startswith("Error:") and "another user's memories" in result
+    assert not (other_memory / "note.md").exists()
+    result = _edit(file_path=str(other_draft / "SKILL.md"), old_string="original", new_string="changed")
+    assert result.startswith("Error:") and "another user's draft skills" in result
+    assert (other_draft / "SKILL.md").read_text(encoding="utf-8") == "original\n"
+    # 作業ディレクトリのほかの場所には書ける。
+    json.loads(_write(file_path=str(data / "ok.txt"), content="x"))
+
+
 def test_edit_replaces_unique_match_and_returns_changed_lines(env):
     _write(file_path="b.py", content="a = 1\nb = round(2.5)\nc = 3\n")
     result = json.loads(_edit(file_path="b.py", old_string="b = round(2.5)", new_string="b = half_up(2.5)"))

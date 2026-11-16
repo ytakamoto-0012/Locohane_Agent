@@ -54,6 +54,13 @@ except ValueError:
 _python_env = os.environ.get("LOCOHANE_MCP_SKILLS_PYTHON")
 SCRIPT_PYTHON: str = _python_env if _python_env else sys.executable
 
+# Resources 配布用のコピー（publish.build_publish_dir）を置くフォルダ。OS の一時フォルダ（%TEMP%）は
+# 使わない（強制終了で残ったものがどこにあるか管理できないため）。サーバーごとに中へ1つずつ作り、
+# 終了時に消す。強制終了で残ったものは、次にどれかのサーバーが起動したときに消す。
+# 環境変数 LOCOHANE_MCP_SKILLS_PUBLISH_DIR で上書きできる。既定はプロジェクト直下 data/mcp_publish。
+_publish_dir_env = os.environ.get("LOCOHANE_MCP_SKILLS_PUBLISH_DIR")
+PUBLISH_ROOT: Path = Path(_publish_dir_env) if _publish_dir_env else PROJECT_ROOT / "data" / "mcp_publish"
+
 # MCPサーバー自体の名前（FastMCPインスタンス名）。クライアント側の表示名や
 # ツール名衝突回避のため、複数のMCPサーバーを同時接続する場合に区別したいことがある。
 # 環境変数 LOCOHANE_MCP_SKILLS_NAME で上書きできる。既定は "locohane-skills"。

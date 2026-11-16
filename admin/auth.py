@@ -48,14 +48,23 @@ def load_admin_users(project_env_path: Path) -> dict[str, str]:
     return _parse_auth_users(raw)
 
 
+def passwords_match(given: str, stored: str) -> bool:
+    """パスワードを定数時間で比べる（hmac.compare_digest でタイミング攻撃を軽減）。
+
+    UTF-8 のバイト列にしてから比べる。str のまま渡すと、ASCII 以外の文字（日本語のパスワード等）で
+    hmac.compare_digest が TypeError を送出し、ログインが 500 になっていた。
+    """
+    return hmac.compare_digest(given.encode("utf-8"), stored.encode("utf-8"))
+
+
 def verify_password(admin_users: dict[str, str], username: str, password: str) -> bool:
     """定数時間比較でパスワードを検証する（hmac.compare_digestでタイミング攻撃を軽減）。"""
     stored = admin_users.get(username)
     if stored is None:
         # ユーザーが存在しない場合も、存在確認の時間差を減らすためダミー比較を行う。
-        hmac.compare_digest(password, "")
+        passwords_match(password, "")
         return False
-    return hmac.compare_digest(password, stored)
+    return passwords_match(password, stored)
 
 
 @dataclass

@@ -14,6 +14,18 @@ from ._workdir import _foreign_tmp_dir_error, _resolve_workdir
 logger = logging.getLogger(__name__)
 
 
+def download_access_error(path: Path) -> str | None:
+    """path をチャットのダウンロード・画像として出してよいか。出せなければ "Error: ..." の文字列。
+
+    他セッションの `_tmp_<…>` と、会話のユーザーが読めない他ユーザーのドラフト・メモリーは出さない。
+    provide_download と、ツール結果の output_path(s) から添付を作る app.py の両方が使う（ツール結果の
+    JSON はどのツールでも書けるため、app.py 側でも同じ判定をしないと provide_download の検査を迂回できた）。
+    """
+    return _foreign_tmp_dir_error(path) or skill_drafts.access_error(
+        path, "read", _state._LLM_CONFIG, skill_drafts.current_draft_user()
+    )
+
+
 @tool
 def provide_download(file_paths: list[str]) -> str:
     """Offer existing files in the chat as download buttons.
@@ -41,9 +53,7 @@ def provide_download(file_paths: list[str]) -> str:
         if not path.is_absolute():
             path = _resolve_workdir() / path
         path = path.resolve()
-        tmp_error = _foreign_tmp_dir_error(path) or skill_drafts.access_error(
-            path, "read", _state._LLM_CONFIG, skill_drafts.current_draft_user()
-        )
+        tmp_error = download_access_error(path)
         if tmp_error:
             return tmp_error
         if not path.is_file():
