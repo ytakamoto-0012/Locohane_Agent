@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-11-17
+
 ### 追加
 
 - `[scripts] guard_temp_dir`（既定 `${common_data_dir}/script_guard_temp`）を追加しました。`run_script` の書き込みガード
@@ -1474,7 +1476,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.6...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.7...HEAD
+[0.7.7]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.3...v0.7.4
