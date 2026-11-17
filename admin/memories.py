@@ -294,8 +294,17 @@ def _replace_frontmatter_name(skill_md: str, name: str, description: str) -> str
 _PREVIEW_CHARS = 120
 
 
+# 一覧の絞り込み（名前・説明・本文）で本文を探す文字数。先頭 _PREVIEW_CHARS だけだと後ろの語で見つからないため、
+# 本文全体を渡す（大きすぎる本文だけ切る）。
+_SEARCH_TEXT_CHARS = 20000
+
+
+def _flat(content: str) -> str:
+    return " ".join(content.split())
+
+
 def _preview(content: str) -> str:
-    flat = " ".join(content.split())
+    flat = _flat(content)
     return flat if len(flat) <= _PREVIEW_CHARS else flat[:_PREVIEW_CHARS] + "…"
 
 
@@ -304,6 +313,7 @@ def _summary(m: mem_store.Memory, mtime: float | None = None) -> dict:
         "name": m.name,
         "description": m.description,
         "preview": _preview(m.content),
+        "search_text": _flat(m.content)[:_SEARCH_TEXT_CHARS],
         "type": m.memory_type,
         "owner": m.owner,
         "visibility": m.visibility,

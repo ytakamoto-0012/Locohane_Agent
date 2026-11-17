@@ -76,6 +76,8 @@ _INDEX_FILENAME = "MEMORY.md"
 # 差し替える目印（索引は会話のユーザーごとに違うため）。
 MEMORY_INDEX_MARKER = "<<MEMORY_INDEX>>"
 _INDEX_MAX_LINES = 200
+# {{memory}} に載せる用語（glossary）の最大行数（ほかの種類の行が少なければ、空いた分まで増やす）。
+_INDEX_GLOSSARY_MAX_LINES = 50
 _INDEX_ENTRY_MAX_CHARS = 150
 
 # 元ファイル付きメモリーの上限。ファイルの本文をまるごと写すと read_memory のたびに
@@ -848,6 +850,7 @@ def edit_memory(
     visibility: str | None = None,
     updated_by: str | None = None,
     source_files: list[Path] | None = None,
+    fingerprints: tuple[SourceFile, ...] | None = None,
 ) -> Path:
     """既存メモリーの説明・種類・本文（ユーザーのものは公開範囲も）をまとめて書き換え、索引を再構築する。
 
@@ -865,29 +868,40 @@ def edit_memory(
         visibility: ユーザーのメモリーの新しい公開範囲（None なら今の値のまま）。
         updated_by: 書き換えた人（frontmatter の updated_by に記録する）。None なら記録済みの値のまま。
         source_files: 渡すとその今の sha256 で元ファイルの指紋を置き換える（None なら記録済みのまま）。
+        fingerprints: 記録する元ファイルの指紋そのもの（記録済みの指紋を取り直さずに残したいとき。用語集の出典の追加用）。
+            source_files と同時には渡せない。件数は SOURCE_FILES_MAX まで。
 
     Returns:
         書き換え後のファイルの絶対パス。
 
     Raises:
         ValueError: memory_type/visibility が不正、description/content が空、name のメモリーが存在しない、
-            source_files が読めない・多すぎる、または元ファイル付きの本文が長すぎる場合。
+            source_files が読めない・多すぎる、source_files と fingerprints を両方渡した、
+            または元ファイル付きの本文が長すぎる場合。
     """
     if not description.strip():
         raise ValueError("description is empty")
     if not content.strip():
         raise ValueError("content is empty")
+    if source_files is not None and fingerprints is not None:
+        raise ValueError("pass either source_files or fingerprints, not both")
+    if fingerprints is not None and len(fingerprints) > SOURCE_FILES_MAX:
+        raise ValueError(f"source_files can list at most {SOURCE_FILES_MAX} files: {len(fingerprints)}")
     _validate_type(memory_type)
     mem = _find_memory(memory_root, name, owner)
     if mem is None:
         raise ValueError(f"Memory not found: {name}")
+    if fingerprints is not None:
+        sources = tuple(fingerprints)
+    else:
+        sources = mem.sources if source_files is None else fingerprint_sources(source_files)
     return _rewrite(
         memory_root,
         mem,
         description=description.strip(),
         memory_type=memory_type,
         content=content,
-        sources=mem.sources if source_files is None else fingerprint_sources(source_files),
+        sources=sources,
         visibility=visibility if visibility is not None else mem.visibility,
         updated_by=updated_by,
     )
@@ -1136,7 +1150,8 @@ def render_memory_block(memory_root: Path, viewer: str | None = None, max_lines:
     """system_prompt.md の {{memory}} プレースホルダーへ差し込むテキストを、viewer 向けに組み立てる。
 
     viewer が見えるメモリー（所有者のランクが高い順。同じランクなら 自分 → 共通 → 他のユーザーの共有のもの）を
-    1行ずつ並べ、max_lines を超える場合は切り詰めて注記を付す（先に並ぶものが残る）。
+    1行ずつ並べ、max_lines を超える場合は切り詰めて注記を付す（先に並ぶものが残る）。用語（glossary）は
+    ほかの種類の後ろに別枠で並べ、_INDEX_GLOSSARY_MAX_LINES 件まで（ほかの種類が少なければ空いた分まで）にする。
 
     Args:
         memory_root: メモリーストアのルートディレクトリ。
@@ -1150,13 +1165,27 @@ def render_memory_block(memory_root: Path, viewer: str | None = None, max_lines:
     if not memories:
         return "(no memories saved)"
     policy = policy_for(memory_root)
-    lines = [
-        f"- [{m.memory_type}] {m.name}{label_for(m, viewer, policy)}: {m.description}"[:_INDEX_ENTRY_MAX_CHARS]
-        for m in memories
-    ]
-    if len(lines) > max_lines:
-        lines = lines[:max_lines] + [
-            "",
-            f"... (truncated after {max_lines} lines; check details with list_memories / search_memory)",
-        ]
+
+    def line(m: Memory) -> str:
+        return f"- [{m.memory_type}] {m.name}{label_for(m, viewer, policy)}: {m.description}"[:_INDEX_ENTRY_MAX_CHARS]
+
+    # 用語（glossary）は辞書ファイル1つで数百件になるため別枠にする（同じ枠だと、ほかの種類と共通のメモリーが
+    # 用語に押し出されて索引から消える）。用語は _INDEX_GLOSSARY_MAX_LINES 件まで（ほかが少なければ空いた分まで）。
+    terms = [m for m in memories if m.memory_type == "glossary"]
+    rest = [m for m in memories if m.memory_type != "glossary"]
+    term_budget = min(len(terms), _INDEX_GLOSSARY_MAX_LINES, max_lines)
+    rest_budget = max_lines - term_budget
+    if len(rest) < rest_budget:
+        term_budget = min(len(terms), max_lines - len(rest))
+    lines = [line(m) for m in rest[:rest_budget]]
+    if len(rest) > rest_budget:
+        lines += ["", f"... (truncated after {rest_budget} lines; check details with list_memories / search_memory)"]
+    if terms:
+        lines += [line(m) for m in terms[:term_budget]]
+        if len(terms) > term_budget:
+            lines += [
+                "",
+                f"... ({len(terms) - term_budget} more glossary terms not shown; find a term with "
+                "search_memory(query, memory_type=\"glossary\"))",
+            ]
     return "\n".join(lines)

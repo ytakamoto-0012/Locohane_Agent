@@ -2864,7 +2864,20 @@ async function renderMemories(container, open) {
   // 編集・コピー・ドラフト作成のフォームはポップアップ（index.html の <form id>-modal）で開く。
   // 一覧が長いとページ下のフォームまでスクロールしないと使えなかったため。Esc で閉じる。
   const modalOf = (f) => $(`#${f.id}-modal`, root);
-  const openModal = (f) => modalOf(f).classList.remove("hidden");
+  // 開いたらフォーカスを中へ移す（Esc はポップアップの keydown で閉じるため、フォーカスが外のボタンに残ると効かない）。
+  const openModal = (f) => {
+    const modal = modalOf(f);
+    modal.classList.remove("hidden");
+    const first = $$(
+      "input:not([readonly]):not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([readonly]), button:not([disabled])",
+      modal
+    ).find((x) => x.offsetParent !== null); // 隠れた行の入力欄にはフォーカスできない
+    if (first) first.focus();
+    else {
+      modal.tabIndex = -1;
+      modal.focus();
+    }
+  };
   const closeModal = (f) => modalOf(f).classList.add("hidden");
 
   const reload = async (target) => {
@@ -3086,7 +3099,7 @@ async function renderMemories(container, open) {
       (m) =>
         (owner === "*" || (m.owner || "") === owner) &&
         (!type || m.type === type) &&
-        (!q || `${m.name}\n${m.description}\n${m.preview || ""}`.toLowerCase().includes(q))
+        (!q || `${m.name}\n${m.description}\n${m.search_text || m.preview || ""}`.toLowerCase().includes(q))
     );
     if (sortKey) {
       const value = SORT_VALUES[sortKey];

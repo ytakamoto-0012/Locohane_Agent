@@ -133,7 +133,7 @@ def test_other_users_entries_are_not_changed(as_user):
     _save(term="受注残", meaning="未出荷の注文の残高。")
     current["user"] = "bob"
     out = _save(term="受注残", meaning="出荷前の受注の合計金額。")
-    assert out.startswith("Saved") and "Other users also have an entry for this term" in out
+    assert out.startswith("Saved") and "Other entries for this term were left unchanged" in out and "(user: alice)" in out
     assert glossary.parse_entry(_glossary(root, "alice")[0]).meaning == "未出荷の注文の残高。"
 
 
@@ -170,12 +170,167 @@ def test_result_shows_knowledge_passages_that_mention_the_term(as_user, monkeypa
     from types import SimpleNamespace
 
     hits = [
-        SimpleNamespace(source_path="D:\docs\a.pdf", locator="p.3", text="今月の受注残は前月より増えた。"),
-        SimpleNamespace(source_path="D:\docs\b.pdf", locator="", text="関係ない文書"),
+        SimpleNamespace(source_path=r"D:\docs\a.pdf", locator="p.3", text="今月の受注残は前月より増えた。"),
+        SimpleNamespace(source_path=r"D:\docs\b.pdf", locator="", text="関係ない文書"),
     ]
     monkeypatch.setattr(glossary_tools, "_enabled_config", lambda: SimpleNamespace(thread_store_enabled=False))
     monkeypatch.setattr(glossary_tools.vector_search, "search", lambda cfg, q, **kw: SimpleNamespace(hits=hits))
     out = _save(term="受注残", meaning="未出荷の注文の残高。")
     assert "[Knowledge] Passages in the ingested documents that mention this term:" in out
-    assert "- D:\docs\a.pdf p.3: 今月の受注残は前月より増えた。" in out
+    assert r"- D:\docs\a.pdf p.3: 今月の受注残は前月より増えた。" in out
     assert "b.pdf" not in out
+
+
+# --- コードレビューで見つかった不具合の回帰テスト ---
+
+
+def _common_term(root, name, term, meaning):
+    entry = glossary.GlossaryEntry(term=term, meaning=meaning, sources=["explained by the admin (2026-11-17)"])
+    memory.create_memory(root, name, glossary.render_description(entry), "glossary", glossary.render_content(entry), owner=None)
+
+
+def test_common_entry_is_not_merged_into_a_users_entry(as_user):
+    root, current = as_user
+    _common_term(root, "glossary-bom", "BOM", "製品を構成する部品と数量の一覧。")
+    _save(term="部品表", meaning="製品を作るのに要る部品の一覧。", visibility="private")
+    out = _save(term="部品表", aliases=["BOM"], meaning="製品を作るのに要る部品の一覧。")
+    assert "Merged entries" not in out
+    assert "glossary-bom (common)" in out
+    assert memory.find_memory(root, "glossary-bom", None) is not None
+    current["user"] = "bob"
+    assert [m.name for m in memory.list_memories(root, "glossary", viewer="bob")] == ["glossary-bom"]
+
+
+def test_concurrent_saves_do_not_overwrite_each_other(as_user):
+    import threading
+
+    root, _ = as_user
+    barrier = threading.Barrier(2)
+
+    def save(term):
+        barrier.wait()
+        _save(term=term, meaning=f"{term} は社内で使うプログラミング言語の名前。")
+
+    threads = [threading.Thread(target=save, args=(t,)) for t in ("C++", "C#")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(glossary.parse_entry(m).term for m in _glossary(root)) == ["C#", "C++"]
+
+
+def test_recorded_fingerprint_of_a_changed_file_is_kept(as_user, tmp_path, monkeypatch):
+    root, _ = as_user
+    monkeypatch.setattr(glossary_tools, "_resolve_file_tools_path", lambda raw: (Path(raw), None))
+    a = tmp_path / "terms.csv"
+    b = tmp_path / "b.csv"
+    a.write_text("ABC,受発注システム\n", encoding="utf-8")
+    b.write_text("ABC,受発注を管理するシステム\n", encoding="utf-8")
+    _save(term="ABC", meaning="受発注を管理する社内システム。", sources=[f"{a} (row 1)"])
+    a.write_text("ABC,別の意味に変わった\n", encoding="utf-8")
+    _save(term="ABC", meaning="受発注を管理する社内システム。", sources=[f"{b} (row 1)"])
+    [mem] = _glossary(root)
+    states = {Path(c.source.path).name: c.state for c in memory.check_sources(mem)}
+    assert states == {"terms.csv": "changed", "b.csv": "unchanged"}
+    a.unlink()
+    _save(term="ABC", meaning="受発注を管理する社内システム。", sources=[f"{b} (row 2)"])
+    [mem] = _glossary(root)
+    states = {Path(c.source.path).name: c.state for c in memory.check_sources(mem)}
+    assert states == {"terms.csv": "missing", "b.csv": "unchanged"}
+
+
+def test_private_term_name_is_not_written_into_entries_visible_to_others(as_user):
+    root, _ = as_user
+    _common_term(root, "glossary-juchu", "受注残", "未出荷の注文の残高。")
+    out = _save(term="極秘案件Z", meaning="来期に始める予定の新規事業の社内コード名。", related_terms=["受注残"], visibility="private")
+    assert "Not linked back" in out
+    assert "極秘案件Z" not in memory.find_memory(root, "glossary-juchu", None).content
+
+
+def test_visibility_is_applied_when_updating(as_user):
+    root, _ = as_user
+    _save(term="受注残", meaning="未出荷の注文の残高。")
+    _save(term="受注残", meaning="未出荷の注文の残高。", visibility="private")
+    [mem] = _glossary(root)
+    assert mem.visibility == "private"
+
+
+def test_merging_a_private_duplicate_keeps_the_entry_private(as_user):
+    root, _ = as_user
+    _save(term="BOM", meaning="製品を作るのに要る部品の一覧（部品表）。")
+    _save(term="部品表", meaning="製品を構成する部品と数量の一覧。", visibility="private")
+    _save(term="BOM", aliases=["部品表"], meaning="製品を構成する部品と数量の一覧（部品表）。")
+    [mem] = _glossary(root)
+    assert mem.visibility == "private"
+
+
+@pytest.mark.parametrize("meaning", ["terms.xlsxを参照", "用語一覧表.xlsxに記載", "terms.csvを見て", "D:\\docs\\用語集.xlsxに記載"])
+def test_file_reference_followed_by_japanese_is_rejected(as_user, meaning):
+    assert _save(term="受注残", meaning=meaning).startswith("Error: meaning")
+
+
+def test_definition_before_an_attached_file_name_is_accepted(as_user):
+    out = _save(term="受注残", meaning="受注済み未出荷注文の残高を示す用語でterms.xlsx にある")
+    assert out.startswith("Saved")
+
+
+def test_alias_with_a_comma_stays_one_alias(as_user):
+    root, _ = as_user
+    _save(term="SG&A", meaning="販売費及び一般管理費。", aliases=["Selling, General and Administrative"])
+    [mem] = _glossary(root)
+    assert glossary.parse_entry(mem).aliases == ["Selling, General and Administrative"]
+    out = _save(term="Selling", meaning="販売すること（営業活動）。")
+    assert out.startswith("Saved")
+    assert len(_glossary(root)) == 2
+
+
+def test_legacy_comma_separated_aliases_are_still_read(tmp_path):
+    memory.create_memory(
+        tmp_path, "glossary-x", "X: 意味", "glossary",
+        "**Term:** X\n**Aliases:** エックス, ex\n**Meaning:** 社内の略語。\n**Sources:**\n- s", owner="alice",
+    )
+    assert glossary.parse_entry(memory.read_memory(tmp_path, "glossary-x", "alice")).aliases == ["エックス", "ex"]
+
+
+@pytest.mark.parametrize(
+    ("rel", "suffix"),
+    [
+        (r"Program Files (x86)\a.xlsx", " (row 2)"),
+        (r"docs\terms (2024).xlsx", " (Sheet1)"),
+        (r"docs\terms.xlsx", " p.3"),
+        (r"docs\terms.xlsx", ", Sheet1"),
+        (r"docs\terms.xlsx", ""),
+    ],
+)
+def test_source_path_with_spaces_and_parentheses_is_resolved(tmp_path, monkeypatch, rel, suffix):
+    monkeypatch.setattr(glossary_tools, "_resolve_file_tools_path", lambda raw: (Path(raw), None))
+    f = tmp_path / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("x", encoding="utf-8")
+    texts, files = glossary_tools._resolve_sources([f"{f}{suffix}"])
+    assert files == [f]
+    assert texts == [f"{f}{suffix}"]
+
+
+def test_repeated_saves_stay_within_the_size_limit(as_user, tmp_path, monkeypatch):
+    root, _ = as_user
+    monkeypatch.setattr(glossary_tools, "_resolve_file_tools_path", lambda raw: (Path(raw), None))
+    f = tmp_path / "terms.csv"
+    f.write_text("x", encoding="utf-8")
+    for i in range(60):
+        out = _save(term="受注残", meaning="未出荷の注文の残高。" + "詳" * 40, sources=[f"{f} (row {i}, {'補足' * 60})"])
+        assert not out.startswith("Error"), out
+    [mem] = _glossary(root)
+    assert len(mem.content) <= memory.SOURCED_CONTENT_MAX_CHARS
+    assert len(glossary.parse_entry(mem).sources) <= 10
+
+
+def test_glossary_does_not_push_other_memories_out_of_the_index(tmp_path):
+    for i in range(300):
+        memory.create_memory(tmp_path, f"glossary-t{i:03d}", f"t{i}: 意味", "glossary", "c", owner="alice")
+    memory.create_memory(tmp_path, "zz-project", "進行中の案件", "project", "c", owner="alice")
+    memory.create_memory(tmp_path, "common-ref", "共通の資料の場所", "reference", "c")
+    block = memory.render_memory_block(tmp_path, viewer="alice")
+    assert "zz-project" in block and "common-ref" in block
+    assert sum(1 for line in block.splitlines() if line.startswith("- [glossary]")) == 198
+    assert "102 more glossary terms not shown" in block

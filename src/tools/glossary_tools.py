@@ -21,10 +21,45 @@ from .vector_db_tools import _enabled_config, _record_search_usage
 
 logger = logging.getLogger(__name__)
 
-# 出典の文のうち、ファイルとして解決を試みる部分（"<パス> (Sheet1, row 3)" のパスの部分）。
-_PATH_LIKE_RE = re.compile(r"^(@\d+|[A-Za-z]:[\\/].*?|\\\\.*?)(\s*[(（].*)?$")
+# 出典の文のうち、ファイルとして解決を試みるもの（@N・ドライブ付きの絶対パス・UNC パスで始まる文）。
+_AT_N_RE = re.compile(r"^(@\d+)(.*)$")
+_ABS_PATH_START_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+# パスの後ろに場所（シート・行・ページ）を書くときの区切り。パスそのものにも空白・括弧・カンマは入りうるので、
+# 区切りの位置ごとに長い方から試し、実在するファイルになった所をパスの終わりとする。
+_PATH_CUT_CHARS = frozenset(" (（,，、;；")
+_PATH_CANDIDATES_MAX = 24
 _KNOWLEDGE_TOP_K = 8
 _KNOWLEDGE_SHOW = 3
+
+
+def _try_file(raw: str) -> Path | None:
+    try:
+        p, error = _resolve_file_tools_path(raw)
+    except Exception as e:  # noqa: BLE001 - 解決できない出典も、文として本文に残せばよい
+        logger.debug("save_glossary_term: cannot resolve the source %r: %s", raw, e)
+        return None
+    return p if not error and p is not None and p.is_file() else None
+
+
+def _split_source_path(text: str) -> tuple[Path, str] | None:
+    """出典の文の先頭のファイル（@N・絶対パス）と、その後ろ（シート・行・ページ等）に分ける。ファイルでなければ None。
+
+    例: "C:\\Program Files (x86)\\a.xlsx (row 2)" → (C:\\Program Files (x86)\\a.xlsx, " (row 2)")、
+    "D:\\docs\\terms.xlsx p.3" → (D:\\docs\\terms.xlsx, " p.3")。
+    """
+    m = _AT_N_RE.match(text)
+    if m:
+        p = _try_file(m.group(1))
+        return (p, m.group(2)) if p is not None else None
+    if not _ABS_PATH_START_RE.match(text):
+        return None
+    cuts = [len(text)] + sorted({i for i, ch in enumerate(text) if ch in _PATH_CUT_CHARS and i > 3}, reverse=True)
+    for i in cuts[:_PATH_CANDIDATES_MAX]:
+        raw = text[:i].rstrip(" ,，、;；")
+        p = _try_file(raw) if raw else None
+        if p is not None:
+            return p, text[len(raw) :]
+    return None
 
 
 def _resolve_sources(sources: list[str] | None) -> tuple[list[str], list[Path]]:
@@ -39,17 +74,12 @@ def _resolve_sources(sources: list[str] | None) -> tuple[list[str], list[Path]]:
         text = " ".join(str(raw).split())
         if not text:
             continue
-        m = _PATH_LIKE_RE.match(text)
-        if m:
-            try:
-                p, error = _resolve_file_tools_path(m.group(1).strip())
-            except Exception as e:  # noqa: BLE001 - 解決できない出典も、文として本文に残せばよい
-                logger.warning("save_glossary_term: cannot resolve the source %r: %s", text, e)
-                p, error = None, str(e)
-            if not error and p is not None and p.is_file():
-                text = f"{p}{m.group(2) or ''}"
-                if p not in files:
-                    files.append(p)
+        split = _split_source_path(text)
+        if split is not None:
+            p, rest = split
+            text = f"{p}{rest}"
+            if p not in files:
+                files.append(p)
         texts.append(text)
     return texts, files[: memory.SOURCE_FILES_MAX]
 
@@ -125,7 +155,9 @@ def save_glossary_term(
             sentence). Write what the documents show.
         related_terms: Terms related to this one but with a different meaning (e.g. a broader term,
             the opposite term, a term used in the same process).
-        visibility: "shared" or "private", as for create_memory (if omitted, shared).
+        visibility: "shared" or "private", as for create_memory. If omitted, a new entry is shared
+            and an existing entry keeps its visibility; if given, it is applied to an existing entry
+            of yours too (common entries are always shared).
 
     Returns:
         A text telling the saved entry (new or updated), merged duplicates, related terms linked
@@ -177,7 +209,14 @@ def save_glossary_term(
             f"Related terms not registered yet: {', '.join(result.unregistered_related)} (if they are "
             "company-specific terms, register them too; they will be linked both ways)."
         )
+    if result.not_linked_private:
+        lines.append(
+            f"Not linked back (this entry is private and those entries are visible to others): "
+            f"{', '.join(result.not_linked_private)}"
+        )
+    if result.trimmed:
+        lines.append("The oldest sources/notes of this entry were trimmed to keep it within the size limit.")
     if result.others:
-        lines.append(f"Other users also have an entry for this term: {', '.join(result.others)}")
+        lines.append(f"Other entries for this term were left unchanged (common or other users'): {', '.join(result.others)}")
     return "\n".join(lines) + _knowledge_excerpts(entry)
 

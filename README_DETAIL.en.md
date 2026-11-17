@@ -1171,8 +1171,20 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   with `glossary` return an error pointing to it). One file per term, named automatically from the term; the body has fixed
   headings (`**Term:**`, `**Aliases:**`, `**Meaning:**`, `**Usage:**`, `**Related terms:**`, `**Sources:**`). The meaning is
   required (a text that only points to a file is rejected) and at least one source is required (files that exist are
-  fingerprinted like `source_files`). A saved entry (own or common) whose term or alias matches is updated instead of
-  creating a new one, and several matching entries are merged into one. Related terms are written into both entries.
+  fingerprinted like `source_files`; a path with spaces or parentheses is found by trying the longest prefix that is an
+  existing file). Aliases, related terms and sources are written one per bullet line (so an alias with a comma is not
+  split when read back; older comma-separated bodies are still read). A saved entry (own first, else common) whose term
+  or alias matches is updated instead of creating a new one; several matching entries are merged into one only when they
+  have the same owner as that entry (a common entry is never merged into a user's entry and deleted). Merging a private
+  duplicate keeps the result private, and a given `visibility` is applied to an existing own entry too. When an entry is
+  updated, the fingerprints already recorded are kept as recorded (so a changed or missing file is still reported) and
+  only the files passed this time are fingerprinted again. Related terms are written into both entries, except that a
+  private entry's term is written only into the user's own private entries. Sources (newest 10), related terms (30) and
+  `Notes` (1000 characters) are capped, and notes then old sources are trimmed so the body stays within the 4000-character
+  limit of entries with source files. Saves run one at a time per memory root (a lock within the process), because
+  sub-agents run tool calls of one response in parallel. In the `{{memory}}` index of the system prompt, glossary terms
+  are listed after the other types in their own block of up to 50 lines (more if the other types leave room), so a large
+  dictionary does not push the other memories out; the rest are found with `search_memory(query, memory_type="glossary")`.
   After saving, up to 3 passages of the knowledge that mention the term are returned so the LLM can correct the meaning.
   Older glossary memories without the headings are matched by the start of their description and rewritten with the
   headings when updated (the old body is kept in `Notes`).
