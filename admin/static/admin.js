@@ -2861,6 +2861,12 @@ async function renderMemories(container, open) {
   }
   let editing = null; // 編集中のメモリー {name, owner}（新規作成中は null）
 
+  // 編集・コピー・ドラフト作成のフォームはポップアップ（index.html の <form id>-modal）で開く。
+  // 一覧が長いとページ下のフォームまでスクロールしないと使えなかったため。Esc で閉じる。
+  const modalOf = (f) => $(`#${f.id}-modal`, root);
+  const openModal = (f) => modalOf(f).classList.remove("hidden");
+  const closeModal = (f) => modalOf(f).classList.add("hidden");
+
   const reload = async (target) => {
     const fresh = $("#instance-subview");
     fresh.innerHTML = "";
@@ -2927,15 +2933,14 @@ async function renderMemories(container, open) {
     list.innerHTML = "";
     list.appendChild(el("div", { text: _t("コピーするメモリー（{0} 件）:", copyTargets.length) }));
     for (const m of copyTargets) list.appendChild(el("div", { text: `${memoryOwnerLabel(m.owner)} / ${m.name}: ${m.description}` }));
-    form.classList.add("hidden");
-    draftForm.classList.add("hidden");
-    copyForm.classList.remove("hidden");
-    copyForm.scrollIntoView({ behavior: "smooth", block: "start" });
+    closeModal(form);
+    closeModal(draftForm);
+    openModal(copyForm);
   });
   copyForm.elements.owner_mode.addEventListener("change", () => {
     $("#copy-memories-owner-label", root).classList.toggle("hidden", copyForm.elements.owner_mode.value !== "user");
   });
-  $("#copy-memories-cancel-btn", root).addEventListener("click", () => copyForm.classList.add("hidden"));
+  $("#copy-memories-cancel-btn", root).addEventListener("click", () => closeModal(copyForm));
   copyForm.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const submit = copyForm.querySelector("button[type=submit]");
@@ -2956,7 +2961,7 @@ async function renderMemories(container, open) {
           target_owner: targetOwner,
         },
       });
-      copyForm.classList.add("hidden");
+      closeModal(copyForm);
       let message = _t("コピーしました: {0} 件・飛ばした {1} 件・失敗 {2} 件", result.copied, result.skipped, result.failed);
       if (result.skipped_items.length) message += "\n\n" + _t("同名のメモリーがコピー先にあるため飛ばしました: {0}", result.skipped_items.join(", "));
       if (result.failed_items.length) message += "\n\n" + _t("コピーできなかったメモリー:") + "\n" + result.failed_items.join("\n");
@@ -2992,12 +2997,11 @@ async function renderMemories(container, open) {
     list.innerHTML = "";
     list.appendChild(el("div", { text: _t("元にするメモリー（{0} 件）:", draftTargets.length) }));
     for (const m of draftTargets) list.appendChild(el("div", { text: `${memoryOwnerLabel(m.owner)} / ${m.name}: ${m.description}` }));
-    form.classList.add("hidden");
-    copyForm.classList.add("hidden");
-    draftForm.classList.remove("hidden");
-    draftForm.scrollIntoView({ behavior: "smooth", block: "start" });
+    closeModal(form);
+    closeModal(copyForm);
+    openModal(draftForm);
   });
-  $("#draft-skill-cancel-btn", root).addEventListener("click", () => draftForm.classList.add("hidden"));
+  $("#draft-skill-cancel-btn", root).addEventListener("click", () => closeModal(draftForm));
   draftForm.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const submit = draftForm.querySelector("button[type=submit]");
@@ -3018,7 +3022,7 @@ async function renderMemories(container, open) {
         },
       });
       status.textContent = "";
-      draftForm.classList.add("hidden");
+      closeModal(draftForm);
       let message = _t("ドラフトスキル {0}/{1} を作成しました（{2}）。そのユーザーの次のメッセージから使えます。", result.owner, result.skill_name, result.path);
       if (result.private_memories_of_others.length) {
         message += "\n" + _t("他のユーザーの個人用のメモリーを含みます: {0}", result.private_memories_of_others.join(", "));
@@ -3032,26 +3036,86 @@ async function renderMemories(container, open) {
     }
   });
 
-  const renderList = () => {
+  // 一覧の並べ替え（見出しを押す）と表示件数（ページ送り）。件数が多いとスクロールが大変なため、
+  // 1ページに表示件数のぶんだけ出す（選択・まとめて操作も表示中のページの行だけが対象）。
+  const SORT_VALUES = {
+    owner: (m) => memoryOwnerLabel(m.owner),
+    visibility: (m) => (m.owner ? _t(MEMORY_VISIBILITY_LABELS[m.visibility]) : _t("全員")),
+    type: (m) => m.type,
+    name: (m) => m.name,
+    description: (m) => m.description,
+    preview: (m) => m.preview || "",
+    mtime: (m) => m.mtime,
+  };
+  let sortKey = null; // null ならサーバーの並び（所有者・種類・名前の順）
+  let sortDir = "asc";
+  let page = 0;
+  const pageSizeSelect = $("#memory-page-size", root);
+  const headers = $$("th[data-sort]", root);
+  for (const th of headers) {
+    th.title = _t("クリックで並べ替え");
+    th.appendChild(el("span", { class: "sort-indicator", text: " ↕" }));
+    th.addEventListener("click", () => {
+      const key = th.dataset.sort;
+      if (sortKey === key) sortDir = sortDir === "asc" ? "desc" : "asc";
+      else {
+        sortKey = key;
+        sortDir = key === "mtime" ? "desc" : "asc"; // 更新日時は新しい順から
+      }
+      renderList(true);
+    });
+  }
+  const syncSortHeaders = () => {
+    for (const th of headers) {
+      const active = th.dataset.sort === sortKey;
+      th.classList.toggle("sorted", active);
+      th.setAttribute("aria-sort", active ? (sortDir === "asc" ? "ascending" : "descending") : "none");
+      $(".sort-indicator", th).textContent = active ? (sortDir === "asc" ? " ▲" : " ▼") : " ↕";
+    }
+  };
+
+  const renderList = (resetPage) => {
+    if (resetPage) page = 0;
     const owner = $("#memory-owner-filter", root).value;
     const type = $("#memory-type-filter", root).value;
     const q = $("#memory-search", root).value.trim().toLowerCase();
     const tbody = $("#memories-tbody", root);
     tbody.innerHTML = "";
     checkboxes = [];
-    const rows = data.memories.filter(
+    let rows = data.memories.filter(
       (m) =>
         (owner === "*" || (m.owner || "") === owner) &&
         (!type || m.type === type) &&
-        (!q || `${m.name}\n${m.description}`.toLowerCase().includes(q))
+        (!q || `${m.name}\n${m.description}\n${m.preview || ""}`.toLowerCase().includes(q))
     );
-    selectAll.disabled = rows.length === 0;
-    syncSelection();
-    if (rows.length === 0) {
-      tbody.appendChild(el("tr", {}, el("td", { colspan: "7", class: "hint", text: _t("メモリーはありません。") })));
+    if (sortKey) {
+      const value = SORT_VALUES[sortKey];
+      const sign = sortDir === "asc" ? 1 : -1;
+      rows = [...rows].sort((a, b) => {
+        const va = value(a);
+        const vb = value(b);
+        const c = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), I18N_LOCALE);
+        return c * sign;
+      });
+    }
+    syncSortHeaders();
+    const pageSize = Number(pageSizeSelect.value) || 100;
+    const pages = Math.max(1, Math.ceil(rows.length / pageSize));
+    page = Math.max(0, Math.min(page, pages - 1));
+    const shown = rows.slice(page * pageSize, (page + 1) * pageSize);
+    $("#memories-page-info", root).textContent = rows.length
+      ? _t("{0}〜{1} 件目 / 全 {2} 件（{3}/{4} ページ）", page * pageSize + 1, page * pageSize + shown.length, rows.length, page + 1, pages)
+      : "";
+    $("#memories-prev-btn", root).disabled = page === 0;
+    $("#memories-next-btn", root).disabled = page >= pages - 1;
+    $("#memories-pager", root).classList.toggle("hidden", pages <= 1);
+    selectAll.disabled = shown.length === 0;
+    if (shown.length === 0) {
+      syncSelection();
+      tbody.appendChild(el("tr", {}, el("td", { colspan: "8", class: "hint", text: _t("メモリーはありません。") })));
       return;
     }
-    for (const m of rows) {
+    for (const m of shown) {
       const link = el("a", { href: "#", text: m.name, onclick: (ev) => (ev.preventDefault(), openMemory(m.name, m.owner)) });
       const cb = el("input", { type: "checkbox", onchange: syncSelection });
       checkboxes.push({ cb, m });
@@ -3059,15 +3123,26 @@ async function renderMemories(container, open) {
         el("tr", {}, [
           el("td", { class: "col-check" }, cb),
           el("td", { text: memoryOwnerLabel(m.owner) }),
-          el("td", { text: m.owner ? _t(MEMORY_VISIBILITY_LABELS[m.visibility]) : _t("全員") }),
+          el("td", { text: SORT_VALUES.visibility(m) }),
           el("td", { text: m.type }),
           el("td", {}, link),
           el("td", { text: m.description }),
+          el("td", { class: "memory-preview", text: m.preview || "" }),
           el("td", { text: new Date(m.mtime * 1000).toLocaleString(I18N_LOCALE) }),
         ])
       );
     }
+    syncSelection();
   };
+  $("#memories-prev-btn", root).addEventListener("click", () => {
+    page -= 1;
+    renderList();
+  });
+  $("#memories-next-btn", root).addEventListener("click", () => {
+    page += 1;
+    renderList();
+  });
+  pageSizeSelect.addEventListener("change", () => renderList(true));
 
   const syncVisibilityRow = () => {
     const common = editing ? !editing.owner : !form.elements.owner.value.trim();
@@ -3083,8 +3158,7 @@ async function renderMemories(container, open) {
     form.elements.owner.readOnly = Boolean(target);
     $("#memory-delete-btn", root).classList.toggle("hidden", !target);
     syncVisibilityRow();
-    form.classList.remove("hidden");
-    form.scrollIntoView({ behavior: "smooth", block: "start" });
+    openModal(form);
   };
 
   async function openMemory(name, owner) {
@@ -3112,9 +3186,9 @@ async function renderMemories(container, open) {
     showForm(_t("メモリーの編集: {0} / {1}", memoryOwnerLabel(m.owner), m.name), { name: m.name, owner: m.owner });
   }
 
-  $("#memory-owner-filter", root).addEventListener("change", renderList);
-  $("#memory-type-filter", root).addEventListener("change", renderList);
-  $("#memory-search", root).addEventListener("input", renderList);
+  $("#memory-owner-filter", root).addEventListener("change", () => renderList(true));
+  $("#memory-type-filter", root).addEventListener("change", () => renderList(true));
+  $("#memory-search", root).addEventListener("input", () => renderList(true));
   form.elements.owner.addEventListener("input", syncVisibilityRow);
   $("#new-memory-btn", root).addEventListener("click", () => {
     form.reset();
@@ -3123,7 +3197,12 @@ async function renderMemories(container, open) {
     $("#memory-sources", root).innerHTML = "";
     showForm(_t("メモリーの新規作成"), null);
   });
-  $("#memory-cancel-btn", root).addEventListener("click", () => form.classList.add("hidden"));
+  $("#memory-cancel-btn", root).addEventListener("click", () => closeModal(form));
+  for (const f of [form, copyForm, draftForm]) {
+    modalOf(f).addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") closeModal(f);
+    });
+  }
   $("#memory-translate-btn", root).addEventListener("click", async (ev) => {
     const btn = ev.currentTarget;
     const status = $("#memory-translate-status", root);
@@ -3191,7 +3270,7 @@ async function renderMemories(container, open) {
       $("#memory-error", root).textContent = e.message;
     }
   });
-  renderList();
+  renderList(true);
   if (open) await openMemory(open.name, open.owner);
 }
 

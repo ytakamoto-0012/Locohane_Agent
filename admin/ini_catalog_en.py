@@ -505,7 +505,7 @@ DESCRIPTIONS: dict[str, str] = {
         '- dispatch_agent / dispatch_agent_batch / check_dispatch_agent_job / stop_dispatch_agent_job (the delegation mechanism itself; delegating to several folders in one turn is normal usage)\n'
         '- create_plan / approve_plan / update_task_progress / get_plan_status / lock_plan_mode (plans normally have several steps, and update_task_progress is called once per step)\n'
         '- AskUserQuestion / ask_user_choice (may be called several times to confirm several items)\n'
-        '- create_memory / update_memory / delete_memory / read_memory / search_memory / list_memories (may handle several memories in one turn; contents are small and the token risk is low)\n'
+        '- create_memory / update_memory / delete_memory / read_memory / search_memory / list_memories / save_glossary_term (may handle several memories in one turn; contents are small and the token risk is low)\n'
         '- read_skill / read_skill_file / get_tool_source (reading several skills in one turn is normal)\n'
         '- check_script_job / stop_script_job (job management)\n'
         '- check_work_dir_status / search_path_memory / provide_download / help / write_thread_note / list_thread_notes / read_thread_note (lightweight tools with low token risk)\n'

@@ -59,10 +59,10 @@ read_tool(=Read), write_tool(=Write), edit_tool(=Edit), glob_tool(=Glob), grep_t
 json_query, search_path_memory, write_scratch_note,
 write_thread_note, list_thread_notes, read_thread_note,
 create_memory, update_memory, delete_memory,
-read_memory, search_memory, list_memories
+read_memory, search_memory, list_memories, save_glossary_term
 ```
 
-- メモリー系6ツールは `_SUBAGENT_TOOLS` に含まれてはいるが、実際に各サブエージェントへ渡るかは `agents/*.md` 側の `tools:` 次第。`explore` は読み込み系（`read_memory`/`search_memory`/`list_memories`）のみ、`worker` は全6ツール（フルアクセス）、`verifier` は含めていない。
+- メモリー系6ツールは `_SUBAGENT_TOOLS` に含まれてはいるが、実際に各サブエージェントへ渡るかは `agents/*.md` 側の `tools:` 次第。`explore`・`worker` は全6ツールと `save_glossary_term`（`explore` が書き込めるのはメモリーだけ。調べた結果を `worker` へ渡し直すと伝達の手間とトークンが無駄になるため）、`verifier` は読み込み系だけ。
 - **`write_scratch_note` は全サブエージェント種別に共通で付与する必須ツール**（既存3種別＝`explore`/`worker`/`verifier` すべてに付与済み）。`system_prompt/subagent_common.md`（4節参照）がトークン上限による打ち切り対策として `write_scratch_note` の使い方を**全エージェント共通の注意事項として無条件に**説明する構成になっているため、`tools:` に含めないエージェント種別を作ると、本文には登場するのに実際には呼べないツールについてのガイダンスだけが渡ることになる。新規に種別を追加する場合も `tools:` に必ず含めること（8節参照）。
 
 - `Read`/`Glob`/`Grep` のように大文字始まりでfrontmatterに書く名前は、Python側の関数名（`read_tool`等）とは別に `@tool("Read")` のようにデコレータ引数で明示された `.name` 属性。frontmatterには **`.name` の方**（`Read`/`Glob`/`Grep`）を書く。

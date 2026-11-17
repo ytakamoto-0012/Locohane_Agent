@@ -36,6 +36,7 @@ from .lock_plan_mode import lock_plan_mode
 from .ask_user_question import ask_user_question
 from .ask_user_choice import ask_user_choice
 from .memory_tools import create_memory, update_memory, delete_memory, read_memory, search_memory, list_memories
+from .glossary_tools import save_glossary_term
 from .show_help import show_help
 from .thread_notes import write_thread_note, list_thread_notes, read_thread_note
 from .vector_db_tools import list_document_collections, search_document_paths, search_documents
@@ -72,6 +73,7 @@ _SUBAGENT_TOOLS: list = [
     read_memory,
     search_memory,
     list_memories,
+    save_glossary_term,
     list_document_collections,
     search_documents,
     search_document_paths,
@@ -119,6 +121,7 @@ _BASE_TOOLS: list[BaseTool] = [
     read_memory,
     search_memory,
     list_memories,
+    save_glossary_term,
     list_document_collections,
     search_documents,
     search_document_paths,

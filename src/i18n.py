@@ -299,5 +299,6 @@ MESSAGES: dict[str, dict[str, str]] = {
     "tool.read_memory": {"ja": "メモリー読み込み", "en": "Read memory"},
     "tool.search_memory": {"ja": "メモリー検索", "en": "Search memory"},
     "tool.list_memories": {"ja": "メモリー一覧", "en": "List memories"},
+    "tool.save_glossary_term": {"ja": "用語登録", "en": "Save glossary term"},
     "tool.help": {"ja": "ヘルプ表示", "en": "Show help"},
 }

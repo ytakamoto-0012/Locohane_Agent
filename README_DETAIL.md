@@ -285,7 +285,8 @@ LLM は `read_skill`/`read_skill_file`/`run_script` という**ビルトイン�
 | `create_plan` / `approve_plan` / `update_task_progress` | 複数ステップの実行計画を作成・承認・進捗更新（承認後は`run_script`の個別確認をスキップ）。各ステップは `content`（内容）と `activeForm`（実行中表示用の現在進行形）を持つ |
 | `get_plan_status` / `lock_plan_mode` | 現在 Plan Mode（書き込み系ツールがブロックされたロック状態）か Edit Automatically（承認済み計画を実行できる状態）かを確認し、後者から前者へユーザー承認なしに手動で戻す |
 | `AskUserQuestion` / `ask_user_choice` | 会話継続に必要な追加情報をユーザーへ質問（`AskUserQuestion` は自由記述。`labels` 省略時は単一入力、指定時は複数項目をまとめて提示。`ask_user_choice` は選択肢形式で、表示される選択肢には常に「✏️ その他（自由入力）」「❌ キャンセル」が自動で追加される） |
-| `create_memory` / `update_memory` / `delete_memory` / `read_memory` / `search_memory` / `list_memories` | スレッドをまたぐ永続メモリー（`src/memory.py`）の保存・更新・削除・全文読込・検索・一覧。主エージェントは全6ツールを持つ。`dispatch_agent` のサブエージェントには種別ごとに絞って委譲し、`explore` は読み込み系（`read_memory`/`search_memory`/`list_memories`）のみ、`worker` は全6ツール（フルアクセス）を持つ（`agents/*.md` の `tools:` 参照） |
+| `create_memory` / `update_memory` / `delete_memory` / `read_memory` / `search_memory` / `list_memories` | スレッドをまたぐ永続メモリー（`src/memory.py`）の保存・更新・削除・全文読込・検索・一覧。主エージェントは全6ツールを持つ。`dispatch_agent` のサブエージェントには種別ごとに絞って委譲し、`explore`・`worker` は全6ツールと `save_glossary_term` を持ち（`explore` が書き込めるのはメモリーだけ。調べた結果を `worker` へ渡し直さずにその場で記録するため）、`verifier` は読み込み系だけを持つ（`agents/*.md` の `tools:` 参照）。用語集（`glossary`）は `create_memory`/`update_memory` では保存できない |
+| `save_glossary_term` | 用語集へ1語1ファイルで登録する（`src/glossary.py`）。意味（ファイルを指すだけの書き方は拒否）と出典は必須。名前は用語から自動で作る。同じ用語・別名の登録があればそれへまとめ、関連用語は互いの本文に載せる。保存後、ナレッジでその用語が出てくる箇所を数件返す（「永続メモリー」の「用語集」参照） |
 | `list_document_collections` / `search_documents` / `search_document_paths` | ベクターDB（`src/vector_db/`）に取り込んだ社内文書のコレクション一覧と意味検索（読み取り専用。`search_document_paths` はファイル名・フォルダ名で探す）。検索結果には出典のパス（`@N`）・ページ等を添え、全体を `[vector_db] max_result_chars` で切り詰める。`[vector_db] enabled = false` の間は「無効です」を返す（「ベクターDB（社内文書の意味検索）」参照） |
 | `help` | ユーザー向けヘルプ本文（`system_prompt/help.md`）をそのまま返す |
 
@@ -1069,9 +1070,10 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
 - **5種類の type**: `user`（ユーザーの役割・選好）／`feedback`（訂正・確認済みの
   アプローチ）／`project`（進行中の作業の背景）／`reference`（外部リソースの所在）／
   `glossary`（専門用語辞書。社内の専門用語・略語・社内名称を知ったときに、1語1メモリーで意味・使われる場面・出典を残す。
-  用語と読み・別名は `description` に書くので `search_memory` で引ける。既定は `shared` で、`[memory] glossary_visibility` で変えられる）。
+  既定は `shared` で、`[memory] glossary_visibility` で変えられる。保存は専用の `save_glossary_term` だけで行う。下の「用語集」参照）。
   それぞれ `<name>.md` として1ファイル保存される（置き場所は次の「ユーザー別のメモリー」）。
-  `name` はファイル名になるため ASCII のスラッグ（英数字・`-`・`_`、64文字まで）に限る。日本語は `description` に書く。
+  `name` はファイル名になるため ASCII のスラッグ（英数字・`-`・`_`、64文字まで）に限る。日本語は `description` に書く
+  （ツールの docstring とエラー文に例を載せている。日本語の名前で呼ばれてもエラー文で気付き、次の呼び出しで直る）。
   説明・本文は会話の表示言語で書かせる（`src/i18n.py` の `response_language_directive`。プロンプトが英語のため、
   指示しないと英語と日本語が混ざる）。言語が混ざった既存のメモリーは、設定ダッシュボードの「AIで翻訳」で揃えられる。
 - **ユーザー別のメモリー**: 新しく保存するメモリーは、会話のログインユーザーのものとして
@@ -1143,12 +1145,14 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   ハッシュが保証するのは「元ファイルが記録した時点から変わっていない」ことだけで、記録した内容の
   読み取りが正しいことは保証しない（間違って記録した内容は、ファイルが変わるまで信用され続ける。
   気づいたら該当のメモリーファイルを直すか消す）。
-- `dispatch_agent` のサブエージェントは、種別ごとに絞ったメモリー系ツールを持つ（`explore`・`verifier` は読み取り系だけ、
-  `worker` は6つすべて。`agents/*.md` の `tools:`）。サブエージェントも会話のユーザーとして動く。
+- `dispatch_agent` のサブエージェントは、種別ごとに絞ったメモリー系ツールを持つ（`verifier` は読み取り系だけ、
+  `explore`・`worker` は6つすべてと `save_glossary_term`。`agents/*.md` の `tools:`）。サブエージェントも会話のユーザーとして動く。
 - **設定ダッシュボードでの編集**: インスタンス詳細の「メモリー」サブタブで、全ユーザー・共通のメモリーを公開範囲に関係なく
   一覧・閲覧・作成・編集（説明・種類・本文・公開範囲）・削除できる（`admin/memories.py`。書き換えは `src/memory.py` の
   `edit_memory` で、`created` と `sources` は残し、索引も再構築する。公開範囲の規則は上と同じで、そのインスタンスの
-  `[memory]` の設定を使う）。所有者で絞り込める。
+  `[memory]` の設定を使う）。所有者・種類・文字（名前・説明・本文）で絞り込め、見出しを押すと並べ替えられる。一覧には本文の先頭
+  120文字も出す。件数が多くても扱えるよう、1ページの表示件数（50/100/200/500、既定100）を選んでページ送りする。
+  編集・新規作成・コピー・ドラフトスキル作成の入力欄はポップアップで開く（Esc で閉じる）。
   一覧のチェックボックスで表示中のメモリーを選んでまとめて削除できる（1件でも見つからなければ何も削除しない。
   絞り込みを変えると選択は外れる）。
   同じく選んだメモリー（最大20件）から**ドラフトスキルを作成**できる（「選択したメモリーからドラフトスキルを作成」。
@@ -1174,6 +1178,25 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   `instances/<インスタンス名>/backups/memory/<所有者（共通は _common）>/<メモリー名>/` に `[admin] backup_keep` 世代まで残り、
   変更履歴に `memory_create`／`memory_update`／`memory_delete` として記録される。変更は次の会話から反映される
   （稼働中でも再起動は要らない）。
+
+- **用語集（`save_glossary_term`）**: 辞書ファイル（xlsx/csv 等）を「学習して」と頼むと、LLM が `create_memory` で
+  `reference` に1件でまとめ、用語の意味を書かずにファイルを指すだけの記録にしていたため、用語は専用ツールで保存させる
+  （`src/tools/glossary_tools.py`、ロジックは `src/glossary.py`。`create_memory`/`update_memory` に `glossary` を渡すとエラーで誘導する）。
+  - 1語1ファイル。名前は用語から自動で作る（ASCII だけの用語は `glossary-<用語>`、日本語の用語はハッシュ）。
+  - 本文は決まった見出し（`**Term:**`・`**Aliases:**`・`**Meaning:**`・`**Usage:**`・`**Related terms:**`・`**Sources:**`）。
+    説明（索引に載る一行）は「用語 (別名): 意味の先頭」。
+  - 意味（`meaning`）は必須。パス・`@N`・ファイル名・「参照」等の言い回しを除くとほとんど何も残らない（ファイルを指すだけの）
+    書き方は拒否する。出典（`sources`）も1つ以上要る（ファイルとシート・行・ページ、ナレッジの文書、「ユーザーの説明（日付）」）。
+    出典のうち実在するファイル（絶対パス・`@N`）は `source_files` と同じく sha256 を記録する。
+  - 同じ意味の用語はまとめる: 用語・別名（NFKC・大文字小文字・空白を無視して比べる）が登録済みの用語（自分・共通）と
+    一致すれば、新しく作らずにその用語を更新し、渡した用語は別名に足す。一致した登録が複数あれば1件にまとめ、残りは消す。
+    他のユーザーの用語は書き換えず、結果で知らせる。
+  - 関連用語（`related_terms`）は互いの本文に載せる: 相手が登録済みなら、相手の `Related terms` にもこの用語を足す。
+    未登録の関連用語は結果で知らせる。
+  - 保存後、ナレッジ（ベクターDB）でその用語が出てくる箇所を最大3件（前後160文字）返し、意味・使われ方が違えば
+    同じ用語で呼び直して直させる。登録の前にも、`explore` にナレッジでの使われ方を調べさせるようシステムプロンプトで指示する。
+  - 見出しの無い（このツールより前の）用語メモリーは、説明の先頭を用語とみなして一致を判定し、更新時に見出し付きへ
+    書き直す（元の本文は `Notes` に残す）。
 
 保存・削除の判断基準（何を保存すべきで何を保存すべきでないか）は
 `system_prompt/system_prompt.md` の「Memory System」セクションに記載している。

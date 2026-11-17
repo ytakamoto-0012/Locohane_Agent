@@ -38,6 +38,7 @@ LangChain の @tool として定義する。read_skill/read_skill_file/run_scrip
 - create_memory / update_memory / delete_memory / read_memory / search_memory /
   list_memories … スレッドをまたぐ永続メモリー（src/memory.py）の読み書き。
   主エージェントのみに公開し、dispatch_agent のサブエージェントには渡さない。
+- save_glossary_term … 用語集（glossary）へ1語1ファイルで登録する（src/glossary.py）。
 - list_document_collections / search_documents / search_document_paths … ベクターDB（src/vector_db/）に
   取り込んだ社内文書の意味検索（読み取り専用。[vector_db] enabled = false なら無効の旨を返す）。
 
@@ -119,6 +120,7 @@ from .registry import (  # noqa: F401
     read_tool,
     run_script,
     run_script_background,
+    save_glossary_term,
     search_document_paths,
     search_documents,
     search_memory,

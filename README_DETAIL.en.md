@@ -282,7 +282,8 @@ Tool descriptions and return values are written in English (the LLM relays them 
 | `create_plan` / `approve_plan` / `update_task_progress` | Create, approve and update the progress of a multi-step execution plan (after approval, the individual confirmations of `run_script` are skipped). Each step has `content` (what to do) and `activeForm` (the present progressive form shown while running) |
 | `get_plan_status` / `lock_plan_mode` | Checks whether it is currently Plan Mode (the locked state where write tools are blocked) or Edit Automatically (the state where an approved plan can be executed), and manually goes back from the latter to the former without user approval |
 | `AskUserQuestion` / `ask_user_choice` | Asks the user for additional information needed to continue the conversation (`AskUserQuestion` is free text: a single input when `labels` is omitted, several items presented together when given. `ask_user_choice` is multiple choice, and "✏️ Other (free input)" and "❌ Cancel" are always added automatically to the displayed choices) |
-| `create_memory` / `update_memory` / `delete_memory` / `read_memory` / `search_memory` / `list_memories` | Save, update, delete, read in full, search and list persistent memory across threads (`src/memory.py`). The main agent has all 6 tools. `dispatch_agent` sub-agents get narrowed sets per kind: `explore` has only the reading tools (`read_memory`/`search_memory`/`list_memories`), and `worker` has all 6 (full access) (see `tools:` of `agents/*.md`) |
+| `create_memory` / `update_memory` / `delete_memory` / `read_memory` / `search_memory` / `list_memories` | Save, update, delete, read in full, search and list persistent memory across threads (`src/memory.py`). The main agent has all 6 tools. `dispatch_agent` sub-agents get narrowed sets per kind: `explore` and `worker` have all 6 plus `save_glossary_term` (memory is the only thing `explore` can write, so that it records what it found on the spot instead of handing it to `worker`), and `verifier` has only the reading tools (see `tools:` of `agents/*.md`). Glossary entries cannot be saved with `create_memory`/`update_memory` |
+| `save_glossary_term` | Registers one term in the glossary as one file (`src/glossary.py`). The meaning (a text that only points to a file is rejected) and the sources are required. The name is made from the term. A saved entry with the same term or alias is updated instead (merging duplicates), and related terms are written into both entries. After saving it returns a few passages of the knowledge that mention the term (see "Glossary" under "Persistent memory") |
 | `list_document_collections` / `search_documents` / `search_document_paths` | The collection list and semantic search of internal documents ingested into the vector DB (`src/vector_db/`) (read-only; `search_document_paths` searches by file and folder names). Search results carry the source path (`@N`), page, etc., and the whole is truncated to `[vector_db] max_result_chars`. While `[vector_db] enabled = false`, they return that it is disabled (see "Vector DB (semantic search of internal documents)") |
 | `help` | Returns the user-facing help text (`system_prompt/help.md`) as is |
 
@@ -1142,7 +1143,10 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
 - **Editing from the settings dashboard**: the "Memory" sub-tab of the instance detail lists, shows, creates, edits
   (description, type, content, visibility) and deletes the memories of all users and the common ones regardless of
   visibility (`admin/memories.py`; edits go through `edit_memory` in `src/memory.py`, which keeps `created` and `sources`
-  and rebuilds the index; the visibility rules are the same as above). They can be filtered by owner, and the shown
+  and rebuilds the index; the visibility rules are the same as above). They can be filtered by owner, type and text (name,
+  description, content) and sorted by clicking a column header; the list also shows the first 120 characters of the
+  content. To handle many memories, the list is paged (50/100/200/500 per page, 100 by default). The edit, create, copy
+  and draft-skill forms open as pop-ups (Esc closes them). The shown
   memories can be selected with checkboxes and deleted together (nothing is deleted if any of them is not found;
   changing the filter clears the selection). The selected memories (up to 20) can also be turned into a **draft skill**
   ("Create a draft skill from selected memories"; `draft-skill` in `admin/memories.py`): the LLM (the same endpoint as
@@ -1160,6 +1164,18 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   before an edit or deletion is kept in `instances/<instance name>/backups/memory/<owner (_common for common)>/<memory name>/`
   up to `[admin] backup_keep` generations, and the change history records `memory_create`/`memory_update`/`memory_delete`.
   Changes take effect from the next conversation (no restart needed for a running instance).
+
+- **Glossary (`save_glossary_term`)**: when asked to "learn" a dictionary file (xlsx/csv, etc.), the LLM used to put it
+  into one `reference` memory with `create_memory` and only point to the file without writing the meanings, so terms are
+  saved only with a dedicated tool (`src/tools/glossary_tools.py`, logic in `src/glossary.py`; `create_memory`/`update_memory`
+  with `glossary` return an error pointing to it). One file per term, named automatically from the term; the body has fixed
+  headings (`**Term:**`, `**Aliases:**`, `**Meaning:**`, `**Usage:**`, `**Related terms:**`, `**Sources:**`). The meaning is
+  required (a text that only points to a file is rejected) and at least one source is required (files that exist are
+  fingerprinted like `source_files`). A saved entry (own or common) whose term or alias matches is updated instead of
+  creating a new one, and several matching entries are merged into one. Related terms are written into both entries.
+  After saving, up to 3 passages of the knowledge that mention the term are returned so the LLM can correct the meaning.
+  Older glossary memories without the headings are matched by the start of their description and rewritten with the
+  headings when updated (the old body is kept in `Notes`).
 
 The criteria for saving and deleting (what should and should not be saved) are written in
 the "Memory System" section of `system_prompt/system_prompt.md`.

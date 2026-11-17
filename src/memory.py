@@ -275,7 +275,8 @@ def _validate_name(name: str) -> None:
     if not name or len(name) > _NAME_MAX or not _NAME_RE.match(name):
         raise ValueError(
             f"name must be an ASCII slug: ASCII letters (a-z, A-Z), digits, hyphens and underscores, "
-            f"up to {_NAME_MAX} characters: {name}"
+            f"up to {_NAME_MAX} characters (no Japanese or other non-ASCII letters; translate or romanize them, "
+            f"e.g. 'monthly-report-format', and keep the Japanese words in description): {name}"
         )
 
 
@@ -846,12 +847,13 @@ def edit_memory(
     owner: str | None = None,
     visibility: str | None = None,
     updated_by: str | None = None,
+    source_files: list[Path] | None = None,
 ) -> Path:
     """既存メモリーの説明・種類・本文（ユーザーのものは公開範囲も）をまとめて書き換え、索引を再構築する。
 
-    設定ダッシュボード（admin/memories.py）から人が直す用途。LLM 向けの update_memory と違い
-    description と type も変えられる（type を変えるとファイルを移す）。created と元ファイルの
-    指紋（sources）はそのまま残す。
+    設定ダッシュボード（admin/memories.py）から人が直す用途と、用語集（src/glossary.py）の書き直し用。
+    LLM 向けの update_memory と違い description と type も変えられる（type を変えるとファイルを移す）。
+    created は残す。元ファイルの指紋（sources）は source_files を渡さなければそのまま残す。
 
     Args:
         memory_root: メモリーストアのルートディレクトリ。
@@ -862,13 +864,14 @@ def edit_memory(
         owner: 所有者。None なら共通のメモリー。
         visibility: ユーザーのメモリーの新しい公開範囲（None なら今の値のまま）。
         updated_by: 書き換えた人（frontmatter の updated_by に記録する）。None なら記録済みの値のまま。
+        source_files: 渡すとその今の sha256 で元ファイルの指紋を置き換える（None なら記録済みのまま）。
 
     Returns:
         書き換え後のファイルの絶対パス。
 
     Raises:
         ValueError: memory_type/visibility が不正、description/content が空、name のメモリーが存在しない、
-            または元ファイル付きの本文が長すぎる場合。
+            source_files が読めない・多すぎる、または元ファイル付きの本文が長すぎる場合。
     """
     if not description.strip():
         raise ValueError("description is empty")
@@ -884,7 +887,7 @@ def edit_memory(
         description=description.strip(),
         memory_type=memory_type,
         content=content,
-        sources=mem.sources,
+        sources=mem.sources if source_files is None else fingerprint_sources(source_files),
         visibility=visibility if visibility is not None else mem.visibility,
         updated_by=updated_by,
     )

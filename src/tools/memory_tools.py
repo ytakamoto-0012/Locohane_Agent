@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 _COMMON_OWNER_ARG = "common"
 # 一覧・検索では自分のメモリーを "(mine, ...)" と表示するため、owner="mine" は自分として受け付ける。
 _MINE_OWNER_ARG = "mine"
+# 用語は save_glossary_term（決まった見出し・1語1ファイル・同義語のまとめ）で保存させる。
+_GLOSSARY_TOOL_ERROR = (
+    "Error: glossary terms are saved only with save_glossary_term (one call per term: term, meaning, sources, "
+    "aliases, usage, related_terms). It keeps one file per term, merges terms with the same meaning and links "
+    "related terms both ways."
+)
 
 
 def _require_memory_root() -> Path:
@@ -153,13 +159,17 @@ def create_memory(
     section of the system prompt. If you already have a memory with the same name it is an error,
     so use update_memory to update an existing memory (if in doubt, first check for duplicates with
     search_memory / list_memories).
+    Do not use it for terms (jargon, abbreviations, internal names, or a dictionary file to learn):
+    save each term with save_glossary_term instead.
 
     Args:
         name: A unique name. ASCII letters (a-z, A-Z), digits, hyphens and underscores only,
-            up to 64 characters. Do not write Japanese letters in the name (put them in
-            description instead).
+            up to 64 characters (e.g. "monthly-report-format"). A name with Japanese (or any
+            other non-ASCII) letters is rejected with an error: translate or romanize it, and
+            write the Japanese words in description instead.
         description: A one-line description (shown as is in the index MEMORY.md).
-        memory_type: One of "user" | "feedback" | "project" | "reference" | "glossary".
+        memory_type: One of "user" | "feedback" | "project" | "reference" ("glossary" is
+            rejected: use save_glossary_term).
         content: The memory body. For the feedback/project types, it is best to include
             "**Why:**" and "**How to apply:**" lines after the rule/fact.
         source_files: When the content records what was read from files (values, table rows,
@@ -181,6 +191,8 @@ def create_memory(
         have a memory with the same name, or a source file cannot be read, it returns an
         "Error: ..." string instead of raising.
     """
+    if memory_type == "glossary":
+        return _GLOSSARY_TOOL_ERROR
     try:
         root = _require_memory_root()
         me = _current_owner()
@@ -215,7 +227,8 @@ def update_memory(
     """Update the body of an existing persistent memory (name/description/memory_type do not change).
 
     Updates your own memory with that name, or else the common memory with that name. Memories of
-    other users cannot be updated (save your own with create_memory instead).
+    other users cannot be updated (save your own with create_memory instead). Glossary entries are
+    updated with save_glossary_term (call it with the same term).
 
     Args:
         name: The name of the memory to update.
@@ -237,6 +250,9 @@ def update_memory(
         root = _require_memory_root()
         me = _current_owner()
         owner = _writable_owner(root, name, me)
+        target = memory.find_memory(root, name, owner)
+        if target is not None and target.memory_type == "glossary":
+            return _GLOSSARY_TOOL_ERROR
         path = memory.update_memory(
             root,
             name,

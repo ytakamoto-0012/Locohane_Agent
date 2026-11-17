@@ -290,10 +290,20 @@ def _replace_frontmatter_name(skill_md: str, name: str, description: str) -> str
     return f"---\n{frontmatter}---\n\n{strip_frontmatter(skill_md)}\n"
 
 
+# 一覧の「本文」列に出す先頭の文字数（空白・改行は1つの空白に詰める）。
+_PREVIEW_CHARS = 120
+
+
+def _preview(content: str) -> str:
+    flat = " ".join(content.split())
+    return flat if len(flat) <= _PREVIEW_CHARS else flat[:_PREVIEW_CHARS] + "…"
+
+
 def _summary(m: mem_store.Memory, mtime: float | None = None) -> dict:
     return {
         "name": m.name,
         "description": m.description,
+        "preview": _preview(m.content),
         "type": m.memory_type,
         "owner": m.owner,
         "visibility": m.visibility,

@@ -276,6 +276,12 @@ select.le-type { width: auto; padding: 4px; font-size: 12px; flex-shrink: 0; }
 .memory-form h3 { margin: 0 0 8px; font-size: 14px; }
 .memory-form label { display: block; margin-bottom: 10px; }
 .memory-form input[type=text], .memory-form select, .memory-form textarea { display: block; width: 100%; margin-top: 4px; }
+/* メモリーの編集・コピー・ドラフト作成はポップアップ（modal）で開く。枠は modal 側が持つ。 */
+.modal .memory-form { background: none; border: none; padding: 0; margin: 0; }
+.modal-xwide { width: 900px; }
+.view-memories .memory-page-size select { display: inline-block; width: auto; }
+.view-memories .memory-pager { align-items: center; gap: 8px; }
+.view-memories td.memory-preview { color: var(--text-dim); max-width: 360px; overflow-wrap: anywhere; }
 
 .settings-section { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 14px; }
 .settings-section h3 { margin: 0 0 8px; font-size: 14px; }
