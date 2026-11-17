@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-11-17
+
 ### 修正
 
 - 用語の登録（`save_glossary_term`）で、自分の用語に別名で一致した共通の用語が重複として削除され、他の全ユーザーから
@@ -1524,7 +1526,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.8...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.9...HEAD
+[0.7.9]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.5...v0.7.6
