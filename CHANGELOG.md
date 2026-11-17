@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-11-17
+
 ### 追加
 
 - 用語集の登録ツール `save_glossary_term` を追加しました。用語は1語1ファイルで、意味（必須。ファイルを指すだけの書き方は
@@ -1495,7 +1497,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.7...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.8...HEAD
+[0.7.8]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.4...v0.7.5
