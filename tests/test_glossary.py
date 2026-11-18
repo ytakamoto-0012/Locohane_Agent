@@ -266,14 +266,28 @@ def test_visibility_follows_glossary_visibility_and_is_not_chosen_by_the_llm(as_
 
 
 def test_updating_a_private_entry_makes_it_follow_the_setting(as_user):
-    # 以前 LLM が private で保存した用語（人の印が無い）も、次の更新で設定（既定 shared）どおりになる
+    # LLM が private で保存した用語（固定の印が false）は、次の更新で設定（既定 shared）どおりになる
+    root, _ = as_user
+    _save(term="受注残", meaning="未出荷の注文の残高。")
+    [mem] = _glossary(root)
+    mem.path.write_text(
+        mem.path.read_text(encoding="utf-8").replace("visibility: shared", "visibility: private\nvisibility_pinned: false"),
+        encoding="utf-8",
+    )
+    assert _glossary(root)[0].visibility == "private"
+    _save(term="受注残", meaning="未出荷の注文の残高。")
+    assert _glossary(root)[0].visibility == "shared"
+
+
+def test_legacy_private_entry_without_pin_record_stays_private(as_user):
+    # 固定の印の仕組みより前に private で保存された用語（記録が無い）は、固定とみなして個人用のまま
     root, _ = as_user
     _save(term="受注残", meaning="未出荷の注文の残高。")
     [mem] = _glossary(root)
     mem.path.write_text(mem.path.read_text(encoding="utf-8").replace("visibility: shared", "visibility: private"), encoding="utf-8")
-    assert _glossary(root)[0].visibility == "private"
     _save(term="受注残", meaning="未出荷の注文の残高。")
-    assert _glossary(root)[0].visibility == "shared"
+    [mem] = _glossary(root)
+    assert mem.visibility == "private" and mem.visibility_pinned
 
 
 def test_entry_made_private_by_a_person_stays_private_after_an_update(as_user):

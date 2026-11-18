@@ -1074,10 +1074,12 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   is shared".
   - **The LLM does not choose**: `create_memory` / `update_memory` / `save_glossary_term` have no `visibility`
     argument. Every save and update by the LLM decides it from the per-type visibility and the checks below (an update
-    does not keep the current value either, so a memory the LLM once saved as `private` follows the settings from its
+    does not keep the current value either, so a memory the LLM saved as `private` follows the settings from its
     next update). A memory a person made private on the settings dashboard gets `visibility_pinned: true` in its
     frontmatter and stays private when the LLM updates it (the list shows "Private (pinned)"; making it shared removes
-    the pin). Glossary merging never combines a private entry with one others can see. The Memory System section of the system prompt (`{{memory_visibility}}`, built by
+    the pin). A private memory always records `visibility_pinned`; a private one without the record (saved before the
+    pin existed) is treated as pinned, because it cannot be told whether a person chose it. The dashboard's edit form
+    sends the visibility only when it was changed (fixing the content alone does not add or remove the pin). Glossary merging never combines a private entry with one others can see. The Memory System section of the system prompt (`{{memory_visibility}}`, built by
     `render_visibility_block` in `src/memory.py`) tells which types are private or shared, and gives the criteria
     (`shared_criteria` / `private_criteria`) as criteria for which type to save as (content to keep private is saved as a
     `private` type, `user` by default; with no `private` type it is given as "do not save these"). The criteria can be in

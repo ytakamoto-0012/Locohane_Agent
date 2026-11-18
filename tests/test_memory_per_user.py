@@ -153,14 +153,44 @@ def test_missing_type_in_policy_uses_default(tmp_path, set_policy):
 
 def test_update_memory_follows_the_type_setting(tmp_path):
     # LLM の更新は公開範囲を引き継がず、種類の設定で決め直す（以前 private だったものも共有に戻る）
-    # 以前 LLM が private を選んで保存したもの（人の印 visibility_pinned は無い）
+    # LLM が private で保存したもの（固定の印は false）
     path = memory.create_memory(tmp_path, "m", "d", "feedback", "a", owner="alice")
-    path.write_text(path.read_text(encoding="utf-8").replace("visibility: shared", "visibility: private"), encoding="utf-8")
-    assert memory.read_memory(tmp_path, "m", "alice").visibility == "private"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("visibility: shared", "visibility: private\nvisibility_pinned: false"),
+        encoding="utf-8",
+    )
+    mem = memory.read_memory(tmp_path, "m", "alice")
+    assert mem.visibility == "private" and not mem.visibility_pinned
     memory.update_memory(tmp_path, "m", "b", owner="alice")
     assert memory.read_memory(tmp_path, "m", "alice").visibility == "shared"
     memory.update_memory(tmp_path, "m", "パスワードは xxx", owner="alice")
-    assert memory.read_memory(tmp_path, "m", "alice").visibility == "private"
+    mem = memory.read_memory(tmp_path, "m", "alice")
+    assert mem.visibility == "private" and not mem.visibility_pinned
+    assert "visibility_pinned: false" in mem.path.read_text(encoding="utf-8")
+
+
+def test_legacy_private_memory_without_pin_record_stays_private(tmp_path):
+    # 固定の印の仕組みより前に private で保存されたもの（記録が無い）は、人が選んだか区別できないため固定とみなす
+    path = memory.create_memory(tmp_path, "m", "d", "feedback", "a", owner="alice")
+    path.write_text(path.read_text(encoding="utf-8").replace("visibility: shared", "visibility: private"), encoding="utf-8")
+    mem = memory.read_memory(tmp_path, "m", "alice")
+    assert mem.visibility == "private" and mem.visibility_pinned
+    memory.update_memory(tmp_path, "m", "b", owner="alice")
+    mem = memory.read_memory(tmp_path, "m", "alice")
+    assert mem.visibility == "private" and mem.visibility_pinned
+    assert "visibility_pinned: true" in mem.path.read_text(encoding="utf-8")
+
+
+def test_dashboard_edit_without_visibility_keeps_pin_state(tmp_path):
+    # 編集で公開範囲を送らない（変えていない）なら、固定の印は付かないまま・付いたまま
+    path = memory.create_memory(tmp_path, "m", "d", "feedback", "a", owner="alice")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("visibility: shared", "visibility: private\nvisibility_pinned: false"),
+        encoding="utf-8",
+    )
+    memory.edit_memory(tmp_path, "m", description="d2", memory_type="feedback", content="a2", owner="alice")
+    mem = memory.read_memory(tmp_path, "m", "alice")
+    assert mem.visibility == "private" and not mem.visibility_pinned
 
 
 def test_memory_made_private_by_a_person_stays_private_after_llm_update(tmp_path):

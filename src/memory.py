@@ -410,7 +410,8 @@ def _serialize(
 ) -> str:
     """メモリー1件を frontmatter 付き Markdown 文字列へ組み立てる（visibility は共通のメモリーでは書かない）。
 
-    visibility_pinned は private のユーザーのメモリーにだけ書く。
+    visibility_pinned は private のユーザーのメモリーにだけ、true / false を必ず書く（印の無い private は
+    印の仕組みより前に保存されたものとして固定扱いにするため。_load を参照）。
     """
     frontmatter: dict = {
         "name": name,
@@ -419,8 +420,8 @@ def _serialize(
     }
     if visibility is not None:
         frontmatter["visibility"] = visibility
-        if visibility_pinned and visibility == "private":
-            frontmatter["visibility_pinned"] = True
+        if visibility == "private":
+            frontmatter["visibility_pinned"] = bool(visibility_pinned)
     if author is not None:
         frontmatter["author"] = author
     if updated_by is not None:
@@ -476,7 +477,11 @@ def _load(path: Path, owner: str | None = None) -> Memory | None:
     else:
         raw_visibility = frontmatter.get("visibility")
         visibility = raw_visibility if raw_visibility in VISIBILITIES else "private"
-        pinned = visibility == "private" and frontmatter.get("visibility_pinned") is True
+        # visibility_pinned の記録が無い private は、印の仕組みより前に保存されたもの。人が個人用にしたのか
+        # LLM が選んだのか区別できないため、他のユーザーへ漏らさないよう固定とみなす（AI の更新で共有に戻さない。
+        # 戻すときは人が設定ダッシュボードで共有にする）。
+        raw_pin = frontmatter.get("visibility_pinned", True)
+        pinned = visibility == "private" and raw_pin is True
     author = frontmatter.get("author")
     updated_by = frontmatter.get("updated_by")
     return Memory(

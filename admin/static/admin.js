@@ -3337,6 +3337,8 @@ async function renderMemories(container, open) {
     form.elements.name.value = m.name;
     form.elements.type.value = m.type;
     form.elements.visibility.value = m.visibility;
+    // 開いたときの公開範囲（変えなければ送らない。送ると「人が選んだ」扱いになり、個人用なら固定の印が付くため）。
+    form.dataset.loadedVisibility = m.visibility;
     form.elements.description.value = m.description;
     form.elements.content.value = m.content;
     const sources = $("#memory-sources", root);
@@ -3409,11 +3411,13 @@ async function renderMemories(container, open) {
   });
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
+    const chosenVisibility = form.elements.visibility.value;
     const body = {
       type: form.elements.type.value,
       description: form.elements.description.value,
       content: form.elements.content.value,
-      visibility: form.elements.visibility.value,
+      // 編集で公開範囲を変えていなければ null（今の公開範囲と固定の印をそのまま残す）。
+      visibility: editing && chosenVisibility === form.dataset.loadedVisibility ? null : chosenVisibility,
     };
     try {
       let target, result;
@@ -3429,7 +3433,7 @@ async function renderMemories(container, open) {
         target = { name: form.elements.name.value.trim(), owner: result.owner };
       }
       await reload(target);
-      const forcedPrivate = target.owner && body.visibility === "shared" && result.visibility === "private";
+      const forcedPrivate = target.owner && chosenVisibility === "shared" && result.visibility === "private";
       alert(
         forcedPrivate
           ? _t("保存しました。次の理由で個人用で保存しました: {0}（[memory] の <種類>_visibility・force_private_checks・force_private_exempt_types で変えられます）", (result.private_reasons || []).join(", "))
