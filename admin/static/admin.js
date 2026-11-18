@@ -3007,8 +3007,7 @@ async function renderMemories(container, open) {
     if (!result) return;
     await reload();
     let done = _t("{0} 件のメモリーを削除しました。", result.deleted);
-    if (result.not_shown) done += "
-" + _t("確認の後に増えた {0} 件は削除していません（一覧を更新しました）。", result.not_shown);
+    if (result.not_shown) done += "\n" + _t("確認の後に増えた {0} 件は削除していません（一覧を更新しました）。", result.not_shown);
     reportFailures(result, done);
   });
 
