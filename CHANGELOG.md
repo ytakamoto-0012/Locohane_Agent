@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.7.11] - 2026-11-19
+
 ### 修正
 
 - 0.7.10 で設定ダッシュボードが「読み込み中」のまま開かなくなっていたのを直しました（`admin/static/admin.js` の
@@ -1605,7 +1607,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.10...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.11...HEAD
+[0.7.11]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.10...v0.7.11
 [0.7.10]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.9...v0.7.10
 [0.7.9]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.7...v0.7.8
