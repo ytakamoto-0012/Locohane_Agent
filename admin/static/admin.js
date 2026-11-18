@@ -43,6 +43,9 @@ function busyLabelFor(text) {
 }
 
 function beginButtonBusy(btn) {
+  // data-no-busy のボタン（一番上へ戻る等、通信しない記号だけのボタン）は処理中の表示にしない
+  // （丸い小さなボタンだと「処理中…」の「処」だけが見えていた）。
+  if (btn.hasAttribute("data-no-busy")) return;
   btn._busyCount = (btn._busyCount || 0) + 1;
   if (btn._busyCount > 1) return;
   const text = btn.textContent.trim();
@@ -242,6 +245,9 @@ function promptRelogin() {
   return reloginPromise;
 }
 
+// 一番上へ戻るボタンを出し始めるスクロール量（px）。
+const SCROLL_TOP_SHOW_PX = 300;
+
 function showShell(username, version) {
   app.innerHTML = "";
   app.appendChild(clone("tpl-shell"));
@@ -249,6 +255,12 @@ function showShell(username, version) {
   $("#lang-select-slot").appendChild(createLanguageSelect());
   if (version) $("#app-version").textContent = `v${version}`;
   mainEl = $("#main");
+  // 一番上へ戻るボタン（スクロールするのは #main。少し下へスクロールしたら出す）。
+  const scrollTopBtn = $("#scroll-top-btn");
+  mainEl.addEventListener("scroll", () => scrollTopBtn.classList.toggle("hidden", mainEl.scrollTop < SCROLL_TOP_SHOW_PX), {
+    passive: true,
+  });
+  scrollTopBtn.addEventListener("click", () => mainEl.scrollTo({ top: 0, behavior: "smooth" }));
   $("#logout-btn").addEventListener("click", async () => {
     await api("/api/logout", { method: "POST" }).catch(() => {});
     showLogin();
@@ -1188,6 +1200,7 @@ const CONFIG_PRESETS = [
       "memory.shared_criteria",
       "memory.private_criteria",
       "memory.force_private_checks",
+      "memory.force_private_exempt_types",
       "memory.user_ranks",
       "memory.default_rank",
     ],
@@ -2886,46 +2899,160 @@ async function renderMemories(container, open) {
     await renderMemories(fresh, target);
   };
 
-  // まとめて削除の選択（表示中の行だけ。絞り込みを変えると選び直しになり、見えていない行は消さない）。
+  // まとめて操作の選択。ページ・並べ替えをまたいで保持し（「絞り込み結果をすべて選択」で全ページ分も選べる）、
+  // 絞り込みを変えると選び直しにする（見えていない行を気づかずに消さないため）。
   const selectAll = $("#memories-select-all", root);
   const deleteBtn = $("#delete-memories-btn", root);
-  let checkboxes = []; // [{cb, m}]
+  const deleteTypeBtn = $("#delete-type-memories-btn", root);
+  const changeBtn = $("#change-memories-btn", root);
+  let checkboxes = []; // 表示中の行 [{cb, m}]
+  const selected = new Map(); // キー（所有者＋名前）→ メモリーの要約
+  const keyOf = (m) => `${m.owner || ""}\u0000${m.name}`;
+  const selectedTargets = () => [...selected.values()];
   const draftBtn = $("#draft-skill-from-memories-btn", root);
   const copyBtn = $("#copy-memories-btn", root);
+  const busyEl = $("#memories-busy", root);
+  // 確認ダイアログに名前を並べるのは先頭の数件だけにする（数百件を並べるとダイアログが画面に収まらず、ブラウザが固まる）。
+  const CONFIRM_LIST_MAX = 20;
+  const confirmList = (items) => {
+    const labels = items.slice(0, CONFIRM_LIST_MAX).map((m) => `${memoryOwnerLabel(m.owner)} / ${m.name}`);
+    if (items.length > CONFIRM_LIST_MAX) labels.push(_t("…ほか {0} 件", items.length - CONFIRM_LIST_MAX));
+    return labels.join("\n");
+  };
   const syncSelection = () => {
-    const checked = checkboxes.filter((c) => c.cb.checked).length;
-    deleteBtn.disabled = checked === 0;
-    draftBtn.disabled = checked === 0;
-    copyBtn.disabled = checked === 0;
-    selectAll.checked = checkboxes.length > 0 && checked === checkboxes.length;
-    selectAll.indeterminate = checked > 0 && checked < checkboxes.length;
+    const count = selected.size;
+    deleteBtn.disabled = count === 0;
+    draftBtn.disabled = count === 0;
+    copyBtn.disabled = count === 0;
+    changeBtn.disabled = count === 0;
+    const shownChecked = checkboxes.filter((c) => c.cb.checked).length;
+    selectAll.checked = checkboxes.length > 0 && shownChecked === checkboxes.length;
+    selectAll.indeterminate = shownChecked > 0 && shownChecked < checkboxes.length;
+    $("#memories-selection-info", root).textContent = count ? _t("{0} 件を選択中", count) : "";
+    $("#memories-clear-selection-btn", root).classList.toggle("hidden", count === 0);
+    deleteTypeBtn.disabled = !$("#memory-type-filter", root).value;
   };
   selectAll.addEventListener("change", () => {
-    for (const c of checkboxes) c.cb.checked = selectAll.checked;
+    for (const c of checkboxes) {
+      c.cb.checked = selectAll.checked;
+      if (selectAll.checked) selected.set(keyOf(c.m), c.m);
+      else selected.delete(keyOf(c.m));
+    }
     syncSelection();
   });
-  deleteBtn.addEventListener("click", async () => {
-    const targets = checkboxes.filter((c) => c.cb.checked).map((c) => c.m);
-    if (targets.length === 0) return;
-    const labels = targets.map((m) => `${memoryOwnerLabel(m.owner)} / ${m.name}`);
-    if (!confirm(_t("選択した {0} 件のメモリーを削除しますか？（削除前の内容はバックアップに残ります）\n{1}", targets.length, labels.join("\n")))) return;
+  $("#memories-select-filtered-btn", root).addEventListener("click", () => {
+    for (const m of filteredRows()) selected.set(keyOf(m), m);
+    for (const c of checkboxes) c.cb.checked = true;
+    syncSelection();
+  });
+  $("#memories-clear-selection-btn", root).addEventListener("click", () => {
+    selected.clear();
+    for (const c of checkboxes) c.cb.checked = false;
+    syncSelection();
+  });
+  // まとめて操作の実行中は、操作ボタンを止めて進み具合を出す（数千件でも二度押しさせない）。
+  const runBulk = async (btn, message, fn) => {
+    $("#memories-error", root).textContent = "";
+    busyEl.textContent = message;
+    beginButtonBusy(btn);
     try {
-      await api(memoriesPath("/delete"), {
-        method: "POST",
-        body: { items: targets.map((m) => ({ name: m.name, owner: m.owner })) },
-      });
+      return await fn();
     } catch (e) {
       $("#memories-error", root).textContent = e.message;
+      return null;
+    } finally {
+      busyEl.textContent = "";
+      endButtonBusy(btn, false);
+    }
+  };
+  const reportFailures = (result, doneMessage) => {
+    let message = doneMessage;
+    if (result.failed_items && result.failed_items.length) {
+      message += "\n\n" + _t("処理できなかったメモリー:") + "\n" + result.failed_items.slice(0, CONFIRM_LIST_MAX).join("\n");
+    }
+    alert(message);
+  };
+  deleteBtn.addEventListener("click", async () => {
+    const targets = selectedTargets();
+    if (targets.length === 0) return;
+    if (!confirm(_t("選択した {0} 件のメモリーを削除しますか？（削除前の内容はバックアップに残ります）\n{1}", targets.length, confirmList(targets)))) return;
+    const result = await runBulk(deleteBtn, _t("{0} 件のメモリーを削除しています…", targets.length), () =>
+      api(memoriesPath("/delete"), {
+        method: "POST",
+        body: { items: targets.map((m) => ({ name: m.name, owner: m.owner })) },
+      })
+    );
+    if (!result) return;
+    await reload();
+    if (result.failed) reportFailures(result, _t("{0} 件のメモリーを削除しました。", result.deleted));
+  });
+  deleteTypeBtn.addEventListener("click", async () => {
+    const type = $("#memory-type-filter", root).value;
+    if (!type) return;
+    const owner = $("#memory-owner-filter", root).value;
+    const targets = data.memories.filter((m) => m.type === type && (owner === "*" || (m.owner || "") === owner));
+    if (targets.length === 0) {
+      alert(_t("種類 {0} のメモリーはありません。", type));
       return;
     }
+    const scope = owner === "*" ? _t("すべての所有者") : memoryOwnerLabel(owner);
+    if (!confirm(_t("種類 {0} のメモリー（{1}）{2} 件をすべて削除しますか？（削除前の内容はバックアップに残ります）\n{3}", type, scope, targets.length, confirmList(targets)))) return;
+    const result = await runBulk(deleteTypeBtn, _t("{0} 件のメモリーを削除しています…", targets.length), () =>
+      api(memoriesPath("/delete-by-type"), { method: "POST", body: { type, owner } })
+    );
+    if (!result) return;
     await reload();
+    reportFailures(result, _t("{0} 件のメモリーを削除しました。", result.deleted));
+  });
+
+  // 選んだメモリーの種類・公開範囲をまとめて変える（admin/memories.py の change）。
+  const changeForm = $("#change-memories-form", root);
+  for (const type of data.types) changeForm.elements.type.appendChild(el("option", { value: type, text: type }));
+  changeBtn.addEventListener("click", () => {
+    if (selected.size === 0) return;
+    changeForm.reset();
+    $("#change-memories-error", root).textContent = "";
+    $("#change-memories-count", root).textContent = _t("対象: {0} 件", selected.size);
+    closeModal(form);
+    openModal(changeForm);
+  });
+  $("#change-memories-cancel-btn", root).addEventListener("click", () => closeModal(changeForm));
+  changeForm.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const type = changeForm.elements.type.value || null;
+    const visibility = changeForm.elements.visibility.value || null;
+    if (!type && !visibility) {
+      $("#change-memories-error", root).textContent = _t("変更する種類か公開範囲を選んでください。");
+      return;
+    }
+    const targets = selectedTargets();
+    const submit = changeForm.querySelector("button[type=submit]");
+    beginButtonBusy(submit);
+    try {
+      const result = await api(memoriesPath("/change"), {
+        method: "POST",
+        body: { items: targets.map((m) => ({ name: m.name, owner: m.owner })), type, visibility },
+      });
+      closeModal(changeForm);
+      await reload();
+      let message = _t("{0} 件のメモリーを変更しました。", result.changed);
+      if (result.forced_private_items.length) {
+        message += "\n\n" + _t("次のメモリーは種類の設定・個人情報の目印により個人用のままです:") + "\n" + result.forced_private_items.slice(0, CONFIRM_LIST_MAX).join("\n");
+        if (result.forced_private_items.length > CONFIRM_LIST_MAX) message += "\n" + _t("…ほか {0} 件", result.forced_private_items.length - CONFIRM_LIST_MAX);
+      }
+      reportFailures(result, message);
+    } catch (e) {
+      $("#change-memories-error", root).textContent = e.message;
+    } finally {
+      endButtonBusy(submit, false);
+    }
   });
 
   // 選んだメモリーを別のインスタンスへコピーする（admin/memories.py の copy）。
   const copyForm = $("#copy-memories-form", root);
   let copyTargets = [];
   copyBtn.addEventListener("click", async () => {
-    copyTargets = checkboxes.filter((c) => c.cb.checked).map((c) => c.m);
+    copyTargets = selectedTargets();
     if (copyTargets.length === 0) return;
     $("#copy-memories-error", root).textContent = "";
     let instances;
@@ -2945,7 +3072,9 @@ async function renderMemories(container, open) {
     const list = $("#copy-memories-list", root);
     list.innerHTML = "";
     list.appendChild(el("div", { text: _t("コピーするメモリー（{0} 件）:", copyTargets.length) }));
-    for (const m of copyTargets) list.appendChild(el("div", { text: `${memoryOwnerLabel(m.owner)} / ${m.name}: ${m.description}` }));
+    // 数百件を並べるとポップアップが重くなるため、先頭の数件だけ並べる。
+    for (const m of copyTargets.slice(0, CONFIRM_LIST_MAX)) list.appendChild(el("div", { text: `${memoryOwnerLabel(m.owner)} / ${m.name}: ${m.description}` }));
+    if (copyTargets.length > CONFIRM_LIST_MAX) list.appendChild(el("div", { text: _t("…ほか {0} 件", copyTargets.length - CONFIRM_LIST_MAX) }));
     closeModal(form);
     closeModal(draftForm);
     openModal(copyForm);
@@ -2990,7 +3119,7 @@ async function renderMemories(container, open) {
   const draftForm = $("#draft-skill-form", root);
   let draftTargets = [];
   draftBtn.addEventListener("click", async () => {
-    draftTargets = checkboxes.filter((c) => c.cb.checked).map((c) => c.m);
+    draftTargets = selectedTargets();
     if (draftTargets.length === 0) return;
     $("#draft-skill-error", root).textContent = "";
     $("#draft-skill-status", root).textContent = "";
@@ -3087,14 +3216,11 @@ async function renderMemories(container, open) {
     }
   };
 
-  const renderList = (resetPage) => {
-    if (resetPage) page = 0;
+  // 今の絞り込み・並べ替えに当てはまる全件（ページ送り前）。
+  function filteredRows() {
     const owner = $("#memory-owner-filter", root).value;
     const type = $("#memory-type-filter", root).value;
     const q = $("#memory-search", root).value.trim().toLowerCase();
-    const tbody = $("#memories-tbody", root);
-    tbody.innerHTML = "";
-    checkboxes = [];
     let rows = data.memories.filter(
       (m) =>
         (owner === "*" || (m.owner || "") === owner) &&
@@ -3111,6 +3237,15 @@ async function renderMemories(container, open) {
         return c * sign;
       });
     }
+    return rows;
+  }
+
+  const renderList = (resetPage) => {
+    if (resetPage) page = 0;
+    const tbody = $("#memories-tbody", root);
+    tbody.innerHTML = "";
+    checkboxes = [];
+    const rows = filteredRows();
     syncSortHeaders();
     const pageSize = Number(pageSizeSelect.value) || 100;
     const pages = Math.max(1, Math.ceil(rows.length / pageSize));
@@ -3130,7 +3265,13 @@ async function renderMemories(container, open) {
     }
     for (const m of shown) {
       const link = el("a", { href: "#", text: m.name, onclick: (ev) => (ev.preventDefault(), openMemory(m.name, m.owner)) });
-      const cb = el("input", { type: "checkbox", onchange: syncSelection });
+      const cb = el("input", { type: "checkbox" });
+      cb.checked = selected.has(keyOf(m));
+      cb.addEventListener("change", () => {
+        if (cb.checked) selected.set(keyOf(m), m);
+        else selected.delete(keyOf(m));
+        syncSelection();
+      });
       checkboxes.push({ cb, m });
       tbody.appendChild(
         el("tr", {}, [
@@ -3199,9 +3340,14 @@ async function renderMemories(container, open) {
     showForm(_t("メモリーの編集: {0} / {1}", memoryOwnerLabel(m.owner), m.name), { name: m.name, owner: m.owner });
   }
 
-  $("#memory-owner-filter", root).addEventListener("change", () => renderList(true));
-  $("#memory-type-filter", root).addEventListener("change", () => renderList(true));
-  $("#memory-search", root).addEventListener("input", () => renderList(true));
+  // 絞り込みを変えたら選び直し（見えていない行を気づかずにまとめて操作しないため）。
+  const refilter = () => {
+    selected.clear();
+    renderList(true);
+  };
+  $("#memory-owner-filter", root).addEventListener("change", refilter);
+  $("#memory-type-filter", root).addEventListener("change", refilter);
+  $("#memory-search", root).addEventListener("input", refilter);
   form.elements.owner.addEventListener("input", syncVisibilityRow);
   $("#new-memory-btn", root).addEventListener("click", () => {
     form.reset();
@@ -3211,7 +3357,7 @@ async function renderMemories(container, open) {
     showForm(_t("メモリーの新規作成"), null);
   });
   $("#memory-cancel-btn", root).addEventListener("click", () => closeModal(form));
-  for (const f of [form, copyForm, draftForm]) {
+  for (const f of [form, copyForm, draftForm, changeForm]) {
     modalOf(f).addEventListener("keydown", (ev) => {
       if (ev.key === "Escape") closeModal(f);
     });
@@ -3276,7 +3422,7 @@ async function renderMemories(container, open) {
       const forcedPrivate = target.owner && body.visibility === "shared" && result.visibility === "private";
       alert(
         forcedPrivate
-          ? _t("保存しました。個人情報・機密を含む（または種類が user の）ため、個人用で保存しました。")
+          ? _t("保存しました。次の理由で個人用で保存しました: {0}（[memory] の <種類>_visibility・force_private_checks・force_private_exempt_types で変えられます）", (result.private_reasons || []).join(", "))
           : _t("保存しました（次の会話から反映されます）。")
       );
     } catch (e) {
@@ -3473,6 +3619,10 @@ function summarizeAuditEntry(entry) {
   if (entry.action === "usage_cost_settings_update") return _t(`料金設定: {0}`, PRICING_MODEL_LABELS[entry.pricing_model] || entry.pricing_model || "");
   if (entry.target_user) return _t(`対象: {0}`, entry.target_user);
   if (entry.memory) return _t(`メモリー: {0} / {1}`, entry.memory_owner || _t("（共通）"), entry.memory);
+  if ((entry.action === "memory_delete" || entry.action === "memory_change") && entry.memories) {
+    const head = entry.memories.slice(0, 5).join(", ");
+    return _t(`メモリー {0} 件: {1}`, entry.count ?? entry.memories.length, entry.memories.length > 5 ? `${head}, …` : head);
+  }
   if (entry.action === "memory_draft_skill") return _t(`ドラフトスキル: {0}（元のメモリー: {1}）`, entry.draft || "", (entry.memories || []).join(", "));
   if (entry.file) return _t(`ファイル: {0}`, entry.file);
   if (entry.key) return _t(`キー: {0}`, entry.key);

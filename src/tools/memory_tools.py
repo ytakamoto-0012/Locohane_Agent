@@ -80,16 +80,18 @@ def _resolve_source_files(source_files: list[str] | None) -> list[Path] | None:
     return resolved
 
 
-def _visibility_note(root: Path, mem: memory.Memory, requested: str | None) -> str:
-    """保存後の公開範囲の説明（shared を求めた・省略して shared のはずが private になった場合は理由も）。"""
+def _visibility_note(root: Path, mem: memory.Memory) -> str:
+    """保存後の公開範囲の説明（設定で決まる。private になった理由も付ける）。
+
+    公開範囲は LLM に選ばせない（config.ini [memory] <type>_visibility と force_private_checks で決まる）。
+    """
     if mem.visibility == "shared":
-        return "Visibility: shared (other users can find and read it)."
-    if requested != "private":
-        _, reasons = memory.resolve_visibility(
-            mem.memory_type, "shared", mem.description, mem.content, mem.sources, memory.policy_for(root)
-        )
-        if reasons:
-            return f"Visibility: private (not shared with other users because it contains: {', '.join(reasons)})."
+        return "Visibility: shared (other users can find and read it; set by the memory_type)."
+    _, reasons = memory.resolve_visibility(
+        mem.memory_type, None, mem.description, mem.content, mem.sources, memory.policy_for(root)
+    )
+    if reasons:
+        return f"Visibility: private (only the current user can find and read it: {', '.join(reasons)})."
     return "Visibility: private (only the current user can find and read it)."
 
 
@@ -150,7 +152,6 @@ def create_memory(
     memory_type: str,
     content: str,
     source_files: list[str] | None = None,
-    visibility: str | None = None,
 ) -> str:
     """Save a new persistent memory as the current user's own memory.
 
@@ -179,15 +180,13 @@ def create_memory(
             whose content was actually confirmed. At most 10 files; with source_files the
             content must be at most 4000 characters (keep only the relevant parts, not the
             whole file).
-        visibility: "shared" lets other users of this system find and read the memory;
-            "private" keeps it to the current user. Choose it by the content, following the
-            Visibility rules in the Memory System section of the system prompt. If omitted, it is
-            shared. Some memory_types and content with personal details are always saved as
-            private; the result tells the visibility it was saved with and why.
+
+    The visibility (shared with other users or private) is set by the memory_type, following
+    the Visibility rules in the Memory System section of the system prompt; you do not choose it.
 
     Returns:
         A text telling the saved file path and the visibility it was saved with. If
-        name/memory_type/visibility is invalid, description/content is empty, you already
+        name/memory_type is invalid, description/content is empty, you already
         have a memory with the same name, or a source file cannot be read, it returns an
         "Error: ..." string instead of raising.
     """
@@ -204,26 +203,18 @@ def create_memory(
             content,
             _resolve_source_files(source_files),
             owner=me,
-            visibility=visibility,
         )
         mem = memory.read_memory(root, name, me)
     except (RuntimeError, ValueError) as e:
         return f"Error: {e}"
     logger.info(
-        "create_memory: %s type=%s sources=%d visibility=%s (requested=%s)",
-        name,
-        memory_type,
-        len(source_files or []),
-        mem.visibility,
-        visibility,
+        "create_memory: %s type=%s sources=%d visibility=%s", name, memory_type, len(source_files or []), mem.visibility
     )
-    return f"Saved the memory: {path}\n{_visibility_note(root, mem, visibility)}"
+    return f"Saved the memory: {path}\n{_visibility_note(root, mem)}"
 
 
 @tool
-def update_memory(
-    name: str, content: str, source_files: list[str] | None = None, visibility: str | None = None
-) -> str:
+def update_memory(name: str, content: str, source_files: list[str] | None = None) -> str:
     """Update the body of an existing persistent memory (name/description/memory_type do not change).
 
     Updates your own memory with that name, or else the common memory with that name. Memories of
@@ -237,9 +228,8 @@ def update_memory(
             Pass them whenever the content reflects files read again (their current sha256 is
             recorded). If omitted, the recorded source files are kept as they are; pass [] to
             remove them. Same limits as create_memory.
-        visibility: "shared" or "private" to change the visibility of your own memory (same rules
-            as create_memory). If omitted, it stays as it is (but becomes private if the new
-            content has personal details). Ignored for common memories.
+
+    The visibility of your own memory is set again by its memory_type (as for create_memory).
 
     Returns:
         A text telling the updated file path. If content is empty, no memory has that name,
@@ -259,22 +249,20 @@ def update_memory(
             content,
             _resolve_source_files(source_files),
             owner=owner,
-            visibility=visibility,
             updated_by=me,
         )
         mem = memory.read_memory(root, name, owner)
     except (RuntimeError, ValueError) as e:
         return f"Error: {e}"
     logger.info(
-        "update_memory: %s sources=%s visibility=%s (requested=%s)",
+        "update_memory: %s sources=%s visibility=%s",
         name,
         "kept" if source_files is None else len(source_files),
         mem.visibility,
-        visibility,
     )
     if owner is None:
         return f"Updated the common memory: {path}"
-    return f"Updated the memory: {path}\n{_visibility_note(root, mem, visibility)}"
+    return f"Updated the memory: {path}\n{_visibility_note(root, mem)}"
 
 
 @tool

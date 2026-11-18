@@ -115,6 +115,10 @@ _CHECK_LABELS: dict[str, str] = {check: label for check, label, _ in _SENSITIVE_
 # 既定で有効な目印（config.ini の force_private_checks の既定と同じ）。社内のローカル運用が前提のため、
 # 社内で共有して困らないもの（メール・電話・機密の表示・個人フォルダのパス）は既定では見ない。
 DEFAULT_PRIVATE_CHECKS: frozenset[str] = frozenset({"card_id", "credential"})
+# 目印を見ない種類（config.ini の force_private_exempt_types の既定と同じ）。用語集は社内用語の定義なので
+# 「パスワード」「API Key」等が語として普通に出てくる。目印で private に倒すと、glossary_visibility = shared に
+# しても用語が個人用になり、設定ダッシュボードで共有に直しても戻されていた。
+DEFAULT_PRIVATE_CHECK_EXEMPT_TYPES: frozenset[str] = frozenset({"glossary"})
 
 # LLM に渡す振り分け基準の既定（config.ini [memory] shared_criteria / private_criteria の既定と同じ）。
 DEFAULT_SHARED_CRITERIA = "know-how that helps anyone (how a task was done, corrections, where shared documents are)"
@@ -130,8 +134,10 @@ class MemoryPolicy:
     """ユーザーのメモリーの公開範囲と優先順位の規則（config.ini [memory]）。
 
     Attributes:
-        type_visibility: 種類ごとの公開範囲。private の種類は常に個人用、shared の種類は指定に従う（省略時は shared）。
+        type_visibility: 種類ごとの公開範囲。LLM の保存・更新はこれに従う（private の種類は個人用、shared の種類は共有）。
+            設定ダッシュボードで人が選んだ公開範囲は、private の種類でなければそのまま使う。
         checks: 有効な個人情報・機密の目印（PRIVATE_CHECKS のうち）。当たれば常に個人用。
+        check_exempt_types: checks を見ない種類（公開範囲は type_visibility だけで決まる）。
         ranks: ユーザー（メモリーの所有者のフォルダ名）ごとのランク。数が大きいほど上位（上司）。
             内容が食い違うメモリーは、所有者のランクが高い方に従わせる（同じなら自分のもの）。
         default_rank: ranks に無いユーザーと、共通のメモリーのランク。
@@ -139,11 +145,20 @@ class MemoryPolicy:
 
     type_visibility: Mapping[str, Visibility] = field(default_factory=lambda: dict(DEFAULT_TYPE_VISIBILITY))
     checks: frozenset[str] = DEFAULT_PRIVATE_CHECKS
+    check_exempt_types: frozenset[str] = DEFAULT_PRIVATE_CHECK_EXEMPT_TYPES
     ranks: Mapping[str, int] = field(default_factory=dict)
     default_rank: int = DEFAULT_RANK
 
     def private_types(self) -> tuple[str, ...]:
-        return tuple(t for t in MEMORY_TYPES if self.type_visibility.get(t, "private") == "private")
+        # 書かれていない種類は既定（DEFAULT_TYPE_VISIBILITY）に従う（以前は private とみなしたため、
+        # 種類を足したときに古い書き方の規則のままだと新しい種類が黙って個人用になった）。
+        return tuple(
+            t for t in MEMORY_TYPES if self.type_visibility.get(t, DEFAULT_TYPE_VISIBILITY.get(t, "private")) == "private"
+        )
+
+    def checks_for(self, memory_type: str) -> frozenset[str]:
+        """memory_type の内容に当てる目印（check_exempt_types の種類なら空）。"""
+        return frozenset() if memory_type in self.check_exempt_types else self.checks
 
     def rank_of(self, owner: str | None) -> int:
         """所有者（None は共通）のランク。"""
@@ -177,26 +192,32 @@ def policy_for(memory_root: Path) -> MemoryPolicy:
 
 def render_visibility_block(shared_criteria: str, private_criteria: str, policy: MemoryPolicy) -> str:
     """system_prompt.md の {{memory_visibility}} へ差し込む、公開範囲の決め方の説明を組み立てる。"""
-    shared_types = [t for t in MEMORY_TYPES if t not in policy.private_types()]
+    # 公開範囲は LLM に選ばせない（ツールに visibility の引数は無い）。種類ごとの設定で決まることを伝え、
+    # 管理者の振り分け基準は「どの種類で保存するか」の基準として渡す。
+    private_types = policy.private_types()
+    shared_types = [t for t in MEMORY_TYPES if t not in private_types]
     if not shared_types:
-        return "All memories are saved as private (only the current user can find and read them); omit `visibility`."
+        return "All memories are saved as private (only the current user can find and read them)."
 
     def _indent(text: str) -> str:
         # 基準は管理者の自由記述（改行可・表示言語のまま）。見出しの下にまとまって見えるよう字下げする。
         return "\n".join(f"  {line}" for line in text.strip().splitlines() if line.strip())
 
-    lines = [
-        "Choose by the content, not by the memory_type. If omitted, it is shared.",
-        '- "shared" for:',
-        _indent(shared_criteria),
-        '- "private" for:',
-        _indent(private_criteria),
-    ]
-    if policy.private_types():
-        lines.append(f"- Memories of type {'/'.join(policy.private_types())} are always private.")
-    if policy.checks:
+    lines = ["Set automatically from the memory_type by the system settings (you do not choose it)."]
+    if private_types:
+        lines.append(f"- Private (only the current user can find and read them): {'/'.join(private_types)}")
+    lines.append(f"- Shared (every user of this system can find and read them): {'/'.join(shared_types)}")
+    checked_types = [t for t in MEMORY_TYPES if policy.checks_for(t)]
+    if policy.checks and checked_types:
         labels = ", ".join(_CHECK_LABELS[c] for c in PRIVATE_CHECKS if c in policy.checks)
-        lines.append(f"- Content with any of these is saved as private automatically: {labels}.")
+        exempt = [t for t in MEMORY_TYPES if t not in checked_types]
+        note = f" (not for {'/'.join(exempt)})" if exempt else ""
+        lines.append(f"- Content with any of these is saved as private automatically{note}: {labels}.")
+    lines += ["So choose the memory_type with this in mind:", "- Save as a shared type:", _indent(shared_criteria)]
+    if private_types:
+        lines += [f"- Save as {'/'.join(private_types)} (private):", _indent(private_criteria)]
+    else:
+        lines += ["- Do not save these (every memory is shared):", _indent(private_criteria)]
     return "\n".join(lines)
 
 SourceState = Literal["unchanged", "changed", "missing"]
@@ -568,8 +589,9 @@ def resolve_visibility(
 ) -> tuple[Visibility, list[str]]:
     """ユーザーのメモリーの公開範囲を決める。
 
-    requested が None なら shared。policy で private の種類、または有効な個人情報・機密の目印を
-    含むなら、指定に関係なく private にする。
+    requested が None なら種類の設定（policy.type_visibility）どおり。policy で private の種類、または
+    有効な個人情報・機密の目印（check_exempt_types の種類では見ない）を含むなら、指定に関係なく private にする。
+    LLM のツールは requested を渡さない（公開範囲は設定で決まる）。requested を渡すのは設定ダッシュボードだけ。
 
     Returns:
         (公開範囲, shared にできなかった理由（shared を求めて private にしたときだけ。英語のラベル）)。
@@ -584,7 +606,7 @@ def resolve_visibility(
     reasons: list[str] = []
     if memory_type in policy.private_types():
         reasons.append(f"memory_type {memory_type} is always private")
-    reasons += detect_sensitive(_sensitive_text(description, content, sources), policy.checks)
+    reasons += detect_sensitive(_sensitive_text(description, content, sources), policy.checks_for(memory_type))
     return ("private", reasons) if reasons else ("shared", [])
 
 
@@ -637,7 +659,8 @@ def is_visible_to(mem: Memory, viewer: str | None, policy: MemoryPolicy = DEFAUL
         return True
     if mem.visibility != "shared" or mem.memory_type in policy.private_types():
         return False
-    return not detect_sensitive(_sensitive_text(mem.description, mem.content, mem.sources), policy.checks)
+    checks = policy.checks_for(mem.memory_type)
+    return not checks or not detect_sensitive(_sensitive_text(mem.description, mem.content, mem.sources), checks)
 
 
 def is_private_to_owner(mem: Memory, policy: MemoryPolicy = DEFAULT_POLICY) -> bool:
@@ -745,8 +768,9 @@ def create_memory(
         source_files: 本文の元になったファイルの絶対パス。指定すると今の sha256 を記録する
             （本文は SOURCED_CONTENT_MAX_CHARS 文字まで）。
         owner: 所有者。None なら共通のメモリーとして保存する。
-        visibility: ユーザーのメモリーの公開範囲（None なら shared）。memory_root に登録された規則
-            （policy_for）に沿って resolve_visibility() が private に倒すことがある。共通のメモリーでは無視する。
+        visibility: ユーザーのメモリーの公開範囲（None なら種類の設定どおり。LLM のツールは常に None）。
+            memory_root に登録された規則（policy_for）に沿って resolve_visibility() が private に倒すことがある。
+            共通のメモリーでは無視する。
         author: 作ったユーザー（frontmatter の author に記録する）。None なら owner。
 
     Returns:
@@ -799,10 +823,13 @@ def update_memory(
     source_files: list[Path] | None = None,
     *,
     owner: str | None = None,
-    visibility: str | None = None,
     updated_by: str | None = None,
 ) -> Path:
     """既存メモリーの本文を更新し、MEMORY.md 索引を再構築する（name/description/type は不変）。
+
+    LLM の update_memory ツール用。ユーザーのメモリーの公開範囲は、今の値を引き継がずに種類の設定
+    （config.ini [memory] <type>_visibility）と新しい本文の目印で決め直す（設定を変えた後や、以前 LLM が
+    private を選んでいたメモリーも、次の更新から設定どおりになる）。
 
     Args:
         memory_root: メモリーストアのルートディレクトリ。
@@ -811,15 +838,13 @@ def update_memory(
         source_files: None なら記録済みの元ファイルの指紋をそのまま残す。リストを渡すと
             その今の sha256 で置き換える（空リストなら元ファイルの記録を外す）。
         owner: 所有者。None なら共通のメモリーを更新する。
-        visibility: ユーザーのメモリーの新しい公開範囲（None なら今の値のまま）。新しい本文が
-            個人情報・機密の目印を含めば private にする。共通のメモリーでは無視する。
         updated_by: 書き換えたユーザー（frontmatter の updated_by に記録する）。None なら記録済みの値のまま。
 
     Returns:
         更新したファイルの絶対パス。
 
     Raises:
-        ValueError: content が空、owner に name のメモリーが存在しない、visibility が不正、
+        ValueError: content が空、owner に name のメモリーが存在しない、
             source_files が読めない・多すぎる、または元ファイル付きの本文が長すぎる場合。
     """
     if not content.strip():
@@ -834,7 +859,7 @@ def update_memory(
         memory_type=mem.memory_type,
         content=content,
         sources=mem.sources if source_files is None else fingerprint_sources(source_files),
-        visibility=visibility if visibility is not None else mem.visibility,
+        visibility=None,
         updated_by=updated_by,
     )
 
@@ -851,6 +876,7 @@ def edit_memory(
     updated_by: str | None = None,
     source_files: list[Path] | None = None,
     fingerprints: tuple[SourceFile, ...] | None = None,
+    follow_policy: bool = False,
 ) -> Path:
     """既存メモリーの説明・種類・本文（ユーザーのものは公開範囲も）をまとめて書き換え、索引を再構築する。
 
@@ -870,6 +896,8 @@ def edit_memory(
         source_files: 渡すとその今の sha256 で元ファイルの指紋を置き換える（None なら記録済みのまま）。
         fingerprints: 記録する元ファイルの指紋そのもの（記録済みの指紋を取り直さずに残したいとき。用語集の出典の追加用）。
             source_files と同時には渡せない。件数は SOURCE_FILES_MAX まで。
+        follow_policy: True なら visibility を無視し、公開範囲を種類の設定と目印で決め直す（LLM が書き換える
+            用語集用。今の値を引き継ぐと、以前 private になった用語が設定を shared にしても戻らなかった）。
 
     Returns:
         書き換え後のファイルの絶対パス。
@@ -902,7 +930,7 @@ def edit_memory(
         memory_type=memory_type,
         content=content,
         sources=sources,
-        visibility=visibility if visibility is not None else mem.visibility,
+        visibility=None if follow_policy else (visibility if visibility is not None else mem.visibility),
         updated_by=updated_by,
     )
 
@@ -915,10 +943,15 @@ def _rewrite(
     memory_type: str,
     content: str,
     sources: tuple[SourceFile, ...],
-    visibility: str,
+    visibility: str | None,
     updated_by: str | None = None,
+    rebuild: bool = True,
 ) -> Path:
-    """mem を新しい内容で書き直す（created・author は残す。type が変われば移す）。"""
+    """mem を新しい内容で書き直す（created・author は残す。type が変われば移す）。
+
+    visibility が None なら種類の設定どおり（resolve_visibility）。rebuild=False なら索引を作り直さない
+    （まとめて書き換える呼び出し側が最後に1回だけ作り直す）。
+    """
     _validate_sourced_content(content, sources)
     final_visibility = (
         None
@@ -946,9 +979,108 @@ def _rewrite(
     )
     if path != mem.path:
         mem.path.unlink()
-    rebuild_index(memory_root, mem.owner)
+    if rebuild:
+        rebuild_index(memory_root, mem.owner)
     logger.info("rewrite memory: name=%s type=%s owner=%s visibility=%s", mem.name, memory_type, mem.owner, final_visibility)
     return path
+
+
+@dataclass(frozen=True)
+class BulkResult:
+    """まとめて操作した結果。
+
+    Attributes:
+        done: 操作したメモリー（操作前の Memory。削除なら消したもの）。
+        failed: 操作できなかったもの（(所有者, 名前, 理由)）。
+    """
+
+    done: tuple[Memory, ...]
+    failed: tuple[tuple[str | None, str, str], ...] = ()
+
+
+def delete_memories(memory_root: Path, mems: list[Memory]) -> BulkResult:
+    """メモリーをまとめて削除する（索引は所有者ごとに最後に1回だけ作り直す）。
+
+    1件ずつ delete_memory すると、そのたびに所有者の全メモリーを読み直して索引を作るため、
+    数百件で O(n²) になり設定ダッシュボードが固まっていた。
+    """
+    done: list[Memory] = []
+    failed: list[tuple[str | None, str, str]] = []
+    owners: set[str | None] = set()
+    for mem in mems:
+        try:
+            mem.path.unlink()
+        except FileNotFoundError:
+            failed.append((mem.owner, mem.name, "not found"))
+            continue
+        except OSError as e:
+            failed.append((mem.owner, mem.name, str(e)))
+            continue
+        done.append(mem)
+        owners.add(mem.owner)
+    for owner in owners:
+        rebuild_index(memory_root, owner)
+    logger.info("delete_memories: deleted=%d failed=%d", len(done), len(failed))
+    return BulkResult(tuple(done), tuple(failed))
+
+
+def change_memories(
+    memory_root: Path,
+    mems: list[Memory],
+    *,
+    memory_type: str | None = None,
+    visibility: str | None = None,
+    updated_by: str | None = None,
+) -> BulkResult:
+    """メモリーの種類・公開範囲をまとめて変える（説明・本文・元ファイルの指紋はそのまま）。
+
+    memory_type / visibility は None なら今の値のまま。公開範囲は共通のメモリーには効かず、ユーザーの
+    メモリーでも private の種類・目印に当たる内容は private になる（edit_memory と同じ規則）。
+    索引は所有者ごとに最後に1回だけ作り直す。
+
+    Raises:
+        ValueError: memory_type / visibility が不正、または両方とも None の場合。
+    """
+    if memory_type is None and visibility is None:
+        raise ValueError("pass memory_type or visibility")
+    if memory_type is not None:
+        _validate_type(memory_type)
+    if visibility is not None and visibility not in VISIBILITIES:
+        raise ValueError(f"visibility must be one of {VISIBILITIES}: {visibility}")
+    done: list[Memory] = []
+    failed: list[tuple[str | None, str, str]] = []
+    owners: set[str | None] = set()
+    for mem in mems:
+        new_type = memory_type or mem.memory_type
+        try:
+            if new_type != mem.memory_type and _find_memory_other_type(memory_root, mem, new_type):
+                raise ValueError(f"a memory named {mem.name} already exists in {new_type}")
+            _rewrite(
+                memory_root,
+                mem,
+                description=mem.description,
+                memory_type=new_type,
+                content=mem.content,
+                sources=mem.sources,
+                visibility=visibility if visibility is not None else mem.visibility,
+                updated_by=updated_by,
+                rebuild=False,
+            )
+        except (ValueError, OSError) as e:
+            failed.append((mem.owner, mem.name, str(e)))
+            continue
+        done.append(mem)
+        owners.add(mem.owner)
+    for owner in owners:
+        rebuild_index(memory_root, owner)
+    logger.info("change_memories: type=%s visibility=%s changed=%d failed=%d", memory_type, visibility, len(done), len(failed))
+    return BulkResult(tuple(done), tuple(failed))
+
+
+def _find_memory_other_type(memory_root: Path, mem: Memory, memory_type: str) -> bool:
+    """mem を memory_type へ移す先に、同じ名前の別のファイルがあるか（壊れた重複を上書きしないため）。"""
+    target = _safe_memory_path(memory_root, memory_type, mem.name, mem.owner)
+    return target != mem.path and target.exists()
 
 
 def copy_memory(
@@ -958,6 +1090,7 @@ def copy_memory(
     owner: str | None,
     copied_by: str | None = None,
     source_policy: MemoryPolicy | None = None,
+    rebuild: bool = True,
 ) -> Literal["copied", "skipped"]:
     """別のメモリーストア（別インスタンス等）の mem を、memory_root の owner のメモリーとして複製する。
 
@@ -971,6 +1104,7 @@ def copy_memory(
         owner: コピー先の所有者。None なら共通のメモリー。
         copied_by: 最後に書き換えたユーザー（updated_by）として残す名前。
         source_policy: コピー元の公開範囲の規則（個人用かの判定に使う）。None なら DEFAULT_POLICY。
+        rebuild: False なら索引を作り直さない（まとめてコピーする呼び出し側が最後に rebuild_index する）。
 
     Returns:
         "copied"（新規）| "skipped"（同じ名前のメモリーがコピー先にある。種類は問わない）。
@@ -1006,7 +1140,8 @@ def copy_memory(
         ),
         encoding="utf-8",
     )
-    rebuild_index(memory_root, owner)
+    if rebuild:
+        rebuild_index(memory_root, owner)
     logger.info("copy_memory: name=%s type=%s owner=%s", mem.name, mem.memory_type, owner)
     return "copied"
 

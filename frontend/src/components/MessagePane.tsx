@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { IStep } from '@chainlit/react-client';
 import { useI18n } from '../i18n';
-import { MessageThread } from './MessageThread';
+import { MessageThread, type OlderStatus } from './MessageThread';
 import { Icon } from './Icon';
 
 // ほぼ最下部(この距離px以内)まで戻ってきたときだけオートスクロールを再開する。
@@ -16,27 +16,47 @@ const AUTO_SCROLL_DISENGAGE_THRESHOLD_PX = 64;
 // 固定表示したユーザー指示をクリックして戻ったとき、その発言の上に空ける余白(px)。
 const PINNED_JUMP_MARGIN_PX = 12;
 
+// 上端からこの距離(px)以内までスクロールしたら、前の会話を読み足す。
+const LOAD_OLDER_THRESHOLD_PX = 80;
+
 /** 表示中の位置より上で一番新しいユーザー指示のうち、上端より上へ完全に隠れたもの（今見えている応答の指示）。
- *  見えている（一部でも）間は固定表示しない。 */
+ *  見えている（一部でも）間は固定表示しない。
+ *  前の会話を読み足すと指示が数千件になり、スクロール・ストリーミングのたびに全件の位置を調べると重いため、
+ *  上から順に並んでいることを使って二分探索する。 */
 function findHiddenUserMessageId(container: HTMLElement): string | null {
   const top = container.getBoundingClientRect().top;
-  let found: string | null = null;
-  for (const row of container.querySelectorAll<HTMLElement>('[data-user-message-id]')) {
-    const rect = row.getBoundingClientRect();
-    if (rect.top >= top) break;
-    found = rect.bottom <= top ? row.dataset.userMessageId ?? null : null;
+  const rows = container.querySelectorAll<HTMLElement>('[data-user-message-id]');
+  // 上端が表示領域の上端より上にある最後の指示を探す。
+  let lo = 0;
+  let hi = rows.length - 1;
+  let last = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].getBoundingClientRect().top < top) {
+      last = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
   }
-  return found;
+  if (last < 0) return null;
+  const row = rows[last];
+  return row.getBoundingClientRect().bottom <= top ? row.dataset.userMessageId ?? null : null;
 }
 
 export function MessagePane({
   messages,
   showTyping,
-  runningSteps
+  runningSteps,
+  olderStatus = null,
+  onReachTop
 }: {
   messages: IStep[];
   showTyping: boolean;
   runningSteps: IStep[];
+  olderStatus?: OlderStatus;
+  /** 一番上までスクロールしたとき（前の会話を読み足す。App.tsx）。 */
+  onReachTop?: () => void;
 }) {
   const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -94,10 +114,37 @@ export function MessagePane({
   // 再開は「ほぼ最下部に戻ったとき」のみ、解除は「大きく離れたとき」のみ
   // 行う非対称な判定。中間の範囲(ENGAGE〜DISENGATEの間)では現状を維持し、
   // handleWheel による解除直後の中途半端な位置で勝手に再開されないようにする。
+  // 前の会話を上に足したとき、読んでいた位置がずれないようにする。読み足しを頼む時点の一番上のメッセージと
+  // その表示位置を覚え、足した後にそのメッセージが同じ位置に来るようスクロールを戻す。
+  const anchorRef = useRef<{ id: string; offset: number } | null>(null);
+  const requestOlder = () => {
+    const el = containerRef.current;
+    if (!el || !onReachTop || olderStatus === 'loading' || olderStatus === 'done') return;
+    const first = el.querySelector<HTMLElement>('[data-message-id]');
+    anchorRef.current = first
+      ? { id: first.dataset.messageId ?? '', offset: first.getBoundingClientRect().top - el.getBoundingClientRect().top }
+      : null;
+    onReachTop();
+  };
+  const firstMessageId = messages[0]?.id;
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    const anchor = anchorRef.current;
+    if (!el || !anchor || firstMessageId === anchor.id) return;
+    anchorRef.current = null;
+    const row = Array.from(el.querySelectorAll<HTMLElement>('[data-message-id]')).find(
+      (r) => r.dataset.messageId === anchor.id
+    );
+    if (!row) return;
+    const offset = row.getBoundingClientRect().top - el.getBoundingClientRect().top;
+    el.scrollTop += offset - anchor.offset;
+  }, [firstMessageId]);
+
   const handleScroll = () => {
     const el = containerRef.current;
     if (!el) return;
     updatePinned();
+    if (el.scrollTop <= LOAD_OLDER_THRESHOLD_PX) requestOlder();
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (distanceFromBottom <= AUTO_SCROLL_ENGAGE_THRESHOLD_PX) {
       setAutoScrollBoth(true);
@@ -113,6 +160,9 @@ export function MessagePane({
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     if (e.deltaY < 0) {
       setAutoScrollBoth(false);
+      // 会話が短くスクロールできない（scroll イベントが来ない）ときも、上へのホイールで前の会話を読み足す。
+      const el = containerRef.current;
+      if (el && el.scrollTop <= LOAD_OLDER_THRESHOLD_PX) requestOlder();
     }
   };
 
@@ -139,7 +189,7 @@ export function MessagePane({
   return (
     <div className="messages-scroll-wrapper">
       <div className="messages-scroll" ref={containerRef} onScroll={handleScroll} onWheel={handleWheel}>
-        <MessageThread messages={messages} showTyping={showTyping} runningSteps={runningSteps} />
+        <MessageThread messages={messages} showTyping={showTyping} runningSteps={runningSteps} olderStatus={olderStatus} />
       </div>
       {pinnedMessage ? (
         <button

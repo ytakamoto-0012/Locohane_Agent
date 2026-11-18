@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useRecoilValue, useSetRecoilState } from 'recoil';
 import {
   useAuth,
@@ -17,7 +17,8 @@ import {
 import { BACKEND_URL } from './chainlitClient';
 import { useI18n } from './i18n';
 import { useBrowserNotify } from './notify';
-import { fetchThreadSnapshot, threadStepsToMessages, splitThreadElements } from './threadSnapshot';
+import { fetchOlderMessages, fetchThreadSnapshot, threadStepsToMessages, splitThreadElements } from './threadSnapshot';
+import type { OlderStatus } from './components/MessageThread';
 import { Header } from './components/Header';
 import { LoginForm } from './components/LoginForm';
 import { MessagePane } from './components/MessagePane';
@@ -30,19 +31,8 @@ import { AskChoiceFormBar } from './components/AskChoiceFormBar';
 import { AskTextBar } from './components/AskTextBar';
 import { AskFileDropzone } from './components/AskFileDropzone';
 import { StarterPrompts } from './components/StarterPrompts';
-import {
-  selectMainThread,
-  selectSideSteps,
-  selectRunningStepChain,
-  selectLatestTokenUsage,
-  selectLatestWorkDir,
-  selectLatestPlan,
-  selectLatestStarters,
-  selectLatestMaxDisplayMessages,
-  selectLatestMaxDisplaySideSteps,
-  selectLatestInputLimits,
-  selectIsInterrupted
-} from './utils/messageTree';
+import { countSteps, deriveThreadView, pruneMessages, selectRunningStepChain } from './utils/messageTree';
+import type { IStep } from '@chainlit/react-client';
 import { useIsMobile } from './utils/useIsMobile';
 import './styles.css';
 
@@ -54,6 +44,10 @@ const REMOTE_GENERATING_POLL_INTERVAL_MS = 3000;
 // index.html の <title> にある既定値。public/settings/tab_title.md が
 // 存在しない・読み込めない場合のフォールバックとして使う。
 const DEFAULT_TAB_TITLE = 'Locohane';
+
+// 生成中の間引き（pruneMessages）を調べ始めるStepの件数。これ以下なら間引かない。
+const PRUNE_MIN_STEPS = 1000;
+const NO_STEPS: IStep[] = [];
 
 function App() {
   const { data: authData, isReady: authReady, isAuthenticated } = useAuth();
@@ -341,33 +335,120 @@ function App() {
     };
   }, [currentThreadId, config?.dataPersistence]);
 
-  const mainMessages = selectMainThread(messages);
+  // 木を1回だけ辿って、画面に要る値をまとめて求める（messages が変わったときだけ）。
+  const view = useMemo(() => deriveThreadView(messages), [messages]);
+  const {
+    mainMessages,
+    sideSteps,
+    tokenUsage,
+    workDir,
+    plan,
+    starterPrompts,
+    inputLimits,
+    interrupted,
+    maxDisplayMessages,
+    maxDisplaySideSteps
+  } = view;
   // 作業ディレクトリの変更UIは新規チャットの最初の送信前のみ有効にする。
   // 1通でもuser_messageが存在すれば（＝新規チャットで送信済み、または
   // 既存スレッドを再開）ロックする。
   const hasSentMessage = mainMessages.some((m) => m.type === 'user_message');
-  const sideSteps = selectSideSteps(messages);
-  const tokenUsage = selectLatestTokenUsage(messages);
-  const workDir = selectLatestWorkDir(messages);
-  const plan = selectLatestPlan(messages);
-  const starterPrompts = selectLatestStarters(messages);
-  const inputLimits = selectLatestInputLimits(messages);
-  const interrupted = selectIsInterrupted(messages);
 
   // 表示専用の間引き。会話コンテキスト(LangGraph側のstate)やログには一切影響しない。
   // 上限0または未取得（値未着信/パース失敗）の場合は無制限（従来どおり全件描画）。
-  const maxDisplayMessages = selectLatestMaxDisplayMessages(messages);
-  const displayMessages =
-    maxDisplayMessages && maxDisplayMessages > 0
-      ? mainMessages.slice(-maxDisplayMessages)
-      : mainMessages;
+  const displayMessages = useMemo(
+    () =>
+      maxDisplayMessages && maxDisplayMessages > 0 ? mainMessages.slice(-maxDisplayMessages) : mainMessages,
+    [mainMessages, maxDisplayMessages]
+  );
 
   // サイドパネル（Step一覧）も同様に表示専用の間引きを適用する。
-  const maxDisplaySideSteps = selectLatestMaxDisplaySideSteps(messages);
-  const displaySideSteps =
-    maxDisplaySideSteps && maxDisplaySideSteps > 0
-      ? sideSteps.slice(-maxDisplaySideSteps)
-      : sideSteps;
+  const displaySideSteps = useMemo(
+    () => (maxDisplaySideSteps && maxDisplaySideSteps > 0 ? sideSteps.slice(-maxDisplaySideSteps) : sideSteps),
+    [sideSteps, maxDisplaySideSteps]
+  );
+
+  // 生成中に増え続ける古いStepを messagesState から外す（表示専用。messageTree.ts の pruneMessages）。
+  // 毎回は調べず、前回調べたときの件数の2倍（最低 PRUNE_MIN_STEPS 件）を超えたときだけ間引く。
+  const prunedSizeRef = useRef(0);
+  useEffect(() => {
+    if (!maxDisplayMessages && !maxDisplaySideSteps) return;
+    const size = countSteps(messages);
+    if (size <= Math.max(PRUNE_MIN_STEPS, prunedSizeRef.current * 2)) return;
+    const pruned = pruneMessages(messages, maxDisplayMessages ?? 0, maxDisplaySideSteps ?? 0);
+    prunedSizeRef.current = pruned === messages ? size : countSteps(pruned);
+    if (pruned !== messages) setMessages(pruned);
+  }, [messages, maxDisplayMessages, maxDisplaySideSteps, setMessages]);
+  // スレッドを切り替えたら数え直す。
+  useEffect(() => {
+    prunedSizeRef.current = 0;
+  }, [currentThreadId]);
+
+  // --- 前の会話の読み足し（会話欄を一番上までスクロールしたとき） ---
+  // スレッドを開いたときは表示件数ぶんしか届かない（src/thread_display.py）ため、それより前をサーバーから
+  // 少しずつ読む（app.py の /locohane/threads/{id}/older）。読み足した分は messagesState の外に持つ
+  // （表示件数の間引き・pruneMessages・生成中の再計算の対象にしない＝増えても重くならない）。
+  // 読み足した後に表示件数の窓から押し出されたメッセージも older へ移し、会話の途中が抜けないようにする。
+  const [older, setOlder] = useState<IStep[]>(NO_STEPS);
+  const [olderStatus, setOlderStatus] = useState<OlderStatus>(null);
+  const olderRef = useRef(older);
+  olderRef.current = older;
+  const olderBusyRef = useRef(false);
+  useEffect(() => {
+    setOlder(NO_STEPS);
+    setOlderStatus(null);
+    olderBusyRef.current = false;
+  }, [currentThreadId]);
+  const prevWindowRef = useRef<{ thread: string | undefined; list: IStep[] }>({ thread: undefined, list: NO_STEPS });
+  useEffect(() => {
+    const prev = prevWindowRef.current;
+    prevWindowRef.current = { thread: currentThreadId, list: displayMessages };
+    if (prev.thread !== currentThreadId || olderRef.current.length === 0) return;
+    const shown = new Set(displayMessages.map((m) => m.id));
+    const dropped = prev.list.filter((m) => !shown.has(m.id));
+    if (dropped.length) {
+      setOlder((list) => {
+        const have = new Set(list.map((m) => m.id));
+        return [...list, ...dropped.filter((m) => !have.has(m.id))];
+      });
+    }
+  }, [displayMessages, currentThreadId]);
+  const shownMessages = useMemo(() => {
+    if (older.length === 0) return displayMessages;
+    const shown = new Set(displayMessages.map((m) => m.id));
+    return [...older.filter((m) => !shown.has(m.id)), ...displayMessages];
+  }, [older, displayMessages]);
+  const loadOlder = useCallback(() => {
+    const threadId = currentThreadId;
+    const first = shownMessages[0];
+    if (!threadId || !first || !config?.dataPersistence || olderBusyRef.current) return;
+    olderBusyRef.current = true;
+    setOlderStatus('loading');
+    fetchOlderMessages(threadId, first.id, maxDisplayMessages && maxDisplayMessages > 0 ? maxDisplayMessages : 50)
+      .then((result) => {
+        if (threadId !== currentThreadIdRef.current) return;
+        if (result.messages.length) {
+          setOlder((list) => {
+            const have = new Set(list.map((m) => m.id));
+            return [...result.messages.filter((m) => !have.has(m.id)), ...list];
+          });
+          setDisplayElements((prev) => {
+            const have = new Set(prev.map((e) => e.id));
+            const fresh = result.elements.filter((e) => !have.has(e.id) && (e.type as string) !== 'avatar');
+            return fresh.length ? [...prev, ...fresh] : prev;
+          });
+        }
+        setOlderStatus(result.hasMore ? null : 'done');
+      })
+      .catch(() => {
+        if (threadId === currentThreadIdRef.current) setOlderStatus('error');
+      })
+      .finally(() => {
+        if (threadId === currentThreadIdRef.current) olderBusyRef.current = false;
+      });
+  }, [currentThreadId, shownMessages, config?.dataPersistence, maxDisplayMessages, setDisplayElements]);
+  const currentThreadIdRef = useRef(currentThreadId);
+  currentThreadIdRef.current = currentThreadId;
 
   const lastMain = mainMessages[mainMessages.length - 1];
   // 送信直後〜最終回答のストリーミング開始までの「空白時間」を可視化する。
@@ -375,7 +456,7 @@ function App() {
   const showTyping = loading && !(lastMain?.type === 'assistant_message' && lastMain.streaming);
   // 「...」の横に出す、今している処理（サイドパネルで実行中のStep）。
   // 表示件数の間引き前の messages から辿る（間引きで実行中のStepが落ちないように）。
-  const runningSteps = showTyping ? selectRunningStepChain(messages) : [];
+  const runningSteps = useMemo(() => (showTyping ? selectRunningStepChain(messages) : NO_STEPS), [showTyping, messages]);
 
   if (!authReady) return null;
   if (requireLogin && !isAuthenticated) return <LoginForm />;
@@ -389,7 +470,13 @@ function App() {
           onOpenThreads={config?.dataPersistence ? () => setMobileDrawer('threads') : undefined}
           onOpenDetails={() => setMobileDrawer('details')}
         />
-        <MessagePane messages={displayMessages} showTyping={showTyping} runningSteps={runningSteps} />
+        <MessagePane
+          messages={shownMessages}
+          showTyping={showTyping}
+          runningSteps={runningSteps}
+          olderStatus={olderStatus}
+          onReachTop={currentThreadId && config?.dataPersistence ? loadOlder : undefined}
+        />
         <AskActionBar />
         <AskFormBar />
         <AskChoiceFormBar />

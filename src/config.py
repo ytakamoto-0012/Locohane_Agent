@@ -1198,13 +1198,15 @@ class Config:
     help_path: Path
 
     # --- 永続メモリーの公開範囲と優先順位（[memory]、src/memory.py の MemoryPolicy） ---
-    # 種類ごとの公開範囲（private の種類は常に個人用、shared の種類は LLM の指定に従う）。
+    # 種類ごとの公開範囲（LLM の保存・更新はこれに従う。LLM は公開範囲を選べない）。
     memory_type_visibility: dict[str, str]
-    # LLM に渡す振り分け基準（system_prompt.md の {{memory_visibility}} に入る）。
+    # LLM に渡す「どの種類で保存するか」の基準（system_prompt.md の {{memory_visibility}} に入る）。
     memory_shared_criteria: str
     memory_private_criteria: str
     # 強制的に個人用にする個人情報・機密の目印（memory.PRIVATE_CHECKS のうち）。
     memory_force_private_checks: frozenset[str]
+    # force_private_checks を見ない種類（公開範囲は <type>_visibility だけで決まる）。
+    memory_force_private_exempt_types: frozenset[str]
     # ユーザー（メモリーの所有者のフォルダ名）ごとのランク。大きいほど上位で、食い違うメモリーはランクの高い方に従わせる。
     memory_user_ranks: dict[str, int]
     # user_ranks に無いユーザーと、共通のメモリーのランク。
@@ -1570,6 +1572,10 @@ class Config:
     # 上記と同様、表示専用の間引きでありLLMへ渡す会話コンテキストや会話ログには
     # 影響しない（frontend/src/App.tsx / messageTree.ts 参照）。
     ui_max_display_side_steps: int
+    # ツール呼び出し等の Step の入力・出力を画面へ送る・会話履歴（chat_threads.sqlite）へ保存するときの
+    # 1つあたりの最大文字数（0 = 切らない）。表示専用で、LLM へ渡す内容・会話ログ（[chat_log]）は切らない
+    # （src/thread_display.py 参照）。
+    ui_max_step_content_chars: int
     # 入力欄へこの文字数以上のテキストを貼り付けたら、入力欄へ展開せず
     # 「貼り付けテキスト」添付（pasted-text-*.txt）として扱う（0以下で無効。
     # frontend/src/components/Composer.tsx、app.py の _build_human_message 参照）。
@@ -2739,6 +2745,17 @@ def _parse_memory_force_private_checks(value: str | None) -> frozenset[str]:
     return frozenset(checks)
 
 
+def _parse_memory_force_private_exempt_types(value: str | None) -> frozenset[str]:
+    """[memory].force_private_exempt_types（カンマ区切りのメモリーの種類）を読む。キーが無ければ既定（glossary）。
+
+    Raises:
+        ValueError: MEMORY_TYPES に無い種類がある場合。
+    """
+    if value is None:
+        return memory.DEFAULT_PRIVATE_CHECK_EXEMPT_TYPES
+    return frozenset(_as_memory_types(value, "[memory].force_private_exempt_types"))
+
+
 def _as_memory_rank(value: object, key: str) -> int:
     """ランク（0以上の整数）として解釈して返す。
 
@@ -2801,6 +2818,7 @@ def memory_policy(config: Config) -> memory.MemoryPolicy:
     return memory.MemoryPolicy(
         type_visibility=dict(config.memory_type_visibility),  # type: ignore[arg-type]
         checks=config.memory_force_private_checks,
+        check_exempt_types=config.memory_force_private_exempt_types,
         ranks=dict(config.memory_user_ranks),
         default_rank=config.memory_default_rank,
     )
@@ -3662,6 +3680,9 @@ def load_config(
         memory_force_private_checks=_parse_memory_force_private_checks(
             os.getenv("MEMORY_FORCE_PRIVATE_CHECKS", memory_section.get("force_private_checks", None))
         ),
+        memory_force_private_exempt_types=_parse_memory_force_private_exempt_types(
+            os.getenv("MEMORY_FORCE_PRIVATE_EXEMPT_TYPES", memory_section.get("force_private_exempt_types", None))
+        ),
         # 空の MEMORY_USER_RANKS（.env の "MEMORY_USER_RANKS=" 等）は未設定とみなす。空を採用すると ini・ダッシュボードの
         # ランクが黙って無視されるうえ、ダッシュボード側（admin/server.py の _ranks_env_override_error）の判定と食い違う。
         memory_user_ranks=_parse_memory_user_ranks(
@@ -4507,6 +4528,9 @@ def load_config(
         ui_max_display_messages=int(os.getenv("UI_MAX_DISPLAY_MESSAGES", ui.get("max_display_messages", 50))),
         ui_max_display_side_steps=int(
             os.getenv("UI_MAX_DISPLAY_SIDE_STEPS", ui.get("max_display_side_steps", 50))
+        ),
+        ui_max_step_content_chars=max(
+            0, int(os.getenv("UI_MAX_STEP_CONTENT_CHARS", ui.get("max_step_content_chars", 20000)))
         ),
         ui_paste_as_attachment_threshold_chars=int(
             os.getenv(

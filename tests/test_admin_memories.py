@@ -137,7 +137,7 @@ def test_owner_scoped_crud_and_visibility(env):
     body = {"name": "tips", "description": "d", "type": "feedback", "content": "c", "owner": "Alice", "visibility": "shared"}
     res = client.post("/api/instances/default/memories", json=body)
     # ログインユーザー名はメモリーのフォルダ名（小文字）へ整える
-    assert res.json() == {"success": True, "owner": "alice", "visibility": "shared"}
+    assert res.json() == {"success": True, "owner": "alice", "visibility": "shared", "private_reasons": []}
     # 共通にも同じ名前で作れる（所有者が違えば別物）
     assert client.post("/api/instances/default/memories", json={**body, "owner": None}).status_code == 200
     data = client.get("/api/instances/default/memories").json()
@@ -227,13 +227,69 @@ def test_bulk_delete_is_all_or_nothing(env):
         "/api/instances/default/memories/delete",
         json={"items": [{"name": "a"}, {"name": "b", "owner": "alice"}, {"name": "b", "owner": "alice"}]},
     )
-    assert res.json() == {"deleted": 2}
+    assert res.json() == {"deleted": 2, "failed": 0, "failed_items": []}
     assert mem_store.find_memory(memory_dir, "a") is None
     assert mem_store.find_memory(memory_dir, "b", "alice") is None
     assert mem_store.find_memory(memory_dir, "keep", "alice") is not None
     backups = inst.backups_dir(env["root"], "default") / "memory"
     assert (backups / "_common" / "a").is_dir() and (backups / "alice" / "b").is_dir()
-    assert _audit_actions(env["audit"]) == ["memory_delete", "memory_delete"]
+    # まとめて削除は変更履歴を1件にまとめる（数千件でも履歴が埋まらないように）
+    assert _audit_actions(env["audit"]) == ["memory_delete"]
+    [entry] = [json.loads(line) for line in env["audit"].read_text(encoding="utf-8").splitlines()]
+    assert entry["count"] == 2 and sorted(entry["memories"]) == ["_common/a", "alice/b"]
+
+
+def test_bulk_delete_has_no_size_limit(env, monkeypatch):
+    client, memory_dir = env["client"], env["memory_dir"]
+    # 準備の作成は1件ごとの索引の作り直しを省く（準備が遅くなるだけなので）
+    original = mem_store.rebuild_index
+    monkeypatch.setattr(mem_store, "rebuild_index", lambda root, owner=None: None)
+    for i in range(600):
+        mem_store.create_memory(memory_dir, f"t{i}", "d", "glossary", "c", owner="alice")
+    monkeypatch.setattr(mem_store, "rebuild_index", original)
+    items = [{"name": f"t{i}", "owner": "alice"} for i in range(600)]
+    res = client.post("/api/instances/default/memories/delete", json={"items": items})
+    assert res.json()["deleted"] == 600
+    assert mem_store.all_memories(memory_dir, "glossary") == []
+
+
+def test_delete_by_type(env):
+    client, memory_dir = env["client"], env["memory_dir"]
+    mem_store.create_memory(memory_dir, "c1", "d", "glossary", "c")
+    mem_store.create_memory(memory_dir, "a1", "d", "glossary", "c", owner="alice")
+    mem_store.create_memory(memory_dir, "b1", "d", "glossary", "c", owner="bob")
+    mem_store.create_memory(memory_dir, "keep", "d", "feedback", "c", owner="alice")
+    assert client.post("/api/instances/default/memories/delete-by-type", json={"type": "nope"}).status_code == 400
+    # 所有者で絞れる
+    res = client.post("/api/instances/default/memories/delete-by-type", json={"type": "glossary", "owner": "alice"})
+    assert res.json()["deleted"] == 1
+    assert sorted(m.name for m in mem_store.all_memories(memory_dir, "glossary")) == ["b1", "c1"]
+    # "*"（既定）なら全員と共通
+    res = client.post("/api/instances/default/memories/delete-by-type", json={"type": "glossary"})
+    assert res.json()["deleted"] == 2
+    assert mem_store.all_memories(memory_dir, "glossary") == []
+    assert mem_store.find_memory(memory_dir, "keep", "alice") is not None
+
+
+def test_bulk_change_type_and_visibility(env):
+    client, memory_dir = env["client"], env["memory_dir"]
+    mem_store.create_memory(memory_dir, "g1", "d", "glossary", "c", owner="alice", visibility="private")
+    mem_store.create_memory(memory_dir, "g2", "d", "glossary", "パスワード", owner="alice", visibility="private")
+    mem_store.create_memory(memory_dir, "f1", "d", "feedback", "パスワードは xxx", owner="alice")
+    url = "/api/instances/default/memories/change"
+    assert client.post(url, json={"items": [{"name": "g1", "owner": "alice"}]}).status_code == 400
+    assert client.post(url, json={"items": [], "visibility": "shared"}).status_code == 400
+    items = [{"name": n, "owner": "alice"} for n in ("g1", "g2", "f1")]
+    res = client.post(url, json={"items": items, "visibility": "shared"}).json()
+    assert res["changed"] == 3
+    # 用語は目印を見ないので共有になり、feedback は目印（credential）で個人用のまま
+    assert [x.split(":")[0] for x in res["forced_private_items"]] == ["alice / f1"]
+    assert mem_store.find_memory(memory_dir, "g2", "alice").visibility == "shared"
+    assert mem_store.find_memory(memory_dir, "f1", "alice").visibility == "private"
+    res = client.post(url, json={"items": items[:2], "type": "reference"}).json()
+    assert res["changed"] == 2
+    assert sorted(m.name for m in mem_store.all_memories(memory_dir, "reference")) == ["g1", "g2"]
+    assert (inst.backups_dir(env["root"], "default") / "memory" / "alice" / "g1").is_dir()
 
 
 def test_dashboard_records_author_and_updated_by(env):

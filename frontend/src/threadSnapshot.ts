@@ -37,3 +37,18 @@ export function splitThreadElements(thread: IThread): {
   );
   return { tasklist, display };
 }
+
+export interface OlderMessages {
+  messages: IStep[];
+  elements: IMessageElement[];
+  hasMore: boolean;
+}
+
+// 会話欄を一番上までスクロールしたとき、before（今いちばん上に出ているメッセージの id）より前の会話を読む
+// （app.py の GET /locohane/threads/{thread_id}/older。スレッドを開いたときは表示件数ぶんしか届かないため）。
+export async function fetchOlderMessages(threadId: string, before: string, limit: number): Promise<OlderMessages> {
+  const query = `?before=${encodeURIComponent(before)}&limit=${limit}`;
+  const res = await fetch(`${BACKEND_URL}/locohane/threads/${threadId}/older${query}`, { credentials: 'include' });
+  if (!res.ok) throw new Error(`failed to fetch older messages (status=${res.status})`);
+  return res.json() as Promise<OlderMessages>;
+}

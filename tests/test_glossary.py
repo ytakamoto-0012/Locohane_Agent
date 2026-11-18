@@ -192,13 +192,13 @@ def _common_term(root, name, term, meaning):
 def test_common_entry_is_not_merged_into_a_users_entry(as_user):
     root, current = as_user
     _common_term(root, "glossary-bom", "BOM", "製品を構成する部品と数量の一覧。")
-    _save(term="部品表", meaning="製品を作るのに要る部品の一覧。", visibility="private")
+    _save(term="部品表", meaning="製品を作るのに要る部品の一覧。")
     out = _save(term="部品表", aliases=["BOM"], meaning="製品を作るのに要る部品の一覧。")
     assert "Merged entries" not in out
     assert "glossary-bom (common)" in out
     assert memory.find_memory(root, "glossary-bom", None) is not None
     current["user"] = "bob"
-    assert [m.name for m in memory.list_memories(root, "glossary", viewer="bob")] == ["glossary-bom"]
+    assert "glossary-bom" in [m.name for m in memory.list_memories(root, "glossary", viewer="bob")]
 
 
 def test_concurrent_saves_do_not_overwrite_each_other(as_user):
@@ -239,26 +239,46 @@ def test_recorded_fingerprint_of_a_changed_file_is_kept(as_user, tmp_path, monke
     assert states == {"terms.csv": "missing", "b.csv": "unchanged"}
 
 
-def test_private_term_name_is_not_written_into_entries_visible_to_others(as_user):
+@pytest.fixture
+def glossary_private(as_user, monkeypatch):
+    """glossary_visibility = private の設定にする。"""
+    root, _ = as_user
+    monkeypatch.setattr(memory, "_POLICIES", {})
+    memory.set_policy(root, memory.MemoryPolicy(type_visibility={**memory.DEFAULT_TYPE_VISIBILITY, "glossary": "private"}))
+    return root
+
+
+def test_private_term_name_is_not_written_into_entries_visible_to_others(as_user, glossary_private):
     root, _ = as_user
     _common_term(root, "glossary-juchu", "受注残", "未出荷の注文の残高。")
-    out = _save(term="極秘案件Z", meaning="来期に始める予定の新規事業の社内コード名。", related_terms=["受注残"], visibility="private")
+    out = _save(term="極秘案件Z", meaning="来期に始める予定の新規事業の社内コード名。", related_terms=["受注残"])
     assert "Not linked back" in out
     assert "極秘案件Z" not in memory.find_memory(root, "glossary-juchu", None).content
 
 
-def test_visibility_is_applied_when_updating(as_user):
+def test_visibility_follows_glossary_visibility_and_is_not_chosen_by_the_llm(as_user):
+    # 公開範囲は [memory] glossary_visibility で決まり、LLM は選べない（引数が無い）
+    root, _ = as_user
+    assert "visibility" not in glossary_tools.save_glossary_term.args
+    out = _save(term="パスワード変更", meaning="API Key を再発行して古い鍵を無効にする手順。")
+    [mem] = _glossary(root)
+    assert mem.visibility == "shared" and "Visibility: shared" in out
+
+
+def test_updating_a_private_entry_makes_it_follow_the_setting(as_user):
+    # 以前 private で保存された用語も、次の更新で設定（既定 shared）どおりになる
     root, _ = as_user
     _save(term="受注残", meaning="未出荷の注文の残高。")
-    _save(term="受注残", meaning="未出荷の注文の残高。", visibility="private")
     [mem] = _glossary(root)
-    assert mem.visibility == "private"
+    memory.edit_memory(root, mem.name, description=mem.description, memory_type="glossary", content=mem.content, owner="alice", visibility="private")
+    assert _glossary(root)[0].visibility == "private"
+    _save(term="受注残", meaning="未出荷の注文の残高。")
+    assert _glossary(root)[0].visibility == "shared"
 
 
-def test_merging_a_private_duplicate_keeps_the_entry_private(as_user):
+def test_entries_are_private_when_glossary_visibility_is_private(as_user, glossary_private):
     root, _ = as_user
     _save(term="BOM", meaning="製品を作るのに要る部品の一覧（部品表）。")
-    _save(term="部品表", meaning="製品を構成する部品と数量の一覧。", visibility="private")
     _save(term="BOM", aliases=["部品表"], meaning="製品を構成する部品と数量の一覧（部品表）。")
     [mem] = _glossary(root)
     assert mem.visibility == "private"
@@ -334,3 +354,41 @@ def test_glossary_does_not_push_other_memories_out_of_the_index(tmp_path):
     assert "zz-project" in block and "common-ref" in block
     assert sum(1 for line in block.splitlines() if line.startswith("- [glossary]")) == 198
     assert "102 more glossary terms not shown" in block
+
+
+def test_translations_are_written_per_language(as_user):
+    # 他の言語の訳語は、言語ごとに見出し付きの1行にする（以前は別名に混ざり、何語か分からない単語の羅列になった）
+    root, _ = as_user
+    out = _save(
+        term="受注残",
+        meaning="受注したがまだ出荷していない注文の残高。",
+        aliases=["受注残高", "order backlog"],
+        translations={"英語": ["order backlog", "backlog"], "de": "Auftragsbestand", "中国語": ["订单积压"]},
+    )
+    assert "Translations: English: order backlog / backlog; German: Auftragsbestand; Chinese: 订单积压" in out
+    [mem] = _glossary(root)
+    assert (
+        "**Aliases:**\n- 受注残高\n**Translations:**\n- English: order backlog / backlog\n- German: Auftragsbestand\n"
+        "- Chinese: 订单积压\n**Meaning:**"
+    ) in mem.content
+    # 登録し直すと言語ごとに足し、訳語でも同じ用語として見つかる（重複を作らない）
+    _save(term="Auftragsbestand", meaning="受注したがまだ出荷していない注文の残高。", translations={"German": ["Auftragsrückstand"], "French": "carnet de commandes"})
+    [mem] = _glossary(root)
+    entry = glossary.parse_entry(mem)
+    assert entry.translations == {
+        "English": ["order backlog", "backlog"],
+        "German": ["Auftragsbestand", "Auftragsrückstand"],
+        "Chinese": ["订单积压"],
+        "French": ["carnet de commandes"],
+    }
+    assert entry.term == "受注残"
+
+
+def test_translations_parse_bracket_and_plain_lines():
+    entry = glossary.clean_translations(["【英語】order backlog", "German: Auftragsbestand / Rückstand", "[zh] 订单积压"])
+    assert entry == {"English": ["order backlog"], "German": ["Auftragsbestand", "Rückstand"], "Chinese": ["订单积压"]}
+    mem = memory.Memory(
+        name="g", description="d", memory_type="glossary", path=Path("g.md"),
+        content="**Term:** X\n**Translations:**\n- English: a / b\n- loose word\n**Meaning:** m",
+    )
+    assert glossary.parse_entry(mem).translations == {"English": ["a", "b"], "Other": ["loose word"]}

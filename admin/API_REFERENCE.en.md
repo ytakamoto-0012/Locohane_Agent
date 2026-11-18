@@ -442,9 +442,16 @@ $C -X PUT "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H" -H 
   -d '{"description":"One-line description","type":"feedback","content":"New text","visibility":"private"}'
 # Delete
 $C -X DELETE "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H"
-# Delete several at once (nothing is deleted if any of them is not found; omit owner for common)
+# Delete several at once (nothing is deleted if any of them is not found; omit owner for common; no limit on the count). Response: deleted/failed/failed_items
 $C -X POST $BASE/api/instances/default/memories/delete -H "$H" -H "$J" \
   -d '{"items":[{"name":"my-note","owner":"alice"},{"name":"old-note"}]}'
+# Delete every memory of a type (owner: "*" = everyone and common (default), "" = common only, a user name = that user only)
+$C -X POST $BASE/api/instances/default/memories/delete-by-type -H "$H" -H "$J" \
+  -d '{"type":"glossary","owner":"*"}'
+# Change the type / visibility at once (an omitted one is kept; visibility does not apply to common memories).
+# Response: changed/failed/failed_items/forced_private_items (kept private by a private type or a check)
+$C -X POST $BASE/api/instances/default/memories/change -H "$H" -H "$J" \
+  -d '{"items":[{"name":"my-note","owner":"alice"}],"visibility":"shared"}'
 # Copy to another instance (the source is unchanged; each memory is handled on its own, and failures are reported with a reason).
 # Omit target_owner to keep each memory's owner, "" for common, or a user name to put them all under that user.
 # A private memory is copied only to the same owner. A memory whose name exists at the destination is skipped (never replaced).

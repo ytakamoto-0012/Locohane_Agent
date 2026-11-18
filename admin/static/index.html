@@ -46,6 +46,7 @@
       </div>
     </header>
     <main id="main"></main>
+    <button type="button" id="scroll-top-btn" class="scroll-top-btn hidden" data-no-busy title="一番上へ戻る" aria-label="一番上へ戻る">↑</button>
   </div>
 </template>
 
@@ -311,6 +312,20 @@
       <label class="memory-page-size">表示件数 <select id="memory-page-size"><option value="50">50</option><option value="100" selected>100</option><option value="200">200</option><option value="500">500</option></select></label>
       <button type="button" id="new-memory-btn">新規作成</button>
     </div>
+    <div class="inline-form memory-selection">
+      <span class="hint" id="memories-selection-info"></span>
+      <button type="button" id="memories-select-filtered-btn" title="ページをまたいで、今の絞り込みに当てはまるメモリーをすべて選択します">絞り込み結果をすべて選択</button>
+      <button type="button" id="memories-clear-selection-btn">選択を解除</button>
+    </div>
+    <div class="inline-actions">
+      <button type="button" id="draft-skill-from-memories-btn" disabled title="選んだメモリーの内容をもとに、AI にスキル（SKILL.md）を下書きさせ、指定したユーザーのドラフトスキルとして保存します">選択したメモリーからドラフトスキルを作成</button>
+      <button type="button" id="copy-memories-btn" disabled title="選んだメモリーを、別のインスタンスの永続メモリーへ複製します（コピー元は変わりません）">選択したメモリーを別のインスタンスへコピー</button>
+      <button type="button" id="change-memories-btn" disabled title="選んだメモリーの種類・公開範囲をまとめて変えます（説明・本文はそのまま）">選択したメモリーの種類・公開範囲を変更</button>
+      <button type="button" id="delete-memories-btn" class="btn-danger" disabled>選択したメモリーを削除</button>
+      <button type="button" id="delete-type-memories-btn" class="btn-danger" disabled title="「すべての種類」以外を選ぶと押せます。所有者の絞り込みは効きます（名前・説明・本文の絞り込みは効きません）">この種類のメモリーをすべて削除</button>
+    </div>
+    <div class="hint" id="memories-busy"></div>
+    <div class="error" id="memories-error"></div>
     <table class="data-table">
       <thead><tr><th class="col-check"><input type="checkbox" id="memories-select-all" title="表示中をすべて選択" /></th><th class="sortable" data-sort="owner">所有者</th><th class="sortable" data-sort="visibility">公開範囲</th><th class="sortable" data-sort="type">種類</th><th class="sortable" data-sort="name">名前</th><th class="sortable" data-sort="description">説明</th><th class="sortable" data-sort="preview">本文</th><th class="sortable" data-sort="mtime">更新日時</th></tr></thead>
       <tbody id="memories-tbody"></tbody>
@@ -320,12 +335,22 @@
       <span class="hint" id="memories-page-info"></span>
       <button type="button" id="memories-next-btn">次へ</button>
     </div>
-    <div class="inline-actions">
-      <button type="button" id="draft-skill-from-memories-btn" disabled title="選んだメモリーの内容をもとに、AI にスキル（SKILL.md）を下書きさせ、指定したユーザーのドラフトスキルとして保存します">選択したメモリーからドラフトスキルを作成</button>
-      <button type="button" id="copy-memories-btn" disabled title="選んだメモリーを、別のインスタンスの永続メモリーへ複製します（コピー元は変わりません）">選択したメモリーを別のインスタンスへコピー</button>
-      <button type="button" id="delete-memories-btn" class="btn-danger" disabled>選択したメモリーを削除</button>
+    <div class="modal-backdrop hidden" id="change-memories-form-modal">
+      <div class="modal">
+        <form id="change-memories-form" class="memory-form">
+          <h3>メモリーの種類・公開範囲をまとめて変更</h3>
+          <p class="hint">変えない項目は「変更しない」のままにします。公開範囲は共通のメモリーには効きません。種類 user（private の種類）や、個人情報・機密の目印に当たるメモリーは、共有を選んでも個人用のままです。変更前の内容はバックアップに残ります。</p>
+          <div class="hint" id="change-memories-count"></div>
+          <label>種類<select name="type"><option value="">変更しない</option></select></label>
+          <label>公開範囲<select name="visibility"><option value="">変更しない</option><option value="private">個人用（本人だけ）</option><option value="shared">共有（全ユーザーが検索できる）</option></select></label>
+          <div class="error" id="change-memories-error"></div>
+          <div class="inline-actions">
+            <button type="button" id="change-memories-cancel-btn" class="btn-cancel">閉じる</button>
+            <button type="submit">変更</button>
+          </div>
+        </form>
+      </div>
     </div>
-    <div class="error" id="memories-error"></div>
     <div class="modal-backdrop hidden" id="copy-memories-form-modal">
       <div class="modal modal-wide">
         <form id="copy-memories-form" class="memory-form">
@@ -378,7 +403,7 @@
           <label>名前（半角英数字・-・_）<input type="text" name="name" maxlength="64" required /></label>
           <label>種類<select name="type"></select></label>
           <label class="memory-visibility-row">公開範囲<select name="visibility"><option value="private">個人用（本人だけ）</option><option value="shared">共有（全ユーザーが検索できる）</option></select></label>
-          <p class="hint memory-visibility-row">種類 user と、個人情報・機密（メールアドレス・電話番号・カード番号・パスワード・社外秘・個人フォルダのパス等）を含むものは、共有を選んでも個人用で保存されます。</p>
+          <p class="hint memory-visibility-row">[memory] で private にした種類（既定は user）と、[memory] force_private_checks の目印（既定はカード番号・パスワード等の語。[memory] force_private_exempt_types の種類＝既定 glossary には効かない）に当たるものは、共有を選んでも個人用で保存されます。AI がこのメモリーを次に更新すると、公開範囲は [memory] の設定どおりに戻ります。</p>
           <label>説明（一行。索引 MEMORY.md に載ります）<input type="text" name="description" required /></label>
           <label>本文<textarea name="content" rows="14" required></textarea></label>
           <div class="inline-form memory-translate">

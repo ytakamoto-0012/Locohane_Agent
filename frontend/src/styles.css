@@ -303,6 +303,17 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  /* 前の会話を読み足して数千件になっても、画面の外の吹き出しは配置計算・描画を省かせる（一度描いた高さは覚える）。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+}
+
+/* 会話欄の一番上：前の会話を読み込み中・これより前は無い（MessageThread の olderStatus）。 */
+.message-thread-older {
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.6;
+  padding: 4px 0;
 }
 
 .message-row--user {

@@ -1085,25 +1085,35 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   検索・読み取りできる。書き換え・削除は本人だけ）を持つ。決め方は `config.ini` の `[memory]` で変えられる
   （設定ダッシュボードの「メモリー」グループ。インスタンスごと）。社内のローカル運用が前提のため、既定は
   「本人・家族のことだけ個人用、ほかは共有」。
-  - **LLM の判断**: LLM は、システムプロンプトの Memory System 節に差し込まれる振り分け基準（`shared_criteria` /
-    `private_criteria`。`{{memory_visibility}}` を `src/memory.py` の `render_visibility_block` が組み立てる）に沿って、
-    種類ではなく内容で `visibility` を選ぶ。省略すると `shared`。基準は言語を問わず、改行して複数の条件を書ける
-    （プロンプトの「- "shared" for:」「- "private" for:」の下に字下げして入る）。設定画面の「AIで清書」で、下書きを
+  - **LLM は選ばない**: `create_memory`/`update_memory`/`save_glossary_term` に `visibility` の引数は無い。
+    LLM が保存・更新するたびに、下の種類ごとの公開範囲と目印で決める（更新でも今の値を引き継がない。以前 LLM が
+    `private` を選んでいたメモリーも、次の更新から設定どおりになる）。システムプロンプトの Memory System 節
+    （`{{memory_visibility}}` を `src/memory.py` の `render_visibility_block` が組み立てる）では、どの種類が
+    個人用・共有かを伝え、振り分け基準（`shared_criteria` / `private_criteria`）を「どの種類で保存するか」の基準として
+    渡す（個人用にしたい内容は `private` の種類＝既定 `user` で保存させる。`private` の種類が無ければ「保存しないもの」
+    として伝える）。基準は言語を問わず、改行して複数の条件を書ける。設定画面の「AIで清書」で、下書きを
     LLM にダッシュボードの表示言語の箇条書きへ整えさせられる（`admin/memories.py` の `polish-criteria`。「AIに相談」と
     同じく「管理者設定」の「回答に使う LLM」の接続先を使い、保存はしない）。
-  - **種類ごとの公開範囲**（`<type>_visibility`）: `private` の種類は、指定や内容に関係なく常に `private`
-    （既定は `user` だけ）。`shared` の種類は上の LLM の判断に従う。
+  - **種類ごとの公開範囲**（`<type>_visibility`）: `private` の種類は常に `private`（既定は `user` だけ）、
+    `shared` の種類は `shared`（下の目印に当たれば `private`）。
   - **強制的に private にする目印**（`force_private_checks`）: 有効にした目印が説明・本文・元ファイルのパスにあれば、
-    指定に関係なく `private` で保存する。`email`（メールアドレス）・`phone`（電話番号）・`card_id`（カード／ID 番号）・
+    種類の設定に関係なく `private` で保存する。`email`（メールアドレス）・`phone`（電話番号）・`card_id`（カード／ID 番号）・
     `credential`（パスワード・口座番号・マイナンバー等の語）・`confidential_label`（社外秘等の表示）・
     `personal_path`（`C:\Users\<名前>\` の個人フォルダのパス）から選ぶ（`src/memory.py` の `_SENSITIVE_PATTERNS`）。
     既定は `card_id` と `credential` だけ。
+  - **目印を見ない種類**（`force_private_exempt_types`、既定 `glossary`）: ここに書いた種類は目印を見ず、公開範囲は
+    `<type>_visibility` だけで決まる。用語集は社内用語の定義なので「パスワード」「API Key」等の語や番号の例が普通に
+    出てくる。以前は目印で用語が `private` に倒れ、`glossary_visibility = shared` にしても個人用になり、設定ダッシュボードで
+    共有に直しても戻されていた。
+  - **設定ダッシュボードで人が選ぶ**: 「メモリー」画面の編集・まとめて変更では、人が選んだ公開範囲を使う（`private` の
+    種類・目印に当たるものは共有を選んでも `private`。保存後のメッセージに理由が出る）。AI がそのメモリーを次に更新すると、
+    公開範囲は設定どおりに戻る。
   - 規則は `load_config()` が `memory_dir` ごとに登録し（`memory.set_policy`）、ツール・索引・設定ダッシュボードの
     編集が同じ規則を使う。変更はインスタンスの再起動後に効く（設定ダッシュボードの編集には保存直後から効く）。
     保存済みのメモリーの `visibility` は書き換えないが、`private` にした
     種類・有効にした目印に当たる `shared` のメモリーは、他のユーザーには見せなくなる。
-  - `visibility` が無い・壊れているユーザーのメモリーも `private` とみなす。ログ（`create_memory: ... visibility=...
-    (requested=...)`）には、LLM が指定した値（省略なら `None`）と実際に保存した値の両方が出る。
+  - `visibility` が無い・壊れているユーザーのメモリーも `private` とみなす。ログ（`create_memory: ... visibility=...`）には
+    実際に保存した値が出る。
 - **検索と優先順位**: `search_memory`/`list_memories`/索引は、自分のメモリー → 共通 → 他のユーザーの `shared` の
   メモリーの順に並べる（`(mine, ...)`・`(common)`・`(user: <ユーザー>)` を付ける）。他のユーザーの `private` の
   メモリーは LLM に一切渡さない（LLM の判断に任せず、`src/memory.py` の `is_visible_to` で機械的に除く）。
@@ -1153,8 +1163,15 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   `[memory]` の設定を使う）。所有者・種類・文字（名前・説明・本文）で絞り込め、見出しを押すと並べ替えられる。一覧には本文の先頭
   120文字も出す。件数が多くても扱えるよう、1ページの表示件数（50/100/200/500、既定100）を選んでページ送りする。
   編集・新規作成・コピー・ドラフトスキル作成の入力欄はポップアップで開く（Esc で閉じる）。
-  一覧のチェックボックスで表示中のメモリーを選んでまとめて削除できる（1件でも見つからなければ何も削除しない。
-  絞り込みを変えると選択は外れる）。
+  一覧のチェックボックスで選んだメモリーをまとめて削除できる（1件でも見つからなければ何も削除しない。
+  選択はページ・並べ替えをまたいで残り、「絞り込み結果をすべて選択」で全ページ分を選べる。絞り込みを変えると選択は外れる）。
+  件数に上限は無い（`src/memory.py` の `delete_memories` が索引 MEMORY.md の作り直しを所有者ごとに最後の1回にまとめる。
+  以前は1件ごとに作り直していたため数百件で固まった）。変更履歴にはまとめて1件で残す。
+  種類の絞り込みを選ぶと「この種類のメモリーをすべて削除」で、その種類のメモリーを全件消せる（所有者の絞り込みは効き、
+  名前・説明・本文の絞り込みは効かない。`POST /api/instances/<name>/memories/delete-by-type`）。
+  「選択したメモリーの種類・公開範囲を変更」で、選んだメモリーの種類・公開範囲をまとめて変えられる（説明・本文は
+  そのまま。公開範囲は共通のメモリーには効かず、`private` の種類・目印に当たるものは個人用のまま理由を表示。
+  `POST /api/instances/<name>/memories/change`）。
   同じく選んだメモリー（最大20件）から**ドラフトスキルを作成**できる（「選択したメモリーからドラフトスキルを作成」。
   `admin/memories.py` の `draft-skill`）。LLM（下の「AIで翻訳」と同じ接続先）がメモリーの内容を1つの SKILL.md に
   まとめ、作成先ユーザーのドラフト置き場 `[skill_creator] draft_dir/<ユーザー>/<スキル名>/` へ skill-creator の
@@ -1183,9 +1200,14 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   `reference` に1件でまとめ、用語の意味を書かずにファイルを指すだけの記録にしていたため、用語は専用ツールで保存させる
   （`src/tools/glossary_tools.py`、ロジックは `src/glossary.py`。`create_memory`/`update_memory` に `glossary` を渡すとエラーで誘導する）。
   - 1語1ファイル。名前は用語から自動で作る（ASCII だけの用語は `glossary-<用語>`、日本語の用語はハッシュ）。
-  - 本文は決まった見出し（`**Term:**`・`**Aliases:**`・`**Meaning:**`・`**Usage:**`・`**Related terms:**`・`**Sources:**`）。
+  - 本文は決まった見出し（`**Term:**`・`**Aliases:**`・`**Translations:**`・`**Meaning:**`・`**Usage:**`・`**Related terms:**`・`**Sources:**`）。
     説明（索引に載る一行）は「用語 (別名): 意味の先頭」。別名・関連用語・出典は1行1件の箇条書き（カンマを含む別名が
     読み戻しで割れないため。以前のカンマ区切りの本文も読める）。
+  - 他の言語の訳語（`translations`。例 `{"English": ["order backlog"], "German": ["Auftragsbestand"]}`）は、
+    `**Translations:**` の下に1言語1行で「`- English: order backlog / backlog`」と書く（以前は別名に混ざり、
+    何語か分からない単語の羅列になった）。言語名は「英語」「en」等を英語の名前（English）にそろえ
+    （`src/glossary.py` の `_LANGUAGE_NAMES`。無い言語は渡された名前のまま）、登録し直すと言語ごとに足す。
+    訳語として書いた語は別名から外し、訳語でも同じ用語として見つかる（重複の判定に使う）。
   - 意味（`meaning`）は必須。パス・`@N`・ファイル名・「参照」等の言い回しを除くとほとんど何も残らない（ファイルを指すだけの）
     書き方は拒否する。ファイル名は拡張子の前の ASCII の並び（日本語のファイル名なら区切りまで、最大12文字）だけを除く
     （ファイル名の前に書いた定義まで消さないため）。出典（`sources`）も1つ以上要る（ファイルとシート・行・ページ、
@@ -2004,9 +2026,10 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[token_ratio]` | `enabled` | 設定ダッシュボード専用（アプリ本体は読まない）。基準値`[graph] token_guard_soft_threshold`や比率を変更したときに、各閾値へ「基準値×比率」を自動入力するか | - |
 | `[token_ratio]` | `<セクション>.<キー>`（例: `subagent.token_guard_soft_threshold`） | 自動入力先の閾値の、基準値に対する比率（空欄なら連動させない） | - |
 | `[memory]` | `user_visibility` / `feedback_visibility` / `project_visibility` / `reference_visibility` / `glossary_visibility` | 種類ごとの永続メモリーの公開範囲。`private` の種類は常に個人用、`shared` の種類は LLM が振り分け基準で選ぶ（既定は `user` だけ `private`。「永続メモリー」参照） | `MEMORY_<TYPE>_VISIBILITY` |
-| `[memory]` | `shared_criteria` / `private_criteria` | LLM に渡す振り分け基準（言語は問わず、改行可。空欄なら既定の文言。設定ダッシュボードの「AIで清書」で表示言語の箇条書きに整えられる） | `MEMORY_SHARED_CRITERIA` / `MEMORY_PRIVATE_CRITERIA` |
+| `[memory]` | `shared_criteria` / `private_criteria` | LLM に渡す「どの種類で保存するか」の基準（公開範囲は種類で決まり LLM は選ばない。言語は問わず、改行可。空欄なら既定の文言。設定ダッシュボードの「AIで清書」で表示言語の箇条書きに整えられる） | `MEMORY_SHARED_CRITERIA` / `MEMORY_PRIVATE_CRITERIA` |
 | `[memory]` | `user_ranks` / `default_rank` | メモリーの優先順位に使うユーザーのランク（`{"ユーザー名": ランク}`。0以上の整数で大きいほど上位。食い違うメモリーはランクの高い方に従う。設定ダッシュボードの「ユーザー」画面でも設定できる）と、未設定のユーザー・共通のメモリーのランク（既定1）。「永続メモリー」参照 | `MEMORY_USER_RANKS` / `MEMORY_DEFAULT_RANK` |
-| `[memory]` | `force_private_checks` | 指定に関係なく `private` にする目印のリスト（`email`／`phone`／`card_id`／`credential`／`confidential_label`／`personal_path`。既定 `["card_id", "credential"]`） | `MEMORY_FORCE_PRIVATE_CHECKS` |
+| `[memory]` | `force_private_checks` | 種類の設定に関係なく `private` にする目印のリスト（`email`／`phone`／`card_id`／`credential`／`confidential_label`／`personal_path`。既定 `["card_id", "credential"]`） | `MEMORY_FORCE_PRIVATE_CHECKS` |
+| `[memory]` | `force_private_exempt_types` | `force_private_checks` を見ない種類（カンマ区切り。既定 `glossary`。空欄なら全種類で見る） | `MEMORY_FORCE_PRIVATE_EXEMPT_TYPES` |
 | `[path_memory]` | `dir` | パスメモリー機能のレジストリファイル（`<thread_id>.json`）保存先 | `PATH_MEMORY_DIR` |
 | `[path_memory]` | `retention_days` | パスメモリーのレジストリファイル保持日数 | `PATH_MEMORY_RETENTION_DAYS` |
 | `[path_memory]` | `cleanup_interval_hours` | パスメモリーの自動削除チェック間隔（時間） | `PATH_MEMORY_CLEANUP_INTERVAL_HOURS` |
@@ -2098,7 +2121,8 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[data_backup]` | `enabled`・`dest_dir`・`times`・`weekdays`・`keep`・`exclude_workdir`・`exclude_logs`・`exclude` | データのバックアップ（「データバックアップ」節）の既定値。全インスタンス共通（インスタンス別に上書きできない）。設定ダッシュボードで保存した値（`<instances_dir>/data_backup.json`）が優先する | - |
 | `[ui]` | `default_language` | 表示言語の既定値（`auto`＝ブラウザの言語 / `ja` / `en`）。利用者が画面で言語を選ぶとそちらが優先される。AI も選んだ言語で回答する（「言語切り替え（日本語 / 英語）」節） | `UI_DEFAULT_LANGUAGE` |
 | `[ui]` | `max_display_messages` | チャット画面に描画するメッセージの最大件数（表示専用の間引き、`0`で無制限） | `UI_MAX_DISPLAY_MESSAGES` |
-| `[ui]` | `max_display_side_steps` | サイドパネルに描画するツール呼び出し等のStepの最大件数（表示専用の間引き、`0`で無制限） | `UI_MAX_DISPLAY_SIDE_STEPS` |
+| `[ui]` | `max_display_side_steps` | サイドパネルに描画するツール呼び出し等のStepの最大件数（表示専用の間引き、`0`で無制限）。会話履歴を開いたときも `max_display_messages` とこの件数ぶんだけを送り（`src/thread_display.py`）、生成中も画面側で同じ件数まで間引く。会話欄を一番上までスクロールすると、それより前の会話を `max_display_messages` 件ずつ読み足す（`GET /locohane/threads/{id}/older`。読み足した分は画面の外を描かない） | `UI_MAX_DISPLAY_SIDE_STEPS` |
+| `[ui]` | `max_step_content_chars` | サイドパネルのStepの入力・出力1つあたりの最大文字数。超えた分は画面へ送らず、会話履歴にも保存しない（既定 `20000`、`0`で切らない。LLMへ渡す内容・会話ログは切らない） | `UI_MAX_STEP_CONTENT_CHARS` |
 | `[ui]` | `paste_as_attachment_threshold_chars` | 入力欄へこの文字数以上のテキストを貼り付けると、入力欄へ展開せず「貼り付けテキスト」カード（`pasted-text-*.txt` 添付）にする。送信時はパスではなく本文としてLLMへ渡す（`0`以下で無効） | `UI_PASTE_AS_ATTACHMENT_THRESHOLD_CHARS` |
 | `[ui]` | `max_input_chars` | 1回の送信の最大文字数（入力欄＋貼り付けテキストの合計）。超過中は送信不可、バックエンドも拒否する（`0`以下で無制限） | `UI_MAX_INPUT_CHARS` |
 | `[ui]` | `token_usage_warn_threshold` | トークン使用量カードの「リクエスト1回あたり」行（メインと実行中のサブエージェント/一括委譲のグループごとに1行。コンテキスト圧縮の要約呼び出しは「圧縮処理（直近1回）」行として出し、会話累計にも加算する。行ごとに判定）の合計トークン数がこの値以上でオレンジ太字表示（`0`以下で無効） | `UI_TOKEN_USAGE_WARN_THRESHOLD` |

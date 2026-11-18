@@ -6,6 +6,9 @@
     **Aliases:**
     - 別名1
     - 別名2
+    **Translations:**
+    - English: 訳語1 / 訳語2
+    - German: 訳語
     **Meaning:** 用語の意味（必須。ファイルを指すだけの書き方は拒否する）
     **Usage:** 使われ方・使われる場面（任意）
     **Related terms:**
@@ -16,6 +19,9 @@
 
 別名・関連用語は1行1件の箇条書きにする（カンマ区切りにすると、カンマや読点を含む別名が読み戻すときに割れるため）。
 以前のカンマ区切り（`**Aliases:** 別名1, 別名2`）の本文も読める。
+
+他の言語の訳語（Translations）は1言語1行で「言語名: 訳語1 / 訳語2」と書く。以前は訳語を別名に混ぜるしかなく、
+どの語が何語か分からない単語の羅列になっていた。言語名は英語の名前にそろえる（「英語」「en」も English。_LANGUAGE_NAMES）。
 
 LLM が create_memory で辞書ファイルの中身を reference に1件でまとめたり、「意味は○○.xlsx を参照」とだけ
 書いたりしていたため、用語の登録は専用ツール（tools/glossary_tools.py の save_glossary_term）に任せ、
@@ -58,6 +64,7 @@ _NAME_PREFIX = "glossary-"
 _LABELS = {
     "term": "Term",
     "aliases": "Aliases",
+    "translations": "Translations",
     "meaning": "Meaning",
     "usage": "Usage",
     "related": "Related terms",
@@ -70,6 +77,33 @@ _BULLET_RE = re.compile(r"^\s*[-*]\s+")
 # 以前のカンマ区切りの一覧（箇条書きでない行）を分ける区切り。
 _LIST_SPLIT_RE = re.compile(r"\s*[,、，;；]\s*")
 _DESCRIPTION_MEANING_CHARS = 80
+# 訳語の行（「- 言語名: 訳語1 / 訳語2」）。
+_TRANSLATION_LINE_RE = re.compile(r"^\s*[-*]?\s*(?:【([^】]+)】|\[([^\]]+)\]|([^:：]+)[:：])\s*(.*)$")
+_TRANSLATION_SPLIT_RE = re.compile(r"\s*(?:/|／|;|；)\s*")
+_TRANSLATION_SEPARATOR = " / "
+_TRANSLATIONS_LANG_MAX = 20
+_TRANSLATIONS_WORDS_MAX = 10
+# 言語名のそろえ方（正規化した書き方 → 英語の名前）。無い言語は渡された名前のまま使う。
+_LANGUAGE_NAMES: dict[str, str] = {}
+for _name, _variants in {
+    "English": ("en", "eng", "english", "英語", "英", "英文"),
+    "Japanese": ("ja", "jp", "jpn", "japanese", "日本語", "和文"),
+    "German": ("de", "ger", "deu", "german", "deutsch", "ドイツ語", "独語", "独", "德语"),
+    "Chinese": ("zh", "zho", "chi", "cn", "chinese", "中国語", "中文", "汉语", "中", "中国語(簡体字)", "簡体字", "简体中文", "zh-cn", "zh-hans"),
+    "Chinese (Traditional)": ("zh-tw", "zh-hant", "繁体字", "繁體中文", "中国語(繁体字)", "traditional chinese"),
+    "Korean": ("ko", "kor", "korean", "韓国語", "한국어", "朝鮮語"),
+    "French": ("fr", "fre", "fra", "french", "français", "francais", "フランス語", "仏語"),
+    "Spanish": ("es", "spa", "spanish", "español", "espanol", "スペイン語"),
+    "Italian": ("it", "ita", "italian", "italiano", "イタリア語"),
+    "Portuguese": ("pt", "por", "portuguese", "português", "ポルトガル語"),
+    "Russian": ("ru", "rus", "russian", "русский", "ロシア語"),
+    "Vietnamese": ("vi", "vie", "vietnamese", "tiếng việt", "ベトナム語"),
+    "Thai": ("th", "tha", "thai", "ไทย", "タイ語"),
+    "Indonesian": ("id", "ind", "indonesian", "bahasa indonesia", "インドネシア語"),
+    "Dutch": ("nl", "nld", "dutch", "nederlands", "オランダ語"),
+}.items():
+    for _v in (_name, *_variants):
+        _LANGUAGE_NAMES[re.sub(r"\s+", "", unicodedata.normalize("NFKC", _v)).casefold()] = _name
 
 # 「意味はファイルを見て」だけの書き方の目印。
 # パス・@N（ここから後ろの空白・読点までをまとめて除く）。
@@ -120,10 +154,13 @@ class GlossaryEntry:
     related: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
     notes: str = ""
+    # 他の言語の訳語（言語名（English 等）→ 訳語）。言語の並びは登録した順。
+    translations: dict[str, list[str]] = field(default_factory=dict)
 
     def keys(self) -> set[str]:
-        """一致の判定に使う、用語と別名の正規化した形。"""
-        return {k for k in (normalize(t) for t in [self.term, *self.aliases]) if k}
+        """一致の判定に使う、用語・別名・訳語の正規化した形（訳語でも同じ用語として見つかるように）。"""
+        words = [self.term, *self.aliases, *(w for ws in self.translations.values() for w in ws)]
+        return {k for k in (normalize(t) for t in words) if k}
 
 
 @dataclass(frozen=True)
@@ -173,6 +210,56 @@ def _clean_list(values: list[str] | None) -> list[str]:
     return result
 
 
+def language_name(raw: str) -> str:
+    """言語名を英語の名前にそろえる（「英語」「en」→ English。知らない言語は前後の空白・括弧を除いたまま）。"""
+    text = " ".join(str(raw).split()).strip("【】[]()（） ")
+    key = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text)).casefold()
+    return _LANGUAGE_NAMES.get(key, text)
+
+
+def clean_translations(raw: object) -> dict[str, list[str]]:
+    """訳語（{言語名: 訳語 または [訳語, ...]}）を整える: 言語名をそろえ、同じ言語はまとめ、空・重複を除く。
+
+    LLM が "German: Auftragsbestand" のような文字列のリストで渡しても受け付ける。
+    """
+    pairs: list[tuple[str, object]] = []
+    if isinstance(raw, dict):
+        pairs = list(raw.items())
+    elif isinstance(raw, list):
+        for item in raw:
+            m = _TRANSLATION_LINE_RE.match(str(item))
+            if m:
+                pairs.append((next(g for g in m.groups()[:3] if g), m.group(4)))
+    result: dict[str, list[str]] = {}
+    for lang_raw, words_raw in pairs:
+        lang = language_name(str(lang_raw))
+        if not lang:
+            continue
+        words = words_raw if isinstance(words_raw, list) else _TRANSLATION_SPLIT_RE.split(str(words_raw or ""))
+        merged = _clean_list([*result.get(lang, []), *(str(w) for w in words)])
+        if merged:
+            result[lang] = merged[:_TRANSLATIONS_WORDS_MAX]
+    return dict(list(result.items())[:_TRANSLATIONS_LANG_MAX])
+
+
+def _merge_translations(old: dict[str, list[str]], new: dict[str, list[str]]) -> dict[str, list[str]]:
+    """訳語を言語ごとに合わせる（今までの訳語の後ろに新しい訳語を足す）。"""
+    result = {lang: list(words) for lang, words in old.items()}
+    for lang, words in new.items():
+        result[lang] = _clean_list([*result.get(lang, []), *words])[:_TRANSLATIONS_WORDS_MAX]
+    return dict(list(result.items())[:_TRANSLATIONS_LANG_MAX])
+
+
+def _parse_translations(lines: list[str]) -> dict[str, list[str]]:
+    """**Translations:** の行（「- 言語名: 訳語1 / 訳語2」）を読む。言語名の無い行は Other にする。"""
+    pairs: list[str] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        pairs.append(line if _TRANSLATION_LINE_RE.match(line) else f"Other: {_BULLET_RE.sub('', line).strip()}")
+    return clean_translations(pairs)
+
+
 def _parse_list(lines: list[str]) -> list[str]:
     """一覧の見出しの値: 箇条書きの行は1行1件、そうでない行（以前のカンマ区切り）は区切りで分ける。"""
     items: list[str] = []
@@ -219,6 +306,7 @@ def parse_entry(mem: memory.Memory) -> GlossaryEntry:
     return GlossaryEntry(
         term=text("term") or _legacy_term(mem.description, mem.name),
         aliases=_parse_list(fields.get("aliases", [])),
+        translations=_parse_translations(fields.get("translations", [])),
         meaning=text("meaning"),
         usage=text("usage"),
         related=_parse_list(fields.get("related", [])),
@@ -233,6 +321,9 @@ def render_content(entry: GlossaryEntry) -> str:
     if entry.aliases:
         lines.append(f"**{_LABELS['aliases']}:**")
         lines += [f"- {a}" for a in entry.aliases]
+    if entry.translations:
+        lines.append(f"**{_LABELS['translations']}:**")
+        lines += [f"- {lang}: {_TRANSLATION_SEPARATOR.join(words)}" for lang, words in entry.translations.items()]
     lines.append(f"**{_LABELS['meaning']}:** {entry.meaning.strip()}")
     if entry.usage.strip():
         lines.append(f"**{_LABELS['usage']}:** {entry.usage.strip()}")
@@ -432,9 +523,13 @@ def save_term(
     related_terms: list[str] | None = None,
     sources: list[str] | None = None,
     source_files: list[Path] | None = None,
-    visibility: str | None = None,
+    translations: object = None,
 ) -> SaveResult:
     """用語を1件登録する（同じ用語・別名の登録があればそれへまとめる）。関連用語は相手にも載せる。
+
+    ユーザーの用語の公開範囲は、新規・更新とも config.ini [memory] glossary_visibility（と目印の設定）で決める
+    （LLM には選ばせない。以前は既存の用語の公開範囲を引き継いだため、一度 private になった用語は設定を
+    shared にしても戻らなかった）。
 
     Args:
         root: メモリーストアのルート。
@@ -444,27 +539,24 @@ def save_term(
         aliases: 同じ意味の別名・略語・読み。
         usage: 使われ方・使われる場面。
         related_terms: 関連する（意味は違う）用語。
+        translations: 他の言語の訳語（{言語名: [訳語, ...]}。clean_translations で整える）。既にある用語へは言語ごとに足す。
         sources: 出典（本文の Sources に載せる文。1つ以上）。
         source_files: 出典のうち実在するファイル（sha256 を記録する。None なら記録済みのまま）。
-        visibility: 公開範囲（memory.create_memory と同じ）。既にある自分の用語を更新するときも反映する
-            （None なら、新規は shared、更新は今の値のまま。ただし個人用の重複をまとめたときは private）。
-            共通の用語では無視する。
 
     Raises:
-        ValueError: term が空、meaning が無い・ファイルを指すだけ、sources が無い、visibility が不正、保存できない場合。
+        ValueError: term が空、meaning が無い・ファイルを指すだけ、sources が無い、保存できない場合。
     """
     term = " ".join((term or "").split())
     if not term:
         raise ValueError("term is empty")
     validate_meaning(meaning)
-    if visibility is not None and visibility not in memory.VISIBILITIES:
-        raise ValueError(f"visibility must be one of {memory.VISIBILITIES}: {visibility}")
     new = GlossaryEntry(
         term=term,
         aliases=[a for a in _clean_list(aliases) if normalize(a) != normalize(term)],
         meaning=meaning.strip(),
         usage=(usage or "").strip(),
         related=_clean_list(related_terms),
+        translations=clean_translations(translations),
         sources=_clean_list(sources),
     )
     if not new.sources:
@@ -474,12 +566,10 @@ def save_term(
             "or 'explained by the user (YYYY-MM-DD)'."
         )
     with _save_lock(root):
-        return _save_term_locked(root, me, new, source_files, visibility)
+        return _save_term_locked(root, me, new, source_files)
 
 
-def _save_term_locked(
-    root: Path, me: str, new: GlossaryEntry, source_files: list[Path] | None, visibility: str | None
-) -> SaveResult:
+def _save_term_locked(root: Path, me: str, new: GlossaryEntry, source_files: list[Path] | None) -> SaveResult:
     policy = memory.policy_for(root)
     loaded = _load_writable(root, me)
     keys = new.keys()
@@ -498,6 +588,7 @@ def _save_term_locked(
             de = d.entry
             entry.aliases += [de.term, *de.aliases]
             entry.related += de.related
+            entry.translations = _merge_translations(entry.translations, de.translations)
             entry.sources += de.sources
             if de.meaning and normalize(de.meaning) not in normalize(new.meaning):
                 entry.notes = "\n".join(x for x in [entry.notes, f"({de.term}) {de.meaning}"] if x)
@@ -507,10 +598,13 @@ def _save_term_locked(
         entry.meaning = _merge_text(entry.meaning, new.meaning)
         entry.usage = _merge_text(entry.usage, new.usage)
         entry.related = _clean_list([*entry.related, *new.related])
+        entry.translations = _merge_translations(entry.translations, new.translations)
         entry.sources = _clean_list([*entry.sources, *new.sources])
     else:
         entry = new
-    entry.aliases = [a for a in entry.aliases if normalize(a) != normalize(entry.term)]
+    # 訳語として書いた語は別名から外す（同じ語が言語名の無い別名にも並ぶと、どれが何語か分からなくなる）。
+    translated = {normalize(w) for ws in entry.translations.values() for w in ws}
+    entry.aliases = [a for a in entry.aliases if normalize(a) != normalize(entry.term) and normalize(a) not in translated]
     entry.related = [r for r in entry.related if normalize(r) not in entry.keys()]
 
     if target is None:
@@ -526,17 +620,12 @@ def _save_term_locked(
     if target is None:
         name = _unused_name(root, _slug_name(entry.term), me)
         path = memory.create_memory(
-            root, name, description, GLOSSARY_TYPE, content, source_files, owner=me, visibility=visibility, author=me
+            root, name, description, GLOSSARY_TYPE, content, source_files, owner=me, author=me
         )
         owner: str | None = me
     else:
         name, owner = target.mem.name, target.mem.owner
-        final_visibility = visibility
-        if owner is not None and final_visibility is None and any(
-            x.mem.visibility == "private" for x in [target, *dupes]
-        ):
-            # 個人用の重複を取り込んだら、まとめた後も個人用にする（他の人へ見せないため）。
-            final_visibility = "private"
+        # 公開範囲は設定（glossary_visibility・目印）で決め直す（まとめた重複の公開範囲も引き継がない）。
         path = memory.edit_memory(
             root,
             name,
@@ -544,9 +633,9 @@ def _save_term_locked(
             memory_type=GLOSSARY_TYPE,
             content=content,
             owner=owner,
-            visibility=final_visibility if owner is not None else None,
             updated_by=me,
             fingerprints=fingerprints,
+            follow_policy=True,
         )
         for d in dupes:
             try:

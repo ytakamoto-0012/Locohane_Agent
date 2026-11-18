@@ -133,11 +133,25 @@ function isSideStepType(step: IStep): boolean {
  * （app.py の _resolve_parent_id が実際の呼び出し階層に基づき parent_id を
  * 設定している）。
  */
+// selectSideSteps の結果を、元のStep（同じオブジェクト）ごとに覚えておく。@chainlit/react-client は
+// 変わったStepとその祖先だけを作り直す（変わらないStepは同じオブジェクトのまま）ため、変わらないStepは
+// 前回と同じオブジェクトを返せ、StepItem の再描画（React.memo）を省ける。
+const sideStepCache = new WeakMap<IStep, IStep>();
+
+function sideStepOf(node: IStep): IStep {
+  if (!node.steps?.length) return node;
+  const cached = sideStepCache.get(node);
+  if (cached) return cached;
+  const result = { ...node, steps: selectSideSteps(node.steps) };
+  sideStepCache.set(node, result);
+  return result;
+}
+
 export function selectSideSteps(messages: IStep[]): IStep[] {
   const out: IStep[] = [];
   for (const node of messages) {
     if (isSideStepType(node)) {
-      out.push(node.steps?.length ? { ...node, steps: selectSideSteps(node.steps) } : node);
+      out.push(sideStepOf(node));
     } else if (node.steps?.length) {
       out.push(...selectSideSteps(node.steps));
     }
@@ -283,4 +297,189 @@ export function selectLatestInputLimits(messages: IStep[]): InputLimits {
   } catch {
     return DEFAULT_INPUT_LIMITS;
   }
+}
+
+/** App が1回の描画で使う値をまとめたもの（deriveThreadView）。 */
+export interface ThreadView {
+  mainMessages: IStep[];
+  sideSteps: IStep[];
+  tokenUsage: IStep | undefined;
+  workDir: IStep | undefined;
+  plan: IStep | undefined;
+  starterPrompts: string[];
+  maxDisplayMessages: number | undefined;
+  maxDisplaySideSteps: number | undefined;
+  inputLimits: InputLimits;
+  interrupted: boolean;
+}
+
+const STATUS_PREFIXES = [
+  TOKEN_USAGE_PREFIX,
+  WORK_DIR_PREFIX,
+  PLAN_PREFIX,
+  STARTER_PREFIX,
+  MAX_DISPLAY_MESSAGES_PREFIX,
+  MAX_DISPLAY_SIDE_STEPS_PREFIX,
+  INPUT_LIMITS_PREFIX,
+  INTERRUPTED_PREFIX
+] as const;
+
+function statusPrefixOf(step: IStep): (typeof STATUS_PREFIXES)[number] | undefined {
+  if (step.type !== 'assistant_message' || typeof step.output !== 'string') return undefined;
+  const output = step.output;
+  return STATUS_PREFIXES.find((p) => output.startsWith(p));
+}
+
+/**
+ * selectMainThread / selectSideSteps / selectLatest* を、木を1回だけ辿って求める。
+ * 長い処理で Step が数万件になると、ストリーミングの1トークンごとに selectLatest* が10回以上木全体を
+ * 辿っていたのが画面の重さの一因だった（App.tsx は useMemo で messages が変わったときだけ呼ぶ）。
+ */
+export function deriveThreadView(messages: IStep[]): ThreadView {
+  const flat = flattenAll(messages);
+  const latest = new Map<string, IStep>();
+  const mainMessages: IStep[] = [];
+  let lastUserOrInterrupted: IStep | undefined;
+  for (const s of flat) {
+    const prefix = statusPrefixOf(s);
+    if (prefix) {
+      latest.set(prefix, s);
+      if (prefix === INTERRUPTED_PREFIX) lastUserOrInterrupted = s;
+      continue;
+    }
+    if (s.type === 'user_message') lastUserOrInterrupted = s;
+    if (s.type === 'user_message' || s.type === 'assistant_message' || s.type === 'system_message') {
+      mainMessages.push(s);
+    }
+  }
+  const one = (prefix: string): IStep[] => {
+    const s = latest.get(prefix);
+    return s ? [s] : [];
+  };
+  return {
+    mainMessages,
+    sideSteps: selectSideSteps(messages),
+    tokenUsage: latest.get(TOKEN_USAGE_PREFIX),
+    workDir: latest.get(WORK_DIR_PREFIX),
+    plan: latest.get(PLAN_PREFIX),
+    starterPrompts: selectLatestStarters(one(STARTER_PREFIX)),
+    maxDisplayMessages: selectLatestMaxDisplayMessages(one(MAX_DISPLAY_MESSAGES_PREFIX)),
+    maxDisplaySideSteps: selectLatestMaxDisplaySideSteps(one(MAX_DISPLAY_SIDE_STEPS_PREFIX)),
+    inputLimits: selectLatestInputLimits(one(INPUT_LIMITS_PREFIX)),
+    interrupted: lastUserOrInterrupted !== undefined && isInterruptedMessage(lastUserOrInterrupted)
+  };
+}
+
+function isMessageType(step: IStep): boolean {
+  return step.type === 'user_message' || step.type === 'assistant_message' || step.type === 'system_message';
+}
+
+/**
+ * 画面に描かない古いStepを messagesState から外す（表示専用。会話の文脈・会話ログには影響しない）。
+ *
+ * スレッドを開いたときはサーバー（src/thread_display.py の select_steps）が表示分だけを送るが、生成中は
+ * Step が増え続け、数千件になるとストリーミングのたびの更新（@chainlit/react-client の addMessageToParent は
+ * 木全体を何度も探す）と描画が重くなる。同じ規則で残す:
+ * - メインの会話の最後の maxMain 件
+ * - サイドパネルの一番外側のStepの最後の maxSide 件と、各Stepの中のStepの最後の maxSide 件（実行中のものは必ず残す）
+ * - 状態メッセージの種類ごとの最新の1件
+ * - 残したStepの祖先（無いと addMessage が子を捨てる）
+ * 外すものが無ければ messages をそのまま返す（同じ配列なら呼び出し側は state を更新しない）。
+ */
+export function pruneMessages(messages: IStep[], maxMain: number, maxSide: number): IStep[] {
+  if (maxMain <= 0 && maxSide <= 0) return messages;
+  const parentOf = new Map<string, IStep | undefined>();
+  const flat: IStep[] = [];
+  const walk = (nodes: IStep[], parent: IStep | undefined) => {
+    for (const n of nodes) {
+      parentOf.set(n.id, parent);
+      flat.push(n);
+      if (n.steps?.length) walk(n.steps, n);
+    }
+  };
+  walk(messages, undefined);
+
+  const keep = new Set<string>();
+  const main: IStep[] = [];
+  const latest = new Map<string, IStep>();
+  const topSide: IStep[] = [];
+  const childSide = new Map<string, IStep[]>();
+  for (const s of flat) {
+    const prefix = statusPrefixOf(s);
+    if (prefix) {
+      latest.set(prefix, s);
+      continue;
+    }
+    if (isMessageType(s)) {
+      main.push(s);
+      continue;
+    }
+    if (!isSideStepType(s)) continue;
+    let ancestor = parentOf.get(s.id);
+    while (ancestor && !isSideStepType(ancestor)) ancestor = parentOf.get(ancestor.id);
+    if (ancestor) {
+      const list = childSide.get(ancestor.id) ?? [];
+      list.push(s);
+      childSide.set(ancestor.id, list);
+    } else {
+      topSide.push(s);
+    }
+  }
+  const last = <T,>(list: T[], n: number) => (n > 0 ? list.slice(-n) : list);
+  for (const s of last(main, maxMain)) keep.add(s.id);
+  for (const s of latest.values()) keep.add(s.id);
+  for (const s of [...last(topSide, maxSide), ...topSide.filter(isRunningStep)]) keep.add(s.id);
+  // 残したサイドパネルのStepの中のStepを、各階層で最後の maxSide 件と実行中のものだけ残す。
+  const stack: IStep[] = flat.filter((s) => keep.has(s.id) && isSideStepType(s));
+  while (stack.length) {
+    const s = stack.pop()!;
+    const kids = childSide.get(s.id) ?? [];
+    for (const k of [...last(kids, maxSide), ...kids.filter(isRunningStep)]) {
+      if (!keep.has(k.id)) {
+        keep.add(k.id);
+        stack.push(k);
+      }
+    }
+  }
+  for (const s of flat) {
+    if (!keep.has(s.id)) continue;
+    let p = parentOf.get(s.id);
+    while (p && !keep.has(p.id)) {
+      keep.add(p.id);
+      p = parentOf.get(p.id);
+    }
+  }
+  if (keep.size === flat.length) return messages;
+
+  const rebuild = (nodes: IStep[]): IStep[] => {
+    let changed = false;
+    const out: IStep[] = [];
+    for (const n of nodes) {
+      if (!keep.has(n.id)) {
+        changed = true;
+        continue;
+      }
+      if (n.steps?.length) {
+        const steps = rebuild(n.steps);
+        if (steps !== n.steps) {
+          changed = true;
+          out.push({ ...n, steps });
+          continue;
+        }
+      }
+      out.push(n);
+    }
+    return changed ? out : nodes;
+  };
+  return rebuild(messages);
+}
+
+/** 木に含まれるStepの数（pruneMessages を呼ぶかの判定用）。 */
+export function countSteps(nodes: IStep[]): number {
+  let n = 0;
+  for (const node of nodes) {
+    n += 1;
+    if (node.steps?.length) n += countSteps(node.steps);
+  }
+  return n;
 }

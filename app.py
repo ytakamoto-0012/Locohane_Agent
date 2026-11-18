@@ -147,6 +147,7 @@ from src.skills import (
 )
 from src.subagent import is_truncated_result
 from src.thread_store import ChatThreadDataLayer, _sanitize_filename_component
+from src.thread_display import DisplayLimits, truncate_text
 from src.tool_labels import tool_label
 from src import i18n
 from src import thread_store
@@ -964,6 +965,29 @@ if _config.thread_store_enabled:
             raise HTTPException(status_code=404, detail="Thread not found")
         return thread
 
+    @_chainlit_asgi_app.get("/locohane/threads/{thread_id}/older")
+    async def _locohane_get_older_messages(
+        thread_id: str, before: str, limit: int = 0, current_user=Depends(_cl_get_current_user)
+    ):
+        """会話欄を一番上までスクロールしたとき、before（今いちばん上に出ているメッセージの id）より前の会話を返す。
+
+        スレッドを開いたときは [ui] max_display_messages 件しか送らない（src/thread_display.py）ため、それより前を
+        少しずつ読み足す用。返すのはメインの会話（状態メッセージを除く）とそれに付いた画像・ファイルだけ。
+        limit を省くと max_display_messages 件（0 なら 50 件）、多くても _OLDER_MESSAGES_MAX 件。
+        """
+        await _assert_owns_thread(thread_id, current_user)
+        if _thread_store_conn is None:
+            raise HTTPException(status_code=404, detail="Thread not found")
+        size = limit if limit > 0 else (_config.ui_max_display_messages or 50)
+        messages, elements, has_more = await thread_store.get_older_messages(
+            _thread_store_conn,
+            thread_id,
+            before,
+            min(size, _OLDER_MESSAGES_MAX),
+            _display_limits().status_prefixes,
+        )
+        return {"messages": messages, "elements": elements, "hasMore": has_more}
+
     @_chainlit_asgi_app.get("/locohane/elements/{element_id}")
     async def _locohane_get_element_file(element_id: str, current_user=Depends(_cl_get_current_user)):
         """永続化済みの添付ファイル・埋め込み画像の実体を配信する。
@@ -1243,7 +1267,7 @@ async def _on_app_startup() -> None:
     global _thread_store_conn, _thread_data_layer
     if _config.thread_store_enabled:
         _thread_store_conn = await thread_store.init_db(_config.thread_store_db)
-        _thread_data_layer = ChatThreadDataLayer(_thread_store_conn, _config.elements_dir)
+        _thread_data_layer = ChatThreadDataLayer(_thread_store_conn, _config.elements_dir, _display_limits())
         # 期限切れスレッドの起動時1回削除＋以降の定期削除（retention_days<=0で無効）。
         # elements_dirも渡し、削除したスレッドの添付・画像ファイルを孤児化させない。
         await thread_store.cleanup_old_threads(
@@ -1520,6 +1544,36 @@ INPUT_LIMITS_PREFIX = "📝 入力上限\n"
 # （ターンが途中で中断されたことをフロントエンドへ伝えるマーカー。これより後に
 # ユーザー発言が無い間、入力欄の上に「続ける」ボタンを出す。値は中断理由）。
 INTERRUPTED_PREFIX = "⏸ 中断\n"
+
+
+# 会話欄で前の会話を読み足すとき（/locohane/threads/{id}/older）、1回に返すメッセージの最大件数。
+_OLDER_MESSAGES_MAX = 200
+
+
+def _display_limits() -> DisplayLimits:
+    """会話履歴を画面へ送るときの上限（[ui]。src/thread_display.py）。状態メッセージは種類ごとに最新の1件だけ送る。"""
+    from src.tools._plan_render import PLAN_PREFIX
+
+    return DisplayLimits(
+        max_messages=max(0, _config.ui_max_display_messages),
+        max_side_steps=max(0, _config.ui_max_display_side_steps),
+        max_step_chars=_config.ui_max_step_content_chars,
+        status_prefixes=(
+            TOKEN_USAGE_PREFIX,
+            WORK_DIR_PREFIX,
+            PLAN_PREFIX,
+            STARTER_PREFIX,
+            MAX_DISPLAY_MESSAGES_PREFIX,
+            MAX_DISPLAY_SIDE_STEPS_PREFIX,
+            INPUT_LIMITS_PREFIX,
+            INTERRUPTED_PREFIX,
+        ),
+    )
+
+
+def _display_step_text(value: object) -> object:
+    """ツール等の Step の入力・出力を、画面へ送る長さ（[ui] max_step_content_chars）に切る。"""
+    return truncate_text(value, _config.ui_max_step_content_chars)
 
 
 async def _send_interrupted_marker(reason: str) -> None:
@@ -4575,6 +4629,8 @@ async def _on_message_impl(message: cl.Message) -> None:
                     step = cl.Step(name=label, type="tool", parent_id=_resolve_parent_id(event, steps))
                     step.start = utc_now()
                     step.input = event["data"].get("input")
+                    # 長い入力（write_file の全文等）は画面へ送る分だけにする（[ui] max_step_content_chars）。
+                    step.input = _display_step_text(step.input)
                     await step.send()
                     steps[event["run_id"]] = step
                     resync_steps[event["run_id"]] = step
@@ -4608,7 +4664,7 @@ async def _on_message_impl(message: cl.Message) -> None:
                     step = steps.pop(event["run_id"], None)
                     if step is not None:
                         output = event["data"].get("output")
-                        step.output = output if isinstance(output, str) else ""
+                        step.output = _display_step_text(output) if isinstance(output, str) else ""
                         step.end = utc_now()
                         if isinstance(output, str) and output.startswith("Error:"):
                             step.is_error = True
@@ -4624,7 +4680,7 @@ async def _on_message_impl(message: cl.Message) -> None:
                         if event["name"] in _SUBAGENT_DISPATCH_TOOLS:
                             for child_owner in [event["run_id"], *owner_children.get(event["run_id"], ())]:
                                 await _close_owner_output(child_owner, thinkings, answers)
-                        step.output = f"Error: {event['data'].get('error')}"
+                        step.output = _display_step_text(f"Error: {event['data'].get('error')}")
                         step.end = utc_now()
                         step.is_error = True
                         await step.update()
@@ -4659,6 +4715,8 @@ async def _on_message_impl(message: cl.Message) -> None:
                         output = event["data"].get("output")
                         content = getattr(output, "content", output)
                         step.output = content
+                        # 長い結果（ファイルの全文・大量の検索結果等）は画面へ送る分だけにする（判定は content の全文で行う）。
+                        step.output = _display_step_text(step.output)
                         step.end = utc_now()
                         if _is_dispatch_agent_error(event["name"], content):
                             step.is_error = True

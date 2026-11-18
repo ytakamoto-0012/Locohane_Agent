@@ -129,6 +129,14 @@ h4 .hint { margin-left: 4px; font-weight: normal; }
 .lang-select { width: auto; padding: 2px 6px; font-size: 12px; }
 .login-lang { margin-top: 12px; text-align: center; }
 #main { flex: 1; overflow: auto; padding: 20px; }
+/* 一番上へ戻るボタン（#main を下へスクロールしたら右下に出す。admin.js の showShell）。 */
+/* 暗い背景・青いボタンの多い画面に埋もれないよう、明るい地に濃い矢印・青い縁取りにする。 */
+.scroll-top-btn { position: fixed; right: 24px; bottom: 24px; z-index: 50; width: 46px; height: 46px; padding: 0; border-radius: 50%;
+  background: var(--text); border: 2px solid var(--accent); color: var(--bg); font-size: 22px; font-weight: 700; line-height: 1;
+  box-shadow: 0 0 0 3px rgba(74, 134, 232, 0.35), 0 4px 14px rgba(0, 0, 0, 0.6); }
+.scroll-top-btn:hover { background: #fff; border-color: var(--accent-hover); box-shadow: 0 0 0 4px rgba(106, 156, 238, 0.5), 0 4px 14px rgba(0, 0, 0, 0.6); }
+/* メモリー一覧: 表の上に置いた処理中表示・エラーと表の間をあける。 */
+.view-memories > #memories-error:not(:empty), .view-memories > #memories-busy:not(:empty) { margin-bottom: 8px; }
 
 .view-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
 .view-header h2 { margin: 0; }

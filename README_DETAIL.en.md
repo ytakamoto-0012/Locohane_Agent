@@ -1072,20 +1072,30 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   `config.ini` (the "Memory" group of the settings dashboard, per instance). Since the system is meant to run locally
   inside an organization, the default is "only things about the person and their family are private; everything else
   is shared".
-  - **The LLM's choice**: the LLM chooses `visibility` by the content, not by the type, following the criteria
-    (`shared_criteria` / `private_criteria`) put into the Memory System section of the system prompt
-    (`{{memory_visibility}}`, built by `render_visibility_block` in `src/memory.py`). If omitted, it is `shared`. The
-    criteria can be in any language and span several lines (they are put, indented, under "- "shared" for:" and
-    "- "private" for:" in the prompt). "Polish with AI" on the settings screen has the LLM turn a draft into a bullet list
-    in the dashboard's display language (`polish-criteria` in `admin/memories.py`; it uses the "LLM used for answers" of
-    the admin settings, like "Ask AI", and does not save).
-  - **Visibility per type** (`<type>_visibility`): memories of a `private` type are always `private`, regardless of the
-    request or content (by default only `user`). A `shared` type follows the LLM's choice above.
+  - **The LLM does not choose**: `create_memory` / `update_memory` / `save_glossary_term` have no `visibility`
+    argument. Every save and update by the LLM decides it from the per-type visibility and the checks below (an update
+    does not keep the current value either, so a memory the LLM once saved as `private` follows the settings from its
+    next update). The Memory System section of the system prompt (`{{memory_visibility}}`, built by
+    `render_visibility_block` in `src/memory.py`) tells which types are private or shared, and gives the criteria
+    (`shared_criteria` / `private_criteria`) as criteria for which type to save as (content to keep private is saved as a
+    `private` type, `user` by default; with no `private` type it is given as "do not save these"). The criteria can be in
+    any language and span several lines. "Polish with AI" on the settings screen has the LLM turn a draft into a bullet
+    list in the dashboard's display language (`polish-criteria` in `admin/memories.py`; it uses the "LLM used for
+    answers" of the admin settings, like "Ask AI", and does not save).
+  - **Visibility per type** (`<type>_visibility`): a `private` type is always `private` (by default only `user`), a
+    `shared` type is `shared` (`private` if it matches a check below).
   - **Checks that force `private`** (`force_private_checks`): if a check that is turned on matches the description,
-    content or source file paths, the memory is saved as `private` regardless of the request. Choose from `email`,
+    content or source file paths, the memory is saved as `private` regardless of the type setting. Choose from `email`,
     `phone`, `card_id` (card/ID numbers), `credential` (words such as password, bank account number, My Number),
     `confidential_label` (labels such as "confidential") and `personal_path` (personal folder paths such as
     `C:\Users\<name>\`) (`_SENSITIVE_PATTERNS` in `src/memory.py`). By default only `card_id` and `credential`.
+  - **Types exempt from the checks** (`force_private_exempt_types`, default `glossary`): the visibility of these types
+    follows `<type>_visibility` only. Definitions of company terms often contain words such as "password" or "API key"
+    and example numbers; before, the checks made terms `private` even with `glossary_visibility = shared`, and changing
+    them to shared on the settings dashboard was reverted.
+  - **Chosen by a person on the settings dashboard**: editing and bulk changes in the Memories screen use the visibility
+    the person chose (a `private` type or a memory matching a check stays `private`, and the message after saving tells
+    why). When the AI updates that memory next, its visibility follows the settings again.
   - `load_config()` registers the rules per `memory_dir` (`memory.set_policy`), so the tools, the index and edits on the
     settings dashboard use the same rules. Changes apply after the instance restarts (edits on the settings dashboard use
     them right after saving). The `visibility` of memories already
@@ -1169,7 +1179,11 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   into one `reference` memory with `create_memory` and only point to the file without writing the meanings, so terms are
   saved only with a dedicated tool (`src/tools/glossary_tools.py`, logic in `src/glossary.py`; `create_memory`/`update_memory`
   with `glossary` return an error pointing to it). One file per term, named automatically from the term; the body has fixed
-  headings (`**Term:**`, `**Aliases:**`, `**Meaning:**`, `**Usage:**`, `**Related terms:**`, `**Sources:**`). The meaning is
+  headings (`**Term:**`, `**Aliases:**`, `**Translations:**`, `**Meaning:**`, `**Usage:**`, `**Related terms:**`, `**Sources:**`).
+  Words of other languages (`translations`, e.g. `{"English": ["order backlog"], "German": ["Auftragsbestand"]}`) are
+  written one line per language under `**Translations:**` ("`- English: order backlog / backlog`"); language names
+  such as "英語" or "en" become English names (`_LANGUAGE_NAMES` in `src/glossary.py`), a saved entry gets new words
+  added per language, translated words are removed from the aliases, and a translation also finds the entry. The meaning is
   required (a text that only points to a file is rejected) and at least one source is required (files that exist are
   fingerprinted like `source_files`; a path with spaces or parentheses is found by trying the longest prefix that is an
   existing file). Aliases, related terms and sources are written one per bullet line (so an alias with a comma is not
@@ -1962,7 +1976,8 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[memory]` | `user_visibility` / `feedback_visibility` / `project_visibility` / `reference_visibility` | Visibility of persistent memories per type. A `private` type is always private; for a `shared` type the LLM chooses by the criteria (by default only `user` is `private`; see "Persistent memory") | `MEMORY_<TYPE>_VISIBILITY` |
 | `[memory]` | `shared_criteria` / `private_criteria` | Criteria given to the LLM (any language, line breaks allowed; the default wording if empty; "Polish with AI" on the settings dashboard turns them into a bullet list in the display language) | `MEMORY_SHARED_CRITERIA` / `MEMORY_PRIVATE_CRITERIA` |
 | `[memory]` | `user_ranks` / `default_rank` | User ranks used to prioritize memories (`{"username": rank}`; an integer of 0 or more, larger is more senior; when memories disagree, the higher rank is followed; can also be set on the "Users" screen of the settings dashboard), and the rank of users without one and of common memories (default 1). See "Persistent memory" | `MEMORY_USER_RANKS` / `MEMORY_DEFAULT_RANK` |
-| `[memory]` | `force_private_checks` | List of checks that force `private` regardless of the request (`email` / `phone` / `card_id` / `credential` / `confidential_label` / `personal_path`; default `["card_id", "credential"]`) | `MEMORY_FORCE_PRIVATE_CHECKS` |
+| `[memory]` | `force_private_checks` | List of checks that force `private` regardless of the type setting (`email` / `phone` / `card_id` / `credential` / `confidential_label` / `personal_path`; default `["card_id", "credential"]`) | `MEMORY_FORCE_PRIVATE_CHECKS` |
+| `[memory]` | `force_private_exempt_types` | Memory types not checked by `force_private_checks` (comma separated; default `glossary`; empty checks every type) | `MEMORY_FORCE_PRIVATE_EXEMPT_TYPES` |
 | `[path_memory]` | `dir` | Where the registry files (`<thread_id>.json`) of path memory are saved | `PATH_MEMORY_DIR` |
 | `[path_memory]` | `retention_days` | Retention in days of the path memory registry files | `PATH_MEMORY_RETENTION_DAYS` |
 | `[path_memory]` | `cleanup_interval_hours` | Interval (hours) of the path memory automatic deletion check | `PATH_MEMORY_CLEANUP_INTERVAL_HOURS` |
@@ -2054,7 +2069,8 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[data_backup]` | `enabled`, `dest_dir`, `times`, `weekdays`, `keep`, `exclude_workdir`, `exclude_logs`, `exclude` | Defaults of the data backup (see "Data backup"). Shared by all instances (cannot be overridden per instance). Values saved on the settings dashboard (`<instances_dir>/data_backup.json`) take precedence | - |
 | `[ui]` | `default_language` | Default display language (`auto` = the browser's language / `ja` / `en`). When a user chooses a language on screen, that takes precedence. The AI also answers in the chosen language (the "Language switching (Japanese / English)" section) | `UI_DEFAULT_LANGUAGE` |
 | `[ui]` | `max_display_messages` | Maximum number of messages drawn on the chat screen (display-only thinning; `0` is unlimited) | `UI_MAX_DISPLAY_MESSAGES` |
-| `[ui]` | `max_display_side_steps` | Maximum number of steps such as tool calls drawn in the side panel (display-only thinning; `0` is unlimited) | `UI_MAX_DISPLAY_SIDE_STEPS` |
+| `[ui]` | `max_display_side_steps` | Maximum number of steps such as tool calls drawn in the side panel (display-only thinning; `0` is unlimited). Opening a thread from the history also sends only `max_display_messages` and this number of items (`src/thread_display.py`), and the screen thins the steps to the same numbers while generating. Scrolling the conversation to the top loads earlier messages `max_display_messages` at a time (`GET /locohane/threads/{id}/older`; off-screen messages are not rendered) | `UI_MAX_DISPLAY_SIDE_STEPS` |
+| `[ui]` | `max_step_content_chars` | Maximum number of characters of each input / output of a side-panel step; the rest is neither sent to the screen nor saved in the thread history (default `20000`, `0` does not cut; what is passed to the LLM and the conversation logs are not cut) | `UI_MAX_STEP_CONTENT_CHARS` |
 | `[ui]` | `paste_as_attachment_threshold_chars` | Pasting text of this many characters or more into the input box makes it a "pasted text" card (a `pasted-text-*.txt` attachment) instead of expanding it in the input box. When sent, it is passed to the LLM as text, not as a path (`0` or less disables it) | `UI_PASTE_AS_ATTACHMENT_THRESHOLD_CHARS` |
 | `[ui]` | `max_input_chars` | Maximum characters per send (the input box + pasted text in total). While over, sending is not possible, and the backend also refuses (`0` or less is unlimited) | `UI_MAX_INPUT_CHARS` |
 | `[ui]` | `token_usage_warn_threshold` | When the total tokens of a "per request" row of the token usage card (one row each for the main agent and running sub-agents / batch delegation groups; summarizing calls for context compaction appear as a "compaction (most recent)" row and are also added to the conversation total; judged per row) reach this value or more, it is shown in bold orange (`0` or less disables it) | `UI_TOKEN_USAGE_WARN_THRESHOLD` |

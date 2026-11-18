@@ -1,4 +1,4 @@
-import { useContext } from 'react';
+import { memo, useContext } from 'react';
 import { useRecoilValue } from 'recoil';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -73,7 +73,10 @@ const markdownSanitizeSchema = {
   }
 };
 
-function MessageBubble({ step }: { step: IStep }) {
+// ストリーミング中は1トークンごとに会話全体が描き直され、表示中の全メッセージの Markdown を毎回
+// 解析し直していた。@chainlit/react-client は変わったメッセージだけを新しいオブジェクトにするため、
+// step が同じなら描き直さない（memo）。
+const MessageBubble = memo(function MessageBubble({ step }: { step: IStep }) {
   const category = messageCategory(step);
   const isUser = category === 'user';
   return (
@@ -81,6 +84,8 @@ function MessageBubble({ step }: { step: IStep }) {
       className={`message-row ${isUser ? 'message-row--user' : 'message-row--assistant'}`}
       // MessagePane が、スクロールで上に隠れたユーザー指示を上端に固定表示するための目印。
       data-user-message-id={isUser ? step.id : undefined}
+      // 前の会話を上に読み足したとき、読んでいた位置を保つ目印（MessagePane）。
+      data-message-id={step.id}
     >
       {!isUser ? <div className={`avatar avatar--${category}`}>{AVATAR_LABEL[category]}</div> : null}
       <div className={`message-bubble ${isUser ? 'message-bubble--user' : `message-bubble--${category}`}`}>
@@ -101,7 +106,7 @@ function MessageBubble({ step }: { step: IStep }) {
       {isUser ? <div className="avatar avatar--user">You</div> : null}
     </div>
   );
-}
+});
 
 /** 応答待ちの「...」。横に今している処理（サイドパネルの実行中Stepと同じ表記）を出す。
  *  サブエージェント実行中は「SUB: explore › ツール: Read」のように外側と一番内側の処理を並べる。 */
@@ -133,14 +138,19 @@ function TypingIndicator({ runningSteps }: { runningSteps: IStep[] }) {
   );
 }
 
+/** 前の会話の読み足しの状態（MessagePane）。loading: 読み込み中 / done: これより前は無い / null: 何も出さない。 */
+export type OlderStatus = 'loading' | 'done' | 'error' | null;
+
 export function MessageThread({
   messages,
   showTyping,
-  runningSteps
+  runningSteps,
+  olderStatus = null
 }: {
   messages: IStep[];
   showTyping: boolean;
   runningSteps: IStep[];
+  olderStatus?: OlderStatus;
 }) {
   const { t } = useI18n();
   if (messages.length === 0 && !showTyping) {
@@ -149,6 +159,15 @@ export function MessageThread({
 
   return (
     <div className="message-thread">
+      {olderStatus ? (
+        <div className="message-thread-older">
+          {olderStatus === 'loading'
+            ? t('messages.olderLoading')
+            : olderStatus === 'error'
+              ? t('messages.olderError')
+              : t('messages.olderNone')}
+        </div>
+      ) : null}
       {messages.map((step) => (
         <MessageBubble key={step.id} step={step} />
       ))}

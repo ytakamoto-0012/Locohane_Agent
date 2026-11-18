@@ -384,6 +384,8 @@ EN: dict[str, str] = {
     'メモリーが見つかりません: {0}': 'Memory not found: {0}',
     '同じ名前のメモリーが既にあります: {0}': 'A memory with the same name already exists: {0}',
     '公開範囲が不正です: {0!r}': 'Invalid visibility: {0!r}',
+    '変更する種類か公開範囲を指定してください。': 'Specify the type or visibility to change.',
+    '変更するメモリーを選択してください。': 'Select the memories to change.',
     '翻訳する説明・本文がありません。': 'There is no description or content to translate.',
     '削除するメモリーを選択してください。': 'Select the memories to delete.',
     'このインスタンスにはドラフトスキルの置き場（[skill_creator] draft_dir）がありません。': 'This instance has no draft skill location ([skill_creator] draft_dir).',

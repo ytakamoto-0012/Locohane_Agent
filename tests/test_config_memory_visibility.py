@@ -55,8 +55,9 @@ def test_overrides_are_registered_and_rendered(tmp_path):
     assert policy.checks == frozenset({"email"})
     block = render_memory_visibility_block(cfg)
     assert cfg.memory_private_criteria == "- 顧客名\n- 金額"
-    assert '- "private" for:\n  - 顧客名\n  - 金額\n' in block
-    assert "type user/project are always private" in block
+    assert "- Save as user/project (private):\n  - 顧客名\n  - 金額" in block
+    assert "- Private (only the current user can find and read them): user/project\n" in block
+    assert policy.check_exempt_types == frozenset({"glossary"})
     assert "email address" in block and "credential" not in block
 
 

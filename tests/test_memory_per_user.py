@@ -110,14 +110,76 @@ def test_private_type_setting(tmp_path, set_policy):
 
 def test_render_visibility_block():
     block = memory.render_visibility_block("tips for anyone", "- 本人のこと\n\n- 家族のこと\n", memory.DEFAULT_POLICY)
-    # 基準は改行を残し、見出しの下に字下げして入れる（空行は除く）
-    assert '- "shared" for:\n  tips for anyone\n- "private" for:\n  - 本人のこと\n  - 家族のこと\n' in block
-    assert "type user are always private" in block
-    assert "card or ID number, credential or personal ID" in block and "email" not in block
+    # 公開範囲は LLM に選ばせず、種類で決まることを伝える。基準は「どの種類で保存するか」として、
+    # 改行を残して見出しの下に字下げして入れる（空行は除く）
+    assert "you do not choose it" in block
+    assert "- Private (only the current user can find and read them): user\n" in block
+    assert "- Shared (every user of this system can find and read them): feedback/project/reference/glossary\n" in block
+    assert "- Save as a shared type:\n  tips for anyone\n- Save as user (private):\n  - 本人のこと\n  - 家族のこと" in block
+    assert "automatically (not for glossary): card or ID number, credential or personal ID" in block
+    assert "email" not in block
     none = memory.MemoryPolicy(type_visibility=dict(memory.DEFAULT_TYPE_VISIBILITY), checks=frozenset())
-    assert "automatically" not in memory.render_visibility_block("a", "b", none)
+    assert "private automatically" not in memory.render_visibility_block("a", "b", none)
     all_private = memory.MemoryPolicy(type_visibility={t: "private" for t in memory.MEMORY_TYPES})
     assert memory.render_visibility_block("a", "b", all_private).startswith("All memories are saved as private")
+    all_shared = memory.MemoryPolicy(type_visibility={t: "shared" for t in memory.MEMORY_TYPES})
+    assert "- Do not save these (every memory is shared):\n  b" in memory.render_visibility_block("a", "b", all_shared)
+
+
+def test_glossary_is_exempt_from_private_checks_by_default(tmp_path):
+    # 用語の定義には「パスワード」「API Key」や番号の例が普通に出てくる。目印で private に倒すと、
+    # glossary_visibility = shared でも用語が個人用になり、ダッシュボードで共有に直しても戻されていた。
+    body = "**Term:** パスワード変更\n**Meaning:** API Key を再発行する手順（受付番号 202611181234）"
+    memory.create_memory(tmp_path, "pw", "d", "glossary", body, owner="alice")
+    assert memory.read_memory(tmp_path, "pw", "alice").visibility == "shared"
+    assert [m.name for m in memory.list_memories(tmp_path, viewer="bob")] == ["pw"]
+    # 他の種類には今までどおり効く
+    memory.create_memory(tmp_path, "fb", "d", "feedback", body, owner="alice")
+    assert memory.read_memory(tmp_path, "fb", "alice").visibility == "private"
+
+
+def test_exempt_types_setting(tmp_path, set_policy):
+    set_policy(tmp_path, check_exempt_types=frozenset())
+    memory.create_memory(tmp_path, "pw", "d", "glossary", "パスワード", owner="alice")
+    assert memory.read_memory(tmp_path, "pw", "alice").visibility == "private"
+
+
+def test_missing_type_in_policy_uses_default(tmp_path, set_policy):
+    # 種類を書いていない古い書き方の規則でも、新しい種類（glossary）は既定（shared）のまま
+    set_policy(tmp_path, type_visibility={"user": "private", "feedback": "shared", "project": "shared", "reference": "shared"})
+    memory.create_memory(tmp_path, "t", "d", "glossary", "x", owner="alice")
+    assert memory.read_memory(tmp_path, "t", "alice").visibility == "shared"
+
+
+def test_update_memory_follows_the_type_setting(tmp_path):
+    # LLM の更新は公開範囲を引き継がず、種類の設定で決め直す（以前 private だったものも共有に戻る）
+    memory.create_memory(tmp_path, "m", "d", "feedback", "a", owner="alice", visibility="private")
+    memory.update_memory(tmp_path, "m", "b", owner="alice")
+    assert memory.read_memory(tmp_path, "m", "alice").visibility == "shared"
+    memory.update_memory(tmp_path, "m", "パスワードは xxx", owner="alice")
+    assert memory.read_memory(tmp_path, "m", "alice").visibility == "private"
+
+
+def test_bulk_delete_and_change_rebuild_index_once(tmp_path, monkeypatch):
+    for i in range(30):
+        memory.create_memory(tmp_path, f"g{i}", "d", "glossary", "x", owner="alice", visibility="private")
+    memory.create_memory(tmp_path, "keep", "d", "feedback", "x", owner="alice")
+    calls = []
+    original = memory.rebuild_index
+    monkeypatch.setattr(memory, "rebuild_index", lambda root, owner=None: (calls.append(owner), original(root, owner)))
+    mems = memory.all_memories(tmp_path, "glossary")
+    result = memory.change_memories(tmp_path, mems[:20], visibility="shared", updated_by="admin")
+    assert len(result.done) == 20 and calls == ["alice"]
+    assert sum(m.visibility == "shared" for m in memory.all_memories(tmp_path, "glossary")) == 20
+    calls.clear()
+    result = memory.change_memories(tmp_path, memory.all_memories(tmp_path, "glossary")[:5], memory_type="reference")
+    assert len(result.done) == 5 and len(memory.all_memories(tmp_path, "reference")) == 5
+    calls.clear()
+    result = memory.delete_memories(tmp_path, memory.all_memories(tmp_path, "glossary"))
+    assert len(result.done) == 25 and calls == ["alice"]
+    assert memory.all_memories(tmp_path, "glossary") == []
+    index = (tmp_path / "users" / "alice" / "MEMORY.md").read_text(encoding="utf-8")
+    assert "keep" in index and "[glossary]" not in index
 
 
 def test_visibility_and_order_for_viewer(tmp_path):

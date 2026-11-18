@@ -114,6 +114,19 @@ class MemoriesDeleteBody(BaseModel):
     items: list[MemoryRef]
 
 
+class MemoriesDeleteByTypeBody(BaseModel):
+    type: str
+    # 対象の所有者。"*" なら全員（共通を含む）、空文字なら共通だけ、それ以外ならそのユーザーだけ。
+    owner: str = "*"
+
+
+class MemoriesChangeBody(BaseModel):
+    items: list[MemoryRef]
+    # None（省略）なら変えない。少なくともどちらか一方を指定する。
+    type: str | None = None
+    visibility: str | None = None
+
+
 class MemoriesCopyBody(BaseModel):
     items: list[MemoryRef]
     # コピー先のインスタンス（コピー元と別のインスタンス）。
@@ -444,6 +457,58 @@ def build_router(
         backup_dir = inst.backups_dir(instances_root, name) / "memory" / (m.owner or _COMMON_BACKUP_DIRNAME) / m.name
         settings_files.backup_file(m.path, backup_dir, backup_keep, prefix=m.memory_type)
 
+    def _private_reasons(root: Path, memory_name: str, owner: str | None) -> list[str]:
+        """保存後に個人用になったユーザーのメモリーの理由（private の種類・当たった目印。英語のラベル）。"""
+        m = mem_store.find_memory(root, memory_name, owner)
+        if m is None or m.owner is None or m.visibility != "private":
+            return []
+        return mem_store.resolve_visibility(
+            m.memory_type, None, m.description, m.content, m.sources, mem_store.policy_for(root)
+        )[1]
+
+    def _resolve_refs(root: Path, items: list[MemoryRef]) -> list[mem_store.Memory]:
+        """選んだメモリーを探す。1件でも見つからなければ 404（何も変えない）。"""
+        targets = list(dict.fromkeys((item.name, _owner_scope(item.owner)) for item in items))
+        found: list[mem_store.Memory] = []
+        missing: list[str] = []
+        for memory_name, owner in targets:
+            _validate_name(memory_name)
+            try:
+                mem = mem_store.find_memory(root, memory_name, owner)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if mem is None:
+                missing.append(f"{owner or _t('（共通）')} / {memory_name}")
+            else:
+                found.append(mem)
+        if missing:
+            shown = ", ".join(missing[:20]) + (f" …(+{len(missing) - 20})" if len(missing) > 20 else "")
+            raise HTTPException(status_code=404, detail=_t("メモリーが見つかりません: {0}", shown))
+        return found
+
+    def _delete_all(request: Request, user: str, name: str, root: Path, found: list[mem_store.Memory]) -> dict:
+        """バックアップを取ってからまとめて削除する（索引の作り直しは所有者ごとに1回。変更履歴は1件にまとめる）。"""
+        for mem in found:
+            _backup(name, mem)
+        result = mem_store.delete_memories(root, found)
+        if result.done:
+            audit.append(
+                audit_log_path,
+                {
+                    "instance": name,
+                    "actor": user,
+                    "remote_addr": client_ip(request),
+                    "action": "memory_delete",
+                    "count": len(result.done),
+                    "memories": [f"{m.owner or _COMMON_BACKUP_DIRNAME}/{m.name}" for m in result.done],
+                },
+            )
+        return {
+            "deleted": len(result.done),
+            "failed": len(result.failed),
+            "failed_items": [f"{o or _t('（共通）')} / {n}: {why}" for o, n, why in result.failed],
+        }
+
     def _audit(request: Request, user: str, name: str, action: str, memory_name: str, owner: str | None) -> None:
         audit.append(
             audit_log_path,
@@ -708,7 +773,12 @@ def build_router(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _audit(request, user, name, "memory_create", body.name, owner)
-        return {"success": True, "owner": owner, "visibility": mem_store.find_memory(root, body.name, owner).visibility}
+        return {
+            "success": True,
+            "owner": owner,
+            "visibility": mem_store.find_memory(root, body.name, owner).visibility,
+            "private_reasons": _private_reasons(root, body.name, owner),
+        }
 
     @router.post("/api/instances/{name}/memories/delete")
     def delete_memories(
@@ -718,30 +788,89 @@ def build_router(
         user: str = Depends(require_login),
         _csrf: None = Depends(require_csrf),
     ):
-        """複数のメモリーをまとめて削除する。1件でも見つからなければ何も削除しない。"""
+        """複数のメモリーをまとめて削除する。1件でも見つからなければ何も削除しない。
+
+        件数に上限は無い（索引の作り直しは所有者ごとに最後の1回だけなので、数千件でも待たされない）。
+        """
         root = _memory_root(name)
-        targets = list(dict.fromkeys((item.name, _owner_scope(item.owner)) for item in body.items))
-        if not targets:
+        if not body.items:
             raise HTTPException(status_code=400, detail=_t("削除するメモリーを選択してください。"))
-        found: list[mem_store.Memory] = []
-        missing: list[str] = []
-        for memory_name, owner in targets:
-            _validate_name(memory_name)
-            try:
-                mem = mem_store.find_memory(root, memory_name, owner)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if mem is None:
-                missing.append(f"{owner or _t('（共通）')} / {memory_name}")
-            else:
-                found.append(mem)
-        if missing:
-            raise HTTPException(status_code=404, detail=_t("メモリーが見つかりません: {0}", ", ".join(missing)))
+        return _delete_all(request, user, name, root, _resolve_refs(root, body.items))
+
+    @router.post("/api/instances/{name}/memories/delete-by-type")
+    def delete_memories_by_type(
+        name: str,
+        body: MemoriesDeleteByTypeBody,
+        request: Request,
+        user: str = Depends(require_login),
+        _csrf: None = Depends(require_csrf),
+    ):
+        """指定した種類のメモリーをすべて削除する（owner で所有者を絞れる。"*" なら全員・共通を含む）。"""
+        root = _memory_root(name)
+        if body.type not in mem_store.MEMORY_TYPES:
+            raise HTTPException(status_code=400, detail=_t("種類が不正です: {0!r}", body.type))
+        found = mem_store.all_memories(root, body.type)
+        if body.owner != "*":
+            scope = _owner_scope(body.owner)
+            found = [m for m in found if m.owner == scope]
+        return _delete_all(request, user, name, root, found)
+
+    @router.post("/api/instances/{name}/memories/change")
+    def change_memories(
+        name: str,
+        body: MemoriesChangeBody,
+        request: Request,
+        user: str = Depends(require_login),
+        _csrf: None = Depends(require_csrf),
+    ):
+        """選んだメモリーの種類・公開範囲をまとめて変える（説明・本文はそのまま。変更前はバックアップに残る）。
+
+        公開範囲は共通のメモリーには効かない。private の種類・個人情報の目印に当たるユーザーのメモリーは、
+        共有を選んでも個人用のまま（forced_private_items に理由を付けて返す）。
+        """
+        root = _memory_root(name)
+        if body.type is None and body.visibility is None:
+            raise HTTPException(status_code=400, detail=_t("変更する種類か公開範囲を指定してください。"))
+        if body.type is not None and body.type not in mem_store.MEMORY_TYPES:
+            raise HTTPException(status_code=400, detail=_t("種類が不正です: {0!r}", body.type))
+        if body.visibility is not None and body.visibility not in mem_store.VISIBILITIES:
+            raise HTTPException(status_code=400, detail=_t("公開範囲が不正です: {0!r}", body.visibility))
+        if not body.items:
+            raise HTTPException(status_code=400, detail=_t("変更するメモリーを選択してください。"))
+        found = _resolve_refs(root, body.items)
         for mem in found:
             _backup(name, mem)
-            mem_store.delete_memory(root, mem.name, mem.owner)
-            _audit(request, user, name, "memory_delete", mem.name, mem.owner)
-        return {"deleted": len(found)}
+        result = mem_store.change_memories(
+            root, found, memory_type=body.type, visibility=body.visibility, updated_by=_dashboard_editor(user)
+        )
+        forced: list[str] = []
+        if body.visibility == "shared":
+            for m in result.done:
+                if m.owner is None:
+                    continue
+                reasons = _private_reasons(root, m.name, m.owner)
+                if reasons:
+                    forced.append(f"{m.owner} / {m.name}: {', '.join(reasons)}")
+        if result.done:
+            audit.append(
+                audit_log_path,
+                {
+                    "instance": name,
+                    "actor": user,
+                    "remote_addr": client_ip(request),
+                    "action": "memory_change",
+                    "count": len(result.done),
+                    "type": body.type,
+                    "visibility": body.visibility,
+                    "memories": [f"{m.owner or _COMMON_BACKUP_DIRNAME}/{m.name}" for m in result.done],
+                },
+            )
+        return {
+            "changed": len(result.done),
+            "failed": len(result.failed),
+            "failed_items": [f"{o or _t('（共通）')} / {n}: {why}" for o, n, why in result.failed],
+            "forced_private_items": forced,
+        }
 
     @router.post("/api/instances/{name}/memories/copy")
     def copy_memories(
@@ -766,6 +895,7 @@ def build_router(
         source_policy = mem_store.policy_for(root)
         fixed_owner = None if body.target_owner is None else _owner_scope(body.target_owner)
         copied = 0
+        copied_owners: set[str | None] = set()
         skipped: list[str] = []
         failed: list[str] = []
         for memory_name, owner in targets:
@@ -781,7 +911,12 @@ def build_router(
                     failed.append(_t("{0}: 個人用のメモリーは同じ所有者へしかコピーできません", label))
                     continue
                 outcome = mem_store.copy_memory(
-                    target_root, mem, owner=dest_owner, copied_by=_dashboard_editor(user), source_policy=source_policy
+                    target_root,
+                    mem,
+                    owner=dest_owner,
+                    copied_by=_dashboard_editor(user),
+                    source_policy=source_policy,
+                    rebuild=False,
                 )
             except HTTPException as exc:
                 failed.append(f"{label}: {exc.detail}")
@@ -794,6 +929,7 @@ def build_router(
                 skipped.append(f"{dest_owner or _t('（共通）')} / {mem.name}")
             else:
                 copied += 1
+                copied_owners.add(dest_owner)
                 audit.append(
                     audit_log_path,
                     {
@@ -807,6 +943,9 @@ def build_router(
                         "source_owner": mem.owner,
                     },
                 )
+        # 索引はコピー先の所有者ごとに最後に1回だけ作り直す（1件ごとだと数百件で O(n²) になる）。
+        for dest in copied_owners:
+            mem_store.rebuild_index(target_root, dest)
         return {
             "copied": copied,
             "skipped": len(skipped),
@@ -844,7 +983,11 @@ def build_router(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _audit(request, user, name, "memory_update", memory_name, scope)
-        return {"success": True, "visibility": mem_store.find_memory(root, memory_name, scope).visibility}
+        return {
+            "success": True,
+            "visibility": mem_store.find_memory(root, memory_name, scope).visibility,
+            "private_reasons": _private_reasons(root, memory_name, scope),
+        }
 
     @router.delete("/api/instances/{name}/memories/{memory_name}")
     def delete_memory(

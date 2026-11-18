@@ -787,8 +787,11 @@ DESCRIPTIONS: dict[str, str] = {
     ),
     'memory.user_visibility': (
         'Visibility of persistent memories (create_memory etc., src/memory.py). A user\'s memory is either shared (every user of the same instance can find and read it; only its owner can change or delete it) or private (only its owner).\n'
-        'Since the system is meant to run locally inside an organization, the default is "only things about the person and their family are private; everything else is shared". Changes apply after the instance restarts (the visibility of memories already saved is not rewritten; however, shared memories of a type set to private, or matching a check that is turned on, are no longer shown to other users).\n'
-        'Visibility per memory type (private / shared). Memories of a private type are always private, regardless of what the LLM asks or what they contain. For a shared type, the LLM chooses by the content following shared_criteria / private_criteria below (shared if it does not specify).\n'
+        'Since the system is meant to run locally inside an organization, the default is "only things about the person and their family are private; everything else is shared". Changes apply after the instance restarts (changing the setting alone does not rewrite the files of saved memories; however, shared memories of a type set to private, or matching a check that is turned on, are no longer shown to other users, and the next time the AI updates a memory it is saved again with the visibility of the new setting).\n'
+        'Visibility per memory type (private / shared). The AI (LLM) cannot choose the visibility: every save and update follows this setting (a private type is always private, a shared type is shared, except content matching force_private_checks below, which is private).\n'
+        'A visibility chosen by a person in the Memories screen of the settings dashboard is kept unless the type is private (when the AI updates that memory next, it follows this setting again).\n'
+        'NOTE: a memory of a shared type becomes shared (every other user can find and read it) the next time the AI updates it, even if it is private now (one the AI once saved as private, or one made private on the settings dashboard), unless it matches a check. '
+        'To keep personal matters from other users, set that type to private, or have the AI save them as a private type (user by default; what you write in private_criteria below is passed to the AI as content to save as user).\n'
         'user: the user\'s role and preferences.'
     ),
     'memory.feedback_visibility': 'feedback: corrections and approaches that worked.',
@@ -796,21 +799,25 @@ DESCRIPTIONS: dict[str, str] = {
     'memory.reference_visibility': 'reference: where external documents and files are, and values read from files.',
     'memory.glossary_visibility': 'glossary: company-specific terms (jargon, abbreviations, internal names) and their meanings.',
     'memory.shared_criteria': (
-        'Criteria given to the LLM (put, indented, under "- "shared" for:" and "- "private" for:" in the Memory System section of the system prompt).\n'
+        'Criteria given to the LLM for which memory type to save as (put, indented, under "- Save as a shared type:" and "- Save as user (private):" in the Memory System section of the system prompt). The visibility follows the type, so content to keep private is saved as a private type.\n'
         'Any language is fine, and several conditions can be written on separate lines (when writing directly in config.ini, indent the second and later lines with spaces). "Polish with AI" on the settings dashboard turns a draft into a bullet list in the dashboard\'s display language. If empty, the default wording is used.\n'
         'shared_criteria: what should be shared.'
     ),
     'memory.private_criteria': (
-        'private_criteria: what should be private (applies to memories of a shared type). Written the same way as shared_criteria.'
+        'private_criteria: what should be private (saved as a private type; if no type is private, it is given as "do not save these"). Written the same way as shared_criteria.'
     ),
     'memory.force_private_checks': (
-        'If the content has any of these, it is saved as private regardless of what the LLM asks, and shared memories are not shown to other users either (a broad check that prefers false positives to misses). Only the kinds in the list are used (an empty list checks nothing).\n'
+        'If the content has any of these, it is saved as private regardless of the type setting, and shared memories are not shown to other users either (a broad check that prefers false positives to misses). Only the kinds in the list are used (an empty list checks nothing).\n'
         'email              - e-mail addresses\n'
         'phone              - phone numbers\n'
         'card_id            - card or ID numbers (3 or 4 groups of 4 digits)\n'
         'credential         - words such as password, PIN, bank account number, My Number, credit card, api key, secret\n'
         'confidential_label - labels such as "confidential" (and the Japanese equivalents)\n'
         'personal_path      - personal folder paths in the form C:\\Users\\<name>\\'
+    ),
+    'memory.force_private_exempt_types': (
+        'Memory types not checked by force_private_checks (comma separated; empty checks every type). The visibility of these types follows <type>_visibility only.\n'
+        'glossary (company terms) is excluded by default: definitions of in-house terms often contain words such as "password" or "API key" and example numbers, and checking them made terms private even with glossary_visibility = shared.'
     ),
     'memory.user_ranks': (
         'Rank per user (an integer of 0 or more; a larger number is more senior). Write it as {"username": rank, ...} (it can also be set on the "Users" screen of the settings dashboard).\n'
@@ -1501,7 +1508,13 @@ DESCRIPTIONS: dict[str, str] = {
     'ui.max_display_side_steps': (
         'Maximum number of steps drawn in the side panel (on the right, the list of steps such as tool calls).\n'
         'Old steps over the limit are only dropped from the display; it has no effect at all on the conversation context passed to the LLM or on the conversation logs (display-only thinning).\n'
-        '0 means unlimited (draw everything as before).'
+        '0 means unlimited (draw everything as before).\n'
+        'When a thread is opened from the history, the server also sends only these two numbers of items (so a thread with a long run still loads quickly). While generating, the screen thins the growing steps to the same numbers.'
+    ),
+    'ui.max_step_content_chars': (
+        'Maximum number of characters of each input / output of a side-panel step (tool calls, etc.). The rest is not sent to the screen and not kept in the thread history (saved for reopening the thread); the number of omitted characters is appended.\n'
+        'Sending huge tool results (whole files, many search hits, etc.) to the screen again and again makes the browser slow and the history slow to load.\n'
+        'Display only: what is passed to the LLM and the conversation logs ([chat_log]) are not cut. 0 means no limit.'
     ),
     'ui.paste_as_attachment_threshold_chars': (
         'When text of this many characters or more is pasted into the input box, it is not expanded in the input box but handled as a "pasted text" card (an attachment pasted-text-<time>.txt).\n'

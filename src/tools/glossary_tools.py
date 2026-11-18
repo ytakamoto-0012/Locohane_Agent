@@ -126,7 +126,7 @@ def save_glossary_term(
     aliases: list[str] | None = None,
     usage: str = "",
     related_terms: list[str] | None = None,
-    visibility: str | None = None,
+    translations: dict[str, list[str] | str] | None = None,
 ) -> str:
     """Register one company-specific term in the glossary (one term = one memory file).
 
@@ -149,15 +149,20 @@ def save_glossary_term(
             sheet/row/page (an absolute path or `@N`, e.g. "D:\\docs\\terms.xlsx (Sheet1, row 12)"),
             the knowledge document and page, or "explained by the user (YYYY-MM-DD)". Files given by
             path are fingerprinted (sha256) like source_files of create_memory.
-        aliases: Other names with the same meaning: abbreviations, full forms, readings, spelling
-            variants (e.g. ["じゅちゅうざん", "受注残高"]).
+        aliases: Other names with the same meaning in the same language: abbreviations, full forms,
+            readings, spelling variants (e.g. ["じゅちゅうざん", "受注残高"]). Do not put words of other
+            languages here: use translations.
+        translations: The term in other languages, by language name, when known (e.g. from a column
+            of the dictionary file): {"English": ["order backlog", "backlog"], "German":
+            ["Auftragsbestand"], "Chinese": ["订单积压"]}. They are written one line per language
+            ("- English: order backlog / backlog"); a saved entry gets the new words added.
         usage: How and where the term is used (in which documents, tasks or departments; an example
             sentence). Write what the documents show.
         related_terms: Terms related to this one but with a different meaning (e.g. a broader term,
             the opposite term, a term used in the same process).
-        visibility: "shared" or "private", as for create_memory. If omitted, a new entry is shared
-            and an existing entry keeps its visibility; if given, it is applied to an existing entry
-            of yours too (common entries are always shared).
+
+    The visibility of the entry is set by the system settings for glossary terms (you do not
+    choose it); the result tells it.
 
     Returns:
         A text telling the saved entry (new or updated), merged duplicates, related terms linked
@@ -179,7 +184,7 @@ def save_glossary_term(
             related_terms=related_terms,
             sources=source_texts,
             source_files=source_files or None,
-            visibility=visibility,
+            translations=translations,
         )
         mem = memory.find_memory(root, result.name, me) or memory.find_memory(root, result.name, None)
     except (RuntimeError, ValueError) as e:
@@ -192,9 +197,13 @@ def save_glossary_term(
         if glossary.normalize(term) != glossary.normalize(entry.term):
             lines.append(f'"{" ".join(term.split())}" was added to its aliases (same meaning).')
     if mem is not None and mem.owner is not None:
-        lines.append(_visibility_note(root, mem, visibility))
+        lines.append(_visibility_note(root, mem))
     if entry.aliases:
         lines.append(f"Aliases: {', '.join(entry.aliases)}")
+    if entry.translations:
+        lines.append(
+            "Translations: " + "; ".join(f"{lang}: {' / '.join(words)}" for lang, words in entry.translations.items())
+        )
     if result.merged:
         lines.append(f"Merged entries with the same meaning into this one and deleted them: {', '.join(result.merged)}")
     if result.previous_meaning:

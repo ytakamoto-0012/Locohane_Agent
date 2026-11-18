@@ -35,6 +35,7 @@ from chainlit.types import Feedback, PageInfo, PaginatedResponse, Pagination, Th
 from chainlit.user import PersistedUser, User
 
 from . import chat_log
+from .thread_display import MESSAGE_TYPES, DisplayLimits, cap_step_content, select_elements, select_steps
 
 logger = logging.getLogger(__name__)
 
@@ -348,13 +349,132 @@ async def get_thread_owner(conn: aiosqlite.Connection, thread_id: str) -> str | 
     return row[0] if row else None
 
 
-async def get_thread_detail(conn: aiosqlite.Connection, thread_id: str) -> ThreadDict | None:
+_STEP_ID_CHUNK = 500
+
+
+async def _load_display_steps(conn: aiosqlite.Connection, thread_id: str, limits: DisplayLimits) -> list[dict]:
+    """画面に要る Step だけを読む（src/thread_display.py の select_steps）。
+
+    まず種類・親・本文の先頭など選ぶのに要る列だけを SQLite の json_extract で取り出して選び、選んだ Step の
+    本文（data_json）だけを読み込む。数万件・数百MBのスレッドでも、全件を Python で json.loads しない。
+    json_extract が使えない SQLite なら全件を読んでから選ぶ。
+    """
+    prefix_len = max((len(p) for p in limits.status_prefixes), default=1)
+    try:
+        cursor = await conn.execute(
+            "SELECT id, json_extract(data_json, '$.type'), json_extract(data_json, '$.parentId'), "
+            "substr(json_extract(data_json, '$.output'), 1, ?), json_extract(data_json, '$.start'), "
+            "json_extract(data_json, '$.end'), json_extract(data_json, '$.isError') "
+            "FROM steps WHERE thread_id = ? ORDER BY created_at, rowid",
+            (prefix_len, thread_id),
+        )
+        rows = await cursor.fetchall()
+    except aiosqlite.OperationalError as e:
+        logger.warning("json_extract is not available; loading every step to trim the thread: %s", e)
+        cursor = await conn.execute(
+            "SELECT data_json FROM steps WHERE thread_id = ? ORDER BY created_at, rowid", (thread_id,)
+        )
+        return select_steps([json.loads(r[0]) for r in await cursor.fetchall()], limits)
+    light = [
+        {"id": r[0], "type": r[1], "parentId": r[2], "output": r[3], "start": r[4], "end": r[5], "isError": bool(r[6])}
+        for r in rows
+    ]
+    chosen = [s["id"] for s in select_steps(light, DisplayLimits(limits.max_messages, limits.max_side_steps, 0, limits.status_prefixes))]
+    full: dict[str, dict] = {}
+    for i in range(0, len(chosen), _STEP_ID_CHUNK):
+        chunk = chosen[i : i + _STEP_ID_CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        cursor = await conn.execute(
+            f"SELECT id, data_json FROM steps WHERE thread_id = ? AND id IN ({placeholders})", (thread_id, *chunk)
+        )
+        for step_id, data_json in await cursor.fetchall():
+            full[step_id] = json.loads(data_json)
+    if len(chosen) < len(light):
+        logger.info("Trimmed the thread for display: thread_id=%s steps=%d/%d", thread_id, len(chosen), len(light))
+    return [cap_step_content(full[i], limits.max_step_chars) for i in chosen if i in full]
+
+
+async def get_older_messages(
+    conn: aiosqlite.Connection,
+    thread_id: str,
+    before_step_id: str,
+    limit: int,
+    status_prefixes: tuple[str, ...] = (),
+) -> tuple[list[dict], list[dict], bool]:
+    """before_step_id より前のメインの会話（ユーザー発言・回答・システムメッセージ）を、新しい方から limit 件返す。
+
+    会話履歴を開いたときは表示件数（[ui] max_display_messages）ぶんしか送らないため、画面で上へスクロールしたときに
+    それより前を読み足す用（app.py の /locohane/threads/{id}/older）。状態メッセージ（status_prefixes で始まる
+    回答。トークン使用量等）は含めない。
+
+    Returns:
+        (古い順のメッセージ, それらに付いた要素（画像・ファイル）, さらに前があるか)。before_step_id が無ければ ([], [], False)。
+    """
+    cursor = await conn.execute("SELECT created_at, rowid FROM steps WHERE thread_id = ? AND id = ?", (thread_id, before_step_id))
+    anchor = await cursor.fetchone()
+    if anchor is None or limit <= 0:
+        return [], [], False
+    created_at, rowid = anchor
+    prefix_len = max((len(p) for p in status_prefixes), default=1)
+    where = (
+        "thread_id = ? AND (created_at < ? OR (created_at = ? AND rowid < ?)) "
+        "AND json_extract(data_json, '$.type') IN ('user_message', 'assistant_message', 'system_message')"
+    )
+    try:
+        cursor = await conn.execute(
+            f"SELECT id, json_extract(data_json, '$.type'), substr(json_extract(data_json, '$.output'), 1, ?) "
+            f"FROM steps WHERE {where} ORDER BY created_at, rowid",
+            (prefix_len, thread_id, created_at, created_at, rowid),
+        )
+        light = [{"id": r[0], "type": r[1], "output": r[2]} for r in await cursor.fetchall()]
+        full_rows = None
+    except aiosqlite.OperationalError as e:
+        logger.warning("json_extract is not available; loading every step to find older messages: %s", e)
+        cursor = await conn.execute(
+            "SELECT data_json FROM steps WHERE thread_id = ? AND (created_at < ? OR (created_at = ? AND rowid < ?)) "
+            "ORDER BY created_at, rowid",
+            (thread_id, created_at, created_at, rowid),
+        )
+        full_rows = [json.loads(r[0]) for r in await cursor.fetchall()]
+        light = full_rows
+    candidates = [
+        s
+        for s in light
+        if s.get("type") in MESSAGE_TYPES
+        and not (s.get("type") == "assistant_message" and isinstance(s.get("output"), str) and s["output"].startswith(status_prefixes))
+    ]
+    has_more = len(candidates) > limit
+    chosen = [s["id"] for s in candidates[-limit:]]
+    if full_rows is not None:
+        by_id = {s.get("id"): s for s in full_rows}
+    else:
+        by_id = {}
+        for i in range(0, len(chosen), _STEP_ID_CHUNK):
+            chunk = chosen[i : i + _STEP_ID_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            cursor = await conn.execute(
+                f"SELECT id, data_json FROM steps WHERE thread_id = ? AND id IN ({placeholders})", (thread_id, *chunk)
+            )
+            for step_id, data_json in await cursor.fetchall():
+                by_id[step_id] = json.loads(data_json)
+    messages = [by_id[i] for i in chosen if i in by_id]
+    ids = {m.get("id") for m in messages}
+    elements = [e for e in await get_elements_for_thread(conn, thread_id) if e.get("forId") in ids]
+    return messages, elements, has_more
+
+
+async def get_thread_detail(
+    conn: aiosqlite.Connection, thread_id: str, limits: DisplayLimits | None = None
+) -> ThreadDict | None:
     """再開・表示に使う ThreadDict を組み立てる。
 
     "id" は必ず引数の thread_id をそのまま返す。@chainlit/react-client の
     resume_thread ハンドラは thread.id が要求した thread_id と異なると
     window.location.href='/thread/<id>' へハードナビゲートする（このSPAには
     存在しないルート）ため、ここでズレると再開が壊れる。
+
+    limits を渡すと、画面に描く分の Step（と、それに付いた要素）だけを返し、ツールの入出力の長い本文を切る
+    （src/thread_display.py。長時間の処理をさせたスレッドの読み込みが重くならないように）。None なら全件。
     """
     cursor = await conn.execute(
         "SELECT owner, name, created_at, updated_at, metadata_json, tags_json FROM threads WHERE id = ?",
@@ -365,13 +485,18 @@ async def get_thread_detail(conn: aiosqlite.Connection, thread_id: str) -> Threa
         return None
     owner, name, created_at, _updated_at, metadata_json, tags_json = row
 
-    steps_cursor = await conn.execute(
-        "SELECT data_json FROM steps WHERE thread_id = ? ORDER BY created_at", (thread_id,)
-    )
-    step_rows = await steps_cursor.fetchall()
-    steps = [json.loads(r[0]) for r in step_rows]
-
-    elements = await get_elements_for_thread(conn, thread_id)
+    if limits is not None and limits.trims:
+        steps = await _load_display_steps(conn, thread_id, limits)
+        elements = select_elements(await get_elements_for_thread(conn, thread_id), {s.get("id") for s in steps})
+    else:
+        steps_cursor = await conn.execute(
+            "SELECT data_json FROM steps WHERE thread_id = ? ORDER BY created_at, rowid", (thread_id,)
+        )
+        step_rows = await steps_cursor.fetchall()
+        steps = [json.loads(r[0]) for r in step_rows]
+        if limits is not None:
+            steps = [cap_step_content(s, limits.max_step_chars) for s in steps]
+        elements = await get_elements_for_thread(conn, thread_id)
 
     return {
         "id": thread_id,
@@ -658,9 +783,15 @@ async def run_cleanup_loop(
 class ChatThreadDataLayer(BaseDataLayer):
     """Chainlit BaseDataLayer の薄いアダプタ。実処理は上記モジュール関数へ委譲する。"""
 
-    def __init__(self, conn: aiosqlite.Connection, elements_dir: Path):
+    def __init__(self, conn: aiosqlite.Connection, elements_dir: Path, display_limits: DisplayLimits | None = None):
+        """
+        Args:
+            display_limits: スレッドを開いたとき画面へ送る履歴の上限（get_thread）と、保存するツール等の Step の
+                本文の文字数の上限（create_step。max_step_chars）。None なら全件・切らない。
+        """
         self._conn = conn
         self._elements_dir = elements_dir
+        self._display_limits = display_limits
 
     async def get_user(self, identifier: str) -> PersistedUser | None:
         return await get_user_row(self._conn, identifier)
@@ -760,6 +891,10 @@ class ChatThreadDataLayer(BaseDataLayer):
         """
         if (step_dict.get("metadata") or {}).get("ephemeral_progress"):
             return
+        # ツール等の Step の長い入出力は、表示に使う分（[ui] max_step_content_chars）だけ保存する
+        # （全文は会話ログ [chat_log] と LangGraph の会話状態に残る。ここは画面の再生用）。
+        if self._display_limits is not None:
+            step_dict = cap_step_content(step_dict, self._display_limits.max_step_chars)
         thread_id = step_dict.get("threadId")
         if thread_id:
             await upsert_thread_stub(self._conn, thread_id, _current_owner())
@@ -789,18 +924,29 @@ class ChatThreadDataLayer(BaseDataLayer):
     async def list_threads(self, pagination: Pagination, filters: ThreadFilter) -> PaginatedResponse[ThreadDict]:
         owner = filters.userId or ANONYMOUS_OWNER
         items, next_cursor = await list_threads_summary(self._conn, owner, pagination.first, pagination.cursor)
-        threads: list[ThreadDict] = []
-        for item in items:
-            thread = await get_thread_detail(self._conn, item["id"])
-            if thread is not None:
-                threads.append(thread)
+        # 一覧に Step は要らない（以前はスレッドごとに全 Step を読み、長いスレッドがあると一覧が重かった）。
+        threads: list[ThreadDict] = [
+            {
+                "id": item["id"],
+                "createdAt": item["updatedAt"],
+                "name": item["name"],
+                "userId": owner,
+                "userIdentifier": owner,
+                "tags": None,
+                "metadata": {},
+                "steps": [],
+                "elements": [],
+            }
+            for item in items
+        ]
         return PaginatedResponse(
             pageInfo=PageInfo(hasNextPage=next_cursor is not None, startCursor=None, endCursor=next_cursor),
             data=threads,
         )
 
     async def get_thread(self, thread_id: str) -> ThreadDict | None:
-        return await get_thread_detail(self._conn, thread_id)
+        """画面へ送るスレッド（再開・再接続時の resume_thread、/locohane/threads/{id}）。表示に要る分だけ返す。"""
+        return await get_thread_detail(self._conn, thread_id, self._display_limits)
 
     async def update_thread(
         self,

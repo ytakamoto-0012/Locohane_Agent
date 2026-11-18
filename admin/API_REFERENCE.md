@@ -439,9 +439,16 @@ $C -X PUT "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H" -H 
   -d '{"description":"一行の説明","type":"feedback","content":"新しい本文","visibility":"private"}'
 # 削除
 $C -X DELETE "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H"
-# まとめて削除（1件でも見つからなければ何も削除しない。owner を省くと共通）
+# まとめて削除（1件でも見つからなければ何も削除しない。owner を省くと共通。件数の上限は無い）。応答は deleted/failed/failed_items
 $C -X POST $BASE/api/instances/default/memories/delete -H "$H" -H "$J" \
   -d '{"items":[{"name":"my-note","owner":"alice"},{"name":"old-note"}]}'
+# 指定した種類のメモリーをすべて削除（owner は "*"＝全員と共通（既定）・""＝共通だけ・ユーザー名＝そのユーザーだけ）
+$C -X POST $BASE/api/instances/default/memories/delete-by-type -H "$H" -H "$J" \
+  -d '{"type":"glossary","owner":"*"}'
+# 種類・公開範囲をまとめて変更（type / visibility の省いた方は変えない。公開範囲は共通のメモリーには効かない）。
+# 応答は changed/failed/failed_items/forced_private_items（private の種類・目印で個人用のままのもの）
+$C -X POST $BASE/api/instances/default/memories/change -H "$H" -H "$J" \
+  -d '{"items":[{"name":"my-note","owner":"alice"}],"visibility":"shared"}'
 # 別のインスタンスへコピー（コピー元は変わらない。1件ずつ処理し、失敗したものは理由付きで報告して続ける）。
 # target_owner を省くとメモリーごとにコピー元と同じ所有者、空文字なら共通、ユーザー名ならそのユーザーのメモリー。
 # 個人用のメモリーは同じ所有者へしかコピーしない。コピー先に同名があるものは飛ばす（置き換えない）。

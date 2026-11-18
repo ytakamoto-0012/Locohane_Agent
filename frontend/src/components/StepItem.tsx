@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import type { IStep } from '@chainlit/react-client';
 import { useI18n, type MessageKey } from '../i18n';
 import { stepDisplayLabel } from '../utils/stepLabel';
@@ -21,7 +21,8 @@ const STATUS_LABELS = {
   background: 'step.background'
 } as const satisfies Record<string, MessageKey>;
 
-export function StepItem({ step }: { step: IStep }) {
+// 変わっていないStep（同じオブジェクト。messageTree.ts の selectSideSteps が保つ）は描き直さない。
+export const StepItem = memo(function StepItem({ step }: { step: IStep }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const hasContent = Boolean(step.input || step.output);
@@ -98,4 +99,4 @@ export function StepItem({ step }: { step: IStep }) {
       ) : null}
     </div>
   );
-}
+});
