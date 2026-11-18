@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.7.10] - 2026-11-18
+
 ### 修正
 
 - `[memory] glossary_visibility = shared` でも用語が個人用（private）で保存され、設定ダッシュボードで共有に直しても
@@ -52,7 +54,7 @@
   「press Ctrl+V to paste an image」）。
 - メモリーの公開範囲を AI（LLM）が選べないようにしました。`create_memory`・`update_memory`・`save_glossary_term` から
   `visibility` の引数を外し、保存・更新のたびに `[memory] <種類>_visibility` と目印の設定で決めます。更新でも今の公開範囲を
-  引き継がないため、以前 AI が個人用を選んだメモリーも、次の更新から設定どおりになります。`shared_criteria` /
+  引き継ぎません（この版より前に個人用で保存されたメモリーは、人が選んだか区別できないため個人用のままにします）。`shared_criteria` /
   `private_criteria` は「どの種類で保存するか」の基準として AI に渡します（個人用にしたい内容は `user` 等の private の種類で
   保存させます）。ただし設定ダッシュボードで人が個人用にしたものは、AI が更新しても個人用のままです。
 - 長時間の処理をさせた会話の画面を軽くしました。
@@ -79,9 +81,10 @@
 ### 移行時の注意
 
 - AI のツールに `visibility` を渡す独自のスキル・プロンプトがあれば、引数を外してください（渡すとエラーになります）。
-- 種類が shared の設定のまま、AI に「個人用で」保存させていたメモリーは、次に AI が更新したときに共有になります。
-  個人的な内容を共有させたくない場合は、`user`（既定 private）で保存させるか、その種類の `<種類>_visibility` を
-  `private` にしてください。
+- この版より前に個人用で保存されたメモリーは、すべて「個人用（固定）」として扱い、AI が更新しても個人用のままです。
+  設定どおりの公開範囲に戻したいものは、設定ダッシュボードの「メモリー」で共有にしてください。
+- この版からは、種類が shared の設定のまま AI が保存したメモリーは共有になります。個人的な内容を共有させたくない
+  場合は、`user`（既定 private）で保存させるか、その種類の `<種類>_visibility` を `private` にしてください。
 
 ## [0.7.9] - 2026-11-17
 
@@ -1597,7 +1600,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.9...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.10...HEAD
+[0.7.10]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.9...v0.7.10
 [0.7.9]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.6...v0.7.7
