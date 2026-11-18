@@ -271,6 +271,19 @@ def test_delete_by_type(env):
     assert mem_store.find_memory(memory_dir, "keep", "alice") is not None
 
 
+def test_delete_by_type_deletes_only_the_confirmed_memories(env):
+    # 確認ダイアログで見せた後に増えたメモリーは消さない
+    client, memory_dir = env["client"], env["memory_dir"]
+    mem_store.create_memory(memory_dir, "a1", "d", "glossary", "c", owner="alice")
+    mem_store.create_memory(memory_dir, "a2", "d", "glossary", "c", owner="alice")
+    res = client.post(
+        "/api/instances/default/memories/delete-by-type",
+        json={"type": "glossary", "owner": "*", "expected": [{"name": "a1", "owner": "alice"}]},
+    )
+    assert res.json()["deleted"] == 1 and res.json()["not_shown"] == 1
+    assert [m.name for m in mem_store.all_memories(memory_dir, "glossary")] == ["a2"]
+
+
 def test_bulk_change_type_and_visibility(env):
     client, memory_dir = env["client"], env["memory_dir"]
     mem_store.create_memory(memory_dir, "g1", "d", "glossary", "c", owner="alice", visibility="private")

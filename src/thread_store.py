@@ -352,6 +352,68 @@ async def get_thread_owner(conn: aiosqlite.Connection, thread_id: str) -> str | 
 _STEP_ID_CHUNK = 500
 
 
+async def _load_steps_by_ids(conn: aiosqlite.Connection, thread_id: str, ids: list[str]) -> dict[str, dict]:
+    """ids の Step の本文（data_json）を読む（SQLite の変数の上限を超えないよう _STEP_ID_CHUNK 件ずつ）。"""
+    full: dict[str, dict] = {}
+    for i in range(0, len(ids), _STEP_ID_CHUNK):
+        chunk = ids[i : i + _STEP_ID_CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        cursor = await conn.execute(
+            f"SELECT id, data_json FROM steps WHERE thread_id = ? AND id IN ({placeholders})", (thread_id, *chunk)
+        )
+        for step_id, data_json in await cursor.fetchall():
+            full[step_id] = json.loads(data_json)
+    return full
+
+
+async def _element_rows_for_steps(
+    conn: aiosqlite.Connection, thread_id: str, step_ids: set[object]
+) -> list[tuple[str | None, int, str]]:
+    """step_ids の Step に付いた要素の行（created_at, rowid, data_json）。"""
+    ids = [i for i in step_ids if isinstance(i, str)]
+    rows: list[tuple[str | None, int, str]] = []
+    for i in range(0, len(ids), _STEP_ID_CHUNK):
+        chunk = ids[i : i + _STEP_ID_CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        cursor = await conn.execute(
+            "SELECT created_at, rowid, data_json FROM elements "
+            f"WHERE thread_id = ? AND kind = 'chainlit' AND for_id IN ({placeholders})",
+            (thread_id, *chunk),
+        )
+        rows += await cursor.fetchall()
+    return rows
+
+
+def _rows_to_elements(rows: list[tuple[str | None, int, str]]) -> list[dict]:
+    """要素の行を作成順（get_elements_for_thread と同じ）に並べ、同じ行を1つにして読み解く。"""
+    unique = {r[1]: r for r in rows}
+    return [json.loads(r[2]) for r in sorted(unique.values(), key=lambda r: (r[0] or "", r[1]))]
+
+
+async def _load_elements_for_steps(conn: aiosqlite.Connection, thread_id: str, step_ids: set[object]) -> list[dict]:
+    """step_ids の Step に付いた要素だけを読む（スレッドの全要素を読んでから絞らない）。"""
+    return _rows_to_elements(await _element_rows_for_steps(conn, thread_id, step_ids))
+
+
+async def _load_display_elements(conn: aiosqlite.Connection, thread_id: str, kept_ids: set[object]) -> list[dict]:
+    """画面へ送る要素: 残した Step に付いたもの・どの Step にも付いていないもの・tasklist（select_elements と同じ規則）。
+
+    スレッドの全要素を読んでから絞らない。json_extract が使えない SQLite なら全件を読んでから選ぶ。
+    """
+    try:
+        cursor = await conn.execute(
+            "SELECT created_at, rowid, data_json FROM elements WHERE thread_id = ? AND kind = 'chainlit' "
+            "AND (for_id IS NULL OR for_id = '' OR json_extract(data_json, '$.type') = 'tasklist')",
+            (thread_id,),
+        )
+        rows = list(await cursor.fetchall())
+    except aiosqlite.OperationalError as e:
+        logger.warning("json_extract is not available; loading every element to trim the thread: %s", e)
+        return select_elements(await get_elements_for_thread(conn, thread_id), kept_ids)
+    rows += await _element_rows_for_steps(conn, thread_id, kept_ids)
+    return select_elements(_rows_to_elements(rows), kept_ids)
+
+
 async def _load_display_steps(conn: aiosqlite.Connection, thread_id: str, limits: DisplayLimits) -> list[dict]:
     """画面に要る Step だけを読む（src/thread_display.py の select_steps）。
 
@@ -364,7 +426,8 @@ async def _load_display_steps(conn: aiosqlite.Connection, thread_id: str, limits
         cursor = await conn.execute(
             "SELECT id, json_extract(data_json, '$.type'), json_extract(data_json, '$.parentId'), "
             "substr(json_extract(data_json, '$.output'), 1, ?), json_extract(data_json, '$.start'), "
-            "json_extract(data_json, '$.end'), json_extract(data_json, '$.isError') "
+            "json_extract(data_json, '$.end'), json_extract(data_json, '$.isError'), "
+            "json_extract(data_json, '$.metadata.stopped_reason'), json_extract(data_json, '$.metadata.background') "
             "FROM steps WHERE thread_id = ? ORDER BY created_at, rowid",
             (prefix_len, thread_id),
         )
@@ -376,19 +439,21 @@ async def _load_display_steps(conn: aiosqlite.Connection, thread_id: str, limits
         )
         return select_steps([json.loads(r[0]) for r in await cursor.fetchall()], limits)
     light = [
-        {"id": r[0], "type": r[1], "parentId": r[2], "output": r[3], "start": r[4], "end": r[5], "isError": bool(r[6])}
+        {
+            "id": r[0],
+            "type": r[1],
+            "parentId": r[2],
+            "output": r[3],
+            "start": r[4],
+            "end": r[5],
+            "isError": bool(r[6]),
+            # 止めた Step・裏で続く Step を実行中に数えない（thread_display._is_running）。
+            "metadata": {"stopped_reason": r[7], "background": r[8]},
+        }
         for r in rows
     ]
     chosen = [s["id"] for s in select_steps(light, DisplayLimits(limits.max_messages, limits.max_side_steps, 0, limits.status_prefixes))]
-    full: dict[str, dict] = {}
-    for i in range(0, len(chosen), _STEP_ID_CHUNK):
-        chunk = chosen[i : i + _STEP_ID_CHUNK]
-        placeholders = ",".join("?" * len(chunk))
-        cursor = await conn.execute(
-            f"SELECT id, data_json FROM steps WHERE thread_id = ? AND id IN ({placeholders})", (thread_id, *chunk)
-        )
-        for step_id, data_json in await cursor.fetchall():
-            full[step_id] = json.loads(data_json)
+    full = await _load_steps_by_ids(conn, thread_id, chosen)
     if len(chosen) < len(light):
         logger.info("Trimmed the thread for display: thread_id=%s steps=%d/%d", thread_id, len(chosen), len(light))
     return [cap_step_content(full[i], limits.max_step_chars) for i in chosen if i in full]
@@ -445,21 +510,9 @@ async def get_older_messages(
     ]
     has_more = len(candidates) > limit
     chosen = [s["id"] for s in candidates[-limit:]]
-    if full_rows is not None:
-        by_id = {s.get("id"): s for s in full_rows}
-    else:
-        by_id = {}
-        for i in range(0, len(chosen), _STEP_ID_CHUNK):
-            chunk = chosen[i : i + _STEP_ID_CHUNK]
-            placeholders = ",".join("?" * len(chunk))
-            cursor = await conn.execute(
-                f"SELECT id, data_json FROM steps WHERE thread_id = ? AND id IN ({placeholders})", (thread_id, *chunk)
-            )
-            for step_id, data_json in await cursor.fetchall():
-                by_id[step_id] = json.loads(data_json)
+    by_id = {s.get("id"): s for s in full_rows} if full_rows is not None else await _load_steps_by_ids(conn, thread_id, chosen)
     messages = [by_id[i] for i in chosen if i in by_id]
-    ids = {m.get("id") for m in messages}
-    elements = [e for e in await get_elements_for_thread(conn, thread_id) if e.get("forId") in ids]
+    elements = await _load_elements_for_steps(conn, thread_id, {m.get("id") for m in messages})
     return messages, elements, has_more
 
 
@@ -487,7 +540,7 @@ async def get_thread_detail(
 
     if limits is not None and limits.trims:
         steps = await _load_display_steps(conn, thread_id, limits)
-        elements = select_elements(await get_elements_for_thread(conn, thread_id), {s.get("id") for s in steps})
+        elements = await _load_display_elements(conn, thread_id, {s.get("id") for s in steps})
     else:
         steps_cursor = await conn.execute(
             "SELECT data_json FROM steps WHERE thread_id = ? ORDER BY created_at, rowid", (thread_id,)
@@ -925,20 +978,31 @@ class ChatThreadDataLayer(BaseDataLayer):
         owner = filters.userId or ANONYMOUS_OWNER
         items, next_cursor = await list_threads_summary(self._conn, owner, pagination.first, pagination.cursor)
         # 一覧に Step は要らない（以前はスレッドごとに全 Step を読み、長いスレッドがあると一覧が重かった）。
-        threads: list[ThreadDict] = [
-            {
-                "id": item["id"],
-                "createdAt": item["updatedAt"],
-                "name": item["name"],
-                "userId": owner,
-                "userIdentifier": owner,
-                "tags": None,
-                "metadata": {},
-                "steps": [],
-                "elements": [],
-            }
-            for item in items
-        ]
+        # 作成日時・metadata・tags はスレッドの行から読む（Step は読まない）。
+        extra: dict[str, tuple[str | None, str | None, str | None]] = {}
+        ids = [item["id"] for item in items]
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            cursor = await self._conn.execute(
+                f"SELECT id, created_at, metadata_json, tags_json FROM threads WHERE id IN ({placeholders})", ids
+            )
+            extra = {r[0]: (r[1], r[2], r[3]) for r in await cursor.fetchall()}
+        threads: list[ThreadDict] = []
+        for item in items:
+            created_at, metadata_json, tags_json = extra.get(item["id"], (None, None, None))
+            threads.append(
+                {
+                    "id": item["id"],
+                    "createdAt": created_at or item["updatedAt"],
+                    "name": item["name"],
+                    "userId": owner,
+                    "userIdentifier": owner,
+                    "tags": json.loads(tags_json) if tags_json else None,
+                    "metadata": json.loads(metadata_json or "{}"),
+                    "steps": [],
+                    "elements": [],
+                }
+            )
         return PaginatedResponse(
             pageInfo=PageInfo(hasNextPage=next_cursor is not None, startCursor=None, endCursor=next_cursor),
             data=threads,

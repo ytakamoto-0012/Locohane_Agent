@@ -156,3 +156,67 @@ def test_get_older_messages(tmp_path):
     assert [m["output"][:2] for m in messages] == ["q0", "a0", "q1"]
     assert not has_more and [e["id"] for e in elements] == ["e1"]
     assert missing == ([], [], False)
+
+
+def test_last_user_message_is_kept_even_beyond_the_limit():
+    # 1回の指示で回答が表示件数を超えても、最後のユーザー発言は残す（画面は送信済みか・中断の後に発言があるかを
+    # 最後のユーザー発言で判断する）
+    run = _step("run")
+    user = _step("user_message", run["id"], "q")
+    answers = [_step("assistant_message", run["id"], f"a{i}") for i in range(10)]
+    kept = select_steps([run, user, *answers], LIMITS)
+    assert [s["output"] for s in kept if s["type"] != "run"] == ["q", "a7", "a8", "a9"]
+
+
+def test_stopped_or_background_steps_are_not_kept_as_running():
+    # end の無い Step でも、止めたもの・裏で続くものは実行中に数えない（画面の isRunningStep と同じ）
+    run = _step("run")
+    stopped = [_step("tool", run["id"], end=None, metadata={"stopped_reason": "interrupted"}) for _ in range(5)]
+    background = _step("tool", run["id"], end=None, metadata={"background": True})
+    running = _step("tool", run["id"], end=None)
+    steps = [run, *stopped, background, running, *(_step("tool", run["id"]) for _ in range(3))]
+    ids = {s["id"] for s in select_steps(steps, LIMITS)}
+    assert running["id"] in ids
+    assert not ({s["id"] for s in stopped} | {background["id"]}) & ids
+
+
+def test_trimmed_thread_from_sqlite_skips_stopped_steps_and_loads_only_needed_elements(tmp_path):
+    async def scenario():
+        conn = await thread_store.init_db(tmp_path / "t.sqlite")
+        try:
+            await thread_store.upsert_thread_stub(conn, "t1", "alice")
+            run = _step("run")
+            old = _step("tool", run["id"], end=None, metadata={"stopped_reason": "interrupted"})
+            tools = [_step("tool", run["id"]) for _ in range(3)]
+            for i, s in enumerate([run, old, *tools]):
+                await thread_store.upsert_step_row(conn, {**s, "threadId": "t1", "createdAt": f"2026-11-18T00:00:{i:02d}Z"})
+            await thread_store.upsert_element_meta(conn, "e-old", "t1", old["id"], {"id": "e-old", "forId": old["id"], "type": "image"})
+            await thread_store.upsert_element_meta(conn, "e-new", "t1", tools[-1]["id"], {"id": "e-new", "forId": tools[-1]["id"], "type": "image"})
+            await thread_store.upsert_element_meta(conn, "e-free", "t1", None, {"id": "e-free", "type": "file"})
+            await thread_store.upsert_element_meta(conn, "e-task", "t1", old["id"], {"id": "e-task", "forId": old["id"], "type": "tasklist"})
+            return await thread_store.get_thread_detail(conn, "t1", LIMITS), old
+        finally:
+            await conn.close()
+
+    thread, old = asyncio.run(scenario())
+    assert old["id"] not in {s["id"] for s in thread["steps"]}
+    assert sorted(e["id"] for e in thread["elements"]) == ["e-free", "e-new", "e-task"]
+
+
+def test_list_threads_returns_the_stored_created_at_metadata_and_tags(tmp_path):
+    from chainlit.types import Pagination, ThreadFilter
+
+    async def scenario():
+        conn = await thread_store.init_db(tmp_path / "t.sqlite")
+        try:
+            await thread_store.save_thread(conn, "t1", owner="alice", name="n", metadata={"k": "v"}, tags=["x"])
+            layer = thread_store.ChatThreadDataLayer(conn, tmp_path / "elements", DisplayLimits())
+            page = await layer.list_threads(Pagination(first=10), ThreadFilter(userId="alice"))
+            cursor = await conn.execute("SELECT created_at FROM threads WHERE id = 't1'")
+            return page.data, (await cursor.fetchone())[0]
+        finally:
+            await conn.close()
+
+    [thread], created_at = asyncio.run(scenario())
+    assert thread["createdAt"] == created_at
+    assert thread["metadata"] == {"k": "v"} and thread["tags"] == ["x"]

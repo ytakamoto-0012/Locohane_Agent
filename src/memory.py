@@ -266,6 +266,9 @@ class Memory:
         visibility: "private" | "shared"。共通のメモリーは常に "shared"。
         author: 作ったユーザー（frontmatter の author。記録が無ければ None）。
         updated_by: 最後に本文を書き換えたユーザー（frontmatter の updated_by。記録が無ければ None）。
+        visibility_pinned: 人が設定ダッシュボードで個人用（private）にしたもの（frontmatter の visibility_pinned）。
+            LLM の保存・更新は公開範囲を種類の設定で決め直すが、この印があるものは個人用のまま残す
+            （人が隠したものを AI の更新で共有へ戻さないため）。人が共有にすると外れる。
     """
 
     name: str
@@ -278,6 +281,7 @@ class Memory:
     visibility: Visibility = "shared"
     author: str | None = None
     updated_by: str | None = None
+    visibility_pinned: bool = False
 
 
 def ensure_dirs(memory_root: Path, owner: str | None = None) -> None:
@@ -402,8 +406,12 @@ def _serialize(
     visibility: str | None = None,
     author: str | None = None,
     updated_by: str | None = None,
+    visibility_pinned: bool = False,
 ) -> str:
-    """メモリー1件を frontmatter 付き Markdown 文字列へ組み立てる（visibility は共通のメモリーでは書かない）。"""
+    """メモリー1件を frontmatter 付き Markdown 文字列へ組み立てる（visibility は共通のメモリーでは書かない）。
+
+    visibility_pinned は private のユーザーのメモリーにだけ書く。
+    """
     frontmatter: dict = {
         "name": name,
         "description": description,
@@ -411,6 +419,8 @@ def _serialize(
     }
     if visibility is not None:
         frontmatter["visibility"] = visibility
+        if visibility_pinned and visibility == "private":
+            frontmatter["visibility_pinned"] = True
     if author is not None:
         frontmatter["author"] = author
     if updated_by is not None:
@@ -460,11 +470,13 @@ def _load(path: Path, owner: str | None = None) -> Memory | None:
     if not isinstance(name, str) or not isinstance(description, str) or memory_type not in MEMORY_TYPES:
         logger.warning("Skipping because the memory frontmatter is invalid: %s", path)
         return None
+    pinned = False
     if owner is None:
         visibility: Visibility = "shared"
     else:
         raw_visibility = frontmatter.get("visibility")
         visibility = raw_visibility if raw_visibility in VISIBILITIES else "private"
+        pinned = visibility == "private" and frontmatter.get("visibility_pinned") is True
     author = frontmatter.get("author")
     updated_by = frontmatter.get("updated_by")
     return Memory(
@@ -479,6 +491,7 @@ def _load(path: Path, owner: str | None = None) -> Memory | None:
         # ユーザー名の記録が無い（ユーザー別になる前の）ユーザーのメモリーは、所有者が作ったものとみなす。
         author=author if isinstance(author, str) and author else owner,
         updated_by=updated_by if isinstance(updated_by, str) and updated_by else None,
+        visibility_pinned=pinned,
     )
 
 
@@ -808,6 +821,8 @@ def create_memory(
             sources=sources,
             visibility=final_visibility,
             author=author if author is not None else owner,
+            # private を明示して作るのは人（設定ダッシュボード）だけ。AI の更新で共有に戻らないよう印を付ける。
+            visibility_pinned=visibility == "private",
         ),
         encoding="utf-8",
     )
@@ -829,7 +844,8 @@ def update_memory(
 
     LLM の update_memory ツール用。ユーザーのメモリーの公開範囲は、今の値を引き継がずに種類の設定
     （config.ini [memory] <type>_visibility）と新しい本文の目印で決め直す（設定を変えた後や、以前 LLM が
-    private を選んでいたメモリーも、次の更新から設定どおりになる）。
+    private を選んでいたメモリーも、次の更新から設定どおりになる）。ただし人が設定ダッシュボードで
+    個人用にしたもの（visibility_pinned）は個人用のまま。
 
     Args:
         memory_root: メモリーストアのルートディレクトリ。
@@ -891,13 +907,15 @@ def edit_memory(
         memory_type: 新しい type。
         content: 新しい本文。
         owner: 所有者。None なら共通のメモリー。
-        visibility: ユーザーのメモリーの新しい公開範囲（None なら今の値のまま）。
+        visibility: ユーザーのメモリーの新しい公開範囲（None なら今の値のまま）。人（設定ダッシュボード）が
+            渡すもので、"private" なら visibility_pinned の印を付け、"shared" なら外す。
         updated_by: 書き換えた人（frontmatter の updated_by に記録する）。None なら記録済みの値のまま。
         source_files: 渡すとその今の sha256 で元ファイルの指紋を置き換える（None なら記録済みのまま）。
         fingerprints: 記録する元ファイルの指紋そのもの（記録済みの指紋を取り直さずに残したいとき。用語集の出典の追加用）。
             source_files と同時には渡せない。件数は SOURCE_FILES_MAX まで。
         follow_policy: True なら visibility を無視し、公開範囲を種類の設定と目印で決め直す（LLM が書き換える
             用語集用。今の値を引き継ぐと、以前 private になった用語が設定を shared にしても戻らなかった）。
+            visibility_pinned の印があるものは個人用のまま。
 
     Returns:
         書き換え後のファイルの絶対パス。
@@ -932,6 +950,7 @@ def edit_memory(
         sources=sources,
         visibility=None if follow_policy else (visibility if visibility is not None else mem.visibility),
         updated_by=updated_by,
+        pinned=None if follow_policy or visibility is None else visibility == "private",
     )
 
 
@@ -946,13 +965,18 @@ def _rewrite(
     visibility: str | None,
     updated_by: str | None = None,
     rebuild: bool = True,
+    pinned: bool | None = None,
 ) -> Path:
     """mem を新しい内容で書き直す（created・author は残す。type が変われば移す）。
 
-    visibility が None なら種類の設定どおり（resolve_visibility）。rebuild=False なら索引を作り直さない
-    （まとめて書き換える呼び出し側が最後に1回だけ作り直す）。
+    visibility が None なら種類の設定どおり（resolve_visibility）。ただし visibility_pinned の印があれば
+    private のまま。pinned は印の付け外し（None なら今の印のまま。人が公開範囲を選んだときだけ渡す）。
+    rebuild=False なら索引を作り直さない（まとめて書き換える呼び出し側が最後に1回だけ作り直す）。
     """
     _validate_sourced_content(content, sources)
+    pin = mem.owner is not None and (mem.visibility_pinned if pinned is None else pinned)
+    if visibility is None and pin:
+        visibility = "private"
     final_visibility = (
         None
         if mem.owner is None
@@ -974,6 +998,7 @@ def _rewrite(
             visibility=final_visibility,
             author=mem.author,
             updated_by=updated_by if updated_by is not None else mem.updated_by,
+            visibility_pinned=pin,
         ),
         encoding="utf-8",
     )
@@ -1065,6 +1090,7 @@ def change_memories(
                 visibility=visibility if visibility is not None else mem.visibility,
                 updated_by=updated_by,
                 rebuild=False,
+                pinned=None if visibility is None else visibility == "private",
             )
         except (ValueError, OSError) as e:
             failed.append((mem.owner, mem.name, str(e)))
@@ -1137,6 +1163,7 @@ def copy_memory(
             visibility=final_visibility,
             author=mem.author if mem.author is not None else mem.owner,
             updated_by=copied_by,
+            visibility_pinned=owner is not None and mem.visibility_pinned,
         ),
         encoding="utf-8",
     )

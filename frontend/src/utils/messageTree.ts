@@ -311,6 +311,8 @@ export interface ThreadView {
   maxDisplaySideSteps: number | undefined;
   inputLimits: InputLimits;
   interrupted: boolean;
+  /** 木の中のStepの総数（pruneMessages を走らせるかの判断用。countSteps と同じ値）。 */
+  stepCount: number;
 }
 
 const STATUS_PREFIXES = [
@@ -366,7 +368,8 @@ export function deriveThreadView(messages: IStep[]): ThreadView {
     maxDisplayMessages: selectLatestMaxDisplayMessages(one(MAX_DISPLAY_MESSAGES_PREFIX)),
     maxDisplaySideSteps: selectLatestMaxDisplaySideSteps(one(MAX_DISPLAY_SIDE_STEPS_PREFIX)),
     inputLimits: selectLatestInputLimits(one(INPUT_LIMITS_PREFIX)),
-    interrupted: lastUserOrInterrupted !== undefined && isInterruptedMessage(lastUserOrInterrupted)
+    interrupted: lastUserOrInterrupted !== undefined && isInterruptedMessage(lastUserOrInterrupted),
+    stepCount: flat.length
   };
 }
 
@@ -427,6 +430,10 @@ export function pruneMessages(messages: IStep[], maxMain: number, maxSide: numbe
   }
   const last = <T,>(list: T[], n: number) => (n > 0 ? list.slice(-n) : list);
   for (const s of last(main, maxMain)) keep.add(s.id);
+  // 最後のユーザー発言は件数に関係なく残す（src/thread_display.py の select_steps と同じ。送信済みか・中断の後に
+  // 発言があるか・実行中のStepの鎖を、画面は最後のユーザー発言から判断するため）。
+  const lastUser = [...main].reverse().find((s) => s.type === 'user_message');
+  if (lastUser) keep.add(lastUser.id);
   for (const s of latest.values()) keep.add(s.id);
   for (const s of [...last(topSide, maxSide), ...topSide.filter(isRunningStep)]) keep.add(s.id);
   // 残したサイドパネルのStepの中のStepを、各階層で最後の maxSide 件と実行中のものだけ残す。

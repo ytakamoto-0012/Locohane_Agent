@@ -89,7 +89,7 @@ def _knowledge_excerpts(entry: glossary.GlossaryEntry) -> str:
     cfg = _enabled_config()
     if cfg is None:
         return ""
-    keys = entry.keys()
+    keys = entry.all_keys()
     meter = embedding_usage.EmbeddingMeter()
     try:
         result = vector_search.search(cfg, " ".join([entry.term, *entry.aliases]), top_k=_KNOWLEDGE_TOP_K, meter=meter)
@@ -126,7 +126,9 @@ def save_glossary_term(
     aliases: list[str] | None = None,
     usage: str = "",
     related_terms: list[str] | None = None,
-    translations: dict[str, list[str] | str] | None = None,
+    # 文字列のリスト（["English: order backlog", ...]）も受け付ける（ローカル LLM がこの形で渡すことがあり、
+    # dict だけにすると引数の検証で弾かれて保存されない。中身は glossary.clean_translations が整える）。
+    translations: dict[str, list[str] | str] | list[str] | None = None,
 ) -> str:
     """Register one company-specific term in the glossary (one term = one memory file).
 
@@ -156,6 +158,8 @@ def save_glossary_term(
             of the dictionary file): {"English": ["order backlog", "backlog"], "German":
             ["Auftragsbestand"], "Chinese": ["订单积压"]}. They are written one line per language
             ("- English: order backlog / backlog"); a saved entry gets the new words added.
+            Entries are matched by term and aliases only: another term that has the same
+            translation is not merged (the result lists it).
         usage: How and where the term is used (in which documents, tasks or departments; an example
             sentence). Write what the documents show.
         related_terms: Terms related to this one but with a different meaning (e.g. a broader term,
@@ -226,6 +230,11 @@ def save_glossary_term(
     if result.trimmed:
         lines.append("The oldest sources/notes of this entry were trimmed to keep it within the size limit.")
     if result.others:
-        lines.append(f"Other entries for this term were left unchanged (common or other users'): {', '.join(result.others)}")
+        lines.append(f"Other entries for this term were left unchanged: {', '.join(result.others)}")
+    if result.same_translation:
+        lines.append(
+            "Entries of other terms with the same translation (not merged; if one of them really means the same, "
+            f"call again with its term in aliases): {', '.join(result.same_translation)}"
+        )
     return "\n".join(lines) + _knowledge_excerpts(entry)
 

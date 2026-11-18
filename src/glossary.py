@@ -30,6 +30,8 @@ LLM が create_memory で辞書ファイルの中身を reference に1件でま�
 - 1語1ファイル（名前は用語から自動で作る。日本語の用語でも ASCII の名前になる）。
 - 同じ意味の用語（用語・別名のどれかが一致するもの）は1件にまとめる（別名に足し、重複した分は消す）。
   まとめるのは同じ所有者の用語どうしだけ（自分の用語へ共通の用語を取り込んで消すと、他の全員から見えなくなるため）。
+  個人用の用語は、まとめ先も個人用のままになるときだけ取り込む（共有の用語へ取り込むと内容が全員から見えるため）。
+  訳語だけが同じ用語はまとめない（辞書では別の用語が同じ訳語を持つことがよくある）。
 - 関連用語は互いの本文に載せる（相手が登録済みなら、相手の Related terms にもこの用語を足す）。
   ただし個人用の用語の名前は、他の人から見える用語には書き込まない。
 - 意味（Meaning）は必須で、出典（Sources）も1つ以上要る。
@@ -79,7 +81,9 @@ _LIST_SPLIT_RE = re.compile(r"\s*[,、，;；]\s*")
 _DESCRIPTION_MEANING_CHARS = 80
 # 訳語の行（「- 言語名: 訳語1 / 訳語2」）。
 _TRANSLATION_LINE_RE = re.compile(r"^\s*[-*]?\s*(?:【([^】]+)】|\[([^\]]+)\]|([^:：]+)[:：])\s*(.*)$")
-_TRANSLATION_SPLIT_RE = re.compile(r"\s*(?:/|／|;|；)\s*")
+# 訳語の区切り: 前後に空白のある「/」（保存時の区切り " / "）、全角の「／」「；」、「;」。
+# 空白の無い「/」は区切りにしない（I/O・TCP/IP のような語が読み戻すときに割れるため）。
+_TRANSLATION_SPLIT_RE = re.compile(r"\s+/\s+|\s*(?:／|;|；)\s*")
 _TRANSLATION_SEPARATOR = " / "
 _TRANSLATIONS_LANG_MAX = 20
 _TRANSLATIONS_WORDS_MAX = 10
@@ -158,9 +162,20 @@ class GlossaryEntry:
     translations: dict[str, list[str]] = field(default_factory=dict)
 
     def keys(self) -> set[str]:
-        """一致の判定に使う、用語・別名・訳語の正規化した形（訳語でも同じ用語として見つかるように）。"""
-        words = [self.term, *self.aliases, *(w for ws in self.translations.values() for w in ws)]
-        return {k for k in (normalize(t) for t in words) if k}
+        """同じ用語かの判定（まとめる・関連用語を結ぶ）に使う、用語・別名の正規化した形。
+
+        訳語は含めない。辞書では別の用語が同じ訳語（order・rate 等）を持つことがよくあり、訳語の一致で
+        まとめると、別の用語の意味を上書きして消してしまうため。
+        """
+        return {k for k in (normalize(t) for t in [self.term, *self.aliases]) if k}
+
+    def translation_keys(self) -> set[str]:
+        """訳語の正規化した形（同じ訳語を持つ別の用語を知らせる・ナレッジで探すときに使う）。"""
+        return {k for k in (normalize(w) for ws in self.translations.values() for w in ws) if k}
+
+    def all_keys(self) -> set[str]:
+        """用語・別名・訳語の正規化した形。"""
+        return self.keys() | self.translation_keys()
 
 
 @dataclass(frozen=True)
@@ -178,6 +193,8 @@ class SaveResult:
     others: list[str]
     not_linked_private: list[str] = field(default_factory=list)
     trimmed: bool = False
+    # 訳語だけが同じ（用語・別名は違う）ので、まとめなかった用語（「名前 (用語)」）。
+    same_translation: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -235,8 +252,10 @@ def clean_translations(raw: object) -> dict[str, list[str]]:
         lang = language_name(str(lang_raw))
         if not lang:
             continue
-        words = words_raw if isinstance(words_raw, list) else _TRANSLATION_SPLIT_RE.split(str(words_raw or ""))
-        merged = _clean_list([*result.get(lang, []), *(str(w) for w in words)])
+        raw_words = words_raw if isinstance(words_raw, (list, tuple)) else [words_raw]
+        # リストの1語に区切りが入っていても分ける（保存した " / " 区切りの行を読み戻したときと同じ語にするため）。
+        words = [w for raw_w in raw_words for w in _TRANSLATION_SPLIT_RE.split(str(raw_w if raw_w is not None else ""))]
+        merged = _clean_list([*result.get(lang, []), *words])
         if merged:
             result[lang] = merged[:_TRANSLATIONS_WORDS_MAX]
     return dict(list(result.items())[:_TRANSLATIONS_LANG_MAX])
@@ -573,10 +592,33 @@ def _save_term_locked(root: Path, me: str, new: GlossaryEntry, source_files: lis
     policy = memory.policy_for(root)
     loaded = _load_writable(root, me)
     keys = new.keys()
-    writable = [x for x in loaded if x.entry.keys() & keys]
+    # 用語・別名どうしが一致する用語（同じ用語）。用語そのものが一致するものを先にする（まとめ先に選ぶ）。
+    writable = sorted(
+        (x for x in loaded if x.entry.keys() & keys),
+        key=lambda x: normalize(x.entry.term) != normalize(new.term),
+    )
+    if not writable:
+        # 片方の用語・別名が、もう片方の訳語と一致する用語（例: ドイツ語の訳語を用語として登録し直した）。
+        # 1件だけならそれへまとめる。複数あると、どれの訳語か決められないので新しく作る（結果で知らせる）。
+        by_translation = [
+            x
+            for x in loaded
+            if x.entry.keys() & new.translation_keys() or x.entry.translation_keys() & keys
+        ]
+        if len(by_translation) == 1:
+            writable = by_translation
     # まとめるのは、まとめ先と同じ所有者の用語だけ（自分の用語に共通の用語を取り込んで消すと、他の全員から消えるため）。
+    # また、まとめ先と公開範囲が同じ側のものだけ: 個人用の用語を共有の用語へ取り込むと内容が全員から見え、
+    # 共有の用語を個人用の用語へ取り込むと他の人から消えるため（まとめ先の公開範囲は保存のたびに設定で決め直す）。
     target = writable[0] if writable else None
-    dupes = [x for x in writable[1:] if target is not None and x.mem.owner == target.mem.owner]
+    target_private = target is not None and _stays_private(target.mem, policy)
+    dupes = [
+        x
+        for x in writable[1:]
+        if target is not None
+        and x.mem.owner == target.mem.owner
+        and memory.is_private_to_owner(x.mem, policy) == target_private
+    ]
     untouched = [x for x in writable[1:] if x not in dupes]
 
     previous_meaning: str | None = None
@@ -605,7 +647,7 @@ def _save_term_locked(root: Path, me: str, new: GlossaryEntry, source_files: lis
     # 訳語として書いた語は別名から外す（同じ語が言語名の無い別名にも並ぶと、どれが何語か分からなくなる）。
     translated = {normalize(w) for ws in entry.translations.values() for w in ws}
     entry.aliases = [a for a in entry.aliases if normalize(a) != normalize(entry.term) and normalize(a) not in translated]
-    entry.related = [r for r in entry.related if normalize(r) not in entry.keys()]
+    entry.related = [r for r in entry.related if normalize(r) not in entry.all_keys()]
 
     if target is None:
         fingerprints = None
@@ -650,8 +692,14 @@ def _save_term_locked(root: Path, me: str, new: GlossaryEntry, source_files: lis
     done = {(name, owner), *(d.key for d in dupes)}
     candidates = [x for x in loaded if x.key not in done]
     linked, unregistered, not_linked_private = _link_related(root, me, entry, candidates, private=private, policy=policy)
-    others = [f"{x.mem.name} (common)" for x in untouched]
+    others = [_other_label(x.mem, me) for x in untouched]
     others += [f"{m.name} (user: {m.owner})" for m in _matching_others(root, entry.keys(), me)]
+    # 訳語だけが同じ用語（用語・別名は違う）はまとめない（別の用語のことが多い）。同じ訳語があることだけ知らせる。
+    same_translation = [
+        f"{x.mem.name} ({x.entry.term})"
+        for x in loaded
+        if x.key not in done and not (x.entry.keys() & entry.keys()) and x.entry.all_keys() & entry.all_keys()
+    ]
     logger.info(
         "save_glossary_term: term=%r name=%s owner=%s created=%s merged=%s linked=%s",
         entry.term, name, owner, target is None, merged, linked,
@@ -668,7 +716,22 @@ def _save_term_locked(root: Path, me: str, new: GlossaryEntry, source_files: lis
         others=others,
         not_linked_private=not_linked_private,
         trimmed=trimmed,
+        same_translation=same_translation,
     )
+
+
+def _stays_private(mem: memory.Memory, policy: memory.MemoryPolicy) -> bool:
+    """保存し直した後も個人用のままになる用語か（人が個人用にした印がある、または用語集が private の種類）。"""
+    return mem.owner is not None and (mem.visibility_pinned or GLOSSARY_TYPE in policy.private_types())
+
+
+def _other_label(mem: memory.Memory, me: str) -> str:
+    """まとめずに残した用語の、結果の文に載せる名前。"""
+    if mem.owner is None:
+        return f"{mem.name} (common)"
+    if mem.owner == me:
+        return f"{mem.name} (yours: not merged because one of the two is private and the other is visible to others)"
+    return f"{mem.name} (user: {mem.owner})"
 
 
 def _link_related(

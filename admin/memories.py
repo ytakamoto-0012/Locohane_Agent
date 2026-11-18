@@ -118,6 +118,9 @@ class MemoriesDeleteByTypeBody(BaseModel):
     type: str
     # 対象の所有者。"*" なら全員（共通を含む）、空文字なら共通だけ、それ以外ならそのユーザーだけ。
     owner: str = "*"
+    # 確認ダイアログで見せたメモリー。渡すと、この中にあるものだけ消す（見せた後に AI が作ったものは消さず、
+    # not_shown で件数を返す）。省くと、その時点の該当するものをすべて消す。
+    expected: list[MemoryRef] | None = None
 
 
 class MemoriesChangeBody(BaseModel):
@@ -330,6 +333,8 @@ def _summary(m: mem_store.Memory, mtime: float | None = None) -> dict:
         "type": m.memory_type,
         "owner": m.owner,
         "visibility": m.visibility,
+        # 人が個人用にした印（AI の更新では共有に戻らない。src/memory.py の Memory.visibility_pinned）。
+        "visibility_pinned": m.visibility_pinned,
         "mtime": mtime if mtime is not None else m.path.stat().st_mtime,
         "sources": len(m.sources),
     }
@@ -813,7 +818,13 @@ def build_router(
         if body.owner != "*":
             scope = _owner_scope(body.owner)
             found = [m for m in found if m.owner == scope]
-        return _delete_all(request, user, name, root, found)
+        not_shown = 0
+        if body.expected is not None:
+            shown = {(item.name, _owner_scope(item.owner)) for item in body.expected}
+            kept = [m for m in found if (m.name, m.owner) in shown]
+            not_shown = len(found) - len(kept)
+            found = kept
+        return {**_delete_all(request, user, name, root, found), "not_shown": not_shown}
 
     @router.post("/api/instances/{name}/memories/change")
     def change_memories(

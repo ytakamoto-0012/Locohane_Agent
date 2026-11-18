@@ -266,14 +266,79 @@ def test_visibility_follows_glossary_visibility_and_is_not_chosen_by_the_llm(as_
 
 
 def test_updating_a_private_entry_makes_it_follow_the_setting(as_user):
-    # 以前 private で保存された用語も、次の更新で設定（既定 shared）どおりになる
+    # 以前 LLM が private で保存した用語（人の印が無い）も、次の更新で設定（既定 shared）どおりになる
+    root, _ = as_user
+    _save(term="受注残", meaning="未出荷の注文の残高。")
+    [mem] = _glossary(root)
+    mem.path.write_text(mem.path.read_text(encoding="utf-8").replace("visibility: shared", "visibility: private"), encoding="utf-8")
+    assert _glossary(root)[0].visibility == "private"
+    _save(term="受注残", meaning="未出荷の注文の残高。")
+    assert _glossary(root)[0].visibility == "shared"
+
+
+def test_entry_made_private_by_a_person_stays_private_after_an_update(as_user):
+    # 人が設定ダッシュボードで個人用にした用語は、AI が登録し直しても共有に戻らない
     root, _ = as_user
     _save(term="受注残", meaning="未出荷の注文の残高。")
     [mem] = _glossary(root)
     memory.edit_memory(root, mem.name, description=mem.description, memory_type="glossary", content=mem.content, owner="alice", visibility="private")
-    assert _glossary(root)[0].visibility == "private"
+    assert _glossary(root)[0].visibility_pinned
+    _save(term="受注残", meaning="未出荷の注文の残高（出荷前の受注の合計）。")
+    [mem] = _glossary(root)
+    assert mem.visibility == "private" and mem.visibility_pinned
+    # 人が共有に戻すと印は外れる
+    memory.edit_memory(root, mem.name, description=mem.description, memory_type="glossary", content=mem.content, owner="alice", visibility="shared")
+    [mem] = _glossary(root)
+    assert mem.visibility == "shared" and not mem.visibility_pinned
+
+
+def test_private_duplicate_is_not_merged_into_a_shared_entry(as_user):
+    # 個人用にした用語の内容を、共有の用語へ取り込んで全員に見せない
+    root, _ = as_user
     _save(term="受注残", meaning="未出荷の注文の残高。")
-    assert _glossary(root)[0].visibility == "shared"
+    _save(term="バックログ", meaning="極秘の取引先Xとの受注の残り。")
+    shared, secret = sorted(_glossary(root), key=lambda m: "バックログ" in m.content)
+    memory.edit_memory(root, secret.name, description=secret.description, memory_type="glossary", content=secret.content, owner="alice", visibility="private")
+    out = _save(term="受注残", aliases=["バックログ"], meaning="未出荷の注文の残高。")
+    mems = {m.name: m for m in _glossary(root)}
+    assert set(mems) == {shared.name, secret.name}
+    assert "極秘" not in mems[shared.name].content
+    assert mems[secret.name].visibility == "private"
+    assert secret.name in out
+
+
+def test_terms_sharing_only_a_translation_are_not_merged(as_user):
+    # 別の用語が同じ訳語を持っていても、まとめて意味を上書きしない
+    root, _ = as_user
+    _save(term="注文", meaning="客から商品を買う申し込みを受けること。", translations={"English": ["order"]})
+    out = _save(term="発注", meaning="仕入先へ商品を買う申し込みをすること。", translations={"English": ["order"]})
+    entries = {glossary.parse_entry(m).term: glossary.parse_entry(m) for m in _glossary(root)}
+    assert set(entries) == {"注文", "発注"}
+    assert entries["注文"].meaning.startswith("客から")
+    assert "same translation" in out
+
+
+def test_translation_words_with_a_slash_survive_a_round_trip(as_user):
+    root, _ = as_user
+    _save(term="入出力", meaning="装置とのデータのやり取り。", translations={"English": ["I/O", "TCP/IP"]})
+    _save(term="入出力", meaning="装置とのデータのやり取り。")
+    [mem] = _glossary(root)
+    assert glossary.parse_entry(mem).translations == {"English": ["I/O", "TCP/IP"]}
+
+
+def test_translations_as_a_list_of_strings_pass_the_tool_arguments(as_user):
+    root, _ = as_user
+    out = glossary_tools.save_glossary_term.invoke(
+        {
+            "term": "受注残",
+            "meaning": "未出荷の注文の残高。",
+            "sources": ["ユーザーの説明 (2026-11-18)"],
+            "translations": ["English: order backlog", "German: Auftragsbestand"],
+        }
+    )
+    assert not out.startswith("Error"), out
+    [mem] = _glossary(root)
+    assert glossary.parse_entry(mem).translations == {"English": ["order backlog"], "German": ["Auftragsbestand"]}
 
 
 def test_entries_are_private_when_glossary_visibility_is_private(as_user, glossary_private):

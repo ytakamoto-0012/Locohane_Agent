@@ -153,10 +153,28 @@ def test_missing_type_in_policy_uses_default(tmp_path, set_policy):
 
 def test_update_memory_follows_the_type_setting(tmp_path):
     # LLM の更新は公開範囲を引き継がず、種類の設定で決め直す（以前 private だったものも共有に戻る）
-    memory.create_memory(tmp_path, "m", "d", "feedback", "a", owner="alice", visibility="private")
+    # 以前 LLM が private を選んで保存したもの（人の印 visibility_pinned は無い）
+    path = memory.create_memory(tmp_path, "m", "d", "feedback", "a", owner="alice")
+    path.write_text(path.read_text(encoding="utf-8").replace("visibility: shared", "visibility: private"), encoding="utf-8")
+    assert memory.read_memory(tmp_path, "m", "alice").visibility == "private"
     memory.update_memory(tmp_path, "m", "b", owner="alice")
     assert memory.read_memory(tmp_path, "m", "alice").visibility == "shared"
     memory.update_memory(tmp_path, "m", "パスワードは xxx", owner="alice")
+    assert memory.read_memory(tmp_path, "m", "alice").visibility == "private"
+
+
+def test_memory_made_private_by_a_person_stays_private_after_llm_update(tmp_path):
+    # 人（設定ダッシュボード）が個人用にしたものは、LLM が更新しても共有に戻らない。人が共有にすると印が外れる
+    memory.create_memory(tmp_path, "m", "d", "project", "a", owner="alice", visibility="private")
+    memory.update_memory(tmp_path, "m", "b", owner="alice")
+    mem = memory.read_memory(tmp_path, "m", "alice")
+    assert mem.visibility == "private" and mem.visibility_pinned
+    memory.change_memories(tmp_path, [mem], visibility="shared")
+    memory.update_memory(tmp_path, "m", "c", owner="alice")
+    mem = memory.read_memory(tmp_path, "m", "alice")
+    assert mem.visibility == "shared" and not mem.visibility_pinned
+    memory.change_memories(tmp_path, [mem], visibility="private")
+    memory.update_memory(tmp_path, "m", "d", owner="alice")
     assert memory.read_memory(tmp_path, "m", "alice").visibility == "private"
 
 

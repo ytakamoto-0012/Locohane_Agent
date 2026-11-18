@@ -14,6 +14,7 @@ import {
   elementState,
   tasklistState
 } from '@chainlit/react-client';
+import type { IMessageElement } from '@chainlit/react-client';
 import { BACKEND_URL } from './chainlitClient';
 import { useI18n } from './i18n';
 import { useBrowserNotify } from './notify';
@@ -370,15 +371,20 @@ function App() {
 
   // 生成中に増え続ける古いStepを messagesState から外す（表示専用。messageTree.ts の pruneMessages）。
   // 毎回は調べず、前回調べたときの件数の2倍（最低 PRUNE_MIN_STEPS 件）を超えたときだけ間引く。
+  // 件数は deriveThreadView が木を辿ったときに数えたもの（ここで木をもう一度辿らない）。
+  // 間引きは今の messagesState に対して行う（描画した時点の messages を元に置き換えると、描画から effect までの
+  // 間にソケットで届いた新しいStep・ストリーミングの文字が消えるため）。
   const prunedSizeRef = useRef(0);
+  const stepCount = view.stepCount;
   useEffect(() => {
     if (!maxDisplayMessages && !maxDisplaySideSteps) return;
-    const size = countSteps(messages);
-    if (size <= Math.max(PRUNE_MIN_STEPS, prunedSizeRef.current * 2)) return;
-    const pruned = pruneMessages(messages, maxDisplayMessages ?? 0, maxDisplaySideSteps ?? 0);
-    prunedSizeRef.current = pruned === messages ? size : countSteps(pruned);
-    if (pruned !== messages) setMessages(pruned);
-  }, [messages, maxDisplayMessages, maxDisplaySideSteps, setMessages]);
+    if (stepCount <= Math.max(PRUNE_MIN_STEPS, prunedSizeRef.current * 2)) return;
+    setMessages((current) => {
+      const pruned = pruneMessages(current, maxDisplayMessages ?? 0, maxDisplaySideSteps ?? 0);
+      prunedSizeRef.current = countSteps(pruned);
+      return pruned;
+    });
+  }, [stepCount, maxDisplayMessages, maxDisplaySideSteps, setMessages]);
   // スレッドを切り替えたら数え直す。
   useEffect(() => {
     prunedSizeRef.current = 0;
@@ -394,18 +400,42 @@ function App() {
   const olderRef = useRef(older);
   olderRef.current = older;
   const olderBusyRef = useRef(false);
+  // 読み足したメッセージの要素（画像・ファイル）。elementState は再接続（resume_thread）や
+  // syncThreadSnapshot で表示件数ぶんの要素に丸ごと置き換わるため、ここに持っておき、消えたら足し直す
+  // （足し直さないと、画面に残っている読み足したメッセージの画像・ファイルのリンクだけが消える）。
+  const [olderElements, setOlderElements] = useState<IMessageElement[]>([]);
+  const displayElements = useRecoilValue(elementState);
   useEffect(() => {
     setOlder(NO_STEPS);
     setOlderStatus(null);
+    setOlderElements([]);
     olderBusyRef.current = false;
   }, [currentThreadId]);
+  useEffect(() => {
+    if (olderElements.length === 0) return;
+    const have = new Set(displayElements.map((e) => e.id));
+    if (olderElements.every((e) => have.has(e.id))) return;
+    setDisplayElements((prev) => {
+      const present = new Set(prev.map((e) => e.id));
+      const missing = olderElements.filter((e) => !present.has(e.id));
+      return missing.length ? [...prev, ...missing] : prev;
+    });
+  }, [displayElements, olderElements, setDisplayElements]);
+  const olderStatusRef = useRef(olderStatus);
+  olderStatusRef.current = olderStatus;
   const prevWindowRef = useRef<{ thread: string | undefined; list: IStep[] }>({ thread: undefined, list: NO_STEPS });
   useEffect(() => {
     const prev = prevWindowRef.current;
     prevWindowRef.current = { thread: currentThreadId, list: displayMessages };
-    if (prev.thread !== currentThreadId || olderRef.current.length === 0) return;
+    if (prev.thread !== currentThreadId) return;
     const shown = new Set(displayMessages.map((m) => m.id));
     const dropped = prev.list.filter((m) => !shown.has(m.id));
+    if (olderRef.current.length === 0) {
+      // まだ何も読み足していない: 押し出された分はサーバーから読み直せる。「これより前は無い」と分かった後に
+      // 押し出されたなら、その印を外して読み足しをもう一度できるようにする（外さないと二度と読めない）。
+      if (dropped.length && olderStatusRef.current === 'done') setOlderStatus(null);
+      return;
+    }
     if (dropped.length) {
       setOlder((list) => {
         const have = new Set(list.map((m) => m.id));
@@ -432,11 +462,13 @@ function App() {
             const have = new Set(list.map((m) => m.id));
             return [...result.messages.filter((m) => !have.has(m.id)), ...list];
           });
-          setDisplayElements((prev) => {
-            const have = new Set(prev.map((e) => e.id));
-            const fresh = result.elements.filter((e) => !have.has(e.id) && (e.type as string) !== 'avatar');
-            return fresh.length ? [...prev, ...fresh] : prev;
-          });
+          const fresh = result.elements.filter((e) => (e.type as string) !== 'avatar');
+          if (fresh.length) {
+            setOlderElements((prev) => {
+              const have = new Set(prev.map((e) => e.id));
+              return [...prev, ...fresh.filter((e) => !have.has(e.id))];
+            });
+          }
         }
         setOlderStatus(result.hasMore ? null : 'done');
       })
@@ -446,7 +478,7 @@ function App() {
       .finally(() => {
         if (threadId === currentThreadIdRef.current) olderBusyRef.current = false;
       });
-  }, [currentThreadId, shownMessages, config?.dataPersistence, maxDisplayMessages, setDisplayElements]);
+  }, [currentThreadId, shownMessages, config?.dataPersistence, maxDisplayMessages]);
   const currentThreadIdRef = useRef(currentThreadId);
   currentThreadIdRef.current = currentThreadId;
 

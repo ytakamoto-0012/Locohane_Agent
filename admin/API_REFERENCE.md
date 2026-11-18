@@ -442,9 +442,10 @@ $C -X DELETE "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H"
 # まとめて削除（1件でも見つからなければ何も削除しない。owner を省くと共通。件数の上限は無い）。応答は deleted/failed/failed_items
 $C -X POST $BASE/api/instances/default/memories/delete -H "$H" -H "$J" \
   -d '{"items":[{"name":"my-note","owner":"alice"},{"name":"old-note"}]}'
-# 指定した種類のメモリーをすべて削除（owner は "*"＝全員と共通（既定）・""＝共通だけ・ユーザー名＝そのユーザーだけ）
+# 指定した種類のメモリーをすべて削除（owner は "*"＝全員と共通（既定）・""＝共通だけ・ユーザー名＝そのユーザーだけ）。
+# expected（任意）に確認で見せたメモリーを渡すと、その中のものだけ消す（見せた後に増えたものは消さず、件数を not_shown で返す）
 $C -X POST $BASE/api/instances/default/memories/delete-by-type -H "$H" -H "$J" \
-  -d '{"type":"glossary","owner":"*"}'
+  -d '{"type":"glossary","owner":"*","expected":[{"name":"glossary-abc","owner":"alice"}]}'
 # 種類・公開範囲をまとめて変更（type / visibility の省いた方は変えない。公開範囲は共通のメモリーには効かない）。
 # 応答は changed/failed/failed_items/forced_private_items（private の種類・目印で個人用のままのもの）
 $C -X POST $BASE/api/instances/default/memories/change -H "$H" -H "$J" \

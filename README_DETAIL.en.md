@@ -1075,7 +1075,9 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   - **The LLM does not choose**: `create_memory` / `update_memory` / `save_glossary_term` have no `visibility`
     argument. Every save and update by the LLM decides it from the per-type visibility and the checks below (an update
     does not keep the current value either, so a memory the LLM once saved as `private` follows the settings from its
-    next update). The Memory System section of the system prompt (`{{memory_visibility}}`, built by
+    next update). A memory a person made private on the settings dashboard gets `visibility_pinned: true` in its
+    frontmatter and stays private when the LLM updates it (the list shows "Private (pinned)"; making it shared removes
+    the pin). Glossary merging never combines a private entry with one others can see. The Memory System section of the system prompt (`{{memory_visibility}}`, built by
     `render_visibility_block` in `src/memory.py`) tells which types are private or shared, and gives the criteria
     (`shared_criteria` / `private_criteria`) as criteria for which type to save as (content to keep private is saved as a
     `private` type, `user` by default; with no `private` type it is given as "do not save these"). The criteria can be in
@@ -1183,7 +1185,10 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   Words of other languages (`translations`, e.g. `{"English": ["order backlog"], "German": ["Auftragsbestand"]}`) are
   written one line per language under `**Translations:**` ("`- English: order backlog / backlog`"); language names
   such as "英語" or "en" become English names (`_LANGUAGE_NAMES` in `src/glossary.py`), a saved entry gets new words
-  added per language, translated words are removed from the aliases, and a translation also finds the entry. The meaning is
+  added per language, and translated words are removed from the aliases. Entries are matched by term and aliases: terms
+  that only share a translation are not merged (bilingual dictionaries often give different terms the same word; the
+  result lists them), while a term or alias equal to a translation of exactly one entry is merged into it. Translations
+  are split only on " / " with spaces (and "／", ";", "；"), so `I/O` and `TCP/IP` stay one word. The meaning is
   required (a text that only points to a file is rejected) and at least one source is required (files that exist are
   fingerprinted like `source_files`; a path with spaces or parentheses is found by trying the longest prefix that is an
   existing file). Aliases, related terms and sources are written one per bullet line (so an alias with a comma is not

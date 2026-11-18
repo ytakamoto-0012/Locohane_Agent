@@ -7,7 +7,7 @@
 pruneMessages が、実行中に増えていく分を同じ規則で間引く）。
 
 残すもの:
-- メインの会話（ユーザー発言・回答・システムメッセージ）の最後の max_messages 件。
+- メインの会話（ユーザー発言・回答・システムメッセージ）の最後の max_messages 件と、最後のユーザー発言。
 - サイドパネルの一番外側の Step（ツール呼び出し等）の最後の max_side_steps 件と、その中の Step の最後の
   max_side_steps 件（実行中のものは件数に関係なく残す）。
 - 状態を伝えるメッセージ（トークン使用量・作業ディレクトリ・実行計画・定型文・表示件数上限・入力上限・中断）の
@@ -70,7 +70,21 @@ def _is_side(step: dict) -> bool:
 
 
 def _is_running(step: dict) -> bool:
-    return bool(step.get("start")) and not step.get("end") and not step.get("isError")
+    """実行中の Step か（frontend/src/utils/messageTree.ts の isRunningStep と同じ規則）。
+
+    止めた Step（metadata.stopped_reason）・裏で続く Step（metadata.background）は実行中に数えない
+    （強制終了等で end の無い Step が溜まったスレッドで、上限に関係なく全部送らないため）。
+    """
+    metadata = step.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return (
+        bool(step.get("start"))
+        and not step.get("end")
+        and not step.get("isError")
+        and not metadata.get("stopped_reason")
+        and not metadata.get("background")
+    )
 
 
 def _status_prefix(step: dict, prefixes: Iterable[str]) -> str | None:
@@ -119,6 +133,11 @@ def select_steps(steps: list[dict], limits: DisplayLimits) -> list[dict]:
             children_side.setdefault(ancestor.get("id"), []).append(s)
 
     keep.update(s.get("id") for s in (main[-limits.max_messages :] if limits.max_messages > 0 else main))
+    # 最後のユーザー発言は件数に関係なく残す（画面は「送信済みか」「中断の後に発言があるか」「実行中の Step の鎖」を
+    # 最後のユーザー発言から判断するため。1回の指示で回答が max_messages 件を超えても外さない）。
+    last_user = next((s for s in reversed(main) if s.get("type") == "user_message"), None)
+    if last_user is not None:
+        keep.add(last_user.get("id"))
     keep.update(s.get("id") for s in latest_status.values())
     kept_side = top_side[-limits.max_side_steps :] if limits.max_side_steps > 0 else top_side
     keep.update(s.get("id") for s in top_side if _is_running(s))

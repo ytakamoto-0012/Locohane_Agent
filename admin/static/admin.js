@@ -2998,11 +2998,18 @@ async function renderMemories(container, open) {
     const scope = owner === "*" ? _t("すべての所有者") : memoryOwnerLabel(owner);
     if (!confirm(_t("種類 {0} のメモリー（{1}）{2} 件をすべて削除しますか？（削除前の内容はバックアップに残ります）\n{3}", type, scope, targets.length, confirmList(targets)))) return;
     const result = await runBulk(deleteTypeBtn, _t("{0} 件のメモリーを削除しています…", targets.length), () =>
-      api(memoriesPath("/delete-by-type"), { method: "POST", body: { type, owner } })
+      api(memoriesPath("/delete-by-type"), {
+        method: "POST",
+        // 確認で見せたものだけ消す（見せた後に AI が作ったメモリーまで消さないため）。
+        body: { type, owner, expected: targets.map((m) => ({ name: m.name, owner: m.owner })) },
+      })
     );
     if (!result) return;
     await reload();
-    reportFailures(result, _t("{0} 件のメモリーを削除しました。", result.deleted));
+    let done = _t("{0} 件のメモリーを削除しました。", result.deleted);
+    if (result.not_shown) done += "
+" + _t("確認の後に増えた {0} 件は削除していません（一覧を更新しました）。", result.not_shown);
+    reportFailures(result, done);
   });
 
   // 選んだメモリーの種類・公開範囲をまとめて変える（admin/memories.py の change）。
@@ -3182,7 +3189,10 @@ async function renderMemories(container, open) {
   // 1ページに表示件数のぶんだけ出す（選択・まとめて操作も表示中のページの行だけが対象）。
   const SORT_VALUES = {
     owner: (m) => memoryOwnerLabel(m.owner),
-    visibility: (m) => (m.owner ? _t(MEMORY_VISIBILITY_LABELS[m.visibility]) : _t("全員")),
+    visibility: (m) =>
+      m.owner
+        ? _t(MEMORY_VISIBILITY_LABELS[m.visibility]) + (m.visibility_pinned ? _t("（固定）") : "")
+        : _t("全員"),
     type: (m) => m.type,
     name: (m) => m.name,
     description: (m) => m.description,

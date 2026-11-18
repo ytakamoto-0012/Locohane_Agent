@@ -445,9 +445,10 @@ $C -X DELETE "$BASE/api/instances/default/memories/my-note?owner=alice" -H "$H"
 # Delete several at once (nothing is deleted if any of them is not found; omit owner for common; no limit on the count). Response: deleted/failed/failed_items
 $C -X POST $BASE/api/instances/default/memories/delete -H "$H" -H "$J" \
   -d '{"items":[{"name":"my-note","owner":"alice"},{"name":"old-note"}]}'
-# Delete every memory of a type (owner: "*" = everyone and common (default), "" = common only, a user name = that user only)
+# Delete every memory of a type (owner: "*" = everyone and common (default), "" = common only, a user name = that user only).
+# expected (optional) lists the memories shown for confirmation: only those are deleted (ones added after it are kept; their count is returned as not_shown)
 $C -X POST $BASE/api/instances/default/memories/delete-by-type -H "$H" -H "$J" \
-  -d '{"type":"glossary","owner":"*"}'
+  -d '{"type":"glossary","owner":"*","expected":[{"name":"glossary-abc","owner":"alice"}]}'
 # Change the type / visibility at once (an omitted one is kept; visibility does not apply to common memories).
 # Response: changed/failed/failed_items/forced_private_items (kept private by a private type or a check)
 $C -X POST $BASE/api/instances/default/memories/change -H "$H" -H "$J" \
