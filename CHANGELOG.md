@@ -12,6 +12,16 @@
 
 ## [Unreleased]
 
+### 変更
+
+- `.locohane/settings.json`（MCP サーバーの接続設定）を git 管理から外し、サンプルの
+  `.locohane/settings.json.example` を置くようにしました。
+
+### 移行時の注意
+
+- 更新後に `.locohane/settings.json` が無い場合は、`.locohane/settings.json.example` をコピーして作ってください
+  （無くても MCP サーバーへ接続しないだけで、起動はします）。
+
 ## [0.7.11] - 2026-11-19
 
 ### 修正

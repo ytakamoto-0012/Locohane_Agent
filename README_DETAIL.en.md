@@ -376,7 +376,7 @@ Locohane/
 ├── .qwen/                  # Qwen Code's directory equivalent to `.claude/` (settings.json, skills/, etc.)
 ├── .locohane/                # project_locohane_dir (default). Its contents are detected automatically at startup
 │   ├── LOCOHANE.md.example  # sample LOCOHANE.md (placing it gives project-specific instructions)
-│   ├── settings.json        # MCP server connection settings
+│   ├── settings.json.example # sample MCP server connection settings (copy to settings.json; settings.json is not tracked by git)
 │   ├── skills/              # additional skills merged into the scan of skills_dir (same names take precedence; currently only README.md and empty)
 │   └── agents/              # additional agent kinds merged into the scan of agents_dir (same names take precedence; currently only README.txt and empty)
 ├── frontend/                # custom React frontend
@@ -995,7 +995,8 @@ Complying with Anthropic's official Model Context Protocol ([specification](http
 external MCP servers (stdio transport only) can be used dynamically as LLM tools.
 The implementation is `src/mcp_client.py` (uses the official Python SDK, PyPI: `mcp`, directly).
 
-- **Settings file**: `.locohane/settings.json` at the project root (tracked by git).
+- **Settings file**: `.locohane/settings.json` at the project root (not tracked by git because it contains this machine's paths;
+  if it does not exist, copy `.locohane/settings.json.example` to create it. Without the file, MCP connections are simply skipped and startup continues).
   Modeled on the `mcpServers` settings format of Claude Code / Qwen Code.
   ```jsonc
   {
@@ -1017,7 +1018,7 @@ The implementation is `src/mcp_client.py` (uses the official Python SDK, PyPI: `
   ```
   The top-level `"mcp"` block is optional and overrides the `[mcp]` section (defaults) of `config.ini`.
   Writing `${ENV_VAR_NAME}` in values of `env` expands it from `os.environ` at connection time.
-  **`.locohane/settings.json` is tracked by git, so do not write secrets such as API keys directly;
+  **`.locohane/settings.json` is not tracked by git, but it can still be seen in backups or when shared, so do not write secrets such as API keys directly;
   always refer to them in this `${ENV_VAR_NAME}` form.**
   If there are unresolved environment variables, only that server's connection is skipped (warning log).
 - **How it connects**: at app startup (`@cl.on_app_startup`) it connects automatically to all entries in `mcpServers`.
@@ -3019,7 +3020,7 @@ llama-server; when using vLLM, it likewise points to a local endpoint).
 
 When the MCP server feature (`.locohane/settings.json`, see "MCP server connections" above) is enabled,
 the commands defined there (e.g. third-party MCP servers via `npx`) are started
-as local subprocesses. In the default state (`.locohane/settings.json` with only an empty `mcpServers`,
+as local subprocesses. In the default state (no `.locohane/settings.json`, or one with only an empty `mcpServers`,
 or `[mcp] enabled = false`), nothing is started, and the offline guarantee does not change.
 However, whether MCP servers added by users themselves communicate over the network internally depends on
 the implementation of each MCP server and is outside the scope of this project.

@@ -380,7 +380,7 @@ Locohane/
 ├── .qwen/                  # Qwen Code用の `.claude/` 相当ディレクトリ（settings.json・skills/等）
 ├── .locohane/                # project_locohane_dir（既定）。配下を起動時に自動検知
 │   ├── LOCOHANE.md.example  # LOCOHANE.md のサンプル（配置するとプロジェクト固有指示になる）
-│   ├── settings.json        # MCPサーバー接続設定
+│   ├── settings.json.example # MCPサーバー接続設定のサンプル（settings.json にコピーして使う。settings.json は git 管理外）
 │   ├── skills/              # skills_dir にマージ走査される追加スキル置き場（同名は優先。現状は README.md のみで中身は空）
 │   └── agents/              # agents_dir にマージ走査される追加エージェント種別置き場（同名は優先。現状は README.txt のみで中身は空）
 ├── frontend/                # カスタムReactフロントエンド
@@ -1006,7 +1006,8 @@ Anthropic公式のModel Context Protocol（[仕様](https://modelcontextprotocol
 準拠し、外部のMCPサーバー（stdioトランスポートのみ対応）をLLMのツールとして動的に
 利用できる。実装は `src/mcp_client.py`（公式Python SDK、PyPI: `mcp` を直接使用）。
 
-- **設定ファイル**: プロジェクト直下 `.locohane/settings.json`（git管理対象）。
+- **設定ファイル**: プロジェクト直下 `.locohane/settings.json`（このマシンのパスを含むため git 管理外。
+  無ければ `.locohane/settings.json.example` をコピーして作る。ファイルが無い場合は MCP 接続をしないだけで起動は続く）。
   Claude Code / Qwen Code の `mcpServers` 設定形式を参考にしている。
   ```jsonc
   {
@@ -1028,8 +1029,8 @@ Anthropic公式のModel Context Protocol（[仕様](https://modelcontextprotocol
   ```
   トップレベルの `"mcp"` ブロックは `config.ini` の `[mcp]` セクション（既定値）を
   上書きする任意項目。`env` の値に `${ENV_VAR_NAME}` と書くと、接続時に
-  `os.environ` から展開される。**`.locohane/settings.json` はgit管理対象のため、
-  APIキー等の機密情報を直接書かず、必ずこの `${ENV_VAR_NAME}` 形式で参照すること。**
+  `os.environ` から展開される。**`.locohane/settings.json` は git 管理外だが、バックアップや共有で
+  人の目に触れることがあるため、APIキー等の機密情報を直接書かず、必ずこの `${ENV_VAR_NAME}` 形式で参照すること。**
   未解決の環境変数がある場合、そのサーバーのみ接続をスキップする（警告ログ）。
 - **接続方式**: アプリ起動時（`@cl.on_app_startup`）に `mcpServers` の全件へ自動
   接続する。Chainlit UIから都度追加する機能は提供しない。
@@ -3124,7 +3125,7 @@ llama-server。vLLMを使う場合も同様にローカルのエンドポイン�
 MCPサーバー機能（`.locohane/settings.json`、上記「MCPサーバー接続」参照）を有効化した
 場合、そこに定義したコマンド（例: `npx` 経由のサードパーティ製MCPサーバー）が
 ローカルサブプロセスとして起動されます。既定状態（`.locohane/settings.json` が
-空の `mcpServers` のみ、または `[mcp] enabled = false`）では何も起動されず、
+無い、または空の `mcpServers` のみ、または `[mcp] enabled = false`）では何も起動されず、
 オフライン保証は変わりません。ただし、ユーザー自身が追加したMCPサーバーが内部で
 ネットワーク通信を行うかどうかは各MCPサーバーの実装次第であり、本プロジェクトの
 管理範囲外です。
