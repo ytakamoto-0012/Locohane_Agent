@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.7.12] - 2026-11-20
+
 ### 追加
 
 - ターンの始めに、ハーネスがユーザーの発言で永続メモリーを必ず検索し、「search_memory を呼んで結果が返った」形で
@@ -49,6 +51,7 @@
 - 追加指示を送った状態でサブエージェントの実行中に停止し、入力欄へ戻った指示を再送すると、生成が失敗する・画面が
   更新されずフリーズしたように見えることがあったのを直しました（停止の後始末が終わるのを待ってから次のターンを始めます。
   停止ボタンを続けて押した場合も、すべての後始末を待ちます）。
+- 設定ダッシュボードの設定画面で、保存ボタンが「先頭へ戻る」ボタンと重なって押しにくかったのを直しました。
 
 ### 移行時の注意
 
@@ -1656,7 +1659,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.11...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.12...HEAD
+[0.7.12]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.11...v0.7.12
 [0.7.11]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.10...v0.7.11
 [0.7.10]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.9...v0.7.10
 [0.7.9]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.8...v0.7.9
