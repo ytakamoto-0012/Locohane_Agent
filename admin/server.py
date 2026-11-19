@@ -1287,6 +1287,8 @@ def get_monitor_overview(user: str = Depends(require_login)):
                 "generating": len(view["generating"]),
                 "waiting": sum(1 for g in view["generating"] if g.get("waiting_for_user")),
                 "log_counts_24h": monitor.recent_level_counts(cfg.log_dir),
+                # MCPサーバーの接続済み数・問題のあるサーバー（未設定・無効なら None）。
+                "mcp": monitor.mcp_summary(view["mcp"]),
                 # 生成中スレッドごとの LLM リクエストの入力トークン（メイン・サブの最大値）。
                 "context_series": context_series,
                 # ナレッジで取り込み中（順番待ち・削除を含む）のコレクション（管理ツールのプロセス内のジョブ）と、

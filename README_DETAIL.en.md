@@ -1036,7 +1036,16 @@ The implementation is `src/mcp_client.py` (uses the official Python SDK, PyPI: `
 - **Behavior on errors**: connection failures and timeouts to individual servers only log a warning
   for that server and skip it; startup of the whole app continues. Failures of tool calls themselves
   are also returned as strings in the form `"Error: ..."` without raising exceptions.
-- **Known limitations**: there is no automatic reconnection if the server process crashes after connecting.
+- **Checking the connection status**: "MCP server connections" on an instance's "Monitor" screen in the settings
+  dashboard shows, for each server, its state (connected / connecting / failed to connect / disconnected / skipped),
+  the number of tools (hover to see their names), when it connected, the number of calls and failures, the last call,
+  and any error. The instance cards in the instance list show an "MCP connected: connected / total" tile only when
+  servers are configured, and name any server that failed to connect, disconnected, has an invalid definition or a
+  missing environment variable, with the tile border in the warning color (servers with `disabled: true` are not counted).
+  The app collects the status with `get_mcp_status()` in `src/mcp_client.py` and writes it to `runtime_status.json`,
+  which the admin tool reads (the app and the admin tool do not talk to each other directly).
+- **Known limitations**: there is no automatic reconnection if the server process crashes after connecting
+  (when the next tool call detects the lost connection, the screen above shows "disconnected"; restart the instance to fix it).
   Only text blocks are extracted from responses (resources such as images are not supported).
 - **Relationship with `[main_agent_tool_guard]`**: the names of MCP dynamic tools are only known at run time
   and cannot be registered in `allow_entries` in advance, so with the default `mode=all`
@@ -2535,7 +2544,7 @@ the main app's operation.
 
 - **Monitor**: connected users and sessions (browser tabs), threads being
   generated (elapsed time, whether waiting for a user response), WARNING/ERROR
-  counts in the last 24 hours (auto-refreshed every 5 seconds). Reachability of the LLM endpoints (`[llm] main_url`/`sub_url`),
+  counts in the last 24 hours, and the connection status of each MCP server (see the "MCP server connections" section) (auto-refreshed every 5 seconds). Reachability of the LLM endpoints (`[llm] main_url`/`sub_url`),
   and slot usage if `provider="llama_cpp"`.
 - **Conversations**: number of threads, cumulative tokens and last use per user, and the thread list
   (filterable by user and name). Choosing a thread shows the conversation content, a chart of the cumulative token usage of that conversation

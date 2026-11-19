@@ -335,6 +335,8 @@ select.le-type { width: auto; padding: 4px; font-size: 12px; flex-shrink: 0; }
 .card-stat-value { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .card-stat-label { font-size: 11px; color: var(--text-dim); }
 .card-stat-sub { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-stat.card-stat-warn { border-color: #fab219; }
+.error-text { color: var(--danger); }
 .monitor-toolbar { display: flex; gap: 10px; align-items: baseline; margin-bottom: 10px; }
 .monitor-section { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 14px; }
 .monitor-section h3 { margin: 0 0 10px; font-size: 14px; }

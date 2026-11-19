@@ -440,3 +440,38 @@ def test_probe_endpoints_server_without_slots_endpoint_is_still_reachable():
 def test_probe_endpoints_unhealthy_server_is_unreachable():
     probe = _probe_with(_FakeLlamaServer(501, health_status=503))
     assert probe["reachable"] is False
+
+
+def test_summarize_runtime_passes_mcp_status():
+    mcp = {"enabled": True, "initialized": True, "servers": []}
+    assert monitor.summarize_runtime({"sessions": [], "generating": [], "mcp": mcp}, {})["mcp"] == mcp
+    # 本体が古い（mcp を書き出さない）場合
+    assert monitor.summarize_runtime({"sessions": [], "generating": []}, {})["mcp"] is None
+    assert monitor.summarize_runtime(None, {})["mcp"] is None
+
+
+def test_mcp_summary_counts_connected_and_problems():
+    mcp = {
+        "enabled": True,
+        "servers": [
+            {"name": "a", "state": "connected"},
+            {"name": "b", "state": "failed"},
+            {"name": "c", "state": "disconnected"},
+            {"name": "d", "state": "skipped", "skip_reason": "disabled"},
+            {"name": "e", "state": "skipped", "skip_reason": "env_missing"},
+            {"name": "f", "state": "connecting"},
+        ],
+    }
+    summary = monitor.mcp_summary(mcp)
+    # disabled は意図どおりのため数に入れない
+    assert summary["total"] == 5
+    assert summary["connected"] == 1
+    assert summary["connecting"] == 1
+    assert summary["problems"] == ["b", "c", "e"]
+
+
+def test_mcp_summary_hidden_when_unused():
+    assert monitor.mcp_summary(None) is None
+    assert monitor.mcp_summary({"enabled": False, "servers": [{"name": "a", "state": "connected"}]}) is None
+    assert monitor.mcp_summary({"enabled": True, "servers": []}) is None
+    assert monitor.mcp_summary({"enabled": True, "servers": [], "settings_error": "x"})["settings_error"] == "x"

@@ -22,11 +22,17 @@
   リスクへの対策（Job Object等）は持たない。
 - MCPツールの応答はテキストブロックのみ抽出する（image/embedded resource
   は対象外。既存の analyze_image パイプラインとは統合しない）。
+
+接続状況の公開:
+- サーバーごとの状態（接続中・接続済み・失敗・スキップ・切断）とツール一覧・
+  呼び出し回数・最後の呼び出しを _STATUS に記録し、get_mcp_status() で返す。
+  app.py が runtime_status.json へ書き出し、設定ダッシュボードのモニター画面が表示する。
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -34,13 +40,16 @@ import re
 import traceback
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import anyio
 from langchain_core.tools import BaseTool, StructuredTool
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
 from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
 
 from . import tools as tools_module
 from .config import Config
@@ -75,6 +84,75 @@ class _ServerLifecycle:
 
 _LIFECYCLES: list[_ServerLifecycle] = []
 
+# --- 接続状況（設定ダッシュボード向け。get_mcp_status() 参照） ---
+# state:
+#   connecting   : 接続を試みている（起動・initialize・tools/list の途中）
+#   connected    : 接続済み（ツールを登録した）
+#   failed       : 接続に失敗した（error に理由）
+#   skipped      : 接続しなかった（skip_reason: disabled / invalid / env_missing）
+#   disconnected : 接続後にサーバーとの接続が切れた（プロセスの終了等。自動再接続はしない）
+_STATUS: dict[str, dict[str, Any]] = {}
+_STATUS_META: dict[str, Any] = {"initialized": False, "settings_found": False, "settings_error": None}
+_ERROR_TEXT_MAX_CHARS = 300
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _error_text(exc: BaseException) -> str:
+    text = str(exc) or type(exc).__name__
+    return f"{type(exc).__name__}: {text}"[:_ERROR_TEXT_MAX_CHARS]
+
+
+def _set_status(name: str, **fields: Any) -> None:
+    entry = _STATUS.setdefault(
+        name,
+        {
+            "name": name,
+            "state": None,
+            "skip_reason": None,
+            "error": None,
+            "tools": [],
+            "connected_at": None,
+            "calls": 0,
+            "failures": 0,
+            "last_call": None,
+        },
+    )
+    entry.update(fields)
+
+
+def _record_call(server_name: str, tool_name: str, *, ok: bool, error: str | None = None, disconnected: bool = False) -> None:
+    entry = _STATUS.get(server_name)
+    if entry is None:
+        return
+    entry["calls"] += 1
+    if not ok:
+        entry["failures"] += 1
+    entry["last_call"] = {"at": _now_iso(), "tool": tool_name, "ok": ok, "error": error}
+    if disconnected:
+        entry["state"] = "disconnected"
+        entry["error"] = error
+
+
+def get_mcp_status() -> dict[str, Any]:
+    """MCPサーバーの接続状況のスナップショットを返す（app.py が runtime_status.json へ書き出す）。
+
+    呼び出し側が前回の値と比べて変化を判定するため、内部の辞書は複製して返す。
+
+    Returns:
+        {"initialized": init_mcp_tools() が始まったか, "settings_found": settings.json があったか,
+         "servers": [サーバーごとの状態（settings.json の記載順）]}
+    """
+    return {**_STATUS_META, "servers": copy.deepcopy(list(_STATUS.values()))}
+
+
+def _is_connection_closed(exc: BaseException) -> bool:
+    if isinstance(exc, McpError):
+        return getattr(exc.error, "code", None) == CONNECTION_CLOSED
+    return isinstance(exc, (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream))
+
 
 def _resolve_env(server_name: str, env: dict[str, Any]) -> dict[str, str] | None:
     """env の値に含まれる ${ENV_VAR_NAME} を os.environ から展開する。
@@ -103,6 +181,12 @@ def _resolve_env(server_name: str, env: dict[str, Any]) -> dict[str, str] | None
                 "MCP server '%s': skipping the connection because environment variable %s is not set",
                 server_name,
                 m.group(1),
+            )
+            _set_status(
+                server_name,
+                state="skipped",
+                skip_reason="env_missing",
+                error=f"environment variable {m.group(1)} is not set",
             )
             return None
         resolved[key] = actual
@@ -138,16 +222,24 @@ def _parse_settings(path: Path) -> list[McpServerSpec]:
     for name, raw in servers.items():
         if not _SERVER_NAME_PATTERN.match(name):
             logger.warning("Skipping an invalid MCP server name: %r", name)
+            _set_status(
+                str(name), state="skipped", skip_reason="invalid", error="server names may only use A-Z, a-z, 0-9, _ and -"
+            )
             continue
         if not isinstance(raw, dict) or not raw.get("command"):
             logger.warning("Skipping MCP server '%s' because its definition is invalid (command is required)", name)
+            _set_status(name, state="skipped", skip_reason="invalid", error="command is required")
             continue
         if raw.get("disabled"):
             logger.info("Skipping MCP server '%s' because disabled=true", name)
+            _set_status(name, state="skipped", skip_reason="disabled")
             continue
         env = _resolve_env(name, raw.get("env", {}) or {})
         if env is None:
             continue
+        # 接続は1台ずつ順に行うため、順番を待っているサーバーも「接続中」として見えるよう先に載せる
+        # （ここで載せると、スキップしたサーバーと合わせて settings.json の記載順に並ぶ）。
+        _set_status(name, state="connecting")
         specs.append(
             McpServerSpec(
                 name=name,
@@ -264,20 +356,32 @@ def _wrap_mcp_tool(
                 session.call_tool(mcp_tool.name, kwargs), timeout=call_timeout
             )
         except asyncio.TimeoutError:
+            _record_call(server_name, mcp_tool.name, ok=False, error=f"timed out after {call_timeout} seconds")
             return (
                 f"Error: the MCP tool call timed out after {call_timeout} seconds "
                 f"(server={server_name}, tool={mcp_tool.name})."
             )
         except McpError as e:
+            _record_call(
+                server_name, mcp_tool.name, ok=False, error=_error_text(e), disconnected=_is_connection_closed(e)
+            )
             return f"Error: the MCP tool call failed (server={server_name}, tool={mcp_tool.name}): {e}"
         except Exception as e:  # noqa: BLE001 - 予期しない伝送層エラーもグラフを壊さず返す
+            _record_call(
+                server_name, mcp_tool.name, ok=False, error=_error_text(e), disconnected=_is_connection_closed(e)
+            )
             return (
                 f"Error: unexpected error during the MCP tool call "
                 f"(server={server_name}, tool={mcp_tool.name}): {e}\n{traceback.format_exc()}"
             )
         texts = [b.text for b in result.content if getattr(b, "type", None) == "text"]
         text = "\n".join(texts) if texts else "(non-text or empty response)"
-        return f"Error (on the MCP tool side): {text}" if result.isError else text
+        if result.isError:
+            # ツール側が返したエラー（接続自体は生きている）。
+            _record_call(server_name, mcp_tool.name, ok=False, error=text[:_ERROR_TEXT_MAX_CHARS])
+            return f"Error (on the MCP tool side): {text}"
+        _record_call(server_name, mcp_tool.name, ok=True)
+        return text
 
     return StructuredTool(
         name=name,
@@ -299,7 +403,15 @@ async def init_mcp_tools(config: Config) -> None:
             mcp_call_timeout_seconds を参照する）。
     """
     global _LIFECYCLES
-    specs = _parse_settings(config.mcp_settings_path)
+    _STATUS.clear()
+    _STATUS_META.update(
+        initialized=True, settings_found=Path(config.mcp_settings_path).is_file(), settings_error=None
+    )
+    try:
+        specs = _parse_settings(config.mcp_settings_path)
+    except ValueError as exc:  # JSON の構文エラー。ダッシュボードにも出したうえで従来どおり送出する
+        _STATUS_META["settings_error"] = _error_text(exc)
+        raise
     if not specs:
         tools_module.register_mcp_tools([])
         return
@@ -321,10 +433,27 @@ async def init_mcp_tools(config: Config) -> None:
             logger.warning(
                 "Failed to connect to MCP server '%s': %s", spec.name, result_holder["error"]
             )
+            error = result_holder["error"]
+            _set_status(
+                spec.name,
+                state="failed",
+                error=(
+                    f"timed out after {config.mcp_connect_timeout_seconds} seconds"
+                    if isinstance(error, (asyncio.TimeoutError, TimeoutError))
+                    else _error_text(error)
+                ),
+            )
             stop_event.set()
             continue
         session_holder = {"session": result_holder["session"]}
         mcp_tools = result_holder["tools"]
+        _set_status(
+            spec.name,
+            state="connected",
+            error=None,
+            tools=[t.name for t in mcp_tools],
+            connected_at=_now_iso(),
+        )
         for mcp_tool in mcp_tools:
             all_wrapped.append(
                 _wrap_mcp_tool(spec.name, session_holder, mcp_tool, config.mcp_call_timeout_seconds)
@@ -348,3 +477,5 @@ async def shutdown_mcp_tools() -> None:
         lc.stop_event.set()
     if _LIFECYCLES:
         await asyncio.gather(*(lc.task for lc in _LIFECYCLES), return_exceptions=True)
+    _STATUS.clear()
+    _STATUS_META.update(initialized=False, settings_found=False, settings_error=None)

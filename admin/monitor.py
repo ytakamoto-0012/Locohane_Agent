@@ -145,7 +145,7 @@ def summarize_runtime(status: dict | None, thread_names: dict[str, str | None]) 
         thread_names: thread_id -> スレッド名（thread_store から引いたもの）。
     """
     if status is None:
-        return {"available": False, "users": [], "sessions": [], "generating": [], "updated_at": None}
+        return {"available": False, "users": [], "sessions": [], "generating": [], "updated_at": None, "mcp": None}
     sessions = [{**s, "thread_name": thread_names.get(s.get("thread_id"))} for s in status.get("sessions", [])]
     generating = [{**g, "thread_name": thread_names.get(g.get("thread_id"))} for g in status.get("generating", [])]
     users: dict[str, dict] = {}
@@ -162,6 +162,37 @@ def summarize_runtime(status: dict | None, thread_names: dict[str, str | None]) 
         "sessions": sessions,
         "generating": generating,
         "updated_at": status.get("updated_at"),
+        # MCPサーバーの接続状況（app.py の _collect_runtime_status）。本体が v0.7.11 以前なら None。
+        "mcp": status.get("mcp"),
+    }
+
+
+# 接続していない・接続が切れた（＝管理者が見るべき）状態。skipped のうち disabled は意図どおりなので含めない。
+_MCP_PROBLEM_STATES = ("failed", "disconnected")
+
+
+def mcp_summary(mcp: dict | None) -> dict | None:
+    """インスタンス一覧のカード用に、MCPサーバーの接続状況を件数へまとめる。
+
+    MCP が無効、またはサーバーが1台も設定されていなければ None（カードに出さない）。
+    """
+    if not mcp or not mcp.get("enabled"):
+        return None
+    servers = mcp.get("servers") or []
+    if not servers and not mcp.get("settings_error"):
+        return None
+    targets = [s for s in servers if s.get("skip_reason") != "disabled"]
+    problems = [
+        s["name"]
+        for s in targets
+        if s.get("state") in _MCP_PROBLEM_STATES or s.get("skip_reason") in ("invalid", "env_missing")
+    ]
+    return {
+        "total": len(targets),
+        "connected": sum(1 for s in targets if s.get("state") == "connected"),
+        "connecting": sum(1 for s in targets if s.get("state") == "connecting"),
+        "problems": problems,
+        "settings_error": mcp.get("settings_error"),
     }
 
 

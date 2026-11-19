@@ -139,7 +139,7 @@ from src.llm import (
 from src.llm.dialect import last_user_turn_index
 from src.llm.thinking_control import unknown_tool_names
 from src.log_rotation import LineCountRotatingFileHandler
-from src.mcp_client import init_mcp_tools, shutdown_mcp_tools
+from src.mcp_client import get_mcp_status, init_mcp_tools, shutdown_mcp_tools
 from src import memory as memory_store
 from src.memory_recall import build_recall_messages
 from src.memory_review import run_memory_review, should_review
@@ -1284,7 +1284,9 @@ def _collect_runtime_status() -> dict:
         }
         for thread_id in sorted(_generating_thread_ids)
     ]
-    return {"pid": os.getpid(), "sessions": sessions, "generating": generating}
+    # MCPサーバーの接続状況（src/mcp_client.py の get_mcp_status）。[mcp] enabled=false なら接続しない。
+    mcp_status = {"enabled": bool(_config.mcp_enabled), **get_mcp_status()}
+    return {"pid": os.getpid(), "sessions": sessions, "generating": generating, "mcp": mcp_status}
 
 
 @cl.on_app_startup

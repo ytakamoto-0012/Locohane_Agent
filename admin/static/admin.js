@@ -422,6 +422,8 @@ async function refreshCardActivity() {
       cardStat(_t("生成中スレッド"), live(item.generating), item.available && item.waiting ? _t(`うち応答待ち {0}`, item.waiting) : null),
       cardStat(_t("24時間の警告"), fmtNum(lc.WARNING || 0), `ERROR ${fmtNum(lc.ERROR || 0)} / CRITICAL ${fmtNum(lc.CRITICAL || 0)}`),
     ];
+    // MCP サーバーが設定されているときだけ出す（admin/monitor.py の mcp_summary。未設定・無効なら null）。
+    if (item.available && item.mcp) tiles.push(cardMcpStat(item.mcp));
     box.replaceChildren(...tiles);
     renderCardContextChart(card.querySelector(".card-context"), item);
     renderCardIngest(card.querySelector(".card-ingest"), item);
@@ -673,6 +675,17 @@ function cardStat(label, value, sub) {
     el("div", { class: "card-stat-label", text: label }),
     sub ? el("div", { class: "card-stat-sub", text: sub }) : null,
   ]);
+}
+
+// カードの「MCP 接続」タイル。問題のあるサーバーがあれば名前を出し、枠を警告色にする。
+function cardMcpStat(m) {
+  let sub = null;
+  if (m.settings_error) sub = _t("settings.json を読めません");
+  else if (m.problems.length) sub = _t(`未接続: {0}`, m.problems.join(", "));
+  else if (m.connecting) sub = _t(`接続中 {0}`, m.connecting);
+  const tile = cardStat(_t("MCP 接続"), `${m.connected} / ${m.total}`, sub);
+  if (m.settings_error || m.problems.length) tile.classList.add("card-stat-warn");
+  return tile;
 }
 
 async function runInstanceAction(name, action, card) {
@@ -3778,10 +3791,16 @@ async function renderMonitor(container) {
   const body = el("div");
   const updated = el("span", { class: "hint" });
   const endpointsBox = el("div");
+  const mcpBox = el("div");
   container.append(
     el("div", { class: "monitor-toolbar" }, [updated, el("span", { class: "hint", text: _t(`（{0}秒ごとに自動更新）`, MONITOR_POLL_MS / 1000) })]),
     tiles,
     body,
+    el("section", { class: "monitor-section" }, [
+      el("h3", { text: _t("MCPサーバー接続") }),
+      el("p", { class: "hint", text: _t("本体が .locohane/settings.json の mcpServers へ起動時に接続した結果と、その後のツール呼び出しの状況です（接続が切れても自動では再接続しません。直すにはインスタンスを再起動します）。") }),
+      mcpBox,
+    ]),
     el("section", { class: "monitor-section" }, [
       el("div", { class: "section-head" }, [
         el("h3", { text: _t("LLM接続先") }),
@@ -3809,6 +3828,7 @@ async function renderMonitor(container) {
       statTile(_t("生成中スレッド"), data.available ? String(data.generating.length) : "-", data.available ? _t(`うち応答待ち {0}`, data.generating.filter((g) => g.waiting_for_user).length) : null),
       statTile(_t("直近24時間の警告"), `${fmtNum(lc.WARNING || 0)}`, `ERROR ${fmtNum(lc.ERROR || 0)} / CRITICAL ${fmtNum(lc.CRITICAL || 0)}`)
     );
+    renderMcpStatus(mcpBox, data);
     if (!data.available) {
       body.replaceChildren(
         el("p", {
@@ -3858,6 +3878,71 @@ async function renderMonitor(container) {
   await refresh();
   // 初回の取得中に別のタブへ移っていたら始めない（移動先の画面のポーリングを止めてしまうため）。
   if (document.body.contains(container)) startMonitorPolling(container, refresh);
+}
+
+// src/mcp_client.py の state / skip_reason の表示。
+const MCP_STATE_BADGES = {
+  connected: ["ok", "✓ 接続済み"],
+  connecting: ["", "接続中..."],
+  failed: ["critical", "✕ 接続失敗"],
+  disconnected: ["critical", "✕ 切断"],
+  skipped: ["", "スキップ"],
+};
+const MCP_SKIP_REASONS = {
+  disabled: "disabled=true のため接続しません",
+  invalid: "設定が正しくありません",
+  env_missing: "環境変数が未設定です",
+};
+
+function renderMcpStatus(box, data) {
+  const hint = (text) => box.replaceChildren(el("p", { class: "hint", text }));
+  if (!data.available) {
+    hint(data.state === "running" || data.state === "external" ? _t("実行状態を取得できません（本体が更新前のバージョン、または起動直後です）。") : _t("インスタンスが停止しています。"));
+    return;
+  }
+  const m = data.mcp;
+  if (!m) return hint(_t("本体がこの表示に対応する前のバージョンです（更新後に再起動すると表示されます）。"));
+  if (!m.enabled) return hint(_t("MCP は無効です（[mcp] enabled = false）。"));
+  if (!m.initialized) return hint(_t("起動処理中です（MCPサーバーへの接続はまだ始まっていません）。"));
+  const parts = [];
+  if (m.settings_error) parts.push(el("div", { class: "error", text: _t(`settings.json を読めません: {0}`, m.settings_error) }));
+  if (!m.servers.length) {
+    if (!m.settings_error) hint(m.settings_found ? _t("mcpServers にサーバーが設定されていません。") : _t("MCP の設定ファイル（.locohane/settings.json）がありません。"));
+    else box.replaceChildren(...parts);
+    return;
+  }
+  const stateBadge = (s) => {
+    const [cls, label] = MCP_STATE_BADGES[s.state] || ["", s.state || "-"];
+    const reason = s.skip_reason ? _t(MCP_SKIP_REASONS[s.skip_reason] || s.skip_reason) : "";
+    return el("span", { class: `badge ${s.skip_reason && s.skip_reason !== "disabled" ? "warn" : cls}`, text: _t(label), title: [reason, s.error].filter(Boolean).join("\n") });
+  };
+  const lastCall = (s) => {
+    const c = s.last_call;
+    if (!c) return el("span", { class: "hint", text: "-" });
+    return el("span", { title: c.error || "" }, [
+      el("span", { class: `badge ${c.ok ? "ok" : "critical"}`, text: c.ok ? "OK" : _t("失敗") }),
+      ` ${c.tool} (${fmtTime(c.at)})`,
+    ]);
+  };
+  const detail = (s) => {
+    const text = s.skip_reason ? [_t(MCP_SKIP_REASONS[s.skip_reason] || s.skip_reason), s.error].filter(Boolean).join(": ") : s.error || "";
+    return text ? el("span", { class: s.state === "failed" || s.state === "disconnected" ? "error-text" : "hint", text }) : el("span", { class: "hint", text: "-" });
+  };
+  parts.push(
+    dataTable(
+      [_t("サーバー"), _t("状態"), _t("ツール数"), _t("接続日時"), _t("呼び出し（失敗）"), _t("最後の呼び出し"), _t("詳細")],
+      m.servers.map((s) => [
+        s.name,
+        stateBadge(s),
+        s.state === "connected" || s.state === "disconnected" ? el("span", { text: String(s.tools.length), title: s.tools.join("\n") }) : el("span", { class: "hint", text: "-" }),
+        s.connected_at ? fmtTime(s.connected_at) : "-",
+        s.calls ? `${fmtNum(s.calls)} (${fmtNum(s.failures)})` : "0",
+        lastCall(s),
+        detail(s),
+      ])
+    )
+  );
+  box.replaceChildren(...parts);
 }
 
 async function loadEndpoints(box) {
