@@ -253,7 +253,8 @@ select.le-type { width: auto; padding: 4px; font-size: 12px; flex-shrink: 0; }
 .le-group-head .le-source .le-btn { margin-left: 0; }
 .le-group .le-list .le-item { background: var(--panel-2); }
 
-.config-footer { display: flex; align-items: center; gap: 10px; position: sticky; bottom: 0; background: var(--bg); padding: 10px 0; }
+/* 右端は「一番上へ戻る」ボタン（.scroll-top-btn: 右 24px・幅 46px の固定表示）と重ならないよう空ける。 */
+.config-footer { display: flex; align-items: center; gap: 10px; position: sticky; bottom: 0; background: var(--bg); padding: 10px 64px 10px 0; }
 #dirty-count { color: var(--text-dim); font-size: 12px; }
 .config-copy-btn { margin-right: auto; }
 .diff-item.selectable { display: flex; gap: 8px; align-items: flex-start; }
