@@ -4448,7 +4448,10 @@ async def _memory_recall_messages(text: str) -> list:
         return []
     if messages:
         try:
-            step = cl.Step(name=tool_label("search_memory"), type="tool")
+            # 親を指定しないとルート直下の Step になり、このターンの他の Step（@cl.on_message の実行ランの下へ
+            # 入る。_resolve_parent_id 参照）の後ろ＝一覧の最後尾に表示されてしまうため、同じ実行ランの下へ入れる。
+            parent = cl.context.current_step
+            step = cl.Step(name=tool_label("search_memory"), type="tool", parent_id=parent.id if parent else None)
             step.start = utc_now()
             step.input = messages[0].tool_calls[0]["args"]
             step.output = _display_step_text(messages[1].content)
