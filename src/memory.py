@@ -14,8 +14,10 @@ ClaudeCode 相当の「スレッド／セッションをまたいで共有され
 3. 索引ファイル MEMORY.md を、保存されているメモリー群から都度再構築する
    （索引を差分更新せず常に全再構築することで整合ズレを防ぐ。共通の分は memory_dir 直下、
    ユーザーの分は users/<ユーザー>/ 直下）。
-4. システムプロンプトへ差し込むための索引テキストを、会話のユーザーごとに組み立てる
-   （{{memory}} プレースホルダー用、200行超は切り詰め。自分 → 共通 → 他のユーザーの順）。
+4. システムプロンプトの {{memory}} には、設定ダッシュボードで「システムプロンプトに表示」を選んだメモリー
+   （frontmatter の in_system_prompt）の本文だけを、会話のユーザーごとに組み立てて差し込む
+   （render_system_prompt_memories）。メモリーが増えてもプロンプトが膨らまないよう、索引そのものは載せない。
+   それ以外のメモリーは、ターンの始めにハーネスが依頼文で探して見せる（relevant_memories、src/memory_recall.py）。
 5. ファイルから読んだ内容を記録するメモリーには、元ファイルの sha256 を
    frontmatter の sources に残し、読むときに今の sha256 と照合する
    （一致すれば元ファイルを開き直さずに内容を使える）。
@@ -24,14 +26,17 @@ Chainlit には依存しない。ツール層（tools/memory_tools.py）の @too
 関数を呼び、例外を "Error: ..." 形式の文字列へ変換して LLM に返す。
 
 賢い仕掛け（動的import・全文検索エンジン等）は入れない。ファイルを読み書き
-して素朴なキーワード一致で検索する、それだけ。
+して素朴なキーワード一致（と、依頼文から探すための文字 bigram の重み付き一致）で検索する、それだけ。
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
+import threading
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -72,9 +77,11 @@ _OWNER_FORBIDDEN_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 _OWNER_MAX = 128
 
 _INDEX_FILENAME = "MEMORY.md"
-# app.py が起動時のシステムプロンプトの {{memory}} に残し、セッションごとに render_memory_block() の結果へ
-# 差し替える目印（索引は会話のユーザーごとに違うため）。
+# app.py が起動時のシステムプロンプトの {{memory}} に残し、セッションごとに render_system_prompt_memories() の結果へ
+# 差し替える目印（見えるメモリーは会話のユーザーごとに違うため）。
 MEMORY_INDEX_MARKER = "<<MEMORY_INDEX>>"
+# システムプロンプトに載せるメモリーの本文の合計の上限（[memory] system_prompt_max_chars の既定）。
+DEFAULT_SYSTEM_PROMPT_MAX_CHARS = 6000
 _INDEX_MAX_LINES = 200
 # {{memory}} に載せる用語（glossary）の最大行数（ほかの種類の行が少なければ、空いた分まで増やす）。
 _INDEX_GLOSSARY_MAX_LINES = 50
@@ -269,6 +276,8 @@ class Memory:
         visibility_pinned: 人が設定ダッシュボードで個人用（private）にしたもの（frontmatter の visibility_pinned）。
             LLM の保存・更新は公開範囲を種類の設定で決め直すが、この印があるものは個人用のまま残す
             （人が隠したものを AI の更新で共有へ戻さないため）。人が共有にすると外れる。
+        in_system_prompt: 人が設定ダッシュボードで「システムプロンプトに表示」を選んだもの（frontmatter の
+            in_system_prompt）。見えるユーザーの会話では、本文がシステムプロンプトに載る。AI の更新・種類の変更でも残る。
     """
 
     name: str
@@ -282,6 +291,7 @@ class Memory:
     author: str | None = None
     updated_by: str | None = None
     visibility_pinned: bool = False
+    in_system_prompt: bool = False
 
 
 def ensure_dirs(memory_root: Path, owner: str | None = None) -> None:
@@ -407,11 +417,13 @@ def _serialize(
     author: str | None = None,
     updated_by: str | None = None,
     visibility_pinned: bool = False,
+    in_system_prompt: bool = False,
 ) -> str:
     """メモリー1件を frontmatter 付き Markdown 文字列へ組み立てる（visibility は共通のメモリーでは書かない）。
 
     visibility_pinned は private のユーザーのメモリーにだけ、true / false を必ず書く（印の無い private は
     印の仕組みより前に保存されたものとして固定扱いにするため。_load を参照）。
+    in_system_prompt は true のときだけ書く。
     """
     frontmatter: dict = {
         "name": name,
@@ -426,6 +438,8 @@ def _serialize(
         frontmatter["author"] = author
     if updated_by is not None:
         frontmatter["updated_by"] = updated_by
+    if in_system_prompt:
+        frontmatter["in_system_prompt"] = True
     frontmatter["created"] = created
     frontmatter["updated"] = updated
     if sources:
@@ -455,11 +469,45 @@ def _parse_sources(raw: object, path: Path) -> tuple[SourceFile, ...]:
     return tuple(sources)
 
 
+# 読み込んだメモリーのキャッシュ。キー: (ファイルパス, 所有者) → ((mtime_ns, size), Memory)。
+# 毎ターンの検索（relevant_memories）・一覧で全ファイルを読み直すと、件数が多いと遅くなる（1500件で約0.6秒）。
+# (mtime, size) が変わったファイルだけ読み直す（書き込みは mtime を変えるので、次の読み込みに必ず反映される）。
+_LOAD_CACHE: dict[tuple[str, str | None], tuple[tuple[int, int], Memory]] = {}
+_LOAD_CACHE_LOCK = threading.Lock()
+_LOAD_CACHE_MAX = 20000
+
+
 def _load(path: Path, owner: str | None = None) -> Memory | None:
     """メモリーファイル1件を読み込み Memory へ変換する。壊れていれば None。
 
     ユーザーのメモリーで visibility が無い・不正なら、他のユーザーへ漏らさないよう private とみなす。
+    (mtime, size) が前回と同じなら、前回読んだ結果を返す（_LOAD_CACHE）。
     """
+    key = (str(path), owner)
+    try:
+        st = path.stat()
+    except OSError:
+        with _LOAD_CACHE_LOCK:
+            _LOAD_CACHE.pop(key, None)
+        raise
+    stamp = (st.st_mtime_ns, st.st_size)
+    with _LOAD_CACHE_LOCK:
+        hit = _LOAD_CACHE.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    mem = _load_uncached(path, owner)
+    with _LOAD_CACHE_LOCK:
+        if mem is None:
+            _LOAD_CACHE.pop(key, None)
+        else:
+            if len(_LOAD_CACHE) >= _LOAD_CACHE_MAX:
+                _LOAD_CACHE.clear()
+            _LOAD_CACHE[key] = (stamp, mem)
+    return mem
+
+
+def _load_uncached(path: Path, owner: str | None = None) -> Memory | None:
+    """_load の本体（キャッシュを見ない）。"""
     text = path.read_text(encoding="utf-8")
     frontmatter, body = _split_frontmatter(text)
     if frontmatter is None:
@@ -497,6 +545,7 @@ def _load(path: Path, owner: str | None = None) -> Memory | None:
         author=author if isinstance(author, str) and author else owner,
         updated_by=updated_by if isinstance(updated_by, str) and updated_by else None,
         visibility_pinned=pinned,
+        in_system_prompt=frontmatter.get("in_system_prompt") is True,
     )
 
 
@@ -642,6 +691,31 @@ def _iter_memories(memory_root: Path, memory_type: str | None = None, owner: str
             if mem is not None:
                 results.append(mem)
     return results
+
+
+def written_since(memory_root: Path, owner: str | None, since: float) -> bool:
+    """owner（と共通）のメモリーのうち、since（time.time() の値）以降に書き込まれたものがあるか。
+
+    ターンの終わりの記録の見直し（src/memory_review.py）で、このターン中に（メインでもサブエージェントでも）
+    メモリーを保存・更新したかを確かめるのに使う。ファイルの更新日時だけを見る（中身は読まない）。
+    """
+    scopes = [None] if owner is None else [owner, None]
+    for scope in scopes:
+        try:
+            root = scope_root(memory_root, scope)
+        except ValueError:
+            continue
+        for memory_type in MEMORY_TYPES:
+            type_dir = root / memory_type
+            if not type_dir.is_dir():
+                continue
+            for entry in type_dir.glob("*.md"):
+                try:
+                    if entry.stat().st_mtime >= since:
+                        return True
+                except OSError:
+                    continue
+    return False
 
 
 def list_owners(memory_root: Path) -> list[str]:
@@ -1004,6 +1078,7 @@ def _rewrite(
             author=mem.author,
             updated_by=updated_by if updated_by is not None else mem.updated_by,
             visibility_pinned=pin,
+            in_system_prompt=mem.in_system_prompt,
         ),
         encoding="utf-8",
     )
@@ -1108,6 +1183,37 @@ def change_memories(
     return BulkResult(tuple(done), tuple(failed))
 
 
+def set_in_system_prompt(memory_root: Path, mems: list[Memory], value: bool) -> BulkResult:
+    """メモリーの「システムプロンプトに表示」（frontmatter の in_system_prompt）をまとめて付け外しする。
+
+    設定ダッシュボード用。説明・本文・公開範囲・更新日時は変えない（frontmatter のこのキーだけを書き換える）。
+    索引 MEMORY.md には載せない情報のため、索引は作り直さない。
+    """
+    done: list[Memory] = []
+    failed: list[tuple[str | None, str, str]] = []
+    for mem in mems:
+        try:
+            text = mem.path.read_text(encoding="utf-8")
+            frontmatter, body = _split_frontmatter(text)
+            if frontmatter is None:
+                raise ValueError("the frontmatter cannot be read")
+            if value:
+                frontmatter["in_system_prompt"] = True
+            else:
+                frontmatter.pop("in_system_prompt", None)
+            header = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False)
+            mem.path.write_text(f"---\n{header}---\n\n{body.rstrip()}\n", encoding="utf-8")
+        except FileNotFoundError:
+            failed.append((mem.owner, mem.name, "not found"))
+            continue
+        except (OSError, ValueError) as e:
+            failed.append((mem.owner, mem.name, str(e)))
+            continue
+        done.append(mem)
+    logger.info("set_in_system_prompt: value=%s changed=%d failed=%d", value, len(done), len(failed))
+    return BulkResult(tuple(done), tuple(failed))
+
+
 def _find_memory_other_type(memory_root: Path, mem: Memory, memory_type: str) -> bool:
     """mem を memory_type へ移す先に、同じ名前の別のファイルがあるか（壊れた重複を上書きしないため）。"""
     target = _safe_memory_path(memory_root, memory_type, mem.name, mem.owner)
@@ -1169,6 +1275,7 @@ def copy_memory(
             author=mem.author if mem.author is not None else mem.owner,
             updated_by=copied_by,
             visibility_pinned=owner is not None and mem.visibility_pinned,
+            in_system_prompt=mem.in_system_prompt,
         ),
         encoding="utf-8",
     )
@@ -1249,14 +1356,21 @@ def read_visible_memory(memory_root: Path, name: str, viewer: str | None, owner:
     return others[0]
 
 
+def _normalize_text(text: str) -> str:
+    """検索用に NFKC（全角英数→半角等）・小文字へそろえる。"""
+    return unicodedata.normalize("NFKC", text).lower()
+
+
 def search_memories(
     memory_root: Path, query: str, memory_type: str | None = None, *, viewer: str | None = None
 ) -> list[Memory]:
     """name/description/content に対する大文字小文字を区別しない部分一致検索（viewer が見えるものだけ）。
 
+    query を空白で区切った語をすべて含むものを返す（1語なら従来どおりの部分一致）。全角・半角の違いは無視する。
+
     Args:
         memory_root: メモリーストアのルートディレクトリ。
-        query: 検索キーワード。
+        query: 検索キーワード（空白区切りで複数可。すべてを含むものが当たる）。
         memory_type: 指定すればそのtypeのみを検索対象にする。
         viewer: 会話のユーザー。自分のもの・共通のもの・他のユーザーの共有のものが対象になる。
 
@@ -1268,13 +1382,121 @@ def search_memories(
     """
     if not query.strip():
         raise ValueError("query is empty")
-    needle = query.lower()
-    hits = [
-        mem
-        for mem in list_memories(memory_root, memory_type, viewer=viewer)
-        if needle in f"{mem.name}\n{mem.description}\n{mem.content}".lower()
-    ]
+    needles = _normalize_text(query).split()
+    hits = []
+    for mem in list_memories(memory_root, memory_type, viewer=viewer):
+        haystack = _normalize_text(f"{mem.name}\n{mem.description}\n{mem.content}")
+        if all(n in haystack for n in needles):
+            hits.append(mem)
     return hits
+
+
+# --- 依頼文からの関連メモリーの検索（ターンの始めの自動検索・search_memory の言い換え候補） ---------------
+
+# ASCII の語（英数字で始まり、英数字・_・-・. が続く）。2文字以上を手がかりにする。
+_ASCII_WORD_RE = re.compile(r"[a-z0-9][a-z0-9_.\-]*")
+# ASCII 以外の文字の並び（日本語など）。区切りの記号・空白で切り、2文字ずつ（bigram）を手がかりにする。
+_NON_ASCII_RUN_RE = re.compile(r"[^\x00-\x7f\s、。，．・「」『』（）【】［］〔〕！？：；…〜“”‘’]+")
+# 本文から手がかりを取る文字数（長い本文で検索が遅くならないように）。
+_RELEVANCE_BODY_CHARS = 4000
+# 1件のメモリーの手がかりのキャッシュ（Memory は _LOAD_CACHE で同じオブジェクトが返るため、id で引いて同一性を確かめる）。
+_TOKEN_CACHE: dict[int, tuple[Memory, frozenset[str], frozenset[str]]] = {}
+_TOKEN_CACHE_MAX = 20000
+
+
+def _text_tokens(text: str) -> set[str]:
+    """検索の手がかり（ASCII の語と、日本語等の文字 bigram）の集合。"""
+    normalized = _normalize_text(text)
+    tokens: set[str] = set()
+    for word in _ASCII_WORD_RE.findall(normalized):
+        word = word.strip("._-")
+        if len(word) >= 2:
+            tokens.add(word)
+    for run in _NON_ASCII_RUN_RE.findall(normalized):
+        if len(run) == 1:
+            continue
+        tokens.update(run[i : i + 2] for i in range(len(run) - 1))
+    return tokens
+
+
+def _memory_tokens(mem: Memory) -> tuple[frozenset[str], frozenset[str]]:
+    """(名前・説明の手がかり, 本文の手がかり)。"""
+    hit = _TOKEN_CACHE.get(id(mem))
+    if hit is not None and hit[0] is mem:
+        return hit[1], hit[2]
+    head = frozenset(_text_tokens(f"{mem.name.replace('-', ' ').replace('_', ' ')}\n{mem.description}"))
+    body = frozenset(_text_tokens(mem.content[:_RELEVANCE_BODY_CHARS]))
+    if len(_TOKEN_CACHE) >= _TOKEN_CACHE_MAX:
+        _TOKEN_CACHE.clear()
+    _TOKEN_CACHE[id(mem)] = (mem, head, body)
+    return head, body
+
+
+def relevant_memories(
+    memory_root: Path,
+    text: str,
+    *,
+    viewer: str | None,
+    limit: int = 8,
+    memory_type: str | None = None,
+) -> list[Memory]:
+    """依頼文 text に関係しそうな、viewer に見えるメモリーを関係の強い順に返す。
+
+    部分一致（search_memories）は依頼文そのものでは当たらないため、依頼文と各メモリーの手がかり（ASCII の語・
+    日本語等の文字 bigram）の重なりを、どれだけ珍しい手がかりか（IDF）で重み付けして数える。名前・説明に
+    ある手がかりは本文の2倍に数える。「して」「です」のようにどのメモリーにもある手がかりは重みが小さい。
+    手がかりが2つ以上（3文字以上の ASCII の語なら1つでも）重なり、点数が最上位の 25% 以上のものだけを返す。
+
+    Args:
+        memory_root: メモリーストアのルートディレクトリ。
+        text: 依頼文（検索語でもよい）。
+        viewer: 会話のユーザー。
+        limit: 返す最大件数。
+        memory_type: 指定すればその type だけ。
+
+    Returns:
+        Memory のリスト（関係の強い順。同点なら list_memories の並び）。
+    """
+    if not memory_root.is_dir() or limit <= 0:
+        return []
+    query = _text_tokens(text)
+    if not query:
+        return []
+    mems = list_memories(memory_root, memory_type, viewer=viewer)
+    if not mems:
+        return []
+    tokens = [_memory_tokens(m) for m in mems]
+    df: dict[str, int] = {}
+    for head, body in tokens:
+        for tok in query:
+            if tok in head or tok in body:
+                df[tok] = df.get(tok, 0) + 1
+    if not df:
+        return []
+    n = len(mems)
+    idf = {tok: math.log(1 + n / count) for tok, count in df.items()}
+    scored: list[tuple[float, int, Memory]] = []
+    for order, (mem, (head, body)) in enumerate(zip(mems, tokens)):
+        score = 0.0
+        matched = 0
+        strong = False
+        for tok, weight in idf.items():
+            if tok in head:
+                score += 2 * weight
+            elif tok in body:
+                score += weight
+            else:
+                continue
+            matched += 1
+            strong = strong or (tok.isascii() and len(tok) >= 3)
+        if matched >= 2 or strong:
+            scored.append((score, order, mem))
+    if not scored:
+        return []
+    top = max(s for s, _, _ in scored)
+    scored = [item for item in scored if item[0] >= top * 0.25]
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [mem for _, _, mem in scored[:limit]]
 
 
 def list_memories(memory_root: Path, memory_type: str | None = None, *, viewer: str | None = None) -> list[Memory]:
@@ -1313,8 +1535,42 @@ def label_for(mem: Memory, viewer: str | None, policy: MemoryPolicy = DEFAULT_PO
     return f" ({', '.join(parts)})"
 
 
+def render_system_prompt_memories(
+    memory_root: Path, viewer: str | None = None, max_chars: int = DEFAULT_SYSTEM_PROMPT_MAX_CHARS
+) -> str:
+    """system_prompt.md の {{memory}} へ差し込む、「システムプロンプトに表示」のメモリーの本文（viewer に見えるものだけ）。
+
+    メモリーが増えてもシステムプロンプトが膨らまないよう、索引は載せず、設定ダッシュボードで選んだもの
+    （in_system_prompt）だけを載せる。並びは list_memories と同じ（ランク → 自分 → 共通 → 他のユーザー）。
+    本文の合計が max_chars を超えたら、超えた分は名前だけを挙げて read_memory で読むよう添える。
+
+    Returns:
+        差し込み用テキスト。載せるものが無ければ「(none)」。
+    """
+    mems = [m for m in list_memories(memory_root, viewer=viewer) if m.in_system_prompt] if memory_root.is_dir() else []
+    if not mems:
+        return "(none)"
+    policy = policy_for(memory_root)
+    parts: list[str] = []
+    omitted: list[str] = []
+    used = 0
+    for m in mems:
+        block = f"### [{m.memory_type}] {m.name}{label_for(m, viewer, policy)}: {m.description}\n{m.content.strip()}"
+        if used + len(block) > max_chars:
+            remaining = max_chars - used
+            if remaining < 300:
+                omitted.append(m.name)
+                continue
+            block = block[:remaining].rstrip() + f"\n... (truncated; read the rest with read_memory(\"{m.name}\"))"
+        parts.append(block)
+        used += len(block)
+    if omitted:
+        parts.append(f"(Not shown because of the length limit; read them with read_memory: {', '.join(omitted)})")
+    return "\n\n".join(parts)
+
+
 def render_memory_block(memory_root: Path, viewer: str | None = None, max_lines: int = _INDEX_MAX_LINES) -> str:
-    """system_prompt.md の {{memory}} プレースホルダーへ差し込むテキストを、viewer 向けに組み立てる。
+    """viewer に見えるメモリーの索引（1行1件）を組み立てる（以前の {{memory}}。今はシステムプロンプトには載せない）。
 
     viewer が見えるメモリー（所有者のランクが高い順。同じランクなら 自分 → 共通 → 他のユーザーの共有のもの）を
     1行ずつ並べ、max_lines を超える場合は切り詰めて注記を付す（先に並ぶものが残る）。用語（glossary）は

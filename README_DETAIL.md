@@ -400,6 +400,7 @@ Locohane/
 │   ├── help.md              # help ツールが返すユーザー向けヘルプ（英語。LLM が利用者の言語で伝える）
 │   ├── compaction_prompt.md # 会話履歴の自動要約指示
 │   ├── subagent_common.md   # サブエージェント共通プロンプト
+│   ├── memory_review.md     # 記録の見直しの記録係のプロンプト
 │   ├── handoff_prompt.md    # トークン上限接近時にLLMへ注入する打ち切り・引き継ぎ指示
 │   └── compressing_test/    # プロンプト圧縮の効果検証用ワークスペース（開発時の実験、tune-prompt関連）
 ├── tools/
@@ -444,6 +445,8 @@ Locohane/
 │   │   └── （read_skill.py/run_script.py/dispatch_agent.py 等、ツールごとに1ファイル）
 │   ├── path_memory.py       # パスメモリー（@N）レジストリの読み書き
 │   ├── memory.py            # 永続メモリーの読み書き・索引再構築
+│   ├── memory_recall.py     # ターンの始めの自動メモリー検索
+│   ├── memory_review.py     # タスクの終わりの記録の見直し（記録係）
 │   ├── vector_db/            # ベクターDB（社内文書の意味検索。「ベクターDB（社内文書の意味検索）」節）
 │   │   ├── extract.py / chunking.py # 文書からのテキスト抽出・チャンク分割
 │   │   ├── render.py         # image_input 時のページ・画像ファイルの画像化（Office は COM で PDF 経由）
@@ -970,6 +973,10 @@ LLM側の共通変換ルール（`system_prompt/system_prompt.md`・`system_prom
   スクリプトを持つスキルの免除設定（`[plan] plan_approval_exempt_scripts`・`[main_agent_tool_guard] allow_entries`）も、
   そのインスタンスの `config_overrides.json` にだけ登録する（管理ツールと同じ検証・バックアップ・変更履歴つき）。
   昇格したスキルと設定が効くのは再起動後。
+- **ドラフトの削除**: 設定ダッシュボードのスキル研究室の「利用者のドラフト（このインスタンス）」の「削除」で消せる
+  （`POST /api/instances/<name>/skill-lab/drafts/delete`）。消さずに `[skill_creator] archive_dir/<ユーザー>/<スキル名>_<日時>/` へ
+  `_workspace` ごと移し、`_draft_meta.json` に `status: deleted` を残す（必要なら手で戻せる）。研究テーマに取り込み中のドラフトは、
+  差し戻しの行き先が無くなるため消せない（先にテーマを削除する）。変更履歴には `skill_lab_draft_delete` で残る。
 - **Claude Code の promote-skill も残している**: ドラフト1件をそのまま判定して昇格させたいときの経路。昇格先・アーカイブ・
   設定の登録は研究室と同じ規則（`promote_helper.py install` は `--instance` 専用の置き場にだけ置く）。記録はどちらも `evals/promotion_log.md`。
 
@@ -1143,12 +1150,30 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   `Read`/`Grep`/`Glob`/`execute_python_code` 等からも読めない（`src/skill_drafts.py` の `access_error`・
   `unreadable_dirs` 等。他のユーザーのドラフトスキルを隠す仕組みと同じ）。
 - **索引 `MEMORY.md`**: 共通の分は `data/memory/MEMORY.md`、ユーザーの分は `data/memory/users/<ユーザー>/MEMORY.md`。
-  create/update/delete のたびに全再構築される（差分更新はしない設計）。
-  システムプロンプトの `{{memory}}` には、会話のユーザーから見えるメモリーの一覧（自分 → 共通 → 他のユーザーの
-  共有のもの）が、会話の開始（グラフの組み立て）ごとに差し込まれる（`app.py` の `_apply_session_draft_skills`。
-  本文は `read_memory`/`search_memory` で都度取得）。新しく保存したメモリーは次の会話から載る。
-- 200行を超える場合はシステムプロンプトへの差込時に切り詰められる（自分のものが先に残る。`src/memory.py`
-  の `render_memory_block`）。
+  create/update/delete のたびに全再構築される（差分更新はしない設計）。索引はシステムプロンプトには載せない
+  （以前は `{{memory}}` に一覧を差し込んでいたが、件数が増えるとプロンプトが膨らみ、会話を開く・最初の応答が遅くなっていた）。
+- **ターンの始めの自動検索**（`[memory] recall_enabled`、既定 true）: ユーザーの発言を受けるたびに、ハーネスがその本文で
+  関係しそうなメモリーを探し（`src/memory.py` の `relevant_memories`。ASCII の語と日本語等の文字 bigram の重なりを、珍しさ（IDF）で
+  重み付けして数える。名前・説明は本文の2倍）、「`search_memory` を呼んで結果が返った」形（AIMessage の tool_call ＋ ToolMessage）で
+  発言の直後に入れる（`src/memory_recall.py`。チャット欄には「メモリー検索」のステップが出る）。LLM が検索を怠っても、覚えている
+  訂正・やり方が必ず目に入る。件数は `recall_max_results`（既定8）、本文の先頭の抜粋は `recall_excerpt_chars`（既定300文字）。
+  評価（`evals/run_case.py`）も同じ関数で入れる。`search_memory` は空白区切りの語をすべて含むものを返し（全角・半角は無視）、
+  完全に当たらなければ似た語のメモリーを「近いもの」として返す。
+- **タスクの終わりの記録の見直し**（`[memory] review_enabled`、既定 true）: ツールを使ったタスク（メインのツール呼び出しが
+  `review_min_tool_calls` 回以上。自動検索は数えない）が最終回答で終わり、そのターンの間にメモリーが1件も保存・更新されていなければ
+  （サブエージェントの保存も含め、メモリーのファイルの更新日時で判定。`src/memory.py` の `written_since`）、ハーネスが記録係を動かす
+  （`src/memory_review.py`。システムプロンプトは `system_prompt/memory_review.md`）。記録係はメモリー系のツール（`search_memory`/
+  `read_memory`/`create_memory`/`update_memory`/`save_glossary_term`）だけを持つ小さなループで、ターンの記録（依頼・追加指示・
+  ツール呼び出しと結果の要約・最終回答）と関係しそうな既存のメモリーを見て、残すべきものだけを保存・更新する（重複は作らず更新）。
+  `[llm] sub_url` の接続先を使い、`review_max_iterations`（既定4）回・`review_timeout_seconds`（既定300秒）まで。最終回答の表示の後に
+  動き、チャット欄に「📝 メモリーに記録しました: …」等の system_message が出る。記録係のやり取りは会話の履歴に足さない。
+  失敗してもターンの結果には影響しない。トークンは会話累計と月別の利用量に足す。
+- **システムプロンプトに表示するメモリー**: 設定ダッシュボードの「メモリー」で選んだメモリー（frontmatter の `in_system_prompt: true`）
+  だけは、本文がシステムプロンプトの `{{memory}}` に毎回載り、AI が常に従う（`src/memory.py` の `render_system_prompt_memories`。
+  見えるユーザーの会話だけ。合計 `[memory] system_prompt_max_chars`（既定6000文字）を超えた分は名前だけ挙げて `read_memory` させる）。
+  AI の更新・種類の変更・コピーでも印は残る。会話の開始（グラフの組み立て）ごとに組み立てるため、変更は次の会話から。
+- メモリーの読み込みは、ファイルの更新日時・サイズが変わっていなければ前回読んだ結果を使う（`src/memory.py` の `_load`。毎ターンの
+  自動検索で全件を読み直さないため）。
 - **元ファイル付きのメモリー（`source_files`）**: ファイルから読んだ値・表の行・ページ付きの要点を
   記録するときは、`create_memory`/`update_memory` の `source_files` に元ファイル（絶対パスまたは `@N`）を
   渡す。ツールがその時点の sha256 とサイズを frontmatter の `sources` に記録する（最大10ファイル、
@@ -1174,9 +1199,10 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   以前は1件ごとに作り直していたため数百件で固まった）。変更履歴にはまとめて1件で残す。
   種類の絞り込みを選ぶと「この種類のメモリーをすべて削除」で、その種類のメモリーを全件消せる（所有者の絞り込みは効き、
   名前・説明・本文の絞り込みは効かない。`POST /api/instances/<name>/memories/delete-by-type`）。
-  「選択したメモリーの種類・公開範囲を変更」で、選んだメモリーの種類・公開範囲をまとめて変えられる（説明・本文は
-  そのまま。公開範囲は共通のメモリーには効かず、`private` の種類・目印に当たるものは個人用のまま理由を表示。
-  `POST /api/instances/<name>/memories/change`）。
+  「選択したメモリーの種類・公開範囲・システムプロンプトへの表示を変更」で、選んだメモリーの種類・公開範囲・「システムプロンプトに表示」を
+  まとめて変えられる（説明・本文はそのまま。公開範囲は共通のメモリーには効かず、`private` の種類・目印に当たるものは個人用のまま理由を表示。
+  `POST /api/instances/<name>/memories/change` の `type`・`visibility`・`in_system_prompt`）。「システムプロンプトに表示」のメモリーは
+  一覧の名前の横に「📌システムプロンプト」と出る。
   同じく選んだメモリー（最大20件）から**ドラフトスキルを作成**できる（「選択したメモリーからドラフトスキルを作成」。
   `admin/memories.py` の `draft-skill`）。LLM（下の「AIで翻訳」と同じ接続先）がメモリーの内容を1つの SKILL.md に
   まとめ、作成先ユーザーのドラフト置き場 `[skill_creator] draft_dir/<ユーザー>/<スキル名>/` へ skill-creator の
@@ -1236,9 +1262,8 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
     `Notes` は1000文字まで残し、それでも超えれば `Notes` → 古い出典の順に切り詰める。
   - サブエージェントは1応答内のツール呼び出しを並列に実行するため、登録はメモリーのルートごとのロックで1件ずつ行う
     （同じ名前を同時に選んで上書きする・重複の削除が重なるのを防ぐ。同じプロセスの中だけ）。
-  - システムプロンプトの索引（`{{memory}}`）では、用語はほかの種類の後ろに別枠で並べ、50件まで（ほかの種類が少なければ
-    空いた分まで）にする。辞書ファイル1つで数百件になり、ほかの種類・共通のメモリーが索引から押し出されていたため。
-    載らなかった用語は `search_memory(query, memory_type="glossary")` で探させる。
+  - 用語もターンの始めの自動検索の対象になる（依頼文に出てくる用語が当たる）。当たらなかった用語は
+    `search_memory(query, memory_type="glossary")` で探させる。
   - 保存後、ナレッジ（ベクターDB）でその用語が出てくる箇所を最大3件（前後160文字）返し、意味・使われ方が違えば
     同じ用語で呼び直して直させる。登録の前にも、`explore` にナレッジでの使われ方を調べさせるようシステムプロンプトで指示する。
   - 見出しの無い（このツールより前の）用語メモリーは、説明の先頭を用語とみなして一致を判定し、更新時に見出し付きへ
@@ -1954,7 +1979,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[plan]` | `auto_approve` | `approve_plan`呼び出し時にユーザーへの承認/却下確認を一切行わず自動承認するか（`false`が既定。書き込み系ツールが人の確認なしに実行されるため、無人自動化用途以外での使用は推奨しない） | `PLAN_AUTO_APPROVE` |
 | `[plan]` | `plan_approval_exempt_scripts` | `run_script`/`run_script_background`の計画承認（Plan Mode）を免除する読み取り専用スクリプトのホワイトリスト（`[["スキル名","スクリプトファイル名"], ...]`形式、空欄なら既定7件）。免除は承認のみで、`[main_agent_tool_guard]`によるメインエージェントからの直接呼び出し制限は別枠 | `PLAN_APPROVAL_EXEMPT_SCRIPTS` |
 | `[default_workdir]` | `dir` | エージェントの既定の作業ディレクトリのベース。実際の書き込み・`run_script`のcwdはこの配下の自セッション専用サブディレクトリ`_tmp_<name>`に限定される（`dir`直下への書き込みは許可されない） | `DEFAULT_WORKDIR` |
-| `[default_workdir]` | `allow_sandbox_dir` | セッション分離の外側で常時書き込みを許可する追加ディレクトリのリスト（`[{"dir": "パス", "allow_entries": [["スキル名","スクリプトファイル名"], ...]}, ...]`形式）。各要素の`allow_entries`を空リストにすると、対象を問わずそのディレクトリへ無制限に書き込み可能になる。登録したディレクトリはスレッドを問わず常時書き込み可能になる点に注意（既定は空リストで無効） | `ALLOW_SANDBOX_DIR` |
+| `[default_workdir]` | `allow_sandbox_dir` | セッション分離の外側で常時書き込みを許可する追加ディレクトリのリスト（`[{"dir": "パス", "allow_entries": [["スキル名","スクリプトファイル名"], "execute_python_code", ...]}, ...]`形式）。対象は書き込みサンドボックスガードを持つ `run_script`/`run_script_background`・`execute_python_code`/`execute_python_code_background`・`Write`/`Edit`（以前は `run_script` 系だけで、`execute_python_code` 等は登録しても止められていた）。`allow_entries` にはツール名（同期版の名前はバックグラウンド版にも効く）か `[スキル名, スクリプトファイル名]`（そのスクリプトだけ）を書く。各要素の`allow_entries`を空リストにすると、対象を問わずそのディレクトリへ無制限に書き込み可能になる。登録したディレクトリはスレッドを問わず常時書き込み可能になる点に注意（既定は空リストで無効） | `ALLOW_SANDBOX_DIR` |
 | `[default_workdir]` | `retention_days` | 上記 `dir` 配下のファイル保持日数（0以下で自動削除無効） | `DEFAULT_WORKDIR_RETENTION_DAYS` |
 | `[skill_creator]` | `draft_dir` | ユーザー別ドラフトスキルの置き場（既定 `${common_data_dir}/skill_drafts`）。スキル走査対象と重なると起動時エラー | `SKILL_DRAFT_DIR` |
 | `[skill_creator]` | `other_users_drafts` | 他ユーザーのドラフトの扱い。`hidden`（既定）／`listed`／`readable`／`full`（「ドラフトスキル（ユーザー別）と昇格」参照） | `SKILL_OTHER_USERS_DRAFTS` |
@@ -2035,6 +2060,9 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[token_ratio]` | `<セクション>.<キー>`（例: `subagent.token_guard_soft_threshold`） | 自動入力先の閾値の、基準値に対する比率（空欄なら連動させない） | - |
 | `[memory]` | `user_visibility` / `feedback_visibility` / `project_visibility` / `reference_visibility` / `glossary_visibility` | 種類ごとの永続メモリーの公開範囲。`private` の種類は常に個人用、`shared` の種類は LLM が振り分け基準で選ぶ（既定は `user` だけ `private`。「永続メモリー」参照） | `MEMORY_<TYPE>_VISIBILITY` |
 | `[memory]` | `shared_criteria` / `private_criteria` | LLM に渡す「どの種類で保存するか」の基準（公開範囲は種類で決まり LLM は選ばない。言語は問わず、改行可。空欄なら既定の文言。設定ダッシュボードの「AIで清書」で表示言語の箇条書きに整えられる） | `MEMORY_SHARED_CRITERIA` / `MEMORY_PRIVATE_CRITERIA` |
+| `[memory]` | `recall_enabled` / `recall_max_results` / `recall_excerpt_chars` | ターンの始めの自動メモリー検索の有効/無効（既定 true）・見せる最大件数（既定8）・本文の抜粋の文字数（既定300、0で説明だけ）。「永続メモリー」参照 | `MEMORY_RECALL_ENABLED` / `MEMORY_RECALL_MAX_RESULTS` / `MEMORY_RECALL_EXCERPT_CHARS` |
+| `[memory]` | `review_enabled` / `review_min_tool_calls` / `review_max_iterations` / `review_timeout_seconds` | タスクの終わりの記録の見直しの有効/無効（既定 true）・見直す最小のツール呼び出し回数（既定1、0で毎ターン）・記録係のモデル呼び出しの上限（既定4）・時間の上限（既定300秒、0以下で無制限）。「永続メモリー」参照 | `MEMORY_REVIEW_ENABLED` / `MEMORY_REVIEW_MIN_TOOL_CALLS` / `MEMORY_REVIEW_MAX_ITERATIONS` / `MEMORY_REVIEW_TIMEOUT_SECONDS` |
+| `[memory]` | `system_prompt_max_chars` | 設定ダッシュボードで「システムプロンプトに表示」にしたメモリーの本文を載せる合計の上限（既定6000文字）| `MEMORY_SYSTEM_PROMPT_MAX_CHARS` |
 | `[memory]` | `user_ranks` / `default_rank` | メモリーの優先順位に使うユーザーのランク（`{"ユーザー名": ランク}`。0以上の整数で大きいほど上位。食い違うメモリーはランクの高い方に従う。設定ダッシュボードの「ユーザー」画面でも設定できる）と、未設定のユーザー・共通のメモリーのランク（既定1）。「永続メモリー」参照 | `MEMORY_USER_RANKS` / `MEMORY_DEFAULT_RANK` |
 | `[memory]` | `force_private_checks` | 種類の設定に関係なく `private` にする目印のリスト（`email`／`phone`／`card_id`／`credential`／`confidential_label`／`personal_path`。既定 `["card_id", "credential"]`） | `MEMORY_FORCE_PRIVATE_CHECKS` |
 | `[memory]` | `force_private_exempt_types` | `force_private_checks` を見ない種類（カンマ区切り。既定 `glossary`。空欄なら全種類で見る） | `MEMORY_FORCE_PRIVATE_EXEMPT_TYPES` |
@@ -2295,8 +2323,12 @@ AI が作業している間も入力欄に入力でき、送信すると作業�
 - **停止・異常時**: 停止ボタン（自分の画面・戻ってきた画面のどちらでも）を押した時点で受付を閉じ、まだ会話へ入っていない
   指示は捨てる（画面では入力欄へ戻る）。画面に出ないまま会話へ入っていた指示は取り除く。ループ検知・通信エラーでの
   再試行やターン内のコンテキスト圧縮では、既に入った指示は失われず、二重にもならない（`tests/test_user_injection_failures.py`）。
-  同じ会話がまだ生成中（停止の後始末中を含む）の間に通常のメッセージが届いた場合は、処理せずにその旨を返す
-  （2本目のターンを並行して走らせない）。
+  同じ会話がまだ生成中の間に通常のメッセージが届いた場合は、処理せずにその旨を返す
+  （2本目のターンを並行して走らせない）。ただし停止ボタンの直後（入力欄へ戻った指示を再送した等）は、停止した古いターンと
+  停止の後始末（サブエージェント・バックグラウンドジョブの強制終了、LLM 接続の強制クローズ、グラフの組み直し）が終わるのを
+  最大120秒待ってから始める（「停止した処理の後始末が終わるのを待ってから始めます…」と出る。`app.py` の `_wait_for_stopped_turn`）。
+  以前は後始末が新しいターンの LLM 接続・サブエージェントまで閉じて生成が失敗したり、古いターンの終わりの合図が新しいターンの
+  開始の後に届いて画面の更新が止まったように見えたりしていた。待った後は「生成中」の表示を送り直す。
 - **コンテキスト圧縮との関係**: 圧縮は「最後のユーザー発話以降は要約しない」保護をするが、ターン途中の追加指示は
   その起点にしない（起点にすると依頼文そのものが要約に飲まれるため。`src/context_trim.py` の
   `find_last_user_message_cut_index`）。追加指示は依頼文より後ろにあるので原文のまま残る。

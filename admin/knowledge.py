@@ -48,6 +48,49 @@ from . import instances as inst
 from .ingest_worker import IngestWorkerClient, WorkerError
 from admin.i18n import t as _t
 
+
+# コレクション一覧（ファイル数・チャンク数の集計つき）のキャッシュ。キー: カタログのフォルダ → (カタログの指紋, 一覧)。
+# 集計は files 表の全行を読むため、文書が多いと1回で数百ミリ秒〜数秒かかる。ナレッジ画面を1回開くだけでも、自分の一覧・
+# 参照ごとの参照元の一覧・参照元の候補（全インスタンス）の一覧で同じ集計を何度も繰り返し、取り込み中は 20 秒ごとに
+# やり直していたため、コレクションが 10 個程度でも画面が重かった（2026-11-19 ユーザー報告）。
+# catalog.sqlite と -wal の更新日時・サイズが変わっていなければ前回の結果を使う（書き込みがあれば必ず変わる）。
+_COLLECTIONS_CACHE: dict[str, tuple[tuple, list]] = {}
+_COLLECTIONS_CACHE_LOCK = threading.Lock()
+
+
+def _catalog_stamp(directory: Path) -> tuple:
+    parts = []
+    for suffix in ("", "-wal"):
+        try:
+            st = (directory / (vcat.CATALOG_FILENAME + suffix)).stat()
+            parts.append((st.st_mtime_ns, st.st_size))
+        except OSError:
+            parts.append(None)
+    return tuple(parts)
+
+
+def list_collections_cached(directory: Path) -> list:
+    """directory のカタログのコレクション一覧（カタログが無ければ空）。カタログが変わっていなければ前回の結果を返す。
+
+    読んでいる間にカタログが書き換わった（読む前と後で指紋が違う）ときは覚えない（古い集計を使い続けないため）。
+    """
+    if not vcat.catalog_exists(directory):
+        return []
+    key = str(directory.resolve())
+    before = _catalog_stamp(directory)
+    with _COLLECTIONS_CACHE_LOCK:
+        hit = _COLLECTIONS_CACHE.get(key)
+    if hit is not None and hit[0] == before:
+        return list(hit[1])
+    with vcat.open_catalog(directory) as catalog:
+        collections = catalog.list_collections()
+    with _COLLECTIONS_CACHE_LOCK:
+        if _catalog_stamp(directory) == before:
+            _COLLECTIONS_CACHE[key] = (before, collections)
+        else:
+            _COLLECTIONS_CACHE.pop(key, None)
+    return list(collections)
+
 CONFIG_INI_PATH = Path(__file__).resolve().parent.parent / "config.ini"
 SCHEDULER_ACTOR = "scheduler"
 
@@ -624,8 +667,8 @@ class IngestScheduler:
                 continue
             if not cfg.vector_db_enabled or not vcat.catalog_exists(cfg.vector_db_dir):
                 continue
-            with vcat.open_catalog(cfg.vector_db_dir) as catalog:
-                collections = catalog.list_collections()
+            # 毎分の判定でファイル数の集計を毎回やり直さない（list_collections_cached）。
+            collections = list_collections_cached(cfg.vector_db_dir)
             for c in collections:
                 if not any(_is_due(c, minute) for minute in minutes):
                     continue
@@ -811,9 +854,8 @@ def build_router(
         if reason is None and src_cfg is None:
             reason = _t("インスタンス {0} の設定を読めません。", r.source_instance)
         collection = None
-        if src_cfg is not None and vcat.catalog_exists(src_cfg.vector_db_dir):
-            with vcat.open_catalog(src_cfg.vector_db_dir) as catalog:
-                collection = next((c for c in catalog.list_collections() if c.name == r.source_collection), None)
+        if src_cfg is not None:
+            collection = next((c for c in list_collections_cached(src_cfg.vector_db_dir) if c.name == r.source_collection), None)
         if reason is None and collection is None:
             reason = _t("インスタンス {0} にコレクション {1} がありません。", r.source_instance, r.source_collection)
         if reason:
@@ -885,8 +927,8 @@ def build_router(
         collections = []
         refs = []
         if vcat.catalog_exists(cfg.vector_db_dir):
+            collections = list_collections_cached(cfg.vector_db_dir)
             with vcat.open_catalog(cfg.vector_db_dir) as catalog:
-                collections = catalog.list_collections()
                 refs = catalog.list_references()
         running = jobs.for_instance(name)
         outgoing = jobs.outgoing_copies(name)
@@ -946,10 +988,7 @@ def build_router(
             cfg = _try_cfg(n)
             if cfg is None:
                 continue
-            collections = []
-            if vcat.catalog_exists(cfg.vector_db_dir):
-                with vcat.open_catalog(cfg.vector_db_dir) as catalog:
-                    collections = catalog.list_collections()
+            collections = list_collections_cached(cfg.vector_db_dir)
             meta = inst.read_instance(instances_root, n)
             keys = ("name", "description", "model", "dim", "document_prefix", "file_count", "chunk_count")
             result.append(

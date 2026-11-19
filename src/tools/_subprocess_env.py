@@ -110,6 +110,9 @@ def _allowed_sandbox_dirs_for(skill_name: str, script_filename: str) -> list[Pat
             not entry.allow_entries
             or skill_name in entry.allow_entries
             or (skill_name, script_filename) in entry.allow_entries
+            # ツール名の指定（[main_agent_tool_guard].allow_entries と同じ形式）は、どのスキルのスクリプトでも許可する。
+            or "run_script" in entry.allow_entries
+            or "run_script_background" in entry.allow_entries
         ):
             if entry.dir.is_dir():
                 result.append(entry.dir)

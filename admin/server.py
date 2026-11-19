@@ -114,6 +114,8 @@ async def _lifespan(_app: FastAPI):
     _data_backup_router.backup_scheduler.start()
     # 設定画面のツール名の候補は別プロセスで求めるため、最初に開くときに待たないよう先に求め始める。
     skill_lab_sources.prefetch_main_agent_tool_names()
+    # スキル研究室のタブの「研究対象」に使うサブエージェントのツール名も同じく先に求める。
+    skill_lab_sources.prefetch_subagent_tool_names()
     yield
     _data_backup_router.backup_scheduler.stop()
     _knowledge_router.ingest_scheduler.stop()

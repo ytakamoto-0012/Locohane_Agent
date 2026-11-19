@@ -638,6 +638,30 @@ def test_api_imports_only_drafts_of_the_instance(client, lab_env):
     assert [d["imported_theme"] for d in sources["drafts"]] == [theme["id"]]
 
 
+def test_api_delete_draft_archives_it_and_refuses_imported(client, lab_env):
+    draft = _draft(lab_env, instance="org_a", name="old-skill")
+    imported = _draft(lab_env, instance="org_a", name="used-skill")
+    theme = client.post("/api/instances/org_a/skill-lab/themes", json={"title": "A", "lab": "lab1"}).json()
+    client.post(
+        f"/api/instances/org_a/skill-lab/themes/{theme['id']}/assets",
+        json={"mode": "draft", "asset_type": "skills", "name": "used-skill", "origin": str(imported)},
+    )
+    # 研究テーマに取り込み中のものは消せない
+    res = client.post("/api/instances/org_a/skill-lab/drafts/delete", json={"owner": "tanaka", "name": "used-skill"})
+    assert res.status_code == 409
+    assert imported.is_dir()
+    # パスの外へは出られない
+    assert client.post("/api/instances/org_a/skill-lab/drafts/delete", json={"owner": "..", "name": "x"}).status_code == 400
+    assert client.post("/api/instances/org_a/skill-lab/drafts/delete", json={"owner": "tanaka", "name": "none"}).status_code == 404
+    res = client.post("/api/instances/org_a/skill-lab/drafts/delete", json={"owner": "tanaka", "name": "old-skill"})
+    assert res.status_code == 200
+    archived = Path(res.json()["archived_to"])
+    assert not draft.exists() and (archived / "SKILL.md").is_file()
+    assert json.loads((archived / "_draft_meta.json").read_text(encoding="utf-8"))["status"] == "deleted"
+    names = [d["name"] for d in client.get("/api/instances/org_a/skill-lab/sources").json()["drafts"]]
+    assert "old-skill" not in names and "used-skill" in names
+
+
 def test_api_case_form_roundtrip(client, lab_env):
     theme = client.post("/api/instances/org_a/skill-lab/themes", json={"title": "A", "lab": "lab1"}).json()
     base = f"/api/instances/org_a/skill-lab/themes/{theme['id']}"

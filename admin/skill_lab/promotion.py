@@ -487,14 +487,18 @@ def _promote(
     return record
 
 
-def archive_draft(draft: Path, archive_dir: Path, *, extra: dict | None = None) -> Path:
-    """ドラフト（と <owner>/_workspace/<skill>/）を archive_dir/<owner>/<skill>_<日時>/ へ移す。"""
+def archive_draft(draft: Path, archive_dir: Path, *, extra: dict | None = None, status: str = "promoted") -> Path:
+    """ドラフト（と <owner>/_workspace/<skill>/）を archive_dir/<owner>/<skill>_<日時>/ へ移す。
+
+    status は来歴（_draft_meta.json）に書く状態。昇格は "promoted"、設定ダッシュボードからの削除は "deleted"
+    （削除もアーカイブへ移すだけなので、必要なら手で元の場所へ戻せる）。
+    """
     owner = draft.parent.name
     dest = archive_dir / owner / f"{draft.name}_{now_stamp()}"
     dest.parent.mkdir(parents=True, exist_ok=True)
     meta_path = draft / DRAFT_META_FILENAME
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
-    meta.update({"status": "promoted", "promoted_at": themes.now_iso(), "archived_from": str(draft), **(extra or {})})
+    meta.update({"status": status, f"{status}_at": themes.now_iso(), "archived_from": str(draft), **(extra or {})})
     # 先に移してから、移した先の来歴に「昇格済み」を書く。以前は移す前に書いていたため、移せなかった
     # （作成者がファイルを開いている等）ドラフトが、元の場所に残ったまま作成者の一覧から消えていた。
     shutil.move(str(draft), str(dest))

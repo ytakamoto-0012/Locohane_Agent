@@ -118,7 +118,7 @@ async def execute_python_code_background(code: str) -> str:
         before_snapshot = {}
 
     try:
-        _guard_allowed_roots, _guard_display_roots = _exec_guard_roots()
+        _guard_allowed_roots, _guard_display_roots = _exec_guard_roots("execute_python_code_background")
         _fs_guard = _python_fs_guard_preamble(
             _guard_allowed_roots, tmp_dir_roots=_tmp_dir_parents(workdir.parent), display_roots=_guard_display_roots
         )

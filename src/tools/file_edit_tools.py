@@ -43,7 +43,7 @@ _NOT_APPROVED = (
 )
 
 
-def _resolve_write_path(file_path: str) -> tuple[Path | None, str | None]:
+def _resolve_write_path(file_path: str, tool_name: str = "Write") -> tuple[Path | None, str | None]:
     """file_path（絶対パス・相対パス・`@N`）を解決し、書き込める場所かを確かめる。
 
     相対パスは execute_python_code の cwd（このセッションの `_tmp_`）基準にする。
@@ -66,11 +66,12 @@ def _resolve_write_path(file_path: str) -> tuple[Path | None, str | None]:
     draft_error = skill_drafts.access_error(path, "write", _state._LLM_CONFIG, skill_drafts.current_draft_user())
     if draft_error:
         return None, draft_error.removeprefix("Error: ")
-    _, display_roots = _exec_guard_roots()
+    # [default_workdir] allow_sandbox_dir でこのツール（Write / Edit）に許したフォルダにも書ける。
+    _, display_roots = _exec_guard_roots(tool_name)
     roots = [Path(r).resolve() for r in display_roots]
     if not any(path.is_relative_to(root) for root in roots):
         shown = ", ".join(str(r) for r in roots)
-        return None, f"Writing is only allowed under the working directory or this session's temporary folder ({shown}): {path}"
+        return None, f"Writing is only allowed under the working directory, this session's temporary folder or the allowed folders ({shown}): {path}"
     return path, None
 
 
@@ -231,7 +232,7 @@ def edit_tool(file_path: str, old_string: str, new_string: str, replace_all: boo
     """
     if not cl.user_session.get("plan_approved"):
         return _NOT_APPROVED
-    path, error = _resolve_write_path(file_path)
+    path, error = _resolve_write_path(file_path, "Edit")
     if error:
         return f"Error: {error}"
     with _path_lock(path):

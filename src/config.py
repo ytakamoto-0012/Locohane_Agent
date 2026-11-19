@@ -1211,6 +1211,19 @@ class Config:
     memory_user_ranks: dict[str, int]
     # user_ranks に無いユーザーと、共通のメモリーのランク。
     memory_default_rank: int
+    # ターンの始めにハーネスが依頼文でメモリーを検索して会話へ入れるか（src/memory_recall.py）と、その件数・本文の抜粋の文字数。
+    memory_recall_enabled: bool
+    memory_recall_max_results: int
+    memory_recall_excerpt_chars: int
+    # ツールを使ったタスクの終わりに、メモリーが保存されていなければ記録係に見直させるか（src/memory_review.py）。
+    memory_review_enabled: bool
+    # 見直しを行う最小のツール呼び出し回数（メインエージェント分。0 ならツールを使わない会話でも見直す）。
+    memory_review_min_tool_calls: int
+    # 記録係のモデル呼び出しの上限回数と、見直し全体の時間の上限（秒。0 以下なら無制限）。
+    memory_review_max_iterations: int
+    memory_review_timeout_seconds: float
+    # システムプロンプトに載せる「システムプロンプトに表示」のメモリーの本文の合計の上限（文字数）。
+    memory_system_prompt_max_chars: int
 
     # --- ユーザー別ドラフトスキル（[skill_creator]、src/skill_drafts.py） ---
     # skill-creator が作るドラフトスキルの置き場。起動時のスキル走査対象
@@ -3690,6 +3703,31 @@ def load_config(
         ),
         memory_default_rank=_as_memory_rank(
             os.getenv("MEMORY_DEFAULT_RANK", memory_section.get("default_rank", memory.DEFAULT_RANK)), "[memory].default_rank"
+        ),
+        memory_recall_enabled=_as_bool(os.getenv("MEMORY_RECALL_ENABLED", memory_section.get("recall_enabled", "true"))),
+        memory_recall_max_results=_as_memory_rank(
+            os.getenv("MEMORY_RECALL_MAX_RESULTS", memory_section.get("recall_max_results", 8)), "[memory].recall_max_results"
+        ),
+        memory_recall_excerpt_chars=_as_memory_rank(
+            os.getenv("MEMORY_RECALL_EXCERPT_CHARS", memory_section.get("recall_excerpt_chars", 300)), "[memory].recall_excerpt_chars"
+        ),
+        memory_review_enabled=_as_bool(os.getenv("MEMORY_REVIEW_ENABLED", memory_section.get("review_enabled", "true"))),
+        memory_review_min_tool_calls=_as_memory_rank(
+            os.getenv("MEMORY_REVIEW_MIN_TOOL_CALLS", memory_section.get("review_min_tool_calls", 1)), "[memory].review_min_tool_calls"
+        ),
+        memory_review_max_iterations=max(
+            1,
+            _as_memory_rank(
+                os.getenv("MEMORY_REVIEW_MAX_ITERATIONS", memory_section.get("review_max_iterations", 4)),
+                "[memory].review_max_iterations",
+            ),
+        ),
+        memory_review_timeout_seconds=_as_float(
+            os.getenv("MEMORY_REVIEW_TIMEOUT_SECONDS", memory_section.get("review_timeout_seconds", 300)), "[memory].review_timeout_seconds"
+        ),
+        memory_system_prompt_max_chars=_as_memory_rank(
+            os.getenv("MEMORY_SYSTEM_PROMPT_MAX_CHARS", memory_section.get("system_prompt_max_chars", memory.DEFAULT_SYSTEM_PROMPT_MAX_CHARS)),
+            "[memory].system_prompt_max_chars",
         ),
         skill_draft_dir=_resolve(
             PROJECT_ROOT,

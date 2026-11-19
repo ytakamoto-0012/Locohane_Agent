@@ -3027,8 +3027,10 @@ async function renderMemories(container, open) {
     ev.preventDefault();
     const type = changeForm.elements.type.value || null;
     const visibility = changeForm.elements.visibility.value || null;
-    if (!type && !visibility) {
-      $("#change-memories-error", root).textContent = _t("変更する種類か公開範囲を選んでください。");
+    const pinValue = changeForm.elements.in_system_prompt.value;
+    const inSystemPrompt = pinValue === "" ? null : pinValue === "true";
+    if (!type && !visibility && inSystemPrompt === null) {
+      $("#change-memories-error", root).textContent = _t("変更する種類・公開範囲・システムプロンプトへの表示のどれかを選んでください。");
       return;
     }
     const targets = selectedTargets();
@@ -3037,7 +3039,7 @@ async function renderMemories(container, open) {
     try {
       const result = await api(memoriesPath("/change"), {
         method: "POST",
-        body: { items: targets.map((m) => ({ name: m.name, owner: m.owner })), type, visibility },
+        body: { items: targets.map((m) => ({ name: m.name, owner: m.owner })), type, visibility, in_system_prompt: inSystemPrompt },
       });
       closeModal(changeForm);
       await reload();
@@ -3274,6 +3276,8 @@ async function renderMemories(container, open) {
     }
     for (const m of shown) {
       const link = el("a", { href: "#", text: m.name, onclick: (ev) => (ev.preventDefault(), openMemory(m.name, m.owner)) });
+      // 「システムプロンプトに表示」のメモリー（本文が毎回システムプロンプトに載る）の印。
+      const pin = m.in_system_prompt ? el("span", { class: "hint", title: _t("本文を毎回システムプロンプトに載せます"), text: " 📌" + _t("システムプロンプト") }) : null;
       const cb = el("input", { type: "checkbox" });
       cb.checked = selected.has(keyOf(m));
       cb.addEventListener("change", () => {
@@ -3288,7 +3292,7 @@ async function renderMemories(container, open) {
           el("td", { text: memoryOwnerLabel(m.owner) }),
           el("td", { text: SORT_VALUES.visibility(m) }),
           el("td", { text: m.type }),
-          el("td", {}, link),
+          el("td", {}, [link, pin]),
           el("td", { text: m.description }),
           el("td", { class: "memory-preview", text: m.preview || "" }),
           el("td", { text: new Date(m.mtime * 1000).toLocaleString(I18N_LOCALE) }),

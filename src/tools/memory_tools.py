@@ -342,22 +342,30 @@ def search_memory(query: str, memory_type: str | None = None) -> str:
     If you need the content itself, pass the name of a hit to read_memory.
 
     Args:
-        query: The search keyword (case-insensitive).
+        query: The search keyword (case-insensitive). Several words separated by spaces match
+            memories that contain all of them.
         memory_type: If given, narrow to one of "user"|"feedback"|"project"|"reference"|"glossary"
             (all types if omitted).
 
     Returns:
-        A list of hits as "- [type] name (owner): description" and the count.
-        With no hits, "No matching memories." If query is empty or memory_type is invalid,
+        A list of hits as "- [type] name (owner): description" and the count. With no exact
+        hits, the memories closest to the query (if any), marked as such; otherwise
+        "No matching memories." If query is empty or memory_type is invalid,
         it returns an "Error: ..." string instead of raising.
     """
     try:
         me = _current_owner()
         root = _require_memory_root()
         hits = memory.search_memories(root, query, memory_type, viewer=me)
+        close = [] if hits else memory.relevant_memories(root, query, viewer=me, limit=10, memory_type=memory_type)
     except (RuntimeError, ValueError) as e:
         return f"Error: {e}"
-    logger.info("search_memory: query=%r type=%s hits=%d", query, memory_type, len(hits))
+    logger.info("search_memory: query=%r type=%s hits=%d close=%d", query, memory_type, len(hits), len(close))
+    if close:
+        return (
+            f"No exact match. {len(close)} memories with similar words (check whether they really apply):\n"
+            + "\n".join(_list_line(root, m, me) for m in close)
+        )
     if not hits:
         return "No matching memories."
     return f"{len(hits)} hits.\n" + "\n".join(_list_line(root, m, me) for m in hits)

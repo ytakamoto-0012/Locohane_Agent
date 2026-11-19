@@ -320,7 +320,7 @@
     <div class="inline-actions">
       <button type="button" id="draft-skill-from-memories-btn" disabled title="選んだメモリーの内容をもとに、AI にスキル（SKILL.md）を下書きさせ、指定したユーザーのドラフトスキルとして保存します">選択したメモリーからドラフトスキルを作成</button>
       <button type="button" id="copy-memories-btn" disabled title="選んだメモリーを、別のインスタンスの永続メモリーへ複製します（コピー元は変わりません）">選択したメモリーを別のインスタンスへコピー</button>
-      <button type="button" id="change-memories-btn" disabled title="選んだメモリーの種類・公開範囲をまとめて変えます（説明・本文はそのまま）">選択したメモリーの種類・公開範囲を変更</button>
+      <button type="button" id="change-memories-btn" disabled title="選んだメモリーの種類・公開範囲・システムプロンプトへの表示をまとめて変えます（説明・本文はそのまま）">選択したメモリーの種類・公開範囲・システムプロンプトへの表示を変更</button>
       <button type="button" id="delete-memories-btn" class="btn-danger" disabled>選択したメモリーを削除</button>
       <button type="button" id="delete-type-memories-btn" class="btn-danger" disabled title="「すべての種類」以外を選ぶと押せます。所有者の絞り込みは効きます（名前・説明・本文の絞り込みは効きません）">この種類のメモリーをすべて削除</button>
     </div>
@@ -338,11 +338,13 @@
     <div class="modal-backdrop hidden" id="change-memories-form-modal">
       <div class="modal">
         <form id="change-memories-form" class="memory-form">
-          <h3>メモリーの種類・公開範囲をまとめて変更</h3>
+          <h3>メモリーの種類・公開範囲・システムプロンプトへの表示をまとめて変更</h3>
           <p class="hint">変えない項目は「変更しない」のままにします。公開範囲は共通のメモリーには効きません。種類 user（private の種類）や、個人情報・機密の目印に当たるメモリーは、共有を選んでも個人用のままです。変更前の内容はバックアップに残ります。</p>
+          <p class="hint">メモリーの一覧はシステムプロンプトに載せません（件数が増えるとプロンプトが膨らむため。AI はユーザーの発言ごとに自動で検索します）。「システムプロンプトに表示」にしたメモリーだけは、本文が毎回システムプロンプトに載り、AI が常に従います（見えるユーザーの会話だけ。合計の上限は [memory] system_prompt_max_chars）。いつも守らせたい少数の決まりに使ってください。</p>
           <div class="hint" id="change-memories-count"></div>
           <label>種類<select name="type"><option value="">変更しない</option></select></label>
           <label>公開範囲<select name="visibility"><option value="">変更しない</option><option value="private">個人用（本人だけ）</option><option value="shared">共有（全ユーザーが検索できる）</option></select></label>
+          <label>システムプロンプトに表示<select name="in_system_prompt"><option value="">変更しない</option><option value="true">表示する（本文を毎回システムプロンプトに載せる）</option><option value="false">表示しない</option></select></label>
           <div class="error" id="change-memories-error"></div>
           <div class="inline-actions">
             <button type="button" id="change-memories-cancel-btn" class="btn-cancel">閉じる</button>

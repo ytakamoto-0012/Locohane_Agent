@@ -396,6 +396,7 @@ Locohane/
 │   ├── help.md              # user-facing help returned by the help tool (English; the LLM relays it in the user's language)
 │   ├── compaction_prompt.md # instructions for automatically summarizing the conversation history
 │   ├── subagent_common.md   # common prompt for sub-agents
+│   ├── memory_review.md     # prompt of the recorder of the memory review
 │   ├── handoff_prompt.md    # cutoff/handoff instructions injected into the LLM when approaching the token limit
 │   └── compressing_test/    # workspace for verifying the effect of prompt compression (development experiments related to tune-prompt)
 ├── tools/
@@ -440,6 +441,8 @@ Locohane/
 │   │   └── (read_skill.py/run_script.py/dispatch_agent.py, etc., one file per tool)
 │   ├── path_memory.py       # reading and writing the path memory (@N) registry
 │   ├── memory.py            # reading and writing persistent memory, rebuilding the index
+│   ├── memory_recall.py     # automatic memory search at the start of a turn
+│   ├── memory_review.py     # review of what to remember at the end of a task (recorder)
 │   ├── vector_db/            # vector DB (semantic search of internal documents; the "Vector DB (semantic search of internal documents)" section)
 │   │   ├── extract.py / chunking.py # extracting text from documents, splitting into chunks
 │   │   ├── render.py         # rendering pages and image files as images for image_input (Office goes through PDF via COM)
@@ -959,6 +962,11 @@ Key points of the design:
   The exemption settings of skills with scripts (`[plan] plan_approval_exempt_scripts`, `[main_agent_tool_guard] allow_entries`) are also
   registered only in that instance's `config_overrides.json` (with the same validation, backup and change history as the admin tool).
   Promoted skills and settings take effect after a restart.
+- **Deleting a draft**: "Delete" in "User drafts (this instance)" of the Skill Lab on the settings dashboard
+  (`POST /api/instances/<name>/skill-lab/drafts/delete`). The draft is not erased but moved with its `_workspace` to
+  `[skill_creator] archive_dir/<user>/<skill name>_<date>/` with `status: deleted` in `_draft_meta.json` (it can be put back by
+  hand). A draft imported into a research theme cannot be deleted (returning would lose its destination; delete the theme
+  first). It is recorded in the change history as `skill_lab_draft_delete`.
 - **Claude Code's promote-skill is also kept**: a route for judging and promoting one draft as is. The promotion destination, archiving and
   settings registration follow the same rules as the lab (`promote_helper.py install` places it only in the `--instance`'s dedicated location). Both record to `evals/promotion_log.md`.
 
@@ -1135,13 +1143,36 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   with `Read`/`Grep`/`Glob`/`execute_python_code` etc. either (`access_error`, `unreadable_dirs` etc. in
   `src/skill_drafts.py`; the same mechanism that hides other users' draft skills).
 - **The index `MEMORY.md`**: `data/memory/MEMORY.md` for common memories and `data/memory/users/<user>/MEMORY.md` for each
-  user. It is fully rebuilt on every create/update/delete (by design, no differential updates).
-  `{{memory}}` of the system prompt receives the list of memories visible to the conversation's user (own, common,
-  other users' shared) at the start of each conversation (when the graph is built; `_apply_session_draft_skills` in
-  `app.py`; bodies are fetched each time with `read_memory`/`search_memory`). Newly saved memories appear from the next
-  conversation.
-- Beyond 200 lines, it is truncated when inserted into the system prompt (your own come first; `render_memory_block`
-  in `src/memory.py`).
+  user. It is fully rebuilt on every create/update/delete (by design, no differential updates). The index is not put in
+  the system prompt (it used to be inserted into `{{memory}}`, but it grew with the number of memories and made opening a
+  chat and the first response slow).
+- **Automatic search at the start of a turn** (`[memory] recall_enabled`, default true): for every user message the harness
+  searches the related memories with its text (`relevant_memories` in `src/memory.py`: overlaps of ASCII words and character
+  bigrams of Japanese etc., weighted by rarity (IDF); name and description count double) and puts the result right after the
+  message as if `search_memory` had been called (an AIMessage tool_call plus a ToolMessage; `src/memory_recall.py`; a
+  "Search memory" step appears in the chat). Even if the LLM forgets to search, the corrections and approaches it remembers are
+  always shown to it. `recall_max_results` (default 8) hits, each with `recall_excerpt_chars` (default 300) characters of its
+  body. Evaluations (`evals/run_case.py`) use the same function. `search_memory` matches memories containing all
+  space-separated words (ignoring full/half width) and, with no exact hit, returns memories with similar words as "close".
+- **Review of what to remember at the end of a task** (`[memory] review_enabled`, default true): when a task that used tools
+  (at least `review_min_tool_calls` main tool calls; the automatic search is not counted) ends with a final answer and no memory
+  was saved or updated during the turn (including by sub-agents; judged by the modification times of the memory files,
+  `written_since` in `src/memory.py`), the harness runs a recorder (`src/memory_review.py`, system prompt
+  `system_prompt/memory_review.md`). The recorder is a small loop with only the memory tools (`search_memory`/`read_memory`/
+  `create_memory`/`update_memory`/`save_glossary_term`); it reads the record of the turn (request, additional instructions,
+  summary of tool calls and results, final answer) and the related existing memories, and saves only what is worth keeping
+  (updating instead of duplicating). It uses the `[llm] sub_url` endpoints, up to `review_max_iterations` (default 4) calls and
+  `review_timeout_seconds` (default 300). It runs after the final answer is shown and posts a system message such as
+  "📝 Saved to memory: ...". Its exchange is not added to the conversation history, a failure does not affect the turn, and its
+  tokens are added to the conversation total and the monthly usage.
+- **Memories shown in the system prompt**: only memories selected on the "Memories" screen of the settings dashboard
+  (frontmatter `in_system_prompt: true`) have their content put in `{{memory}}` of the system prompt every time, and the AI
+  always follows them (`render_system_prompt_memories` in `src/memory.py`; only for users who can see them; beyond
+  `[memory] system_prompt_max_chars` (default 6000 characters) they are only named and read with `read_memory`). The mark is
+  kept through AI updates, type changes and copies. It is assembled at the start of each conversation, so changes apply from
+  the next conversation.
+- Memory files are re-read only when their modification time or size changed (`_load` in `src/memory.py`), so the automatic
+  search on every turn does not re-read every file.
 - **Memories with source files (`source_files`)**: when recording values, table rows or key points with page numbers
   read from files, pass those files (absolute paths or `@N`) in `source_files` of `create_memory`/`update_memory`.
   The tool records their current sha256 and size in `sources` of the frontmatter (at most 10 files; the body is
@@ -1204,9 +1235,8 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   private entry's term is written only into the user's own private entries. Sources (newest 10), related terms (30) and
   `Notes` (1000 characters) are capped, and notes then old sources are trimmed so the body stays within the 4000-character
   limit of entries with source files. Saves run one at a time per memory root (a lock within the process), because
-  sub-agents run tool calls of one response in parallel. In the `{{memory}}` index of the system prompt, glossary terms
-  are listed after the other types in their own block of up to 50 lines (more if the other types leave room), so a large
-  dictionary does not push the other memories out; the rest are found with `search_memory(query, memory_type="glossary")`.
+  sub-agents run tool calls of one response in parallel. Terms are also found by the automatic search at the start of a turn
+  (when the request mentions them); others are found with `search_memory(query, memory_type="glossary")`.
   After saving, up to 3 passages of the knowledge that mention the term are returned so the LLM can correct the meaning.
   Older glossary memories without the headings are matched by the start of their description and rewritten with the
   headings when updated (the old body is kept in `Notes`).
@@ -1905,7 +1935,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[plan]` | `auto_approve` | Whether to approve automatically without asking the user to approve/reject when `approve_plan` is called (`false` by default. Write tools run without human confirmation, so it is not recommended except for unattended automation) | `PLAN_AUTO_APPROVE` |
 | `[plan]` | `plan_approval_exempt_scripts` | Whitelist of read-only scripts exempted from plan approval (Plan Mode) for `run_script`/`run_script_background` (`[["skill name","script file name"], ...]` form; the 7 defaults if empty). The exemption covers only approval; the restriction on direct calls from the main agent by `[main_agent_tool_guard]` is separate | `PLAN_APPROVAL_EXEMPT_SCRIPTS` |
 | `[default_workdir]` | `dir` | Base of the agent's default working directory. Actual writes and the cwd of `run_script` are limited to the session's own subdirectory `_tmp_<name>` under it (writing directly under `dir` is not allowed) | `DEFAULT_WORKDIR` |
-| `[default_workdir]` | `allow_sandbox_dir` | List of additional directories where writing is always allowed outside session separation (`[{"dir": "path", "allow_entries": [["skill name","script file name"], ...]}, ...]` form). Making an element's `allow_entries` an empty list allows unlimited writing to that directory regardless of the target. Note that registered directories are always writable regardless of thread (empty list and disabled by default) | `ALLOW_SANDBOX_DIR` |
+| `[default_workdir]` | `allow_sandbox_dir` | List of additional directories where writing is always allowed outside session separation (`[{"dir": "path", "allow_entries": [["skill name","script file name"], "execute_python_code", ...]}, ...]` form). It applies to the tools with the write sandbox guard: `run_script`/`run_script_background`, `execute_python_code`/`execute_python_code_background` and `Write`/`Edit` (before, only `run_script` was covered, and `execute_python_code` etc. were blocked even when registered). `allow_entries` takes tool names (the synchronous name also applies to the background version) or `[skill name, script file name]` (only that script). Making an element's `allow_entries` an empty list allows unlimited writing to that directory regardless of the target. Note that registered directories are always writable regardless of thread (empty list and disabled by default) | `ALLOW_SANDBOX_DIR` |
 | `[default_workdir]` | `retention_days` | Retention in days of files under `dir` above (0 or less disables automatic deletion) | `DEFAULT_WORKDIR_RETENTION_DAYS` |
 | `[skill_creator]` | `draft_dir` | Location of per-user draft skills (default `${common_data_dir}/skill_drafts`). Overlapping with the skill scan targets is an error at startup | `SKILL_DRAFT_DIR` |
 | `[skill_creator]` | `other_users_drafts` | Handling of other users' drafts. `hidden` (default) / `listed` / `readable` / `full` (see "Draft skills (per user) and promotion") | `SKILL_OTHER_USERS_DRAFTS` |
@@ -1983,6 +2013,9 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[context_compaction]` | `pre_note_warning_text` | Text of the warning message injected when the above threshold is reached | `CONTEXT_COMPACTION_PRE_NOTE_WARNING_TEXT` |
 | `[memory]` | `user_visibility` / `feedback_visibility` / `project_visibility` / `reference_visibility` | Visibility of persistent memories per type. A `private` type is always private; for a `shared` type the LLM chooses by the criteria (by default only `user` is `private`; see "Persistent memory") | `MEMORY_<TYPE>_VISIBILITY` |
 | `[memory]` | `shared_criteria` / `private_criteria` | Criteria given to the LLM (any language, line breaks allowed; the default wording if empty; "Polish with AI" on the settings dashboard turns them into a bullet list in the display language) | `MEMORY_SHARED_CRITERIA` / `MEMORY_PRIVATE_CRITERIA` |
+| `[memory]` | `recall_enabled` / `recall_max_results` / `recall_excerpt_chars` | Automatic memory search at the start of a turn on/off (default true), the maximum number of hits shown (default 8) and the length of the body excerpt (default 300; 0 shows only the description). See "Persistent memory" | `MEMORY_RECALL_ENABLED` / `MEMORY_RECALL_MAX_RESULTS` / `MEMORY_RECALL_EXCERPT_CHARS` |
+| `[memory]` | `review_enabled` / `review_min_tool_calls` / `review_max_iterations` / `review_timeout_seconds` | Review of what to remember at the end of a task on/off (default true), the minimum number of tool calls to review (default 1; 0 reviews every turn), the maximum model calls of the recorder (default 4) and its time limit (default 300 seconds; 0 or less means no limit). See "Persistent memory" | `MEMORY_REVIEW_ENABLED` / `MEMORY_REVIEW_MIN_TOOL_CALLS` / `MEMORY_REVIEW_MAX_ITERATIONS` / `MEMORY_REVIEW_TIMEOUT_SECONDS` |
+| `[memory]` | `system_prompt_max_chars` | The total limit of the bodies of memories set to "Show in the system prompt" on the settings dashboard (default 6000 characters) | `MEMORY_SYSTEM_PROMPT_MAX_CHARS` |
 | `[memory]` | `user_ranks` / `default_rank` | User ranks used to prioritize memories (`{"username": rank}`; an integer of 0 or more, larger is more senior; when memories disagree, the higher rank is followed; can also be set on the "Users" screen of the settings dashboard), and the rank of users without one and of common memories (default 1). See "Persistent memory" | `MEMORY_USER_RANKS` / `MEMORY_DEFAULT_RANK` |
 | `[memory]` | `force_private_checks` | List of checks that force `private` regardless of the type setting (`email` / `phone` / `card_id` / `credential` / `confidential_label` / `personal_path`; default `["card_id", "credential"]`) | `MEMORY_FORCE_PRIVATE_CHECKS` |
 | `[memory]` | `force_private_exempt_types` | Memory types not checked by `force_private_checks` (comma separated; default `glossary`; empty checks every type) | `MEMORY_FORCE_PRIVATE_EXEMPT_TYPES` |
@@ -2243,8 +2276,13 @@ an "Add instruction" button appears next to the stop button instead of the send 
   and instructions not yet in the conversation are discarded (put back in the input box on screen). Instructions that entered the
   conversation without being shown are removed. Retries after loop detection or communication errors and in-turn context
   compaction neither lose instructions that already entered nor duplicate them (`tests/test_user_injection_failures.py`).
-  If a normal message arrives while the same conversation is still generating (including while stopping), it is not processed
-  and a notice is returned (a second turn is never run in parallel).
+  If a normal message arrives while the same conversation is still generating, it is not processed and a notice is returned
+  (a second turn is never run in parallel). Right after the stop button (e.g. resending the instructions returned to the input
+  box), the turn waits up to 120 seconds for the stopped turn and the stop cleanup (killing sub-agents and background jobs,
+  force-closing the LLM connections, rebuilding the graph) to finish ("Waiting for the stopped task to finish cleaning up..."
+  is shown; `_wait_for_stopped_turn` in `app.py`). Before, the cleanup also closed the new turn's LLM connections and
+  sub-agents so generation failed, or the end signal of the old turn arrived after the start of the new one and the screen
+  looked frozen. After waiting, the "generating" state is sent again.
 - **Relation to context compaction**: compaction protects "everything from the last user message on" from being summarized, but
   a mid-turn additional instruction is not used as that starting point (otherwise the request itself would be summarized away;
   `find_last_user_message_cut_index` in `src/context_trim.py`). The instruction comes after the request, so it stays verbatim.

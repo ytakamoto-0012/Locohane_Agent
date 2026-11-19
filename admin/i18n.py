@@ -421,4 +421,9 @@ EN: dict[str, str] = {
     '{0}（スキル研究室）': '{0} (Skill Lab)',
     '管理アシスタント（AIに相談）': 'Admin assistant (Ask AI)',
     '{0}（スキル研究室・削除済み）': '{0} (Skill Lab, deleted)',
+    'ドラフトの指定が不正です: {0}': 'Invalid draft: {0}',
+    'ドラフトが見つかりません: {0}': 'Draft not found: {0}',
+    'このドラフトは研究テーマ {0} に取り込まれているため削除できません。先にそのテーマを削除してください。': 'This draft cannot be deleted because it is imported into the research theme {0}. Delete that theme first.',
+    'ドラフトを移せませんでした（ファイルを開いていないか確かめてください）: {0}': 'Could not move the draft (check that none of its files are open): {0}',
+    '「システムプロンプトに表示」を変更するメモリーを選択してください。': 'Select the memories whose "Show in the system prompt" setting to change.',
 }

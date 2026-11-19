@@ -8,7 +8,7 @@
 
 組み立ては2段階:
 1. build_prompts(): 起動時に1回（評価ではケースごとに1回）。ユーザーごとに変わる部分（ドラフトスキルの一覧・
-   メモリーの索引）は目印（DRAFT_SKILLS_MARKER・MEMORY_INDEX_MARKER）のまま残す。
+   システムプロンプトに表示するメモリー）は目印（DRAFT_SKILLS_MARKER・MEMORY_INDEX_MARKER）のまま残す。
 2. fill_session_parts(): 会話（グラフ）を組み立てるたび。目印をそのユーザー向けの内容に差し替え、
    ナレッジのコレクション一覧を差し込む。応答言語の指示（src/i18n.py の response_language_directive）は呼び出し側が末尾に足す。
 """
@@ -121,12 +121,17 @@ def fill_session_parts(system_prompt: str, config: "Config", *, drafts: list, me
     drafts: このユーザーに見えるドラフトスキル（src/skill_drafts.py の scan_visible_drafts）。評価では常に空
         （評価対象のスキルは研究対象として正式スキルと同じく重ねる。利用者のドラフトは本番でもその人にしか見えないため除く）。
     """
-    from .memory import MEMORY_INDEX_MARKER, render_memory_block
+    from .memory import DEFAULT_SYSTEM_PROMPT_MAX_CHARS, MEMORY_INDEX_MARKER, render_system_prompt_memories
     from .skill_drafts import DRAFT_SKILLS_MARKER, render_draft_skills_block
     from .tools.vector_db_tools import render_document_collections_block
 
-    filled = system_prompt.replace(DRAFT_SKILLS_MARKER, render_draft_skills_block(drafts)).replace(
-        MEMORY_INDEX_MARKER, render_memory_block(config.memory_dir, viewer=memory_viewer)
+    # メモリーの索引は載せない（件数が増えるとプロンプトが膨らむため）。設定ダッシュボードで選んだものだけを載せ、
+    # ほかはターンの始めの自動検索（src/memory_recall.py）で見せる。
+    pinned = render_system_prompt_memories(
+        config.memory_dir,
+        viewer=memory_viewer,
+        max_chars=getattr(config, "memory_system_prompt_max_chars", DEFAULT_SYSTEM_PROMPT_MAX_CHARS),
     )
+    filled = system_prompt.replace(DRAFT_SKILLS_MARKER, render_draft_skills_block(drafts)).replace(MEMORY_INDEX_MARKER, pinned)
     # ナレッジのコレクション一覧は取り込みで変わるため、組み立てのたびに差し込む。
     return filled.replace("{{document_collections}}", render_document_collections_block(config))

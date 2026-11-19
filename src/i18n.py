@@ -178,6 +178,26 @@ MESSAGES: dict[str, dict[str, str]] = {
         "(this may take from tens of seconds to a few minutes)…",
     },
     "notice.compaction_done": {"ja": "会話履歴の整理が完了しました。", "en": "The conversation history has been summarized."},
+    "notice.memory_review_start": {
+        "ja": "📝 このタスクで覚えておくことがないか、メモリーの記録を見直しています…",
+        "en": "📝 Reviewing whether anything from this task should be saved to memory…",
+    },
+    "notice.memory_review_saved": {
+        "ja": "📝 メモリーに記録しました: {names}",
+        "en": "📝 Saved to memory: {names}",
+    },
+    "notice.memory_review_nothing": {
+        "ja": "📝 メモリーに記録するものはありませんでした。",
+        "en": "📝 Nothing from this task needed to be saved to memory.",
+    },
+    "notice.memory_review_failed": {
+        "ja": "📝 メモリーの記録の見直しに失敗しました（{error}）。",
+        "en": "📝 The memory review failed ({error}).",
+    },
+    "notice.waiting_stop_cleanup": {
+        "ja": "停止した処理の後始末が終わるのを待ってから始めます…",
+        "en": "Waiting for the stopped task to finish cleaning up before starting…",
+    },
     "notice.compaction_skipped": {
         "ja": "会話履歴の整理は対象外だったためスキップしました。",
         "en": "The conversation history did not need summarizing, so it was skipped.",

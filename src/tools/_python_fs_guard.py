@@ -74,7 +74,30 @@ def _register_exec_output_files(workdir: Path, before_snapshot: dict[Path, float
     return "[Created/updated files]\n" + "\n".join(lines)
 
 
-def _exec_guard_roots() -> tuple[list[Path], list[Path]]:
+def allowed_sandbox_dirs_for_tool(tool_name: str) -> list[Path]:
+    """config.ini [default_workdir].allow_sandbox_dir のうち、ビルトインツール tool_name からの書き込みを許すディレクトリ。
+
+    allow_entries が空のエントリ（対象を問わず無制限）と、allow_entries にツール名 tool_name を書いたエントリが対象
+    （[スキル名, スクリプトファイル名] のエントリは run_script 専用。_subprocess_env.py の _allowed_sandbox_dirs_for）。
+    以前は execute_python_code 系・Write/Edit がこの設定を一切見ず、登録しても作業ディレクトリの外として
+    書き込みガードに止められていた（2026-11-19 ユーザー報告）。存在しないディレクトリは無視する。
+    """
+    names = {tool_name, *_SANDBOX_TOOL_ALIASES.get(tool_name, ())}
+    result: list[Path] = []
+    for entry in _state._ALLOW_SANDBOX_DIRS:
+        if (not entry.allow_entries or names & entry.allow_entries) and entry.dir.is_dir():
+            result.append(entry.dir)
+    return result
+
+
+# バックグラウンド版は、同期版のツール名を書いたエントリでも許可する（同じコード・スクリプトを動かすだけのため）。
+_SANDBOX_TOOL_ALIASES: dict[str, tuple[str, ...]] = {
+    "execute_python_code_background": ("execute_python_code",),
+    "run_script_background": ("run_script",),
+}
+
+
+def _exec_guard_roots(tool_name: str = "execute_python_code") -> tuple[list[Path], list[Path]]:
     """execute_python_code系（execute_python_code/execute_python_code_background）
     のガードに渡す (allowed_roots, display_roots) を組み立てる。
 
@@ -87,10 +110,10 @@ def _exec_guard_roots() -> tuple[list[Path], list[Path]]:
     直接呼ぶ場合にロックファイル書き込みが必要になるLocohane内部の
     状態ディレクトリ）を allowed_roots に含める。
 
-    config.ini [default_workdir].allow_sandbox_dir（_state._ALLOW_SANDBOX_DIRS）
-    はここでは対象外（execute_python_code系は対象外。run_script/
-    run_script_background 経由のみ、_subprocess_env.py の
-    _run_script_guard_env() が扱う）。default_workdir自体
+    config.ini [default_workdir].allow_sandbox_dir（_state._ALLOW_SANDBOX_DIRS）のうち、
+    tool_name（execute_python_code / execute_python_code_background / Write / Edit）に許したもの
+    （allow_entries が空、またはそのツール名を含むもの。allowed_sandbox_dirs_for_tool）も加える。
+    default_workdir自体
     （`_tmp_<thread_id>` 以外のサブディレクトリや直下）は意図的に含めない
     （default_workdirはサーバー側の共有ディレクトリのため、他セッションが
     誤参照する事故を避けるため常に自セッション専用の`_tmp_<thread_id>`
@@ -109,7 +132,7 @@ def _exec_guard_roots() -> tuple[list[Path], list[Path]]:
     execute_python_code がユーザー指定の作業ディレクトリへ書き込めなく
     なってしまう）。
     """
-    roots = [_resolve_workdir(need_write=True), _resolve_exec_workdir()]
+    roots = [_resolve_workdir(need_write=True), _resolve_exec_workdir(), *allowed_sandbox_dirs_for_tool(tool_name)]
     display_roots = list(roots)
     if _state._PATH_MEMORY_DIR is not None:
         roots.append(_state._PATH_MEMORY_DIR)

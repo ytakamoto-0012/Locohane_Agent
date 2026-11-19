@@ -129,6 +129,23 @@ def subagent_tool_names() -> tuple[str, ...]:
     return _registry_tool_names("_SUBAGENT_TOOLS")
 
 
+def prefetch_subagent_tool_names() -> None:
+    """subagent_tool_names を裏で先に求め始める（管理ツールの起動時に呼ぶ）。
+
+    別プロセスで src.tools を読み込むため数秒かかり、以前はスキル研究室のタブを最初に開いたとき
+    （GET /api/instances/{name}/skill-lab/sources）にそれを待っていた。失敗しても何もしない
+    （lru_cache は例外を覚えないため、開いたときに求め直してエラーを出す）。
+    """
+
+    def _run() -> None:
+        try:
+            subagent_tool_names()
+        except Exception:  # noqa: BLE001 - 開いたときに改めて求める
+            pass
+
+    threading.Thread(target=_run, name="subagent_tool_names", daemon=True).start()
+
+
 # main_agent_tool_names の結果（別プロセスで求めるため、一度求めたら使い回す）。失敗は _TOOL_NAMES_RETRY_SECONDS 秒の間
 # 覚えておき、その間は求め直さずに同じエラーにする（設定画面を開く・保存するたびに最大 120 秒の別プロセスを待たないため）。
 _TOOL_NAMES_RETRY_SECONDS = 300.0

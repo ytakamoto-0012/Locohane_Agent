@@ -94,6 +94,11 @@ class ReturnBody(BaseModel):
     reject: bool = False
 
 
+class DeleteDraftBody(BaseModel):
+    owner: str
+    name: str
+
+
 def build_router(
     *,
     require_login: Callable,
@@ -319,6 +324,36 @@ def build_router(
             "tools_error": tools_error,
             "instance_locohane_dir": str(cfg.instance_locohane_dir),
         }
+
+    @router.post("/api/instances/{name}/skill-lab/drafts/delete")
+    def delete_draft(name: str, body: DeleteDraftBody, request: Request, user: str = Depends(require_login), _c=Depends(require_csrf)):
+        """利用者のドラフト（[skill_creator] draft_dir/<owner>/<name>/）を削除する。
+
+        消さずに [skill_creator] archive_dir/<owner>/<name>_<日時>/ へ作業フォルダ（_workspace）ごと移し、
+        来歴（_draft_meta.json）に status = "deleted" を残す（昇格と同じ置き場。手で戻せる）。
+        研究テーマに取り込み中のドラフトは、テーマ側の差し戻しが行き先を失うため断る（先にテーマを削除する）。
+        """
+        _app_instance(name)
+        cfg = _cfg(name)
+        for part in (body.owner, body.name):
+            if not part or part in (".", "..") or part.startswith("_") or any(c in part for c in '\\/:*?"<>|'):
+                raise HTTPException(status_code=400, detail=_t("ドラフトの指定が不正です: {0}", f"{body.owner}/{body.name}"))
+        draft_root = cfg.skill_draft_dir.resolve()
+        draft = (draft_root / body.owner / body.name).resolve()
+        if draft.parent.parent != draft_root or not (draft / "SKILL.md").is_file():
+            raise HTTPException(status_code=404, detail=_t("ドラフトが見つかりません: {0}", f"{body.owner}/{body.name}"))
+        theme_id = sources.imported_drafts(themes.themes_root(cfg.common_data_dir)).get(str(draft))
+        if theme_id:
+            raise HTTPException(
+                status_code=409,
+                detail=_t("このドラフトは研究テーマ {0} に取り込まれているため削除できません。先にそのテーマを削除してください。", theme_id),
+            )
+        try:
+            dest = promotion.archive_draft(draft, cfg.skill_archive_dir, status="deleted", extra={"deleted_by": user})
+        except OSError as exc:
+            raise HTTPException(status_code=409, detail=_t("ドラフトを移せませんでした（ファイルを開いていないか確かめてください）: {0}", exc)) from exc
+        _audit(request, user, name, "skill_lab_draft_delete", owner=body.owner, draft=body.name, archived_to=str(dest))
+        return {"archived_to": str(dest)}
 
     @router.get("/api/instances/{name}/skill-lab/themes")
     def list_themes(name: str, user: str = Depends(require_login)):

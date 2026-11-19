@@ -144,19 +144,33 @@ async function renderSkillLabPanel(container, name) {
     `${d.owner}/${d.name}`,
     d.status === "returned" ? _t(`差し戻し中（{0}）`, d.returned_reason || "") : d.status,
     fmtTime(d.updated_at),
-    d.imported_theme
-      ? el("span", { class: "hint", text: _t("テーマに取り込み済み") })
-      : el("button", {
-          text: _t("テーマを作って取り込む"),
-          onclick: async () => {
-            const theme = await labAction(() => api(labPath(name, "/themes"), { method: "POST", body: { title: `${d.owner}/${d.name}`, lab: defaultLab(themesData.labs) } }));
-            if (!theme) return;
-            const ok = await labAction(() =>
-              api(themePath(name, theme.id, "/assets"), { method: "POST", body: { mode: "draft", asset_type: "skills", name: d.name, origin: d.path } }),
-            );
-            if (ok) renderThemeDetail(container, name, theme.id);
-          },
-        }),
+    el("div", { class: "inline-form" }, [
+      d.imported_theme
+        ? el("span", { class: "hint", text: _t("テーマに取り込み済み") })
+        : el("button", {
+            text: _t("テーマを作って取り込む"),
+            onclick: async () => {
+              const theme = await labAction(() => api(labPath(name, "/themes"), { method: "POST", body: { title: `${d.owner}/${d.name}`, lab: defaultLab(themesData.labs) } }));
+              if (!theme) return;
+              const ok = await labAction(() =>
+                api(themePath(name, theme.id, "/assets"), { method: "POST", body: { mode: "draft", asset_type: "skills", name: d.name, origin: d.path } }),
+              );
+              if (ok) renderThemeDetail(container, name, theme.id);
+            },
+          }),
+      // 取り込み中のドラフトは消せない（テーマ側の差し戻しの行き先が無くなるため。先にテーマを削除する）。
+      d.imported_theme
+        ? ""
+        : el("button", {
+            class: "btn-danger",
+            text: _t("削除"),
+            onclick: async () => {
+              if (!confirm(_t("ドラフト「{0}」を削除します。作成者の会話では使えなくなります（ファイルはアーカイブ置き場へ移すので、必要なら手で戻せます）。よろしいですか？", `${d.owner}/${d.name}`))) return;
+              const ok = await labAction(() => api(labPath(name, "/drafts/delete"), { method: "POST", body: { owner: d.owner, name: d.name } }));
+              if (ok) renderSkillLabPanel(container, name);
+            },
+          }),
+    ]),
   ]);
   container.append(dataTable([_t("ドラフト"), _t("状態"), _t("更新"), ""], draftRows, _t("このインスタンスにドラフトはありません。")));
 }

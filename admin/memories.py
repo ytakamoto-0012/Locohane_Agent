@@ -125,9 +125,11 @@ class MemoriesDeleteByTypeBody(BaseModel):
 
 class MemoriesChangeBody(BaseModel):
     items: list[MemoryRef]
-    # None（省略）なら変えない。少なくともどちらか一方を指定する。
+    # None（省略）なら変えない。少なくともどれか1つを指定する。
     type: str | None = None
     visibility: str | None = None
+    # 「システムプロンプトに表示」（src/memory.py の Memory.in_system_prompt）の付け外し。
+    in_system_prompt: bool | None = None
 
 
 class MemoriesCopyBody(BaseModel):
@@ -335,6 +337,8 @@ def _summary(m: mem_store.Memory, mtime: float | None = None) -> dict:
         "visibility": m.visibility,
         # 人が個人用にした印（AI の更新では共有に戻らない。src/memory.py の Memory.visibility_pinned）。
         "visibility_pinned": m.visibility_pinned,
+        # 本文をシステムプロンプトに載せるもの（src/memory.py の Memory.in_system_prompt）。
+        "in_system_prompt": m.in_system_prompt,
         "mtime": mtime if mtime is not None else m.path.stat().st_mtime,
         "sources": len(m.sources),
     }
@@ -834,13 +838,15 @@ def build_router(
         user: str = Depends(require_login),
         _csrf: None = Depends(require_csrf),
     ):
-        """選んだメモリーの種類・公開範囲をまとめて変える（説明・本文はそのまま。変更前はバックアップに残る）。
+        """選んだメモリーの種類・公開範囲・「システムプロンプトに表示」をまとめて変える（説明・本文はそのまま。変更前はバックアップに残る）。
 
         公開範囲は共通のメモリーには効かない。private の種類・個人情報の目印に当たるユーザーのメモリーは、
         共有を選んでも個人用のまま（forced_private_items に理由を付けて返す）。
+        「システムプロンプトに表示」にしたメモリーは、見えるユーザーの会話でシステムプロンプトに本文が載る
+        （公開範囲はそのまま守る。次の会話から）。
         """
         root = _memory_root(name)
-        if body.type is None and body.visibility is None:
+        if body.type is None and body.visibility is None and body.in_system_prompt is None:
             raise HTTPException(status_code=400, detail=_t("変更する種類か公開範囲を指定してください。"))
         if body.type is not None and body.type not in mem_store.MEMORY_TYPES:
             raise HTTPException(status_code=400, detail=_t("種類が不正です: {0!r}", body.type))
@@ -851,9 +857,18 @@ def build_router(
         found = _resolve_refs(root, body.items)
         for mem in found:
             _backup(name, mem)
-        result = mem_store.change_memories(
-            root, found, memory_type=body.type, visibility=body.visibility, updated_by=_dashboard_editor(user)
-        )
+        if body.type is not None or body.visibility is not None:
+            result = mem_store.change_memories(
+                root, found, memory_type=body.type, visibility=body.visibility, updated_by=_dashboard_editor(user)
+            )
+        else:
+            result = mem_store.BulkResult(tuple(found))
+        if body.in_system_prompt is not None and result.done:
+            # 種類を変えるとファイルが移るため、書き換えた後のものを探し直してから付け外しする
+            # （先に付けると、change_memories が読み込み済みの古い値で書き戻してしまう）。
+            current = [m for m in (mem_store.find_memory(root, d.name, d.owner) for d in result.done) if m is not None]
+            pinned = mem_store.set_in_system_prompt(root, current, body.in_system_prompt)
+            result = mem_store.BulkResult(result.done, result.failed + pinned.failed)
         forced: list[str] = []
         if body.visibility == "shared":
             for m in result.done:
@@ -873,6 +888,7 @@ def build_router(
                     "count": len(result.done),
                     "type": body.type,
                     "visibility": body.visibility,
+                    "in_system_prompt": body.in_system_prompt,
                     "memories": [f"{m.owner or _COMMON_BACKUP_DIRNAME}/{m.name}" for m in result.done],
                 },
             )
