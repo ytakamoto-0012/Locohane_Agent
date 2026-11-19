@@ -57,7 +57,7 @@ async def run_script_background(skill_name: str, script_filename: str, script_ar
     if isinstance(prepared, str):
         return prepared
     cmd, workdir = prepared
-    env, guard_dir = _run_script_guard_env(workdir, skill_name, script_filename)
+    env, guard_dir = _run_script_guard_env(workdir, skill_name, script_filename, "run_script_background")
 
     _purge_stale_background_jobs()
 

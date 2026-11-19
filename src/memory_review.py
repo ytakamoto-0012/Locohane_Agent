@@ -3,7 +3,7 @@
 LLM はタスクを終えると、ユーザーの訂正・うまくいったやり方をメモリーに残すのを忘れることが多い
 （システムプロンプトで「保存せよ」と書くだけでは、最終回答を書いた時点で終わってしまう）。そこで、
 ツールを使ったタスクが終わり、そのターンの間にメモリーが1件も保存・更新されていなければ
-（メインでもサブエージェントでも。src/memory.py の written_since でファイルの更新日時を見る）、
+（メインでもサブエージェントでも。src/memory.py の start_write_tracking で、このターンの処理が書いたかを見る）、
 ハーネスが記録係を1回だけ動かす。
 
 記録係はメインのグラフとは別の、小さな ReAct ループ（最大 [memory] review_max_iterations 回のモデル呼び出し）:
@@ -29,6 +29,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 
 from . import memory
 from .memory_recall import is_recall_message
+from .today import with_today
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,11 @@ _TOOL_ARGS_MAX_CHARS = 300
 _TOOL_RESULT_MAX_CHARS = 300
 _TOOL_CALLS_MAX = 40
 _RELATED_MAX = 8
+# 関係するメモリーを探す文の長さ（長い依頼文を貼り付けたターンで検索が重くならないように）。
+_SEARCH_MAX_CHARS = 4000
+# 同梱の記録係プロンプト（[paths].system_prompt_path が、memory_review.md が加わる前の版からコピーした
+# 独自のフォルダを指していて、そこに無いときに使う）。
+_BUNDLED_PROMPT = Path(__file__).resolve().parent.parent / "system_prompt" / "memory_review.md"
 
 # 記録係に渡すツール（メモリー系だけ）。
 _REVIEW_TOOL_NAMES = ("search_memory", "read_memory", "create_memory", "update_memory", "save_glossary_term")
@@ -135,7 +141,7 @@ def build_turn_record(turn_messages: list[BaseMessage]) -> tuple[str, str]:
     if calls_total > len(tool_lines):
         parts.append(f"... ({calls_total - len(tool_lines)} more calls not shown)")
     parts += ["", "## Final answer to the user", _cut(final_answer, _ANSWER_MAX_CHARS) or "(none)"]
-    search_text = "\n".join(requests) + "\n" + final_answer[:1000]
+    search_text = ("\n".join(requests) + "\n" + final_answer[:1000])[:_SEARCH_MAX_CHARS]
     return "\n".join(parts), search_text
 
 
@@ -156,6 +162,8 @@ def review_system_prompt(config, language_directive: str = "") -> str:
     from .config import render_memory_visibility_block
 
     path = Path(config.system_prompt_path).parent / "memory_review.md"
+    if not path.is_file():
+        path = _BUNDLED_PROMPT
     text = path.read_text(encoding="utf-8")
     try:
         visibility = render_memory_visibility_block(config)
@@ -197,19 +205,21 @@ async def run_memory_review(
         model: テスト用の差し替え口（bind_tools できるチャットモデル）。None なら build_model(config, role="sub")。
     """
     result = ReviewResult()
-    record, search_text = build_turn_record(turn_messages)
-    memory_root = Path(config.memory_dir)
-    human = (
-        f"{record}\n\n## Related memories already saved\n{_related_block(memory_root, search_text, viewer)}\n\n"
-        "Decide what to save, following your instructions."
-    )
-    messages: list[BaseMessage] = [SystemMessage(content=review_system_prompt(config, language_directive)), HumanMessage(content=human)]
-    tools = _review_tools()
-    tools_by_name = {t.name: t for t in tools}
     max_iterations = max(1, int(getattr(config, "memory_review_max_iterations", DEFAULT_MAX_ITERATIONS)))
     timeout = float(getattr(config, "memory_review_timeout_seconds", DEFAULT_TIMEOUT_SECONDS))
     try:
         async with asyncio.timeout(timeout if timeout > 0 else None):
+            # 記録の組み立て・プロンプトの読み込みも失敗しうるので try の中で行う（失敗は result.error にする）。
+            record, search_text = build_turn_record(turn_messages)
+            memory_root = Path(config.memory_dir)
+            # 全メモリーを読んで採点するため、イベントループを止めないよう別スレッドで行う。
+            related = await asyncio.to_thread(_related_block, memory_root, search_text, viewer)
+            human = f"{record}\n\n## Related memories already saved\n{related}\n\nDecide what to save, following your instructions."
+            # 「来週の金曜」等を絶対日付で残せるよう、メインのグラフ・サブエージェントと同じく今日の日付を添える。
+            system = with_today(review_system_prompt(config, language_directive))
+            messages: list[BaseMessage] = [SystemMessage(content=system), HumanMessage(content=human)]
+            tools = _review_tools()
+            tools_by_name = {t.name: t for t in tools}
             if model is None:
                 from .llm import build_model
 

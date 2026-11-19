@@ -56,7 +56,10 @@ def recall_text(memory_root: Path, query: str, *, viewer: str | None, max_result
     ]
     for mem in hits:
         lines.append(f"- [{mem.memory_type}] {mem.name}{memory.label_for(mem, viewer, policy)}: {mem.description}")
-        if excerpt_chars > 0:
+        if mem.in_system_prompt:
+            # 本文はシステムプロンプトに載っている（同じ本文を毎ターン会話へ重ねて足さない）。
+            lines.append("  > (its content is in the system prompt)")
+        elif excerpt_chars > 0:
             flat = " ".join(mem.content.split())
             if flat:
                 excerpt = flat if len(flat) <= excerpt_chars else flat[:excerpt_chars] + " ..."
@@ -76,6 +79,10 @@ def build_recall_messages(
     """
     if not getattr(config, "memory_recall_enabled", True) or not query.strip():
         return [], 0
+    max_results = getattr(config, "memory_recall_max_results", DEFAULT_MAX_RESULTS)
+    if max_results <= 0:
+        # 0 件にした = 自動検索を止めた。「関係するメモリーは無い」と偽りの結果を入れない。
+        return [], 0
     memory_root = getattr(config, "memory_dir", None)
     if memory_root is None or not Path(memory_root).is_dir():
         return [], 0
@@ -84,7 +91,7 @@ def build_recall_messages(
             Path(memory_root),
             query,
             viewer=viewer,
-            max_results=getattr(config, "memory_recall_max_results", DEFAULT_MAX_RESULTS),
+            max_results=max_results,
             excerpt_chars=getattr(config, "memory_recall_excerpt_chars", DEFAULT_EXCERPT_CHARS),
         )
     except Exception:  # noqa: BLE001 - 検索できなくても依頼の処理は続ける

@@ -29,6 +29,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 
 from ..config import THINKING_LEVELS, Config
 from ..images import is_image_followup_message
+from ..memory_recall import is_recall_message
 from .dialect import budget_params, extract_reasoning
 
 # レベルを比較するための順位（off が最小、xhigh が最大）。
@@ -156,6 +157,9 @@ def _replay(messages: list[BaseMessage], settings: ThinkingControlSettings) -> l
     prev_ai: AIMessage | None = None
     tool_messages: list[ToolMessage] = []
     for message in messages[start:]:
+        # ターンの始めの自動メモリー検索（src/memory_recall.py）はモデルのステップではない。
+        if is_recall_message(message):
+            continue
         if isinstance(message, AIMessage):
             if prev_ai is not None:
                 steps.append(_next_step(prev_ai, tool_messages, [level for level, _ in steps], settings))
@@ -242,7 +246,7 @@ def previous_step_stats(messages: list[BaseMessage], settings: ThinkingControlSe
     for message in reversed(messages):
         if isinstance(message, HumanMessage) and not is_image_followup_message(message):
             return None
-        if isinstance(message, AIMessage):
+        if isinstance(message, AIMessage) and not is_recall_message(message):
             reasoning = extract_reasoning(message.additional_kwargs) or ""
             content = message.content if isinstance(message.content, str) else str(message.content)
             marker = settings.budget_message

@@ -29,6 +29,7 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from .config import Config
 from .images import is_image_followup_message
+from .memory_recall import is_recall_message
 from .llm import ToolCallLoopDetected
 
 # 注意メッセージに添える結果の抜粋の最大文字数。
@@ -110,6 +111,9 @@ def detect_tool_call_loop(messages: list[BaseMessage], config: Config) -> ToolLo
         message = messages[index]
         if is_image_followup_message(message):
             continue
+        # ターンの始めの自動メモリー検索（src/memory_recall.py）はモデルの呼び出しではない（ターンの始まり）。
+        if is_recall_message(message):
+            break
         if isinstance(message, ToolMessage):
             results.append(message)
             continue

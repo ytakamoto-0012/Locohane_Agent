@@ -832,13 +832,13 @@ DESCRIPTIONS: dict[str, str] = {
         'Automatic search at the start of a turn (true/false). Every time the user sends a message, the harness searches the memories related to it and puts the result in the conversation as if search_memory had been called (even if the AI forgets to search, the corrections and approaches it remembers are always shown to it).\n'
         'The list of memories is not put in the system prompt (it grows with the number of memories), so with false the memories are used only when the AI calls search_memory itself.'
     ),
-    'memory.recall_max_results': ('The maximum number of memories shown by the automatic search.'),
+    'memory.recall_max_results': ('The maximum number of memories shown by the automatic search. 0 turns the automatic search off (the same as recall_enabled = false).'),
     'memory.recall_excerpt_chars': (
         'How many characters of the start of each memory body the automatic search adds (0 shows only the description).'
     ),
     'memory.review_enabled': (
         'Review of what to remember at the end of a task (true/false). When a task that used tools ends and no memory was saved or updated during the turn, the harness shows the record of the turn to a recorder (a small AI that has only the memory tools) and has it save corrections, approaches that worked, terms, etc.\n'
-        'It runs after the final answer is shown (a "Memory record" step appears in the chat). It calls the LLM of [llm] sub_url once or a few times, so the end of the turn becomes slower.'
+        'It runs separately at the end of the turn (after the final answer is shown and the chat log is saved), and notices about the review and its result appear in the chat. The turn itself does not wait for it (the next message can be sent right away), but it calls the LLM of [llm] sub_url once or a few times.'
     ),
     'memory.review_min_tool_calls': (
         'The minimum number of tool calls of the main AI for the review to run (the automatic search at the start of the turn is not counted). 0 reviews every turn, even conversations without tools.'

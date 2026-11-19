@@ -80,7 +80,7 @@ def _subprocess_env() -> dict[str, str]:
             env["PATH"] = os.pathsep.join([*(str(d) for d in bin_dirs), env.get("PATH", "")])
     return env
 
-def _allowed_sandbox_dirs_for(skill_name: str, script_filename: str) -> list[Path]:
+def _allowed_sandbox_dirs_for(skill_name: str, script_filename: str, tool_name: str = "run_script") -> list[Path]:
     """config.ini [default_workdir].allow_sandbox_dir のうち、指定した
     (skill_name, script_filename) からの書き込みが許可されているディレクトリ
     だけを抽出する。
@@ -99,6 +99,7 @@ def _allowed_sandbox_dirs_for(skill_name: str, script_filename: str) -> list[Pat
     Args:
         skill_name: 実行しようとしているスキルのフォルダ名。
         script_filename: 実行しようとしているスクリプトのファイル名。
+        tool_name: 呼び出したツール（run_script / run_script_background）。
 
     Returns:
         許可されたディレクトリのうち実在するもの（is_dir()）のリスト。
@@ -111,8 +112,10 @@ def _allowed_sandbox_dirs_for(skill_name: str, script_filename: str) -> list[Pat
             or skill_name in entry.allow_entries
             or (skill_name, script_filename) in entry.allow_entries
             # ツール名の指定（[main_agent_tool_guard].allow_entries と同じ形式）は、どのスキルのスクリプトでも許可する。
+            # 同期版の名前（run_script）はバックグラウンド版にも効くが、逆（run_script_background だけを書いたエントリで
+            # 同期版を許す）は無い（execute_python_code 系と同じ。_python_fs_guard.py の _SANDBOX_TOOL_ALIASES）。
             or "run_script" in entry.allow_entries
-            or "run_script_background" in entry.allow_entries
+            or (tool_name == "run_script_background" and "run_script_background" in entry.allow_entries)
         ):
             if entry.dir.is_dir():
                 result.append(entry.dir)
@@ -186,7 +189,9 @@ def cleanup_guard_temp(root: Path, older_than_seconds: float = 0) -> int:
     return removed
 
 
-def _run_script_guard_env(workdir: Path, skill_name: str, script_filename: str) -> tuple[dict[str, str], Path | None]:
+def _run_script_guard_env(
+    workdir: Path, skill_name: str, script_filename: str, tool_name: str = "run_script"
+) -> tuple[dict[str, str], Path | None]:
     """run_script/run_script_background が起動するサブプロセスへ、書き込み
     サンドボックスガードを注入した環境変数を組み立てる。
 
@@ -239,7 +244,7 @@ def _run_script_guard_env(workdir: Path, skill_name: str, script_filename: str) 
     allowed_roots = [workdir]
     if _state._DEFAULT_WORKDIR is not None:
         allowed_roots.append(_resolve_exec_workdir())
-    allowed_roots.extend(_allowed_sandbox_dirs_for(skill_name, script_filename))
+    allowed_roots.extend(_allowed_sandbox_dirs_for(skill_name, script_filename, tool_name))
     allowed_roots.extend(_skill_creator_draft_roots(skill_name))
     display_roots = list(allowed_roots)
     if _state._PATH_MEMORY_DIR is not None:

@@ -1162,19 +1162,22 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   （以前は `{{memory}}` に一覧を差し込んでいたが、件数が増えるとプロンプトが膨らみ、会話を開く・最初の応答が遅くなっていた）。
 - **ターンの始めの自動検索**（`[memory] recall_enabled`、既定 true）: ユーザーの発言を受けるたびに、ハーネスがその本文で
   関係しそうなメモリーを探し（`src/memory.py` の `relevant_memories`。ASCII の語と日本語等の文字 bigram の重なりを、珍しさ（IDF）で
-  重み付けして数える。名前・説明は本文の2倍）、「`search_memory` を呼んで結果が返った」形（AIMessage の tool_call ＋ ToolMessage）で
+  重み付けして数える。名前・説明は本文の2倍。ひらがなだけの bigram と英語の機能語は手がかりにしない）、「`search_memory` を呼んで結果が返った」形（AIMessage の tool_call ＋ ToolMessage）で
   発言の直後に入れる（`src/memory_recall.py`。チャット欄には「メモリー検索」のステップが出る）。LLM が検索を怠っても、覚えている
-  訂正・やり方が必ず目に入る。件数は `recall_max_results`（既定8）、本文の先頭の抜粋は `recall_excerpt_chars`（既定300文字）。
-  評価（`evals/run_case.py`）も同じ関数で入れる。`search_memory` は空白区切りの語をすべて含むものを返し（全角・半角は無視）、
+  訂正・やり方が必ず目に入る。件数は `recall_max_results`（既定8。0で自動検索をしない）、本文の先頭の抜粋は `recall_excerpt_chars`
+  （既定300文字。「システムプロンプトに表示」のメモリーは本文が既に載っているので抜粋を付けない）。自動検索のメッセージはモデルの
+  応答ではないため、トークン上限の判定・思考レベルの切り替え・ツール呼び出しのループ検知では数えない。
+  評価（`evals/run_case.py`）も同じ関数で入れ、トランスクリプトでは `HarnessMemoryRecall` として区別する（`tool_called_*` で数えない）。`search_memory` は空白区切りの語をすべて含むものを返し（全角・半角は無視）、
   完全に当たらなければ似た語のメモリーを「近いもの」として返す。
 - **タスクの終わりの記録の見直し**（`[memory] review_enabled`、既定 true）: ツールを使ったタスク（メインのツール呼び出しが
   `review_min_tool_calls` 回以上。自動検索は数えない）が最終回答で終わり、そのターンの間にメモリーが1件も保存・更新されていなければ
-  （サブエージェントの保存も含め、メモリーのファイルの更新日時で判定。`src/memory.py` の `written_since`）、ハーネスが記録係を動かす
+  （サブエージェントの保存も含め、このターンの処理が書いたかで判定。`src/memory.py` の `start_write_tracking`。管理画面の操作や
+  他の会話の書き込みは数えない）、ハーネスが記録係を動かす
   （`src/memory_review.py`。システムプロンプトは `system_prompt/memory_review.md`）。記録係はメモリー系のツール（`search_memory`/
   `read_memory`/`create_memory`/`update_memory`/`save_glossary_term`）だけを持つ小さなループで、ターンの記録（依頼・追加指示・
   ツール呼び出しと結果の要約・最終回答）と関係しそうな既存のメモリーを見て、残すべきものだけを保存・更新する（重複は作らず更新）。
-  `[llm] sub_url` の接続先を使い、`review_max_iterations`（既定4）回・`review_timeout_seconds`（既定300秒）まで。最終回答の表示の後に
-  動き、チャット欄に「📝 メモリーに記録しました: …」等の system_message が出る。記録係のやり取りは会話の履歴に足さない。
+  `[llm] sub_url` の接続先を使い、`review_max_iterations`（既定4）回・`review_timeout_seconds`（既定300秒）まで。ターンの後始末（最終回答の表示・
+  会話ログ・スナップショット・圧縮）が終わった後に別のタスクで動き（ターンを「生成中」のまま待たせない。停止ボタンでは止まらない）、チャット欄に「📝 メモリーに記録しました: …」等の system_message が出る。記録係のやり取りは会話の履歴に足さない。
   失敗してもターンの結果には影響しない。トークンは会話累計と月別の利用量に足す。
 - **システムプロンプトに表示するメモリー**: 設定ダッシュボードの「メモリー」で選んだメモリー（frontmatter の `in_system_prompt: true`）
   だけは、本文がシステムプロンプトの `{{memory}}` に毎回載り、AI が常に従う（`src/memory.py` の `render_system_prompt_memories`。

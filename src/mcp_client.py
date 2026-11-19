@@ -157,7 +157,7 @@ def _is_connection_closed(exc: BaseException) -> bool:
 def _resolve_env(server_name: str, env: dict[str, Any]) -> dict[str, str] | None:
     """env の値に含まれる ${ENV_VAR_NAME} を os.environ から展開する。
 
-    .locohane/settings.json はgit管理対象のため、APIキー等の機密情報を
+    settings.json はプロジェクトやインスタンスの設定として共有・バックアップされうるため、APIキー等の機密情報を
     平文で書かせないための緩和策（Claude Codeの .mcp.json と同じ慣習）。
 
     Args:

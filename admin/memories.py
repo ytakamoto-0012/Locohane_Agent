@@ -847,7 +847,7 @@ def build_router(
         """
         root = _memory_root(name)
         if body.type is None and body.visibility is None and body.in_system_prompt is None:
-            raise HTTPException(status_code=400, detail=_t("変更する種類か公開範囲を指定してください。"))
+            raise HTTPException(status_code=400, detail=_t("変更する種類・公開範囲・「システムプロンプトに表示」のどれかを指定してください。"))
         if body.type is not None and body.type not in mem_store.MEMORY_TYPES:
             raise HTTPException(status_code=400, detail=_t("種類が不正です: {0!r}", body.type))
         if body.visibility is not None and body.visibility not in mem_store.VISIBILITIES:
@@ -866,9 +866,23 @@ def build_router(
         if body.in_system_prompt is not None and result.done:
             # 種類を変えるとファイルが移るため、書き換えた後のものを探し直してから付け外しする
             # （先に付けると、change_memories が読み込み済みの古い値で書き戻してしまう）。
-            current = [m for m in (mem_store.find_memory(root, d.name, d.owner) for d in result.done) if m is not None]
-            pinned = mem_store.set_in_system_prompt(root, current, body.in_system_prompt)
-            result = mem_store.BulkResult(result.done, result.failed + pinned.failed)
+            current: list[tuple] = []
+            missing: list[tuple[str | None, str, str]] = []
+            for d in result.done:
+                m = mem_store.find_memory(root, d.name, d.owner)
+                if m is None:
+                    missing.append((d.owner, d.name, "not found"))
+                else:
+                    current.append((d, m))
+            pinned = mem_store.set_in_system_prompt(root, [m for _, m in current], body.in_system_prompt)
+            pinned_keys = {(m.owner, m.name) for m in pinned.done}
+            if body.type is None and body.visibility is None:
+                # 「システムプロンプトに表示」だけの変更なら、付け外しできたものだけを変更したものとして数える
+                # （失敗したものを changed と監査ログに入れない）。
+                done = tuple(d for d, m in current if (m.owner, m.name) in pinned_keys)
+            else:
+                done = result.done
+            result = mem_store.BulkResult(done, result.failed + tuple(missing) + pinned.failed)
         forced: list[str] = []
         if body.visibility == "shared":
             for m in result.done:

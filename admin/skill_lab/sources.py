@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import functools
 import json
 import subprocess
 import sys
@@ -123,10 +122,19 @@ def find_official_skill_dir(cfg: Config, name: str) -> Path | None:
     return None
 
 
-@functools.lru_cache(maxsize=1)
+# subagent_tool_names の結果と、求めている間に来た呼び出しを待たせるロック（lru_cache は同時の呼び出しをまとめないため、
+# 先読み（prefetch_subagent_tool_names）の最中にタブを開くと、別プロセスをもう1つ起動して待っていた）。
+_subagent_tool_names: tuple[str, ...] | None = None
+_subagent_tool_names_lock = threading.Lock()
+
+
 def subagent_tool_names() -> tuple[str, ...]:
-    """サブエージェントに割り当てられるツール名（frontmatter の tools に書けるもの）。"""
-    return _registry_tool_names("_SUBAGENT_TOOLS")
+    """サブエージェントに割り当てられるツール名（frontmatter の tools に書けるもの）。一度求めたら使い回す（失敗は覚えない）。"""
+    global _subagent_tool_names
+    with _subagent_tool_names_lock:
+        if _subagent_tool_names is None:
+            _subagent_tool_names = _registry_tool_names("_SUBAGENT_TOOLS")
+        return _subagent_tool_names
 
 
 def prefetch_subagent_tool_names() -> None:
@@ -134,7 +142,7 @@ def prefetch_subagent_tool_names() -> None:
 
     別プロセスで src.tools を読み込むため数秒かかり、以前はスキル研究室のタブを最初に開いたとき
     （GET /api/instances/{name}/skill-lab/sources）にそれを待っていた。失敗しても何もしない
-    （lru_cache は例外を覚えないため、開いたときに求め直してエラーを出す）。
+    （失敗は覚えないため、開いたときに求め直してエラーを出す）。
     """
 
     def _run() -> None:

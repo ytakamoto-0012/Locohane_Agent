@@ -58,6 +58,16 @@ _COLLECTIONS_CACHE: dict[str, tuple[tuple, list]] = {}
 _COLLECTIONS_CACHE_LOCK = threading.Lock()
 
 
+# 更新されたばかり（この時間以内）のカタログの一覧は覚えない。同じ時刻の刻みの中で2回書かれ、サイズも
+# 変わらないと指紋が同じになり、古い一覧を返してしまうため（Windows で再現。src/memory.py の _RACY_NS と同じ考え方）。
+_RACY_NS = 3_000_000_000
+
+
+def _catalog_is_racy(stamp: tuple) -> bool:
+    now = time.time_ns()
+    return any(part is not None and now - part[0] < _RACY_NS for part in stamp)
+
+
 def _catalog_stamp(directory: Path) -> tuple:
     parts = []
     for suffix in ("", "-wal"):
@@ -80,12 +90,13 @@ def list_collections_cached(directory: Path) -> list:
     before = _catalog_stamp(directory)
     with _COLLECTIONS_CACHE_LOCK:
         hit = _COLLECTIONS_CACHE.get(key)
-    if hit is not None and hit[0] == before:
+    racy = _catalog_is_racy(before)
+    if hit is not None and hit[0] == before and not racy:
         return list(hit[1])
     with vcat.open_catalog(directory) as catalog:
         collections = catalog.list_collections()
     with _COLLECTIONS_CACHE_LOCK:
-        if _catalog_stamp(directory) == before:
+        if _catalog_stamp(directory) == before and not racy:
             _COLLECTIONS_CACHE[key] = (before, collections)
         else:
             _COLLECTIONS_CACHE.pop(key, None)

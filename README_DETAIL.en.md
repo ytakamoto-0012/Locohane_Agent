@@ -1157,21 +1157,26 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   chat and the first response slow).
 - **Automatic search at the start of a turn** (`[memory] recall_enabled`, default true): for every user message the harness
   searches the related memories with its text (`relevant_memories` in `src/memory.py`: overlaps of ASCII words and character
-  bigrams of Japanese etc., weighted by rarity (IDF); name and description count double) and puts the result right after the
+  bigrams of Japanese etc., weighted by rarity (IDF); name and description count double; hiragana-only bigrams and English
+  function words are ignored) and puts the result right after the
   message as if `search_memory` had been called (an AIMessage tool_call plus a ToolMessage; `src/memory_recall.py`; a
   "Search memory" step appears in the chat). Even if the LLM forgets to search, the corrections and approaches it remembers are
-  always shown to it. `recall_max_results` (default 8) hits, each with `recall_excerpt_chars` (default 300) characters of its
-  body. Evaluations (`evals/run_case.py`) use the same function. `search_memory` matches memories containing all
+  always shown to it. `recall_max_results` (default 8; 0 turns the search off) hits, each with `recall_excerpt_chars` (default
+  300) characters of its body (none for memories shown in the system prompt, whose content is already there). The injected
+  messages are not model responses, so the token guards, the thinking level control and the tool call loop guard skip them.
+  Evaluations (`evals/run_case.py`) use the same function and mark it as `HarnessMemoryRecall` in the transcript (not counted
+  by `tool_called_*`). `search_memory` matches memories containing all
   space-separated words (ignoring full/half width) and, with no exact hit, returns memories with similar words as "close".
 - **Review of what to remember at the end of a task** (`[memory] review_enabled`, default true): when a task that used tools
   (at least `review_min_tool_calls` main tool calls; the automatic search is not counted) ends with a final answer and no memory
-  was saved or updated during the turn (including by sub-agents; judged by the modification times of the memory files,
-  `written_since` in `src/memory.py`), the harness runs a recorder (`src/memory_review.py`, system prompt
+  was saved or updated during the turn (including by sub-agents; judged by whether the turn's own processing wrote one,
+  `start_write_tracking` in `src/memory.py`, so dashboard edits and other conversations do not count), the harness runs a recorder (`src/memory_review.py`, system prompt
   `system_prompt/memory_review.md`). The recorder is a small loop with only the memory tools (`search_memory`/`read_memory`/
   `create_memory`/`update_memory`/`save_glossary_term`); it reads the record of the turn (request, additional instructions,
   summary of tool calls and results, final answer) and the related existing memories, and saves only what is worth keeping
   (updating instead of duplicating). It uses the `[llm] sub_url` endpoints, up to `review_max_iterations` (default 4) calls and
-  `review_timeout_seconds` (default 300). It runs after the final answer is shown and posts a system message such as
+  `review_timeout_seconds` (default 300). It runs as a separate task after the turn's bookkeeping (final answer, chat log,
+  snapshot, compaction), so the turn does not stay "generating" (the stop button does not stop it), and posts a system message such as
   "📝 Saved to memory: ...". Its exchange is not added to the conversation history, a failure does not affect the turn, and its
   tokens are added to the conversation total and the monthly usage.
 - **Memories shown in the system prompt**: only memories selected on the "Memories" screen of the settings dashboard

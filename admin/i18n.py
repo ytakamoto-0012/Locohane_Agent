@@ -425,5 +425,5 @@ EN: dict[str, str] = {
     'ドラフトが見つかりません: {0}': 'Draft not found: {0}',
     'このドラフトは研究テーマ {0} に取り込まれているため削除できません。先にそのテーマを削除してください。': 'This draft cannot be deleted because it is imported into the research theme {0}. Delete that theme first.',
     'ドラフトを移せませんでした（ファイルを開いていないか確かめてください）: {0}': 'Could not move the draft (check that none of its files are open): {0}',
-    '「システムプロンプトに表示」を変更するメモリーを選択してください。': 'Select the memories whose "Show in the system prompt" setting to change.',
+    '変更する種類・公開範囲・「システムプロンプトに表示」のどれかを指定してください。': 'Specify the type, the visibility or "Show in the system prompt" to change.',
 }

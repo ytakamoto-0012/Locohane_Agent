@@ -19,6 +19,7 @@ import copy
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
+from .memory_recall import is_recall_message
 from .skills import skill_content_name
 
 _MARKER_TEMPLATE = (
@@ -385,7 +386,9 @@ def last_ai_total_tokens(messages: list[BaseMessage]) -> int | None:
         （config.ini [llm].track_token_usage=false 等）場合は None。
     """
     for message in reversed(messages):
-        if not isinstance(message, AIMessage):
+        # ターンの始めの自動メモリー検索（src/memory_recall.py）が足した AIMessage はモデルの応答ではなく
+        # usage_metadata を持たない。これを直近とみなすと、ターンの最初の呼び出しで閾値判定が飛ばされる。
+        if not isinstance(message, AIMessage) or is_recall_message(message):
             continue
         usage = getattr(message, "usage_metadata", None)
         if not isinstance(usage, dict):

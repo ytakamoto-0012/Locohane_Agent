@@ -401,21 +401,27 @@ def _make_relayed_emit(session, thread_id: str, original_emit):
 # LLM 接続・サブエージェントまで閉じてしまい生成が失敗する、または古いターンの task_end が新しいターンの
 # task_start の後に届いて画面が「生成していない」状態になり、更新が止まったように見えていた（2026-11-19 ユーザー報告）。
 # on_message は、これと停止した古いターンの終了を待ってから始める（_wait_for_stopped_turn）。
-_stop_cleanups: dict[str, asyncio.Event] = {}
+# 停止が重なる（二度押し・on_stop と別セッションからの停止）と後始末も重なるため、スレッドごとに走っている
+# すべての後始末を持つ（1つだけだと、先に終わった後始末が記録を消し、まだ走っている後始末が新しいターンの
+# LLM 接続を閉じてしまう）。
+_stop_cleanups: dict[str, set[asyncio.Event]] = {}
 # 停止した古いターン・後始末を待つ時間の上限（秒）。超えたら従来どおり「処理中」として断る。
 _STOP_WAIT_SECONDS = 120.0
 
 
 def _begin_stop_cleanup(thread_id: str) -> asyncio.Event:
     event = asyncio.Event()
-    _stop_cleanups[thread_id] = event
+    _stop_cleanups.setdefault(thread_id, set()).add(event)
     return event
 
 
 def _end_stop_cleanup(thread_id: str, event: asyncio.Event) -> None:
     event.set()
-    if _stop_cleanups.get(thread_id) is event:
-        _stop_cleanups.pop(thread_id, None)
+    running = _stop_cleanups.get(thread_id)
+    if running is not None:
+        running.discard(event)
+        if not running:
+            _stop_cleanups.pop(thread_id, None)
 
 
 async def _wait_for_stopped_turn(thread_id: str) -> None:
@@ -429,11 +435,10 @@ async def _wait_for_stopped_turn(thread_id: str) -> None:
     waits: list[asyncio.Future] = []
     if old_task is not None and old_task is not current and not old_task.done() and old_task.cancelling() > 0:
         waits.append(old_task)
-    cleanup = _stop_cleanups.get(thread_id)
-    cleanup_wait: asyncio.Task | None = None
-    if cleanup is not None and not cleanup.is_set():
-        cleanup_wait = asyncio.ensure_future(cleanup.wait())
-        waits.append(cleanup_wait)
+    cleanup_waits = [
+        asyncio.ensure_future(event.wait()) for event in list(_stop_cleanups.get(thread_id, ())) if not event.is_set()
+    ]
+    waits.extend(cleanup_waits)
     if not waits:
         return
     logging.getLogger(__name__).info(
@@ -442,14 +447,19 @@ async def _wait_for_stopped_turn(thread_id: str) -> None:
     notice = cl.Message(content=i18n.t("notice.waiting_stop_cleanup"), type="system_message")
     try:
         await notice.send()
+        # すべて（古いターンとすべての後始末）が終わるまで待つ。
         await asyncio.wait(waits, timeout=_STOP_WAIT_SECONDS)
     finally:
-        if cleanup_wait is not None and not cleanup_wait.done():
-            cleanup_wait.cancel()
-    try:
-        await notice.remove()
-    except Exception:  # noqa: BLE001 - 表示の後片付けはベストエフォート
-        logging.getLogger(__name__).debug("Failed to remove the waiting notice", exc_info=True)
+        for wait in cleanup_waits:
+            if not wait.done():
+                wait.cancel()
+        # 待っている間にもう一度停止された（このタスクが cancel された）場合も、待機の知らせは消す。
+        try:
+            await notice.remove()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - 表示の後片付けはベストエフォート
+            logging.getLogger(__name__).debug("Failed to remove the waiting notice", exc_info=True)
     # 古いターンの process_message は終わる時に task_end を送るため、このターンの task_start の後に届くと
     # 画面は「生成していない」状態になる（停止ボタンが消え、送信が追加指示ではなく通常の送信になる）。送り直す。
     await cl.context.emitter.task_start()
@@ -2471,8 +2481,8 @@ def _apply_session_draft_skills() -> str:
     "visible_draft_names" に入れる（src/tools/session_tools.py 参照）。
     組み立てに使ったドラフトの要約（skill_drafts.drafts_signature）も
     "drafts_signature" に残し、on_message が変化を検知して組み直せるようにする。
-    永続メモリーの索引（MEMORY_INDEX_MARKER）も、このユーザー向けのもの（src/memory.py の
-    render_memory_block）へ差し替える。
+    「システムプロンプトに表示」のメモリー（{{memory}}）も、このユーザーに見えるもの（src/memory.py の
+    render_system_prompt_memories）で埋める。
     """
     user = cl.user_session.get("user")
     draft_user = skill_drafts.draft_owner_name(user.identifier if user else None)
@@ -4462,52 +4472,88 @@ async def _memory_recall_messages(text: str) -> list:
     return messages
 
 
-async def _run_memory_review_visible(graph, config: dict, human_message_id: str | None, turn_started_at: float) -> None:
-    """タスクの終わりの記録の見直し（src/memory_review.py）。必要なときだけ動かし、結果を system_message で知らせる。
+# 実行中の記録の見直し（_start_memory_review_in_background）。タスクが途中で GC されないよう参照を持つ。
+_memory_review_tasks: set[asyncio.Task] = set()
 
-    ツールを使ったタスクで、このターンの間にメモリーが保存・更新されていなければ（ファイルの更新日時で判定。
-    サブエージェントが保存した分も含む）、記録係に残すべきものを保存させる。記録係のやり取りは会話の履歴に
-    足さない。失敗してもターンの結果には影響させない。
+
+async def _memory_review_turn(graph, config: dict, human_message_id: str | None, memory_writes: list[str]) -> list | None:
+    """記録の見直し（src/memory_review.py）が要るなら、このターンのメッセージを返す（要らなければ None）。
+
+    ツールを使ったタスクで、このターンの処理（メイン・サブエージェント）がメモリーを1件も書いていなければ
+    （memory_writes。src/memory.py の start_write_tracking）見直す。ターンの後で会話が圧縮されても
+    範囲を見失わないよう、ターンの中で切り出しておく。
     """
     if not _config.memory_review_enabled:
-        return
+        return None
     try:
         state = await graph.aget_state(config)
     except Exception:  # noqa: BLE001 - 見直しは付帯処理
         logging.getLogger(__name__).warning("Memory review: failed to read the conversation state", exc_info=True)
-        return
+        return None
     messages = state.values.get("messages", []) if state else []
     start = next((i for i, m in enumerate(messages) if human_message_id and getattr(m, "id", None) == human_message_id), None)
     if start is None:
         start = last_user_turn_index(messages)
     if start is None:
-        return
-    turn = messages[start:]
-    viewer = cl.user_session.get(skill_drafts.SESSION_USER_KEY)
-    written = await asyncio.to_thread(memory_store.written_since, _config.memory_dir, viewer, turn_started_at)
-    if not should_review(_config, turn, memory_written=written):
-        return
-    notice = cl.Message(content=i18n.t("notice.memory_review_start"), type="system_message")
-    await notice.send()
-    result = await run_memory_review(_config, turn, viewer=viewer, language_directive=i18n.response_language_directive())
-    if result.usage["total"]:
-        usage = {
-            "input_tokens": result.usage["input"],
-            "output_tokens": result.usage["output"],
-            "total_tokens": result.usage["total"],
-        }
-        cumulative = cl.user_session.get("token_usage_cumulative") or _new_usage_totals()
-        _accumulate_usage(cumulative, usage)
-        cl.user_session.set("token_usage_cumulative", cumulative)
-        await _persist_token_usage()
-        await _record_monthly_usage(usage)
-    if result.saved:
-        notice.content = i18n.t("notice.memory_review_saved", names=", ".join(result.saved))
-    elif result.error:
-        notice.content = i18n.t("notice.memory_review_failed", error=result.error)
-    else:
-        notice.content = i18n.t("notice.memory_review_nothing")
-    await notice.update()
+        return None
+    turn = list(messages[start:])
+    return turn if should_review(_config, turn, memory_written=bool(memory_writes)) else None
+
+
+async def _run_memory_review_visible(turn: list) -> None:
+    """記録係を動かし、結果を system_message で知らせる。記録係のやり取りは会話の履歴に足さない。
+
+    どの経路で終わっても（失敗・取り消し）「見直し中」の知らせは結果の文言へ置き換える。
+    """
+    notice: cl.Message | None = None
+    outcome = i18n.t("notice.memory_review_failed", error="stopped")
+    try:
+        notice = cl.Message(content=i18n.t("notice.memory_review_start"), type="system_message")
+        await notice.send()
+        viewer = cl.user_session.get(skill_drafts.SESSION_USER_KEY)
+        result = await run_memory_review(_config, turn, viewer=viewer, language_directive=i18n.response_language_directive())
+        if result.saved:
+            outcome = i18n.t("notice.memory_review_saved", names=", ".join(result.saved))
+        elif result.error:
+            outcome = i18n.t("notice.memory_review_failed", error=result.error)
+        else:
+            outcome = i18n.t("notice.memory_review_nothing")
+        if result.usage["total"]:
+            usage = {
+                "input_tokens": result.usage["input"],
+                "output_tokens": result.usage["output"],
+                "total_tokens": result.usage["total"],
+            }
+            cumulative = cl.user_session.get("token_usage_cumulative") or _new_usage_totals()
+            _accumulate_usage(cumulative, usage)
+            cl.user_session.set("token_usage_cumulative", cumulative)
+            await _persist_token_usage()
+            await _record_monthly_usage(usage)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 見直しの失敗でターンを失敗扱いにしない
+        logging.getLogger(__name__).warning("Memory review failed", exc_info=True)
+        outcome = i18n.t("notice.memory_review_failed", error=f"{type(exc).__name__}: {exc}")
+    finally:
+        if notice is not None:
+            notice.content = outcome
+            try:
+                await notice.update()
+            except Exception:  # noqa: BLE001 - 画面を閉じた後等
+                logging.getLogger(__name__).debug("Failed to update the memory review notice", exc_info=True)
+
+
+def _start_memory_review_in_background(turn: list) -> None:
+    """ターンの後始末が終わった後、記録の見直しをターンとは別のタスクで動かす。
+
+    ターンの中で待つと、最終回答の後も最大 [memory] review_timeout_seconds の間「生成中」のままになり
+    （他のスレッドへの送信は断られ、停止ボタンを押すと会話ログ・スナップショット・圧縮まで飛ばされる）、
+    応答が終わったのに固まって見えていた。別タスクにすると停止ボタン（このターンのタスクの cancel）では
+    止まらないが、時間の上限（review_timeout_seconds）で必ず終わる。
+    """
+    task = asyncio.create_task(_run_memory_review_visible(turn))
+    _memory_review_tasks.add(task)
+    task.add_done_callback(_memory_review_tasks.discard)
 
 
 async def _on_message_impl(message: cl.Message) -> None:
@@ -4623,13 +4669,14 @@ async def _on_message_impl(message: cl.Message) -> None:
         if repaired:
             logging.getLogger(__name__).warning("Repaired %d orphaned tool_calls before the turn", repaired)
 
-    # 記録の見直し（_run_memory_review_visible）がこのターンの範囲を見つけるための id と、
-    # このターンにメモリーが書かれたかを更新日時で判定するための開始時刻。
+    # 記録の見直し（_memory_review_turn）がこのターンの範囲を見つけるための id と、
+    # このターンの処理（サブエージェントを含む）がメモリーを書いたかの記録（src/memory.py の start_write_tracking）。
     if not human_message.id:
         human_message.id = str(uuid.uuid4())
-    turn_started_at = time.time()
+    memory_writes = memory_store.start_write_tracking()
     # ターンの始めの自動メモリー検索（src/memory_recall.py）。検索した結果を発言の直後に入れる。
-    inputs = {"messages": [human_message, *await _memory_recall_messages(message.content)]}
+    # 生の UNC パスを @N に置き換えた後の本文で検索する（検索語として見せる query に生のパスが戻らないように）。
+    inputs = {"messages": [human_message, *await _memory_recall_messages(processed_text)]}
     turn_totals = {"input": 0, "output": 0, "total": 0}  # このターンのトークン使用量
     # 無言終了（tool_calls も回答テキストも無いまま終わる）を検知した場合、
     # 最終回答を促して自動的にリトライする（下のループ末尾を参照。
@@ -5506,7 +5553,7 @@ async def _on_message_impl(message: cl.Message) -> None:
             await turn_injections.show(user_injection.event_payload(leftover)["injections"])
             # 最終回答の後なので、ターン途中の割り込みと違い新しいユーザー発話として扱う
             # （mark_user_turn: [llm].reasoning_preserve で前のターンの thinking を送り続けないため）。
-            leftover_recall = await _memory_recall_messages("\n".join(i.text for i in leftover))
+            leftover_recall = await _memory_recall_messages(register_raw_unc_paths_in_text("\n".join(i.text for i in leftover)))
             inputs = {"messages": [mark_user_turn(user_injection.to_human_message(leftover, injection_token)), *leftover_recall]}
             continue
         if injection_token is not None:
@@ -5519,13 +5566,15 @@ async def _on_message_impl(message: cl.Message) -> None:
     # なる）。
     await _remove_message_ids_if_present(graph, config, loop_nudge_ids + empty_nudge_ids)
 
-    # タスクの終わりの記録の見直し（src/memory_review.py）。最終回答は表示済みなので、その後に行う。
+    # タスクの終わりの記録の見直し（src/memory_review.py）。要否と範囲だけここで決め、記録係自体は
+    # このターンの後始末（会話ログ・スナップショット・圧縮）の後に別タスクで動かす。
     try:
-        await _run_memory_review_visible(graph, config, human_message.id, turn_started_at)
+        review_turn = await _memory_review_turn(graph, config, human_message.id, memory_writes)
     except asyncio.CancelledError:
         raise
     except Exception:  # noqa: BLE001 - 見直しの失敗でターンを失敗扱いにしない
         logging.getLogger(__name__).warning("Memory review failed", exc_info=True)
+        review_turn = None
 
     # 会話ログ（[chat_log].enabled=true の場合のみ、on_chat_start で
     # cl.user_session["chat_log_path"] が設定済み）。ユーザー発言と
@@ -5576,6 +5625,9 @@ async def _on_message_impl(message: cl.Message) -> None:
     # かかりうる（実測97秒）ため、_run_context_compaction_visible で
     # Stepを表示し「思考中のまま何も起きていないように見える」状態を防ぐ。
     await _run_context_compaction_visible(graph, config, thread_id, last_usage)
+
+    if review_turn is not None:
+        _start_memory_review_in_background(review_turn)
 
 
 @cl.on_message

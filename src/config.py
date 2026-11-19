@@ -3705,27 +3705,24 @@ def load_config(
             os.getenv("MEMORY_DEFAULT_RANK", memory_section.get("default_rank", memory.DEFAULT_RANK)), "[memory].default_rank"
         ),
         memory_recall_enabled=_as_bool(os.getenv("MEMORY_RECALL_ENABLED", memory_section.get("recall_enabled", "true"))),
-        memory_recall_max_results=_as_memory_rank(
+        memory_recall_max_results=_non_negative_int(
             os.getenv("MEMORY_RECALL_MAX_RESULTS", memory_section.get("recall_max_results", 8)), "[memory].recall_max_results"
         ),
-        memory_recall_excerpt_chars=_as_memory_rank(
+        memory_recall_excerpt_chars=_non_negative_int(
             os.getenv("MEMORY_RECALL_EXCERPT_CHARS", memory_section.get("recall_excerpt_chars", 300)), "[memory].recall_excerpt_chars"
         ),
         memory_review_enabled=_as_bool(os.getenv("MEMORY_REVIEW_ENABLED", memory_section.get("review_enabled", "true"))),
-        memory_review_min_tool_calls=_as_memory_rank(
+        memory_review_min_tool_calls=_non_negative_int(
             os.getenv("MEMORY_REVIEW_MIN_TOOL_CALLS", memory_section.get("review_min_tool_calls", 1)), "[memory].review_min_tool_calls"
         ),
-        memory_review_max_iterations=max(
-            1,
-            _as_memory_rank(
-                os.getenv("MEMORY_REVIEW_MAX_ITERATIONS", memory_section.get("review_max_iterations", 4)),
-                "[memory].review_max_iterations",
-            ),
+        memory_review_max_iterations=_positive_int(
+            os.getenv("MEMORY_REVIEW_MAX_ITERATIONS", memory_section.get("review_max_iterations", 4)),
+            "[memory].review_max_iterations",
         ),
         memory_review_timeout_seconds=_as_float(
             os.getenv("MEMORY_REVIEW_TIMEOUT_SECONDS", memory_section.get("review_timeout_seconds", 300)), "[memory].review_timeout_seconds"
         ),
-        memory_system_prompt_max_chars=_as_memory_rank(
+        memory_system_prompt_max_chars=_non_negative_int(
             os.getenv("MEMORY_SYSTEM_PROMPT_MAX_CHARS", memory_section.get("system_prompt_max_chars", memory.DEFAULT_SYSTEM_PROMPT_MAX_CHARS)),
             "[memory].system_prompt_max_chars",
         ),

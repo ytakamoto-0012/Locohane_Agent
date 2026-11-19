@@ -56,6 +56,7 @@ from evals.headless_chainlit import install as install_headless_chainlit  # noqa
 from evals.headless_chainlit import patch_ask_relay  # noqa: E402
 from evals.instance import apply_instance, llm_env_from_instance, resolve_instance_name  # noqa: E402
 from evals import output_inspect, temp_dirs  # noqa: E402
+from src.memory_recall import is_recall_message  # noqa: E402
 from evals.timing_callbacks import LatencyCallbackHandler  # noqa: E402
 
 
@@ -100,6 +101,12 @@ def _serialize_messages(messages, reasoning_chars: int = _REASONING_KEEP_CHARS) 
     out = []
     for msg in messages:
         content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        if is_recall_message(msg):
+            # ターンの始めにハーネスが入れた自動メモリー検索（src/memory_recall.py）。モデルが呼んだ search_memory と
+            # 区別できるよう別の type にし、tool_calls を付けない（expect の tool_called_* や judge が数えないように）。
+            if isinstance(msg, ToolMessage):
+                out.append({"type": "HarnessMemoryRecall", "content": content})
+            continue
         entry: dict = {"type": type(msg).__name__, "content": content}
         tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:

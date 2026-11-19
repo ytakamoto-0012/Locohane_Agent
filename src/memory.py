@@ -31,11 +31,13 @@ Chainlit には依存しない。ツール層（tools/memory_tools.py）の @too
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import logging
 import math
 import re
 import threading
+import time
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -471,7 +473,10 @@ def _parse_sources(raw: object, path: Path) -> tuple[SourceFile, ...]:
 
 # 読み込んだメモリーのキャッシュ。キー: (ファイルパス, 所有者) → ((mtime_ns, size), Memory)。
 # 毎ターンの検索（relevant_memories）・一覧で全ファイルを読み直すと、件数が多いと遅くなる（1500件で約0.6秒）。
-# (mtime, size) が変わったファイルだけ読み直す（書き込みは mtime を変えるので、次の読み込みに必ず反映される）。
+# (mtime, size) が変わったファイルだけ読み直す。ただし更新されたばかり（_RACY_SECONDS 以内）のファイルは
+# 覚えない: 同じ時刻の刻みの中で同じ長さに書き直されると (mtime, size) が変わらず、古い内容を返してしまうため
+# （Windows で再現。git の racy-clean と同じ考え方）。
+_RACY_NS = 3_000_000_000
 _LOAD_CACHE: dict[tuple[str, str | None], tuple[tuple[int, int], Memory]] = {}
 _LOAD_CACHE_LOCK = threading.Lock()
 _LOAD_CACHE_MAX = 20000
@@ -491,13 +496,14 @@ def _load(path: Path, owner: str | None = None) -> Memory | None:
             _LOAD_CACHE.pop(key, None)
         raise
     stamp = (st.st_mtime_ns, st.st_size)
+    racy = time.time_ns() - st.st_mtime_ns < _RACY_NS
     with _LOAD_CACHE_LOCK:
         hit = _LOAD_CACHE.get(key)
-    if hit is not None and hit[0] == stamp:
+    if hit is not None and hit[0] == stamp and not racy:
         return hit[1]
     mem = _load_uncached(path, owner)
     with _LOAD_CACHE_LOCK:
-        if mem is None:
+        if mem is None or racy:
             _LOAD_CACHE.pop(key, None)
         else:
             if len(_LOAD_CACHE) >= _LOAD_CACHE_MAX:
@@ -691,6 +697,30 @@ def _iter_memories(memory_root: Path, memory_type: str | None = None, owner: str
             if mem is not None:
                 results.append(mem)
     return results
+
+
+# このターンの処理（メインエージェント・その配下のサブエージェントやツールのスレッド）がメモリーを書いたかの記録。
+# ターンの終わりの記録の見直し（src/memory_review.py）の要否に使う。ファイルの更新日時で見ると、管理画面の操作・
+# 他の会話・前のターンの見直しの書き込みまで「このターンで書いた」と数えてしまうため、書き込み関数が
+# 呼び出し元の文脈（contextvars。asyncio のタスク・LangChain のツール用スレッドへ引き継がれる）へ記録する。
+_TURN_WRITES: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar("locohane_memory_turn_writes", default=None)
+
+
+def start_write_tracking() -> list[str]:
+    """今の文脈（ターンを処理するタスク）でのメモリーの書き込みの記録を始め、記録先のリストを返す。
+
+    以後この文脈とそこから始めたタスク・ツールのスレッドで create/update/edit/delete したメモリーの名前が
+    このリストへ追記される。
+    """
+    writes: list[str] = []
+    _TURN_WRITES.set(writes)
+    return writes
+
+
+def _note_write(name: str) -> None:
+    writes = _TURN_WRITES.get()
+    if writes is not None:
+        writes.append(name)
 
 
 def written_since(memory_root: Path, owner: str | None, since: float) -> bool:
@@ -906,6 +936,7 @@ def create_memory(
         encoding="utf-8",
     )
     rebuild_index(memory_root, owner)
+    _note_write(name)
     logger.info("create_memory: name=%s type=%s owner=%s visibility=%s", name, memory_type, owner, final_visibility)
     return path
 
@@ -1086,6 +1117,7 @@ def _rewrite(
         mem.path.unlink()
     if rebuild:
         rebuild_index(memory_root, mem.owner)
+    _note_write(mem.name)
     logger.info("rewrite memory: name=%s type=%s owner=%s visibility=%s", mem.name, memory_type, mem.owner, final_visibility)
     return path
 
@@ -1304,6 +1336,7 @@ def delete_memory(memory_root: Path, name: str, owner: str | None = None) -> Pat
         raise ValueError(f"Memory not found: {name}")
     mem.path.unlink()
     rebuild_index(memory_root, owner)
+    _note_write(name)
     logger.info("delete_memory: name=%s owner=%s", name, owner)
     return mem.path
 
@@ -1361,6 +1394,23 @@ def _normalize_text(text: str) -> str:
     return unicodedata.normalize("NFKC", text).lower()
 
 
+# 部分一致検索用に正規化した name/description/content のキャッシュ（_TOKEN_CACHE と同じく id で引いて同一性を確かめる。
+# Memory は _LOAD_CACHE で同じオブジェクトが返るため、ファイルが変わらない限り正規化し直さない）。
+_HAYSTACK_CACHE: dict[int, tuple["Memory", str]] = {}
+_HAYSTACK_CACHE_MAX = 20000
+
+
+def _haystack(mem: Memory) -> str:
+    hit = _HAYSTACK_CACHE.get(id(mem))
+    if hit is not None and hit[0] is mem:
+        return hit[1]
+    text = _normalize_text(f"{mem.name}\n{mem.description}\n{mem.content}")
+    if len(_HAYSTACK_CACHE) >= _HAYSTACK_CACHE_MAX:
+        _HAYSTACK_CACHE.clear()
+    _HAYSTACK_CACHE[id(mem)] = (mem, text)
+    return text
+
+
 def search_memories(
     memory_root: Path, query: str, memory_type: str | None = None, *, viewer: str | None = None
 ) -> list[Memory]:
@@ -1385,7 +1435,7 @@ def search_memories(
     needles = _normalize_text(query).split()
     hits = []
     for mem in list_memories(memory_root, memory_type, viewer=viewer):
-        haystack = _normalize_text(f"{mem.name}\n{mem.description}\n{mem.content}")
+        haystack = _haystack(mem)
         if all(n in haystack for n in needles):
             hits.append(mem)
     return hits
@@ -1402,20 +1452,40 @@ _RELEVANCE_BODY_CHARS = 4000
 # 1件のメモリーの手がかりのキャッシュ（Memory は _LOAD_CACHE で同じオブジェクトが返るため、id で引いて同一性を確かめる）。
 _TOKEN_CACHE: dict[int, tuple[Memory, frozenset[str], frozenset[str]]] = {}
 _TOKEN_CACHE_MAX = 20000
+# ひらがなだけの bigram（「くだ」「ださ」「しま」「ます」等）は文法の部分で、どの依頼文にも現れるため手がかりにしない
+# （手がかりにすると、関係の無い依頼でも「ください」を含むメモリーが毎回当たっていた）。
+_HIRAGANA_ONLY_RE = re.compile(r"[\u3041-\u309f\u30fc]+")
+# 手がかりにしない英語の機能語（3文字以上の語は1語だけでも強い手がかりとみなすため、ここで除く）。
+_ASCII_STOPWORDS = frozenset(
+    "the and for you your are was were this that these those with from have has had not but can could "
+    "will would should please use what when where which who why how all any out into about our their them "
+    "there then than its it's too very just also get got let make made".split()
+)
+# ASCII の語の中で区切りとみなす記号（deploy-steps → deploy, steps も手がかりにする）。
+_ASCII_WORD_SPLIT_RE = re.compile(r"[_.\-]+")
 
 
 def _text_tokens(text: str) -> set[str]:
-    """検索の手がかり（ASCII の語と、日本語等の文字 bigram）の集合。"""
+    """検索の手がかり（ASCII の語と、日本語等の文字 bigram）の集合。
+
+    ASCII の語は、つながったまま（deploy-steps）と記号で区切った部分（deploy・steps）の両方を入れる
+    （メモリーの名前をそのまま書いた依頼でも、空白で区切って書いた依頼でも当たるように）。
+    """
     normalized = _normalize_text(text)
     tokens: set[str] = set()
     for word in _ASCII_WORD_RE.findall(normalized):
         word = word.strip("._-")
-        if len(word) >= 2:
-            tokens.add(word)
+        candidates = [word, *_ASCII_WORD_SPLIT_RE.split(word)] if _ASCII_WORD_SPLIT_RE.search(word) else [word]
+        for cand in candidates:
+            if len(cand) >= 2 and cand not in _ASCII_STOPWORDS:
+                tokens.add(cand)
     for run in _NON_ASCII_RUN_RE.findall(normalized):
         if len(run) == 1:
             continue
-        tokens.update(run[i : i + 2] for i in range(len(run) - 1))
+        for i in range(len(run) - 1):
+            gram = run[i : i + 2]
+            if not _HIRAGANA_ONLY_RE.fullmatch(gram):
+                tokens.add(gram)
     return tokens
 
 
@@ -1424,7 +1494,7 @@ def _memory_tokens(mem: Memory) -> tuple[frozenset[str], frozenset[str]]:
     hit = _TOKEN_CACHE.get(id(mem))
     if hit is not None and hit[0] is mem:
         return hit[1], hit[2]
-    head = frozenset(_text_tokens(f"{mem.name.replace('-', ' ').replace('_', ' ')}\n{mem.description}"))
+    head = frozenset(_text_tokens(f"{mem.name}\n{mem.description}"))
     body = frozenset(_text_tokens(mem.content[:_RELEVANCE_BODY_CHARS]))
     if len(_TOKEN_CACHE) >= _TOKEN_CACHE_MAX:
         _TOKEN_CACHE.clear()
@@ -1465,30 +1535,27 @@ def relevant_memories(
     mems = list_memories(memory_root, memory_type, viewer=viewer)
     if not mems:
         return []
-    tokens = [_memory_tokens(m) for m in mems]
+    # 各メモリーと重なった手がかり（集合の積で求める。依頼文が長くても速いように）。
+    overlaps: list[tuple[frozenset[str], frozenset[str]]] = []
     df: dict[str, int] = {}
-    for head, body in tokens:
-        for tok in query:
-            if tok in head or tok in body:
-                df[tok] = df.get(tok, 0) + 1
+    for mem in mems:
+        head, body = _memory_tokens(mem)
+        in_head = head & query
+        in_body = (body & query) - in_head
+        overlaps.append((in_head, in_body))
+        for tok in in_head | in_body:
+            df[tok] = df.get(tok, 0) + 1
     if not df:
         return []
     n = len(mems)
     idf = {tok: math.log(1 + n / count) for tok, count in df.items()}
     scored: list[tuple[float, int, Memory]] = []
-    for order, (mem, (head, body)) in enumerate(zip(mems, tokens)):
-        score = 0.0
-        matched = 0
-        strong = False
-        for tok, weight in idf.items():
-            if tok in head:
-                score += 2 * weight
-            elif tok in body:
-                score += weight
-            else:
-                continue
-            matched += 1
-            strong = strong or (tok.isascii() and len(tok) >= 3)
+    for order, (mem, (in_head, in_body)) in enumerate(zip(mems, overlaps)):
+        matched = len(in_head) + len(in_body)
+        if not matched:
+            continue
+        score = sum(2 * idf[tok] for tok in in_head) + sum(idf[tok] for tok in in_body)
+        strong = any(tok.isascii() and len(tok) >= 3 for tok in in_head | in_body)
         if matched >= 2 or strong:
             scored.append((score, order, mem))
     if not scored:

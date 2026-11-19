@@ -251,3 +251,152 @@ def test_knowledge_collection_list_cache_follows_catalog_changes(tmp_path):
     with vcat.open_catalog(tmp_path) as c:
         c.create("b", [str(tmp_path)])
     assert [c.name for c in knowledge.list_collections_cached(tmp_path)] == ["a", "b"]
+
+
+# --- 2026-11-20 のレビューで直した不具合の回帰テスト ---------------------------------------------------------
+
+
+def test_relevant_memories_ignores_grammar_bigrams(tmp_path):
+    """「ください」「します」等のひらがなだけの bigram だけが重なる依頼では何も当たらない。"""
+    memory.create_memory(tmp_path, "excel-format", "Excel の書式", "feedback", "表は罫線を付けてください。", owner="alice")
+    memory.create_memory(tmp_path, "lunch", "昼食の好み", "user", "そばにします。", owner="alice")
+    assert memory.relevant_memories(tmp_path, "天気を教えてください", viewer="alice") == []
+    assert memory.relevant_memories(tmp_path, "今日は何をしますか", viewer="alice") == []
+    assert [m.name for m in memory.relevant_memories(tmp_path, "Excel の書式を直して", viewer="alice")] == ["excel-format"]
+
+
+def test_relevant_memories_matches_slug_names(tmp_path):
+    _seed(tmp_path)
+    memory.create_memory(tmp_path, "vpn_config", "接続の設定", "reference", "社外から入るとき。", owner="alice")
+    assert [m.name for m in memory.relevant_memories(tmp_path, "deploy-steps を見て", viewer="alice")][:1] == ["deploy-steps"]
+    assert [m.name for m in memory.relevant_memories(tmp_path, "use the vpn_config memory", viewer="alice")] == ["vpn_config"]
+    # 英語の機能語（the 等）だけでは当たらない
+    assert memory.relevant_memories(tmp_path, "the", viewer="alice") == []
+
+
+def test_load_cache_reflects_same_size_rewrites(tmp_path):
+    """同じ長さの本文へ続けて書き直しても、古い内容を返さない（mtime の刻みが同じでも）。"""
+    memory.create_memory(tmp_path, "m", "d", "feedback", "aaaa", owner="alice")
+    for i in range(40):
+        text = "bbbb" if i % 2 == 0 else "aaaa"
+        memory.update_memory(tmp_path, "m", text, owner="alice")
+        assert memory.read_memory(tmp_path, "m", "alice").content == text
+
+
+def test_search_memories_sees_rewrites(tmp_path):
+    memory.create_memory(tmp_path, "m", "d", "feedback", "りんご", owner="alice")
+    assert [m.name for m in memory.search_memories(tmp_path, "りんご", viewer="alice")] == ["m"]
+    memory.update_memory(tmp_path, "m", "みかん", owner="alice")
+    assert memory.search_memories(tmp_path, "りんご", viewer="alice") == []
+    assert [m.name for m in memory.search_memories(tmp_path, "みかん", viewer="alice")] == ["m"]
+
+
+def test_build_recall_messages_zero_results_disables(tmp_path):
+    _seed(tmp_path)
+    config = types.SimpleNamespace(memory_dir=tmp_path, memory_recall_enabled=True, memory_recall_max_results=0)
+    assert memory_recall.build_recall_messages(config, "月次レポート", "alice") == ([], 0)
+
+
+def test_build_recall_messages_skips_excerpt_of_pinned(tmp_path):
+    _seed(tmp_path)
+    memory.set_in_system_prompt(tmp_path, [memory.read_memory(tmp_path, "monthly-report", "alice")], True)
+    config = types.SimpleNamespace(memory_dir=tmp_path, memory_recall_enabled=True, memory_recall_max_results=5, memory_recall_excerpt_chars=50)
+    messages, _ = memory_recall.build_recall_messages(config, "月次レポートをお願い", "alice")
+    assert "monthly-report" in messages[1].content
+    assert "売上" not in messages[1].content
+    assert "in the system prompt" in messages[1].content
+
+
+def test_token_guard_skips_recall_message():
+    from src.context_trim import last_ai_total_tokens
+
+    messages = [
+        HumanMessage(content="前"),
+        AIMessage(content="答え", usage_metadata={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120000}),
+        *_turn(tool_calls=0)[:3],
+    ]
+    assert last_ai_total_tokens(messages) == 120000
+
+
+def test_tool_loop_guard_does_not_count_recall():
+    from src.tool_loop_guard import detect_tool_call_loop
+
+    call = {"name": "search_memory", "args": {"query": "q"}}
+    messages = [HumanMessage(content="x"), *_turn(tool_calls=0)[1:3]]
+    messages += [AIMessage(content="", tool_calls=[{**call, "id": "m1"}]), ToolMessage(content="r", tool_call_id="m1", name="search_memory")]
+    config = types.SimpleNamespace(tool_loop_guard_enabled=True, tool_loop_guard_max_repeats=2, tool_loop_guard_exclude_tools=[])
+    assert detect_tool_call_loop(messages, config) is None
+
+
+def test_write_tracking_follows_threads_and_ignores_other_contexts(tmp_path):
+    import contextvars
+
+    async def turn():
+        writes = memory.start_write_tracking()
+        await asyncio.to_thread(memory.create_memory, tmp_path, "m1", "d", "feedback", "c", owner="alice")
+        return writes
+
+    writes = asyncio.run(turn())
+    assert writes == ["m1"]
+    # 記録を始めていない文脈（管理画面・他の会話）の書き込みは数えない
+    contextvars.copy_context().run(memory.update_memory, tmp_path, "m1", "c2", owner="alice")
+    assert writes == ["m1"]
+
+
+def test_review_prompt_falls_back_and_has_today(tmp_path, monkeypatch):
+    """独自のプロンプトフォルダに memory_review.md が無くても同梱のものを使い、今日の日付を添える。"""
+    (tmp_path / "prompts").mkdir()
+    config = types.SimpleNamespace(system_prompt_path=tmp_path / "prompts" / "system_prompt.md")
+    assert "{{memory_visibility}}" not in memory_review.review_system_prompt(config)
+
+    seen = {}
+
+    class _Model(_FakeModel):
+        async def ainvoke(self, messages):
+            seen["system"] = messages[0].content
+            return AIMessage(content="Nothing to save")
+
+    monkeypatch.setattr(_state, "_MEMORY_ROOT", tmp_path)
+    config = types.SimpleNamespace(
+        memory_dir=tmp_path,
+        system_prompt_path=tmp_path / "prompts" / "system_prompt.md",
+        memory_review_max_iterations=2,
+        memory_review_timeout_seconds=30,
+    )
+    result = asyncio.run(memory_review.run_memory_review(config, _turn(tool_calls=1), viewer="alice", model=_Model()))
+    assert result.error is None
+    assert time.strftime("%Y-%m-%d") in seen["system"]
+
+
+def test_review_errors_are_reported_not_raised(tmp_path, monkeypatch):
+    """プロンプトが読めない等、記録係を始める前の失敗も result.error にする（例外を投げて知らせを残さない）。"""
+
+    def _broken(*args, **kwargs):
+        raise FileNotFoundError("memory_review.md")
+
+    monkeypatch.setattr(memory_review, "review_system_prompt", _broken)
+    config = types.SimpleNamespace(memory_dir=tmp_path, memory_review_timeout_seconds=30)
+    model = _FakeModel()
+    result = asyncio.run(memory_review.run_memory_review(config, _turn(tool_calls=1), viewer="alice", model=model))
+    assert result.error is not None and "FileNotFoundError" in result.error
+    assert model.calls == 0
+
+
+def test_run_script_sandbox_alias_is_one_way(tmp_path, monkeypatch):
+    from src.config import SandboxDirEntry
+    from src.tools import _subprocess_env
+
+    sync_dir = tmp_path / "sync"
+    bg_dir = tmp_path / "bg"
+    for d in (sync_dir, bg_dir):
+        d.mkdir()
+    monkeypatch.setattr(
+        _state,
+        "_ALLOW_SANDBOX_DIRS",
+        (
+            SandboxDirEntry(dir=sync_dir, allow_entries=frozenset({"run_script"})),
+            SandboxDirEntry(dir=bg_dir, allow_entries=frozenset({"run_script_background"})),
+        ),
+    )
+    assert _subprocess_env._allowed_sandbox_dirs_for("s", "a.py") == [sync_dir]
+    assert _subprocess_env._allowed_sandbox_dirs_for("s", "a.py", "run_script_background") == [sync_dir, bg_dir]
