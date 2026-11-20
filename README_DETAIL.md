@@ -498,7 +498,7 @@ Locohane/
 │   └── verifier.md          # 成果物検証用エージェント種別
 ├── skills/
 │   ├── SKILLS_README.md    # スキル開発者向けガイド
-│   ├── skill-creator/       # ユーザー別ドラフトスキルの作成・改善案の作成・eval検証を行うメタスキル
+│   ├── skill-creator/       # ユーザー別ドラフトスキルの作成・改善案の作成・内容の検証を行うメタスキル
 │   ├── archive-tools/       # zip/tar等の圧縮・解凍・中身の一覧（標準ライブラリのみ）
 │   ├── docx-read/           # docx読込専用（段落・表・文書プロパティ・Track Changes有無）
 │   ├── docx-create/         # docx新規生成（見出し/段落/表/画像/ページ設定等）
@@ -889,7 +889,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 ^
 
 | スキル | 配置場所 | 種別 | 内容 |
 |--------|----------|------|------|
-| `skill-creator` | `skills/` | スクリプト実行を伴う | 自分専用のドラフトスキルの作成・既存スキルの改善案の作成・本文の書き込み・evalハーネスによる繰り返し評価（スキル安定化トライアウト）・description のトリガー精度最適化を行うメタスキル。正式スキルは書き換えない（下記「ドラフトスキル（ユーザー別）と昇格」）。 |
+| `skill-creator` | `skills/` | スクリプト実行を伴う | 自分専用のドラフトスキル（SKILL.md だけの短い最初の版）の作成・既存スキルの改善案の作成・本文の書き込み・内容の検証を行うメタスキル。評価と育成はスキル研究室で行う。正式スキルは書き換えない（下記「ドラフトスキル（ユーザー別）と昇格」）。 |
 | `pdf-tools` | `skills/` | スクリプト実行を伴う | PDFのテキスト抽出・ページ画像化（レイアウト/図表/スキャン内容の視覚把握）・PDF生成（日本語対応）。 |
 | `docx-read` | `skills/` | スクリプト実行を伴う | docxの読込専用（段落・表・文書プロパティ・Track Changes有無・画像有無の取得）。 |
 | `docx-create` | `skills/` | スクリプト実行を伴う | docxの新規生成（見出し/段落/箇条書き/表/画像/ページ設定/ヘッダーフッター等）。 |
@@ -933,6 +933,13 @@ LLM側の共通変換ルール（`system_prompt/system_prompt.md`・`system_prom
 利用者（スキル開発の専門家とは限らない）がチャットから skill-creator で作るスキルは、
 正式スキルではなく**ドラフト**として `[skill_creator] draft_dir`（既定 `data/<インスタンス名>/skill_drafts/`）の
 `<ユーザー名>/<スキル名>/` に置かれる。設計の要点:
+
+- **ドラフトは小さく作り、評価で育てる**: チャット側の skill-creator は、SKILL.md だけの短い最初の版（目安30行程度）を書き、
+  形式の検証（`validate_skill.py`）と読み直しで内容を確かめるところまでを行う。ローカルLLMでの評価ループは回さない。
+  最初から詳しく書いたものを後から削るのは難しく、使われないスクリプトや長い注意書きが残りやすいため、
+  繰り返し評価と「失敗したところだけ直す・必要になったらスクリプトを足す」育成はスキル研究室で行う。
+  雛形（`scaffold_skill.py`）は `references/` を作らず、`scripts/` は `--with-script` 指定時だけ作る。
+  新規ドラフトの本文が長い・スクリプトや references/ がある場合、`validate_skill.py` の `warnings` に出る（合否には使わない）。
 
 - **本番への混入を構造的に防ぐ**: `draft_dir` は起動時のスキル走査対象（`skills_dir`・`agents_dir`・
   `project_locohane_dir`）と同一・包含関係にすると起動時にエラーになる（`src/config.py` の `_validate_skill_draft_dir`）。
@@ -1223,7 +1230,7 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
   同じく選んだメモリー（最大20件）から**ドラフトスキルを作成**できる（「選択したメモリーからドラフトスキルを作成」。
   `admin/memories.py` の `draft-skill`）。LLM（下の「AIで翻訳」と同じ接続先）がメモリーの内容を1つの SKILL.md に
   まとめ、作成先ユーザーのドラフト置き場 `[skill_creator] draft_dir/<ユーザー>/<スキル名>/` へ skill-creator の
-  `scaffold_skill.py` と同じ構成（`references/`・`evals/`・`_draft_meta.json`。元のメモリーは `source_memories` に記録）で保存する。
+  `scaffold_skill.py` と同じ構成（`evals/`・`_draft_meta.json`。元のメモリーは `source_memories` に記録）で保存する。
   作成先ユーザーは既定 `anonymous` で、ログインユーザー・既存のドラフト／メモリーの所有者から選べる。スキル名は
   空欄なら LLM が決める（正式スキル・既存のドラフトと同じ名前は拒否）。ドラフトはそのユーザーの次のメッセージから
   会話で使え、正式化はほかのドラフトと同じくスキル研究室で行う。他のユーザーの個人用のメモリーを選ぶと、その内容が
@@ -2031,7 +2038,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[file_tools_duplicate_guard]` | `max_calls` | 同一シグネチャの呼び出しを許可する回数（既定1回） | `FILE_TOOLS_DUPLICATE_GUARD_MAX_CALLS` |
 | `[file_tools_duplicate_guard]` | `carry_over_to_main` | サブエージェント内の呼び出し履歴をメイン判定へ持ち越すかどうか | `FILE_TOOLS_DUPLICATE_GUARD_CARRY_OVER` |
 | `[main_agent_tool_guard]` | `mode` | メインエージェント自身がビルトインツール・`run_script`配下のスキルスクリプトを直接呼び出せる回数を制限するガードのモード（`dispatch_agent`配下のサブエージェントは対象外）。`false`=無効、`tools_skills_only`=MCP動的ツール（`mcp__server__tool`形式）のみ常に許可しそれ以外は制限、`all`（既定）=MCP動的ツールも含め全て制限。トークン消費の大きい重量系ツールの連打によるトークン上限到達を防ぐ | `MAIN_AGENT_TOOL_GUARD_MODE` |
-| `[main_agent_tool_guard]` | `visibility_mode` | `mode!=false`時の可視化モード。対象はスキル一覧とビルトインツールの呼べない名前案内（`mode=all`時はMCP動的ツール名も混ざりうる）。`strict`（既定）は呼び出せないツール・スキルを一覧から完全除外、`hint`は一覧に出しつつ直接実行不可のものへ`dispatch_agentへ委譲`という注記を付ける | `MAIN_AGENT_TOOL_GUARD_VISIBILITY_MODE` |
+| `[main_agent_tool_guard]` | `visibility_mode` | `mode!=false`時の可視化モード。対象はスキル一覧とビルトインツールの呼べない名前案内（`mode=all`時はMCP動的ツール名も混ざりうる）。`strict`（既定）は呼び出せないツール・スキルを一覧から完全除外（除外したスキルがあれば「explore に目録から選ばせ、実行は worker へ委譲する」指示を一覧の末尾に足し、目録＝除外したスキルの名前と説明は explore のプロンプトの `{{skill_catalog}}` にだけ載せる。スキルが多くてもメインのプロンプトは増えない）、`hint`は一覧に出しつつ直接実行不可のものへ`dispatch_agentへ委譲`という注記を付ける | `MAIN_AGENT_TOOL_GUARD_VISIBILITY_MODE` |
 | `[main_agent_tool_guard]` | `allow_entries` | 許可リスト（ホワイトリスト）。`["ツール名", max_calls]`または`[["スキル名","スクリプトファイル名"], max_calls]`の要素からなるリスト形式で、未登録のツール・スキルスクリプトは`mode=all`（または`tools_skills_only`時のMCP以外）の間メインエージェントから一切呼び出せない。`max_calls`は`0`=登録のみで完全ブロック、`-1`=無制限、`1`以上=その回数まで許可（他のガードと0/-1の意味が逆なので注意） | `MAIN_AGENT_TOOL_GUARD_ALLOW_ENTRIES` |
 | `[graph]` | `implementation` | ReAct ループの実装（`handwritten` または `prebuilt`） | `GRAPH_IMPL` |
 | `[graph]` | `recursion_limit` | メインReActループ（agent→tools遷移）の最大反復回数。超過時は打ち切りメッセージを表示 | `GRAPH_RECURSION_LIMIT` |

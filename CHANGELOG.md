@@ -30,6 +30,21 @@
   `cadquery` は LGPL の `casadi` と OpenCASCADE 本体を連れてくるため、README_DETAIL.md「依存パッケージ」の記述を更新し、
   改変してはいけないパッケージ（LGPL・MPL 2.0 のもの）を「改変禁止のパッケージ」として明記しました。
 
+## [0.7.13] - 2026-11-21
+
+### 変更
+
+- チャットの skill-creator が作るドラフトスキルを、SKILL.md だけの短い最初の版（目安30行程度）にしました。
+  不要なスクリプトや長い注意書きを最初から書かず、評価と育成はスキル研究室で行います。チャット側ではローカルLLMでの
+  評価ループ（繰り返し評価・トリガー精度の改善）を回さず、形式の検証と読み直しで内容を確かめるだけにしました。
+  - 雛形（`scaffold_skill.py`）はスクリプト実行の手順と `references/` を入れなくなりました（`scripts/` は `--with-script` 指定時だけ）。
+  - `validate_skill.py` が、新規ドラフトの本文が長いとき・スクリプトや `references/` があるときに `warnings` を出します（合否には使いません）。
+  - スキル研究室の「新しいスキルを AI で作成」と、メモリーからのドラフトスキル作成も、短い最初の版を書くようにしました。
+- `[main_agent_tool_guard] visibility_mode = strict` で一覧から外したスキルがあるとき、メインエージェントに「一覧に無いスキルが
+  要りそうなら explore に目録から選ばせ、実行は worker へ委譲する」よう指示するようにしました。外したスキルの名前と説明は
+  explore のプロンプトにだけ載せるため（`agents/explore.md` の `{{skill_catalog}}`）、スキルが増えてもメインエージェントの
+  プロンプトは増えません。これまでは外したスキルをメインエージェントが知る手段がなく、使われないままでした。
+
 ## [0.7.12] - 2026-11-20
 
 ### 追加
@@ -1677,7 +1692,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.12...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.13...HEAD
+[0.7.13]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.12...v0.7.13
 [0.7.12]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.11...v0.7.12
 [0.7.11]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.10...v0.7.11
 [0.7.10]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.9...v0.7.10

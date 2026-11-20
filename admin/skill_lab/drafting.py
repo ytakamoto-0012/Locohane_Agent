@@ -71,7 +71,11 @@ Do not write verify_script (a checking script in the input file folders that a p
 _SKILL_SYSTEM = """You write skills (SKILL.md) for a business AI assistant.
 A SKILL.md starts with frontmatter (name, description) and the body describes the procedure.
 - The description is the only trigger clue. Write concretely "what it does" and "for what kind of instructions it is used" (1024 characters or fewer).
-- The body is 500 lines or fewer. If it uses scripts, write call examples in the form `python <script>.py <args...>` and also explain what the output means.
+- This is the first version; the evaluation loop grows it later by fixing what fails. Keep it small: about 30 lines or fewer,
+  1-2 sentences of purpose, 3-7 numbered steps, a few notes. Write only what the order asks for; no background, no
+  examples beyond one, no rules for situations nobody mentioned.
+- Use only instructions. Do not plan scripts or references/: the assistant's usual tools do the work, and a script is
+  added later only if the evaluation shows mechanical work going wrong.
 - Do not write tool names (run_script, etc.) in the body.
 - The body is read by a fairly small local LLM: short sentences, one rule per line with what to do instead, conditions as bullet
   points, no long background or many examples. Write example names and values in the users' language.

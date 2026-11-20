@@ -1,4 +1,4 @@
-"""新しいドラフトスキルの雛形（SKILL.md + references/ + evals/ +（任意で）scripts/）を作る。
+"""新しいドラフトスキルの雛形（SKILL.md + evals/ +（任意で）scripts/）を作る。
 
 skill-creator スキルの実行スクリプト（progressive disclosure 第3段階）。
 
@@ -29,6 +29,9 @@ from _common import (
     write_meta,
 )
 
+# 最初の版は SKILL.md だけの短いものにする（評価で失敗が出たところだけ足して育てる）。
+# 雛形にスクリプト実行の手順や references/ を入れると、不要でもスクリプトや長い参照資料を
+# 書き足す方向に誘導してしまうため入れない。
 SKILL_MD_TEMPLATE = """---
 name: {name}
 description: {description}
@@ -36,20 +39,27 @@ description: {description}
 
 # {name}
 
-(Write in 1-2 sentences what this skill does)
+(1-2 sentences: what this skill does)
 
-## Procedure
+## Steps
 
-1. (What to do first)
-2. Run the following command:
-   ```
-   python run.py --input <input file>
-   ```
-3. Write what the keys of the output JSON mean and how to report to the user.
+1. (step)
+2. (step)
+3. (how to answer the user)
 
 ## Notes
 
-- (How to handle invalid input, what not to do)
+- (only rules you already know are needed; leave this out if there are none)
+"""
+
+SCRIPT_STEP = """
+## Script
+
+```
+python run.py --input <input file>
+```
+
+(what the keys of the output JSON mean)
 """
 
 SAMPLE_SCRIPT_TEMPLATE = '''"""Script that runs the {name} skill.
@@ -80,7 +90,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", required=True, help="skill name (lowercase letters, digits and hyphens)")
     parser.add_argument("--description", required=True, help="what it does and for what kind of messages it is used")
-    parser.add_argument("--with-script", action="store_true", help="also create a sample scripts/run.py")
+    parser.add_argument(
+        "--with-script",
+        action="store_true",
+        help="also create a sample scripts/run.py (only when the work cannot be done with the assistant's usual tools)",
+    )
     args = parser.parse_args()
 
     error = validate_name_description(args.name, args.description)
@@ -96,8 +110,10 @@ def main() -> int:
         raise SkillCreatorError(f"A draft with the same name already exists: {ref.full_name}")
 
     ref.dir.mkdir(parents=True)
-    (ref.dir / "SKILL.md").write_text(SKILL_MD_TEMPLATE.format(name=args.name, description=args.description), encoding="utf-8")
-    (ref.dir / "references").mkdir()
+    skill_md = SKILL_MD_TEMPLATE.format(name=args.name, description=args.description)
+    if args.with_script:
+        skill_md += SCRIPT_STEP
+    (ref.dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
     (ref.dir / DRAFT_EVALS_DIRNAME).mkdir()
     if args.with_script:
         (ref.dir / "scripts").mkdir()
@@ -119,7 +135,10 @@ def main() -> int:
         {
             "draft": ref.full_name,
             "skill_dir": str(ref.dir),
-            "note": "From the next message, you can use this skill in your own conversations. Rewrite the body with write_draft_file.py.",
+            "note": (
+                "From the next message, you can use this skill in your own conversations. Rewrite the body with write_draft_file.py. "
+                "Keep the first version short (SKILL.md only, about 30 lines or fewer); add only what the evaluation shows is missing."
+            ),
         }
     )
     return 0

@@ -494,7 +494,7 @@ Locohane/
 │   └── verifier.md          # agent kind for verifying deliverables
 ├── skills/
 │   ├── SKILLS_README.md    # guide for skill developers
-│   ├── skill-creator/       # meta-skill for creating per-user draft skills, making improvements, and eval verification
+│   ├── skill-creator/       # meta-skill for creating per-user draft skills, making improvements, and checking their content
 │   ├── docx-read/           # docx read-only (paragraphs, tables, document properties, whether there are Track Changes)
 │   ├── docx-create/         # generating new docx (headings/paragraphs/tables/images/page setup, etc.)
 │   ├── docx-edit/           # editing existing docx (find/replace, Track Changes, adding/deleting paragraphs)
@@ -880,7 +880,7 @@ The SKILL.md files, references and script messages of the bundled skills are wri
 
 | Skill | Location | Type | Details |
 |--------|----------|------|------|
-| `skill-creator` | `skills/` | Runs scripts | Meta-skill for creating your own draft skills, making improvements of existing skills, writing their bodies, repeated evaluation with the eval harness (skill stabilization tryout) and optimizing the trigger accuracy of descriptions. Does not rewrite official skills (see "Draft skills (per user) and promotion" below). |
+| `skill-creator` | `skills/` | Runs scripts | Meta-skill for creating your own draft skills (a short first version with SKILL.md only), making improvements of existing skills, writing their bodies and checking their content. Evaluation and growing are done in the Skill Lab. Does not rewrite official skills (see "Draft skills (per user) and promotion" below). |
 | `pdf-tools` | `skills/` | Runs scripts | Extracting text from PDFs, rendering pages as images (visually grasping layout/figures/scanned content), generating PDFs (Japanese supported). |
 | `docx-read` | `skills/` | Runs scripts | docx read-only (getting paragraphs, tables, document properties, whether there are Track Changes and images). |
 | `docx-create` | `skills/` | Runs scripts | Generating new docx (headings/paragraphs/bullets/tables/images/page setup/header and footer, etc.). |
@@ -922,6 +922,13 @@ do you need to state how to use `check_script_job`/`stop_script_job` in SKILL.md
 Skills that users (not necessarily skill development experts) create with skill-creator from the chat are placed
 not as official skills but as **drafts** in `<username>/<skill name>/` of `[skill_creator] draft_dir` (default `data/<instance name>/skill_drafts/`).
 Key points of the design:
+
+- **Drafts start small and grow through evaluation**: skill-creator in the chat writes a short first version with SKILL.md only
+  (about 30 lines), and only checks its content with format validation (`validate_skill.py`) and a re-read. It does not run
+  an evaluation loop with the local LLM. A detailed first version is hard to cut down later and tends to keep unused scripts
+  and long notes, so repeated evaluation and growing ("fix only what failed, add a script only when needed") happen in the Skill Lab.
+  The template (`scaffold_skill.py`) does not create `references/`, and creates `scripts/` only with `--with-script`.
+  When a new draft has a long body, scripts or references/, `validate_skill.py` reports it in `warnings` (not used for pass/fail).
 
 - **Structurally preventing them from leaking into production**: making `draft_dir` the same as, or nested with, the startup skill scan targets (`skills_dir`, `agents_dir`,
   `project_locohane_dir`) causes an error at startup (`_validate_skill_draft_dir` in `src/config.py`).
@@ -1218,7 +1225,7 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   ("Create a draft skill from selected memories"; `draft-skill` in `admin/memories.py`): the LLM (the same endpoint as
   "Translate with AI" below) combines their content into one SKILL.md and saves it in the chosen user's draft location
   `[skill_creator] draft_dir/<user>/<skill name>/` with the same layout as skill-creator's `scaffold_skill.py`
-  (`references/`, `evals/`, `_draft_meta.json`; the source memories are recorded in `source_memories`). The user defaults
+  (`evals/`, `_draft_meta.json`; the source memories are recorded in `source_memories`). The user defaults
   to `anonymous` and can be chosen from the login users and the owners of existing drafts and memories. If the skill name
   is left empty, the LLM chooses it (names of official skills and existing drafts are rejected). The user can use the
   draft in conversations from their next message, and it is made official in the Skill Lab like other drafts. If you
@@ -1991,7 +1998,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[file_tools_duplicate_guard]` | `max_calls` | Number of calls allowed with the same signature (default 1) | `FILE_TOOLS_DUPLICATE_GUARD_MAX_CALLS` |
 | `[file_tools_duplicate_guard]` | `carry_over_to_main` | Whether the call history within sub-agents carries over to the main agent's checks | `FILE_TOOLS_DUPLICATE_GUARD_CARRY_OVER` |
 | `[main_agent_tool_guard]` | `mode` | Mode of the guard limiting how many times the main agent itself can call built-in tools and skill scripts under `run_script` directly (sub-agents under `dispatch_agent` are not covered). `false` = disabled, `tools_skills_only` = always allow only MCP dynamic tools (`mcp__server__tool` form) and limit everything else, `all` (default) = limit everything including MCP dynamic tools. Prevents hitting the token limit by hammering heavy tools with large token consumption | `MAIN_AGENT_TOOL_GUARD_MODE` |
-| `[main_agent_tool_guard]` | `visibility_mode` | Visibility mode when `mode!=false`. Covers the skill list and the notice of built-in tool names that cannot be called (MCP dynamic tool names can be mixed in with `mode=all`). `strict` (default) removes uncallable tools and skills from the lists entirely; `hint` lists them but adds a note to delegate to dispatch_agent on those that cannot be run directly | `MAIN_AGENT_TOOL_GUARD_VISIBILITY_MODE` |
+| `[main_agent_tool_guard]` | `visibility_mode` | Visibility mode when `mode!=false`. Covers the skill list and the notice of built-in tool names that cannot be called (MCP dynamic tool names can be mixed in with `mode=all`). `strict` (default) removes uncallable tools and skills from the lists entirely (if skills were removed, an instruction to have explore choose one from the catalog and delegate running it to worker is added at the end of the list, and the catalog, the names and descriptions of the removed skills, is put only in explore's prompt via `{{skill_catalog}}`, so the main prompt does not grow with the number of skills); `hint` lists them but adds a note to delegate to dispatch_agent on those that cannot be run directly | `MAIN_AGENT_TOOL_GUARD_VISIBILITY_MODE` |
 | `[main_agent_tool_guard]` | `allow_entries` | Allow list (whitelist). A list of elements `["tool name", max_calls]` or `[["skill name","script file name"], max_calls]`; unregistered tools and skill scripts cannot be called at all from the main agent while `mode=all` (or except MCP with `tools_skills_only`). `max_calls`: `0` = registered but completely blocked, `-1` = unlimited, `1` or more = allowed up to that many times (note that the meanings of 0/-1 are the reverse of the other guards) | `MAIN_AGENT_TOOL_GUARD_ALLOW_ENTRIES` |
 | `[graph]` | `implementation` | Implementation of the ReAct loop (`handwritten` or `prebuilt`) | `GRAPH_IMPL` |
 | `[graph]` | `recursion_limit` | Maximum iterations of the main ReAct loop (agent -> tools transitions). A cutoff message is shown when exceeded | `GRAPH_RECURSION_LIMIT` |

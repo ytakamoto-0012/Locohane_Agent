@@ -109,7 +109,7 @@ def test_create_draft_skill_from_memories(env):
     fm = _parse_frontmatter(text)
     assert fm == {"name": "monthly-report-check", "description": "Checks the monthly report: totals and format"}
     assert "1. Open the report." in text and "```" not in text
-    assert (skill_dir / "references").is_dir() and (skill_dir / "evals").is_dir()
+    assert (skill_dir / "evals").is_dir() and not (skill_dir / "references").exists()
     meta = json.loads((skill_dir / "_draft_meta.json").read_text(encoding="utf-8"))
     assert meta["status"] == "draft" and meta["author"].endswith("(dashboard)")
     assert meta["source_memories"] == [{"name": "rule-a", "owner": "alice"}, {"name": "common-b", "owner": None}]
