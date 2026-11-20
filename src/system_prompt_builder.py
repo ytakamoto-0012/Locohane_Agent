@@ -24,6 +24,45 @@ if TYPE_CHECKING:
 # メインエージェントが直接呼べないビルトインツールの案内（visibility_mode が all / hint のとき）
 _BLOCKED_TOOLS_HINT = "The following built-in tools cannot be called directly (delegate to dispatch_agent if you need details or execution): "
 
+# visibility_mode=strict で一覧から外したスキルがあるとき、メインの {{skills}} の末尾に足す指示。
+# メインは外したスキルの名前を知らないため、選定は目録（{{skill_catalog}}）を持つ explore に任せる。
+# 目録をメインの文脈に入れないことで、スキルが多くてもメインのトークンを増やさない（2026-11-20 ユーザー要望）。
+_STRICT_HIDDEN_SKILLS_NOTE = (
+    "{count} more skills exist but are not listed here (they cannot be run by you directly). "
+    "Do not guess their names. When the task needs a skill (creating, converting or reading a particular kind of file, "
+    "using an external service, etc.) and none listed above fits, first delegate to `explore`: "
+    '"From the skill catalog, find the skill for <what the task needs>, read its SKILL.md with `read_skill`, and report '
+    'the skill name, the script to run, its arguments and the inputs it needs (or that no skill fits)." '
+    "Then write that report into the task and delegate the execution to `worker`. "
+    "If `explore` reports that no skill fits, do the task without a skill."
+)
+
+# explore の {{skill_catalog}} に入れる目録の見出しと説明（strict で外したスキルがあるときだけ）
+_SKILL_CATALOG_HEADER = (
+    "### Skill catalog (for choosing a skill for the main agent)\n\n"
+    "The main agent cannot see the skills below. When the task asks you to find a skill for some work, choose from "
+    "this catalog (and the skills above), read the chosen SKILL.md with `read_skill`, and report the skill name, the "
+    "script to run, its arguments and the inputs it needs; if none fits, say so. Do not run them yourself unless they "
+    "are in the run_script list above: the main agent hands the execution to `worker`.\n\n"
+)
+
+
+def strict_hidden_skills(skills: list, config: "Config") -> list:
+    """visibility_mode=strict でメインの {{skills}} から外れるスキル（strict 以外・mode=false では常に空）。"""
+    from .skills import is_skill_directly_runnable
+
+    if config.main_agent_tool_guard_visibility_mode != "strict" or config.main_agent_tool_guard_mode == "false":
+        return []
+    return [s for s in skills if not is_skill_directly_runnable(s, config)]
+
+
+def render_skill_catalog_block(skills: list, config: "Config") -> str:
+    """explore の {{skill_catalog}} に入れる文字列。strict で外したスキルが無ければ空文字。"""
+    from .skills import render_skills_block
+
+    hidden = strict_hidden_skills(skills, config)
+    return f"{_SKILL_CATALOG_HEADER}{render_skills_block(hidden)}" if hidden else ""
+
 
 def main_skills_block(skills: list, config: "Config") -> tuple[str, str]:
     """メインエージェントの {{skills}} と {{main_agent_blocked_tools_hint}} に入れる文字列。
@@ -31,7 +70,8 @@ def main_skills_block(skills: list, config: "Config") -> tuple[str, str]:
     [main_agent_tool_guard] visibility_mode で見せ方が変わる（mode=false なら絞り込み・差し替えは起きない）。
       all   : 全スキルを出し、直接扱えないものは説明の末尾に注記。呼べないツール名も案内する。
       hint  : 全スキル名を出し、直接扱えないものは説明を「委譲する」旨の固定文言に差し替える。呼べないツール名も案内する。
-      strict: 直接扱えないスキルは一覧から外す。
+      strict: 直接扱えないスキルは一覧から外し、外したものがあれば「explore に目録から選ばせる」指示を末尾に足す
+              （目録は explore の {{skill_catalog}}、render_skill_catalog_block 参照）。
     サブエージェントの {{skills}} はこの設定と関係なく build_prompts() が別に組み立てる。
     """
     from .skills import (
@@ -50,7 +90,12 @@ def main_skills_block(skills: list, config: "Config") -> tuple[str, str]:
             block = render_skills_block_with_hint(skills, config)
         blocked = list_blocked_tool_names_for_hint(get_all_tools(), config)
         return block, (_BLOCKED_TOOLS_HINT + ", ".join(blocked)) if blocked else ""
-    return render_skills_block(filter_skills_for_main_agent_guard(skills, config)), ""
+    hidden = strict_hidden_skills(skills, config)
+    if not hidden:
+        return render_skills_block(filter_skills_for_main_agent_guard(skills, config)), ""
+    visible = filter_skills_for_main_agent_guard(skills, config)
+    listed = render_skills_block(visible) if visible else "(no skills you can run directly)"
+    return f"{listed}\n\n{_STRICT_HIDDEN_SKILLS_NOTE.format(count=len(hidden))}", ""
 
 
 def build_prompts(config: "Config", skills: list, agent_type_defs: list) -> tuple[str, list]:
@@ -80,6 +125,7 @@ def build_prompts(config: "Config", skills: list, agent_type_defs: list) -> tupl
     # [subagent].agent_type_run_script_allowlist に登録がある種別だけ登録スキルへ絞る（{{all_skills}} は全スキル）。
     agent_types_block = render_agent_types_block(agent_type_defs)
     all_skills_block = render_skills_block(skills)
+    skill_catalog_block = render_skill_catalog_block(skills, config)
     agents = [
         replace(
             a,
@@ -88,6 +134,7 @@ def build_prompts(config: "Config", skills: list, agent_type_defs: list) -> tupl
                 render_skills_block(filter_skills_for_agent_type(skills, a.name, config.subagent_agent_type_run_script_allowlist)),
             )
             .replace("{{all_skills}}", all_skills_block)
+            .replace("{{skill_catalog}}", skill_catalog_block)
             .replace("{{agent_types}}", agent_types_block)
             .replace(
                 "{{run_script_allowlist}}",

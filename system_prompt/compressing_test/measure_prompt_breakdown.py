@@ -78,16 +78,14 @@ from src.project_instructions import render_project_instructions_block  # noqa: 
 from src.skills import (  # noqa: E402
     build_system_prompt_from_block,
     filter_skills_for_agent_type,
-    filter_skills_for_main_agent_guard,
     render_skills_block,
-    render_skills_block_with_guard_annotation,
-    render_skills_block_with_hint,
     scan_skills,
 )
+from src.system_prompt_builder import main_skills_block as build_main_skills_block  # noqa: E402
+from src.system_prompt_builder import render_skill_catalog_block  # noqa: E402
 from src.tools import (  # noqa: E402
     filter_main_agent_tools,
     get_all_tools,
-    list_blocked_tool_names_for_hint,
     registry,
 )
 
@@ -129,27 +127,6 @@ def count_prompt_tokens(
     return response.usage.prompt_tokens
 
 
-def build_main_skills_block(skills, config) -> str:
-    """app.py と同じ分岐で、メインエージェント用の{{skills}}差込テキストを組み立てる。"""
-    if config.main_agent_tool_guard_visibility_mode in ("all", "hint"):
-        if config.main_agent_tool_guard_visibility_mode == "all":
-            return render_skills_block_with_guard_annotation(skills, config)
-        return render_skills_block_with_hint(skills, config)
-    return render_skills_block(filter_skills_for_main_agent_guard(skills, config))
-
-
-def build_blocked_tools_hint(config) -> str:
-    """app.py と同じ分岐で、{{main_agent_blocked_tools_hint}}差込テキストを組み立てる。"""
-    if config.main_agent_tool_guard_visibility_mode not in ("all", "hint"):
-        return ""
-    blocked_names = list_blocked_tool_names_for_hint(get_all_tools(), config)
-    if not blocked_names:
-        return ""
-    return "以下のビルトインツールは直接呼び出せません（詳細確認・実行が必要な場合は" "dispatch_agentへ委譲してください）: " + "、".join(
-        blocked_names
-    )
-
-
 def build_production_system_prompt(config) -> tuple[str, str]:
     """app.py の @cl.on_chat_start と同じ手順で、メインエージェント用の
     本番相当system_promptを組み立てる。
@@ -158,8 +135,8 @@ def build_production_system_prompt(config) -> tuple[str, str]:
         (完成した system_prompt, {{skills}}へ差し込まれたテキスト単体)
     """
     skills = scan_skills([config.skills_dir, *config.locohane_skills_dirs])
-    main_skills_block = build_main_skills_block(skills, config)
-    blocked_tools_hint = build_blocked_tools_hint(config)
+    # {{skills}} と {{main_agent_blocked_tools_hint}} は本番と同じ関数で組み立てる（visibility_mode の分岐を写さない）。
+    main_skills_block, blocked_tools_hint = build_main_skills_block(skills, config)
 
     system_prompt = build_system_prompt_from_block(main_skills_block, config.system_prompt_path).replace(
         "{{main_agent_blocked_tools_hint}}", blocked_tools_hint
@@ -234,6 +211,7 @@ def build_subagent_agent_types(config) -> list[dict]:
                 ),
             )
             .replace("{{all_skills}}", render_skills_block(skills))
+            .replace("{{skill_catalog}}", render_skill_catalog_block(skills, config))
             .replace("{{agent_types}}", agent_types_block)
             .replace(
                 "{{run_script_allowlist}}",

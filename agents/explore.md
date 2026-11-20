@@ -186,6 +186,8 @@ that are not listed) results in an error.
 
 {{run_script_allowlist}}
 
+{{skill_catalog}}
+
 ---
 
 ## Mandatory rules and prohibitions (always follow; the mandatory rules and prohibitions in the common notes at the end of this prompt also apply)
