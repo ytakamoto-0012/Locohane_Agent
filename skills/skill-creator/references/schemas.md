@@ -19,7 +19,7 @@ so you receive a `job_id` with `start` and the result with `status`. While `stat
 python scaffold_skill.py --name my-skill --description "..." [--with-script]
 ```
 
-Creates SKILL.md, references/ and evals/ (and scripts/run.py with `--with-script`) in your draft location.
+Creates a short SKILL.md and evals/ (and scripts/run.py with `--with-script`; use it only when a script is really needed) in your draft location.
 The same name as an official skill, or as one of your existing drafts, is an error.
 
 Output: `{"draft", "skill_dir", "note"}`
@@ -78,7 +78,10 @@ Output: `{"user", "drafts": [{"draft", "own", "readable", "kind", "base_skill", 
 python validate_skill.py --name my-skill
 ```
 
-Output: `{"draft", "valid", "error", "name", "description", "description_length", "script_files", "eval_cases"}`
+Output: `{"draft", "valid", "error", "name", "description", "description_length", "body_lines", "script_files", "eval_cases", "warnings"}`
+
+- `body_lines`: lines of the SKILL.md body (without the frontmatter and empty lines).
+- `warnings`: for new drafts, points that make the first version too big (a long body, scripts, references/). They do not make `valid` false.
 
 ## make_eval_case.py
 

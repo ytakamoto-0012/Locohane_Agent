@@ -59,6 +59,34 @@ def test_scaffold_creates_draft_under_own_folder(draft_env):
     assert (skill_dir / "SKILL.md").is_file() and (skill_dir / "evals").is_dir()
     meta = json.loads((skill_dir / "_draft_meta.json").read_text(encoding="utf-8"))
     assert meta["kind"] == "new" and meta["author"] == "tanaka" and meta["status"] == "draft"
+    # 最初の版は SKILL.md だけ（スクリプト・参照資料へ誘導しない）
+    assert not (skill_dir / "scripts").exists() and not (skill_dir / "references").exists()
+    assert "run.py" not in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_scaffold_with_script_adds_script_and_its_step(draft_env):
+    result = _run("scaffold_skill.py", "--name", "my-tool", "--description", "テスト用のスキル。", "--with-script", env=draft_env["env"])
+    assert result.returncode == 0, result.stderr
+    skill_dir = draft_env["drafts"] / "tanaka" / "my-tool"
+    assert (skill_dir / "scripts" / "run.py").is_file()
+    assert "python run.py" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_validate_warns_when_first_version_is_big(draft_env):
+    _scaffold(draft_env)
+    result = _run("validate_skill.py", "--name", "my-tool", env=draft_env["env"])
+    out = json.loads(result.stdout)
+    assert result.returncode == 0 and out["valid"] and out["warnings"] == []
+
+    body = "\n".join(f"{i}. step" for i in range(1, 61))
+    content = f"---\nname: my-tool\ndescription: テスト用のスキル。\n---\n\n# my-tool\n\n{body}\n"
+    _run("write_draft_file.py", "--name", "my-tool", "--path", "SKILL.md", "--content", content, env=draft_env["env"])
+    _run("write_draft_file.py", "--name", "my-tool", "--path", "scripts/run.py", "--content", "print(1)", env=draft_env["env"])
+    result = _run("validate_skill.py", "--name", "my-tool", env=draft_env["env"])
+    out = json.loads(result.stdout)
+    # 警告は合否に使わない
+    assert result.returncode == 0 and out["valid"] and out["body_lines"] == 61
+    assert len(out["warnings"]) == 2
 
 
 def test_scaffold_rejects_official_skill_name(draft_env):
@@ -310,7 +338,7 @@ def test_isolated_eval_status_ignores_results_of_changed_draft(draft_env, tmp_pa
     out_dir.mkdir()
     (out_dir / "tryout.json").write_text(json.dumps(_tryout_for(draft)), encoding="utf-8")
     assert module._is_stale(out_dir, ref, "with_skill") is False
-    (draft / "references" / "new.md").write_text("x", encoding="utf-8")
+    (draft / "new.md").write_text("x", encoding="utf-8")
     assert module._is_stale(out_dir, ref, "with_skill") is True
     assert module._is_stale(out_dir, ref, "without_skill") is False
 
@@ -371,7 +399,7 @@ def test_run_all_freezes_draft_during_tryout_and_always_writes_tryout(draft_env,
         overlay = Path(extra_args[extra_args.index("--skill-overlay") + 1])
         seen.append((case_path.parent, skill_tree.tree_sha256(overlay)))
         # 評価中に作成者がドラフトを直した
-        (draft / "references" / f"edit{len(seen)}.md").write_text("x", encoding="utf-8")
+        (draft / f"edit{len(seen)}.md").write_text("x", encoding="utf-8")
         return {"case_id": "001_basic", "rules_pass": True}
 
     monkeypatch.setattr(run_all, "_run_one", fake_run_one)

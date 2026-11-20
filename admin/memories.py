@@ -170,7 +170,8 @@ A SKILL.md starts with frontmatter (name, description) and the body describes th
 - name: {name_rule}
 - description: the only trigger clue. Write concretely "what it does" and "for what kind of instructions it is used",
   on one line, 1024 characters or fewer.
-- The body is 500 lines or fewer: purpose, procedure (numbered steps), and notes (what to avoid, how to handle exceptions).
+- Keep the body short (a draft; it is evaluated and grown later): 1-2 sentences of purpose, numbered steps, and a few
+  notes. Do not add background, examples or rules that are not in the memories, and do not write the same thing twice.
   Keep every concrete fact, value, rule and reason in the memories that the procedure needs; do not invent features,
   commands, file paths or values that are not in the memories. Do not write tool names (run_script, etc.) in the body.
 - Do not copy personal information (e-mail addresses, phone numbers, passwords, account numbers) into the skill.
@@ -647,7 +648,6 @@ def build_router(
             raise HTTPException(status_code=502, detail=_t("LLM の応答を SKILL.md として読めませんでした: {0}", error))
         target.mkdir(parents=True)
         (target / "SKILL.md").write_text(skill_md, encoding="utf-8")
-        (target / "references").mkdir()
         (target / "evals").mkdir()
         now = datetime.now().astimezone().isoformat(timespec="seconds")
         editor = _dashboard_editor(user)
