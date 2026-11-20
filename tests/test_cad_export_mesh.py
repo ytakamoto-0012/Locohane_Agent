@@ -282,6 +282,47 @@ def test_dxf_layers_become_parts_with_faces_and_free_curves(cq, tmp_path) -> Non
     assert data["stats"]["faces"] == 1 and data["faces"][0]["area"] == pytest.approx(8.0)
     assert [e["length"] for e in data["edgeList"] if e.get("free")] == [pytest.approx(2.0)]
     assert [v["point"][:2] for v in data["vertexList"] if v.get("free")] == [[20.0, 20.0]]
+    # 単独の点も部品（レイヤー）を持つ（サイドバーでレイヤーを隠したときに一緒に隠すため）。
+    guide = next(p["id"] for p in data["parts"] if p["name"] == "GUIDE")
+    assert all(v["part"] == guide for v in data["vertexList"] if v.get("free"))
+
+
+def test_dxf_layer_settings_are_kept(cq, tmp_path) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+    from src.cad.export_mesh import Options, cad_file_to_viewer_data
+
+    doc = ezdxf.new()
+    doc.layers.add("RED", color=1, linetype="DASHED")
+    hidden = doc.layers.add("HIDDEN", color=5)
+    hidden.off()
+    msp = doc.modelspace()
+    msp.add_lwpolyline([(0, 0), (4, 0), (4, 2), (0, 2)], close=True, dxfattribs={"layer": "RED"})
+    msp.add_line((10, 0), (12, 0), dxfattribs={"layer": "HIDDEN"})
+    path = tmp_path / "layers.dxf"
+    doc.saveas(path)
+    data = cad_file_to_viewer_data(path, "DXF", Options())
+    parts = {p["name"]: p for p in data["parts"]}
+    red = parts["RED"]["layer"]
+    assert red["color"] == "#ff0000" and red["aci"] == 1 and red["linetype"] == "DASHED"
+    assert not red["off"] and not red["frozen"]
+    assert parts["RED"]["color"] == "#ff0000"
+    # 面はレイヤーの色で描く。
+    assert data["faces"][0]["color"] == "#ff0000"
+    assert parts["HIDDEN"]["layer"]["off"] is True
+
+
+def test_dxf_single_layer_is_kept_as_a_part(cq, tmp_path) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+    from src.cad.export_mesh import Options, cad_file_to_viewer_data
+
+    doc = ezdxf.new()
+    doc.modelspace().add_line((0, 0), (1, 0))
+    path = tmp_path / "one.dxf"
+    doc.saveas(path)
+    data = cad_file_to_viewer_data(path, "DXF", Options())
+    assert [p["name"] for p in data["parts"]] == ["0"]
+    # 色 7（白/黒）は背景で変わるので、色を付けない。
+    assert data["parts"][0]["layer"]["color"] is None and "color" not in data["parts"][0]
 
 
 def test_run_cad_code_prologue_and_epilogue(cq, tmp_path) -> None:

@@ -1,11 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useChatData } from '@chainlit/react-client';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useRecoilValue } from 'recoil';
+import { ChainlitContext, sessionIdState, useChatData, type IAction } from '@chainlit/react-client';
 import { useI18n } from '../i18n';
 import type { MessageKey } from '../i18n/messages';
 import {
   CAD_DATA_FORMAT,
+  effectiveColor,
   itemsOf,
+  rgbText,
   sameSelection,
+  type BoxMode,
+  type CadColorOverrides,
   type CadData,
   type CadItemInfo,
   type CadKind,
@@ -13,6 +18,7 @@ import {
   type CadViewerProps
 } from './cad/cadData';
 import type { CadScene, CadSceneColors, ViewName } from './cad/CadScene';
+import { CadSidebar } from './cad/CadSidebar';
 
 const KIND_LABEL: Record<CadKind, MessageKey> = {
   face: 'cad.kind.face',
@@ -20,12 +26,19 @@ const KIND_LABEL: Record<CadKind, MessageKey> = {
   vertex: 'cad.kind.vertex',
   part: 'cad.kind.part'
 };
-const VIEWS: { id: ViewName; label: MessageKey }[] = [
-  { id: 'iso', label: 'cad.view.iso' },
-  { id: 'front', label: 'cad.view.front' },
-  { id: 'top', label: 'cad.view.top' },
-  { id: 'right', label: 'cad.view.right' }
+// 平面の 1 つめの軸が右・2 つめの軸が上。'+' は平面の法線（1 つめ × 2 つめ）の正の側から、'-' は裏側から見る。
+const VIEWS: ViewName[] = ['xy+', 'yz+', 'zx+', 'xy-', 'yz-', 'zx-'];
+const BOX_MODES: { id: BoxMode; label: MessageKey; title: MessageKey }[] = [
+  { id: 'off', label: 'cad.box.off', title: 'cad.box.offTitle' },
+  { id: 'window', label: 'cad.box.window', title: 'cad.box.windowTitle' },
+  { id: 'crossing', label: 'cad.box.crossing', title: 'cad.box.crossingTitle' }
 ];
+
+/** 確定時に返す、変えた色（キーは ID の文字列）。 */
+export interface CadColorChanges {
+  faces: Record<string, string>;
+  parts: Record<string, string>;
+}
 
 /** 画面のテーマ（ライト / ダーク、アクセント色）から 3D 表示の色を決める。 */
 function sceneColors(el: HTMLElement): CadSceneColors {
@@ -53,8 +66,8 @@ function fmt(n: unknown): string {
   return typeof n === 'number' ? String(Math.round(n * 1000) / 1000) : '';
 }
 
-/** ホバー中・選択中の要素の短い説明（例: 「面 #3 PLANE 面積 600 >Z」）。 */
-function describe(item: CadItemInfo | undefined, label: string, t: (k: MessageKey) => string): string {
+/** ホバー中・選択中の要素の短い説明（例: 「面 #3 PLANE 面積 600 RGB(200, 0, 0) >Z」）。 */
+function describe(item: CadItemInfo | undefined, label: string, color: string | null, t: (k: MessageKey) => string): string {
   if (!item) return label;
   const parts = [label];
   if (item.kind === 'part') parts.push(item.path ?? item.name ?? '');
@@ -64,6 +77,7 @@ function describe(item: CadItemInfo | undefined, label: string, t: (k: MessageKe
   if (item.radius !== undefined) parts.push(`R ${fmt(item.radius)}`);
   if (item.point) parts.push(`(${item.point.map(fmt).join(', ')})`);
   if (item.free) parts.push(t('cad.info.free'));
+  if (color) parts.push(rgbText(color));
   const sel = item.selectors?.[0] ?? item.meshHints?.[0];
   if (sel) parts.push(sel);
   return parts.filter(Boolean).join('  ');
@@ -73,7 +87,7 @@ function describe(item: CadItemInfo | undefined, label: string, t: (k: MessageKe
  * show_cad_viewer（src/tools/cad_viewer.py）専用の表示コンポーネント。
  * backend では cl.AskElementMessage（spec.type === 'element'）として届く。name が "CadViewer" の
  * カスタム要素の props（question / select / data）から 3D ビューアを描き、確定時に askUser.callback へ
- * { submitted: true, selected: [{ kind, id }] }、閉じたときは { submitted: false } を返す。
+ * { submitted: true, selected: [{ kind, id }], colors: { faces, parts } }、閉じたときは { submitted: false } を返す。
  * AskFormBar（labels）・AskChoiceFormBar（choices）とは props の形で排他になる。
  */
 export function CadViewerBar() {
@@ -90,7 +104,8 @@ export function CadViewerBar() {
       question={props.question ?? ''}
       kinds={props.select?.length ? props.select : ['face']}
       data={props.data}
-      onSubmit={(selected) => askUser.callback({ submitted: true, selected })}
+      saveId={props.save_id ?? ''}
+      onSubmit={(selected, colors, message) => askUser.callback({ submitted: true, selected, colors, message })}
       onCancel={() => askUser.callback({ submitted: false, selected: [] })}
     />
   );
@@ -100,12 +115,27 @@ interface PanelProps {
   question: string;
   kinds: CadKind[];
   data: CadData;
-  onSubmit: (selected: CadSelection[]) => void;
+  saveId: string;
+  onSubmit: (selected: CadSelection[], colors: CadColorChanges, message: string) => void;
   onCancel: () => void;
 }
 
-function CadViewerPanel({ question, kinds, data, onSubmit, onCancel }: PanelProps) {
+function initialHiddenParts(data: CadData): Set<number> {
+  // 「保存」したデータは保存したときの表示に戻す。それ以外は、DXF で非表示・フリーズのレイヤーを
+  // 最初から隠す（CAD で開いたときと同じ見え方）。
+  if (data.viewState?.hiddenParts) return new Set(data.viewState.hiddenParts);
+  return new Set((data.parts ?? []).filter((p) => p.layer && (p.layer.off || p.layer.frozen)).map((p) => p.id));
+}
+
+type SaveState = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved'; path: string } | { kind: 'error'; message: string };
+
+function CadViewerPanel({ question, kinds, data, saveId, onSubmit, onCancel }: PanelProps) {
   const { t } = useI18n();
+  const client = useContext(ChainlitContext);
+  const sessionId = useRecoilValue(sessionIdState);
+  const [saveState, setSaveState] = useState<SaveState>({ kind: 'idle' });
+  // 選択と一緒に AI へ返す指示（「この面に φ5 の穴を開けて」等）。
+  const [message, setMessage] = useState('');
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<CadScene | null>(null);
   const [mode, setMode] = useState<CadKind>(kinds[0]);
@@ -113,10 +143,30 @@ function CadViewerPanel({ question, kinds, data, onSubmit, onCancel }: PanelProp
   const [hover, setHover] = useState<CadSelection | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [expanded, setExpanded] = useState(false);
+  const [boxMode, setBoxMode] = useState<BoxMode>('off');
+  const hasParts = (data.parts?.length ?? 0) > 0;
+  const [sidebarOpen, setSidebarOpen] = useState(hasParts);
+  const [kindVisible, setKindVisible] = useState({ face: true, edge: true, vertex: true, ...data.viewState?.visible });
+  const [hiddenParts, setHiddenParts] = useState<Set<number>>(() => initialHiddenParts(data));
+  const [colors, setColors] = useState<CadColorOverrides>({ faces: new Map(), parts: new Map() });
 
-  const label = useCallback((s: CadSelection) => `${t(KIND_LABEL[s.kind])} #${s.id}`, [t]);
+  const label = useCallback(
+    (s: CadSelection) => {
+      const base = `${t(KIND_LABEL[s.kind])} #${s.id}`;
+      const name = s.kind === 'part' ? data.parts?.[s.id]?.name : undefined;
+      return name ? `${base} ${name}` : base;
+    },
+    [t, data]
+  );
   const toggle = useCallback((item: CadSelection) => {
     setSelection((cur) => (cur.some((s) => sameSelection(s, item)) ? cur.filter((s) => !sameSelection(s, item)) : [...cur, item]));
+  }, []);
+  const boxPick = useCallback((items: CadSelection[], remove: boolean) => {
+    setSelection((cur) => {
+      if (remove) return cur.filter((s) => !items.some((i) => sameSelection(i, s)));
+      const added = items.filter((i) => !cur.some((s) => sameSelection(s, i)));
+      return added.length ? [...cur, ...added] : cur;
+    });
   }, []);
 
   // three.js は import() で必要になったときだけ読む。
@@ -127,7 +177,7 @@ function CadViewerPanel({ question, kinds, data, onSubmit, onCancel }: PanelProp
     import('./cad/CadScene')
       .then(({ CadScene }) => {
         if (disposed) return;
-        sceneRef.current = new CadScene(host, data, { onHover: setHover, onPick: toggle }, sceneColors(host));
+        sceneRef.current = new CadScene(host, data, { onHover: setHover, onPick: toggle, onBoxPick: boxPick }, sceneColors(host));
         sceneRef.current.setMode(kinds[0]);
         setStatus('ready');
       })
@@ -141,7 +191,7 @@ function CadViewerPanel({ question, kinds, data, onSubmit, onCancel }: PanelProp
       sceneRef.current = null;
     };
     // data・kinds は要素ごとに固定（key={element.id} で作り直す）。
-  }, [data, kinds, toggle]);
+  }, [data, kinds, toggle, boxPick]);
 
   useEffect(() => {
     sceneRef.current?.setMode(mode);
@@ -149,6 +199,20 @@ function CadViewerPanel({ question, kinds, data, onSubmit, onCancel }: PanelProp
   useEffect(() => {
     sceneRef.current?.setSelection(selection);
   }, [selection, status]);
+  useEffect(() => {
+    sceneRef.current?.setBoxMode(boxMode);
+  }, [boxMode, status]);
+  useEffect(() => {
+    sceneRef.current?.setVisibility({ ...kindVisible, hiddenParts });
+  }, [kindVisible, hiddenParts, status]);
+  useEffect(() => {
+    sceneRef.current?.setColorOverrides(colors);
+  }, [colors, status]);
+
+  // 保存した後に色・表示を変えたら「保存しました」を消す（保存したファイルは前の内容のまま）。
+  useEffect(() => {
+    setSaveState((s) => (s.kind === 'saved' ? { kind: 'idle' } : s));
+  }, [colors, hiddenParts, kindVisible]);
 
   // テーマ（ライト / ダーク・アクセント色）の切り替えに追従する。
   useEffect(() => {
@@ -170,9 +234,54 @@ function CadViewerPanel({ question, kinds, data, onSubmit, onCancel }: PanelProp
   }, [expanded]);
 
   const hoverText = useMemo(() => {
-    if (!hover) return t('cad.hint');
-    return describe(itemsOf(data, hover.kind)[hover.id], label(hover), t);
-  }, [hover, data, label, t]);
+    if (!hover) return t(boxMode === 'off' ? 'cad.hint' : 'cad.hintBox');
+    return describe(itemsOf(data, hover.kind)[hover.id], label(hover), effectiveColor(data, colors, hover), t);
+  }, [hover, data, label, t, colors, boxMode]);
+
+  const selectAll = () => {
+    const ids = sceneRef.current?.selectableIds(mode) ?? [];
+    boxPick(
+      ids.map((id) => ({ kind: mode, id })),
+      false
+    );
+  };
+
+  const colorChanges = (): CadColorChanges => {
+    const changes: CadColorChanges = { faces: {}, parts: {} };
+    colors.faces.forEach((hex, id) => (changes.faces[String(id)] = hex));
+    colors.parts.forEach((hex, id) => (changes.parts[String(id)] = hex));
+    return changes;
+  };
+  const submit = () => onSubmit(selection, colorChanges(), message.trim());
+
+  // 変えた色・隠した部品を適用したデータを JSON に書く（app.py の cad_viewer_save）。ビューアは閉じない。
+  const save = async () => {
+    if (!saveId || saveState.kind === 'saving') return;
+    setSaveState({ kind: 'saving' });
+    const action: IAction = {
+      id: '',
+      name: 'cad_viewer_save',
+      payload: { save_id: saveId, colors: colorChanges(), hidden_parts: [...hiddenParts], visible: kindVisible },
+      label: '',
+      tooltip: '',
+      forId: '',
+      onClick: () => {}
+    };
+    try {
+      const res = await client.callAction(action, sessionId);
+      const r = res?.response;
+      if (r?.ok) setSaveState({ kind: 'saved', path: String(r.path ?? '') });
+      else setSaveState({ kind: 'error', message: String(r?.error ?? t('cad.saveFailed')) });
+    } catch (err) {
+      setSaveState({ kind: 'error', message: err instanceof Error ? err.message : t('cad.saveFailed') });
+    }
+  };
+  const saveText =
+    saveState.kind === 'saved'
+      ? t('cad.saved', { path: saveState.path })
+      : saveState.kind === 'error'
+        ? `${t('cad.saveFailed')} ${saveState.message}`
+        : '';
 
   const summary = `${data.source.format ?? ''}${data.source.path ? ' ' + data.source.path.split(/[\\/]/).pop() : ''}  ${data.bbox.size
     .map(fmt)
@@ -195,21 +304,78 @@ function CadViewerPanel({ question, kinds, data, onSubmit, onCancel }: PanelProp
               {t(KIND_LABEL[k])}
             </button>
           ))}
+          <span className="cad-viewer-sep" />
+          {BOX_MODES.map((b) => (
+            <button
+              key={b.id}
+              type="button"
+              role="radio"
+              aria-checked={boxMode === b.id}
+              title={t(b.title)}
+              className={`cad-viewer-chip${boxMode === b.id ? ' active' : ''}`}
+              onClick={() => setBoxMode(b.id)}
+            >
+              {t(b.label)}
+            </button>
+          ))}
+          <button type="button" className="cad-viewer-chip" title={t('cad.selectAllTitle')} onClick={selectAll}>
+            {t('cad.selectAll')}
+          </button>
+          <button
+            type="button"
+            className="cad-viewer-chip"
+            title={t('cad.deselectAllTitle')}
+            disabled={selection.length === 0}
+            onClick={() => setSelection([])}
+          >
+            {t('cad.deselectAll')}
+          </button>
         </div>
         <div className="cad-viewer-views">
           {VIEWS.map((v) => (
-            <button key={v.id} type="button" className="cad-viewer-chip" onClick={() => sceneRef.current?.setView(v.id)}>
-              {t(v.label)}
+            <button
+              key={v}
+              type="button"
+              className="cad-viewer-chip cad-viewer-view"
+              title={t(`cad.view.${v}` as MessageKey)}
+              onClick={() => sceneRef.current?.setView(v)}
+            >
+              {v.toUpperCase()}
             </button>
           ))}
+          <button
+            type="button"
+            className={`cad-viewer-chip${sidebarOpen ? ' active' : ''}`}
+            aria-pressed={sidebarOpen}
+            onClick={() => setSidebarOpen((x) => !x)}
+          >
+            {t('cad.sidebar')}
+          </button>
           <button type="button" className="cad-viewer-chip" onClick={() => setExpanded((x) => !x)}>
             {expanded ? t('cad.shrink') : t('cad.expand')}
           </button>
         </div>
       </div>
-      <div className="cad-viewer-host" ref={hostRef}>
-        {status === 'loading' && <div className="cad-viewer-overlay">{t('cad.loading')}</div>}
-        {status === 'error' && <div className="cad-viewer-overlay">{t('cad.webglError')}</div>}
+      <div className="cad-viewer-body">
+        {sidebarOpen && (
+          <CadSidebar
+            data={data}
+            kinds={kinds}
+            selection={selection}
+            kindVisible={kindVisible}
+            onKindVisible={(k, v) => setKindVisible((cur) => ({ ...cur, [k]: v }))}
+            hiddenParts={hiddenParts}
+            onHiddenParts={setHiddenParts}
+            colors={colors}
+            onColors={setColors}
+            onTogglePart={(id) => toggle({ kind: 'part', id })}
+            onHoverPart={(id) => sceneRef.current?.setExternalHover(id === null ? null : { kind: 'part', id })}
+          />
+        )}
+        <div className="cad-viewer-host" ref={hostRef}>
+          {status === 'loading' && <div className="cad-viewer-overlay">{t('cad.loading')}</div>}
+          {status === 'error' && <div className="cad-viewer-overlay">{t('cad.webglError')}</div>}
+        </div>
       </div>
       <div className="cad-viewer-status">
         <span className="cad-viewer-hover">{hoverText}</span>
@@ -220,7 +386,11 @@ function CadViewerPanel({ question, kinds, data, onSubmit, onCancel }: PanelProp
           <span className="cad-viewer-empty">{t('cad.noneSelected')}</span>
         ) : (
           selection.map((s) => (
-            <span key={`${s.kind}-${s.id}`} className="cad-viewer-tag" title={describe(itemsOf(data, s.kind)[s.id], label(s), t)}>
+            <span
+              key={`${s.kind}-${s.id}`}
+              className="cad-viewer-tag"
+              title={describe(itemsOf(data, s.kind)[s.id], label(s), effectiveColor(data, colors, s), t)}
+            >
               {label(s)}
               <button type="button" aria-label={t('cad.remove')} onClick={() => toggle(s)}>
                 ×
@@ -234,13 +404,47 @@ function CadViewerPanel({ question, kinds, data, onSubmit, onCancel }: PanelProp
           </button>
         )}
       </div>
+      <textarea
+        className="cad-viewer-message"
+        rows={2}
+        value={message}
+        placeholder={t('cad.messagePlaceholder')}
+        aria-label={t('cad.message')}
+        onChange={(e) => setMessage(e.target.value)}
+        onKeyDown={(e) => {
+          // Ctrl（⌘）+ Enter で確定。Enter だけなら改行（IME の変換確定と区別するため）。
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            submit();
+          }
+        }}
+      />
       <div className="ask-form-actions">
-        <button type="button" className="ask-form-cancel" onClick={onCancel}>
+        {/* 左端はキャンセル（ほかの質問ツールと同じ位置）。保存・確定は右にまとめる。 */}
+        <button type="button" className="ask-form-cancel" title={t('cad.cancelTitle')} onClick={onCancel}>
           {t('cad.close')}
         </button>
-        <button type="button" className="ask-form-submit" onClick={() => onSubmit(selection)}>
-          {t('cad.confirm', { count: selection.length })}
-        </button>
+        <div className="cad-viewer-actions-right">
+          {saveText && (
+            <span className={`cad-viewer-save-status${saveState.kind === 'error' ? ' error' : ''}`} title={saveText}>
+              {saveText}
+            </span>
+          )}
+          {saveId && (
+            <button
+              type="button"
+              className="ask-form-cancel"
+              title={t('cad.saveTitle')}
+              disabled={saveState.kind === 'saving'}
+              onClick={() => void save()}
+            >
+              {saveState.kind === 'saving' ? t('cad.saving') : t('cad.save')}
+            </button>
+          )}
+          <button type="button" className="ask-form-submit" title={t('cad.confirmTitle')} onClick={submit}>
+            {t('cad.confirm', { count: selection.length })}
+          </button>
+        </div>
       </div>
     </div>
   );

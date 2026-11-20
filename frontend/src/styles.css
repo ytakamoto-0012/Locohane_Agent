@@ -706,10 +706,30 @@
 }
 
 /* 3D ビューア（CadViewerBar.tsx、show_cad_viewer ツール） */
+/* 画面が低くても下のボタン列（キャンセル・保存・確定）が画面外に出ないよう、高さに上限を付け、
+   足りない分は 3D 表示の部分（.cad-viewer-body）を縮める。 */
 .cad-viewer-bar {
   max-width: 960px;
-  max-height: none;
+  max-height: calc(100vh - 120px);
   gap: 8px;
+}
+
+.cad-viewer-bar > * {
+  flex-shrink: 0;
+}
+
+.cad-viewer-bar > .cad-viewer-body {
+  flex-shrink: 1;
+  min-height: 140px;
+}
+
+.cad-viewer-actions-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
 }
 
 .cad-viewer-bar.cad-viewer-expanded {
@@ -717,6 +737,7 @@
   inset: 12px;
   z-index: 1000;
   max-width: none;
+  max-height: none;
   margin: 0;
   width: auto;
   background: var(--surface);
@@ -747,8 +768,13 @@
   cursor: pointer;
 }
 
-.cad-viewer-chip:hover {
+.cad-viewer-chip:hover:not(:disabled) {
   border-color: var(--accent);
+}
+
+.cad-viewer-chip:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .cad-viewer-chip.active {
@@ -758,19 +784,232 @@
   font-weight: 600;
 }
 
+.cad-viewer-sep {
+  width: 1px;
+  margin: 2px 4px;
+  background: var(--border);
+}
+
+.cad-viewer-view {
+  font-family: var(--font-mono, monospace);
+  padding: 4px 8px;
+}
+
+.cad-viewer-body {
+  display: flex;
+  gap: 8px;
+  height: min(420px, 50vh);
+}
+
+.cad-viewer-expanded .cad-viewer-body {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+}
+
 .cad-viewer-host {
   position: relative;
-  height: min(420px, 50vh);
+  flex: 1;
+  min-width: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   overflow: hidden;
   touch-action: none;
 }
 
-.cad-viewer-expanded .cad-viewer-host {
-  height: auto;
+/* 範囲選択の枠。完全包囲は実線、包囲＋交差は破線（CAD でよく使う見分け方）。 */
+.cad-viewer-box {
+  position: absolute;
+  pointer-events: none;
+  border: 1.5px solid #3e63dd;
+  background: rgba(62, 99, 221, 0.12);
+}
+
+.cad-viewer-box.crossing {
+  border: 1.5px dashed #30a46c;
+  background: rgba(48, 164, 108, 0.12);
+}
+
+.cad-viewer-message {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 2.6em;
+  max-height: 160px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.cad-viewer-message:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.cad-viewer-save-status {
+  min-width: 0;
+  align-self: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.cad-viewer-save-status.error {
+  color: var(--danger, #e5484d);
+}
+
+.cad-sidebar {
+  width: 230px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.cad-sidebar section + section {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.cad-sidebar h4 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.cad-sidebar-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.cad-sidebar-actions button {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.cad-sidebar-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0;
+  cursor: pointer;
+}
+
+.cad-sidebar-hint {
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.cad-color-edit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.cad-rgb {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.cad-rgb input {
+  width: 46px;
+  padding: 1px 2px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: inherit;
+}
+
+.cad-swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.cad-tree,
+.cad-tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.cad-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 22px;
+  border-radius: 4px;
+}
+
+.cad-tree-row:hover {
+  background: var(--accent-soft);
+}
+
+.cad-tree-row.selected .cad-tree-name {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.cad-tree-toggle {
+  width: 14px;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+  font-size: 11px;
+}
+
+.cad-tree-name {
   flex: 1;
-  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font-size: 12px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.cad-tree-name:disabled {
+  cursor: default;
+}
+
+.cad-tree-count {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 .cad-viewer-canvas {

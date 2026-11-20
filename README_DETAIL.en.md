@@ -1843,14 +1843,37 @@ STL can be shown without cadquery (the other formats and running code need cadqu
 the IDs of neighbouring elements, the path and color of its part (assembly), whether it is a free curve or point (`free`), whether it is a seam of a cylinder etc. (`seam`),
 and the CadQuery selectors verified to pick exactly that one element (`>Z`, `%CYLINDER`, `>Z[1]`, etc.).
 IDs follow the order of CadQuery's `Workplane().add(shape).faces().vals()` (0-based; the same for edges and vertices), so code can refer to them directly.
-It also returns an `@N` of the viewer data; passing it as `file_path` shows the same shape again at once.
+A large CAD model has thousands of faces and hundreds of thousands of triangles, and select all / box selection can pick many of them, so the selected
+elements are not put in the return value, not even as a list of IDs. Everything is written to `cad_selection_*.json` in the session's `_tmp_` folder
+(one entry per element under `selected`, color changes under `color_changes`) and registered as an `@N`. The return value is a JSON summary whose size does
+not depend on the selection: the number selected (`selected_count`, and `selected_by_kind` per kind), the number of color changes (`color_change_count`),
+the `@N` of the selection file (`selection_file`; the LLM reads only the fields it needs with `json_query`), and a model summary (`model`).
+The answer left in the chat (saved in the conversation as the user's message) is also only the counts per kind, such as "Selected 12 Face(s)".
+It also returns an `@N` of the viewer data (`viewer_data`); passing it as `file_path` shows the same shape again at once.
 
 **How it works**: reading the shape, tessellating it and computing the information run in a subprocess (`src/cad/run_cad.py`, Python is `[scripts] python`), not in the app itself,
 and the resulting viewer data (JSON) is put in the session's `_tmp_` folder. The viewer is shown, like the multiple choice of `ask_user_choice`, with
 `cl.AskElementMessage` + `CustomElement` (name `CadViewer`), and drawn by `frontend/src/components/CadViewerBar.tsx` in the frontend.
 three.js is loaded only when a viewer opens (`frontend/src/components/cad/CadScene.ts`; it is not part of the main chat bundle).
-In the viewer, drag to rotate, right-drag to pan, use the wheel to zoom, click to select / deselect, switch the kind of element and the view (iso, front, top, right) with the buttons at the top,
+In the viewer, drag to rotate, right-drag to pan, use the wheel to zoom, click to select / deselect, switch the kind of element with the buttons at the top,
 and use "Expand" to fill the screen (Esc to restore). As with the other question tools, it can be answered on the screen you come back to after switching conversations.
+
+- **Views**: `XY+` `YZ+` `ZX+` `XY-` `YZ-` `ZX-`. The first axis of the plane points right and the second up; `+` looks from the positive side of the normal
+  (first × second), `-` from the back side (e.g. `XY+` looks from +Z with X right and Y up, `ZX+` from +Y with Z right and X up). The viewer opens with an iso view.
+- **Box selection**: "Box: inside" selects the elements fully inside the left-dragged box, "Box: inside + crossing" also those crossing it (solid / dashed box).
+  Elements hidden behind others are included. Hold Ctrl (⌘) while dragging to deselect. Right-drag pan and wheel zoom still work in box mode.
+- **Select all / Deselect all**: "Select all" selects every visible element of the current kind; "Deselect all" deselects everything, of any kind.
+- **Panel (left sidebar)**: show / hide faces, edges and vertices; see and change the color (RGB) of the selected faces / parts; the part structure tree
+  (STEP/IGES assemblies) or the layers (DXF: color, linetype, off / frozen / locked). Each part or layer can be hidden and recolored, and clicking its name selects it.
+  DXF layers that are off or frozen start hidden. Hidden elements are not picked by clicking, box selection or select all.
+  Changed colors are not written to the original CAD file; they reach the LLM as `color_changes` (`{kind, id, from, to}`) in the selection file (the return value has only their count).
+- **Instruction box**: an instruction for the AI typed in the box under the viewer (optional, e.g. "make a 5 mm hole in the selected face") is returned with the
+  selection and color changes on "Confirm" (Ctrl+Enter). It comes first in the return value as `user_instruction` and stays in the chat with the selection (up to 4000 characters).
+- **Save (💾)**: writes the viewer data with the changed colors, hidden parts and per-kind display applied to `<original file name>_edited_<date time>.json`
+  in the working folder (or this thread's `_tmp_` folder if it is not writable) and registers it as an `@N`. The viewer stays open, and pressing it again overwrites the same file.
+  Colors go into both the faces' `color` and the triangle vertex colors, hidden parts into `viewState`, and the list of changes into `edits.color_changes`,
+  so passing this JSON as `file_path` reopens the model as it looked when saved. The `@N` of the saved file reaches the LLM in the `notes` of the tool's return value.
+  The button calls the app's action_callback `cad_viewer_save` (`save_viewer_edits` in `src/tools/cad_viewer.py`), which is accepted only while that viewer waits for an answer.
 
 **Settings**: `[cad_viewer]` (`enabled`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`) and
 `[user_response_timeouts] show_cad_viewer_seconds` (default 0 = no limit). It is registered in `[main_agent_tool_guard] allow_entries` so the main agent can call it directly.

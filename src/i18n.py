@@ -263,6 +263,9 @@ MESSAGES: dict[str, dict[str, str]] = {
     "cad.kind.edge": {"ja": "エッジ", "en": "Edge"},
     "cad.kind.vertex": {"ja": "頂点", "en": "Vertex"},
     "cad.kind.part": {"ja": "部品", "en": "Part"},
+    "cad.count": {"ja": "{kind} {count} 件", "en": "{count} {kind}(s)"},
+    "cad.selected_summary": {"ja": "{items}を選択", "en": "Selected {items}"},
+    "cad.color_changes": {"ja": "色の変更 {count} 件", "en": "{count} color change(s)"},
     # --- 大量のファイルを読む前の確認（src/tools/_read_volume_guard.py） ---
     "read_volume.question": {
         "ja": "読み取りの対象になるファイルが {total} 件あります（{breakdown}、{folders} フォルダ）。"

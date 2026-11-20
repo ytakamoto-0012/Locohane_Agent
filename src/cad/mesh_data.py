@@ -232,6 +232,57 @@ def _add_extreme_hints(faces: list[dict]) -> None:
                 faces[int(hits[0])].setdefault("meshHints", []).append(f"{sign}{name}")
 
 
+def apply_view_edits(
+    data: dict[str, Any],
+    *,
+    face_colors: dict[int, str],
+    part_colors: dict[int, str],
+    hidden_parts: Sequence[int] = (),
+    visible: dict[str, bool] | None = None,
+    color_changes: Sequence[dict[str, Any]] = (),
+    saved_at: str = "",
+) -> dict[str, Any]:
+    """ビューアで変えた色・表示を適用したビューア用データ（元の data は変えない）。
+
+    色は面の情報（faces[i].color・parts[i].color）と三角形の頂点色（mesh.colors）の両方に入れるので、
+    書き出した JSON を show_cad_viewer の file_path に渡すと、変えた色のまま表示される。部品の色は
+    その部品の面にも付ける（面ごとに変えた色が優先）。隠した部品と種類ごとの表示は "viewState" に、
+    変更の一覧は "edits" に残す。
+    """
+    out = json.loads(json.dumps(data))
+    parts = out.get("parts") or []
+    for pi, color in part_colors.items():
+        if 0 <= pi < len(parts):
+            parts[pi]["color"] = color
+    faces = out.get("faces") or []
+    new_face_colors: dict[int, str] = {}
+    for fi, face in enumerate(faces):
+        color = face_colors.get(fi)
+        if color is None and face.get("part") is not None:
+            color = part_colors.get(int(face["part"]))
+        if color is not None:
+            new_face_colors[fi] = color
+            face["color"] = color
+    mesh = out.get("mesh") or {}
+    if new_face_colors and mesh.get("positions") and mesh.get("indices"):
+        n_vertices = len(base64.b64decode(mesh["positions"])) // 12
+        indices = np.frombuffer(base64.b64decode(mesh["indices"]), dtype="<u4")
+        if mesh.get("colors"):
+            colors = np.frombuffer(base64.b64decode(mesh["colors"]), dtype=np.uint8).reshape(-1, 3).copy()
+        else:
+            colors = np.full((n_vertices, 3), 180, dtype=np.uint8)
+        for fi, color in new_face_colors.items():
+            start, count = mesh["faceRanges"][fi]
+            if not count:
+                continue
+            verts = indices[start * 3 : (start + count) * 3]
+            colors[int(verts.min()) : int(verts.max()) + 1] = [int(color[k : k + 2], 16) for k in (1, 3, 5)]
+        mesh["colors"] = b64(colors, "u1")
+    out["viewState"] = {"hiddenParts": sorted({int(p) for p in hidden_parts}), "visible": dict(visible or {})}
+    out["edits"] = {"saved_at": saved_at, "color_changes": list(color_changes)}
+    return out
+
+
 def write_viewer_json(data: dict[str, Any], out_path: str | Path) -> None:
     """ビューア用データを JSON で書く（数値の NaN・無限大は null にする）。"""
     Path(out_path).write_text(json.dumps(_finite(data), ensure_ascii=False, separators=(",", ":")), encoding="utf-8")

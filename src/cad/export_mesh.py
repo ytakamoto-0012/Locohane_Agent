@@ -45,6 +45,9 @@ class Part:
     color: tuple[int, int, int] | None = None
     # 部品の中の面ごとの色（XCAF で面に色が付いている場合）。キーは TopoDS_Face（配置後）。
     face_colors: list[tuple[TopoDS_Shape, tuple[int, int, int]]] = field(default_factory=list)
+    # DXF のレイヤーの設定（色・線種・非表示・フリーズ・ロック）。ビューアのサイドバーに出し、
+    # 非表示・フリーズのレイヤーは最初から隠す。DXF 以外は None。
+    layer: dict[str, Any] | None = None
 
 
 @dataclass
@@ -210,10 +213,35 @@ def _load_dxf(path: str) -> list[Part]:
             if el.dxftype() == "POINT":
                 shapes.append(cq.Vertex.makeVertex(*el.dxf.location.xyz))
         if shapes:
-            parts.append(Part(layer, layer, cq.Compound.makeCompound(shapes).wrapped))
+            settings, color = _dxf_layer_settings(doc, layer)
+            parts.append(Part(layer, layer, cq.Compound.makeCompound(shapes).wrapped, color, layer=settings))
     if not parts:
         raise CadLoadError(f"The DXF file has no lines, curves or points that can be shown: {path}")
     return parts
+
+
+def _dxf_layer_settings(doc, name: str) -> tuple[dict[str, Any], tuple[int, int, int] | None]:
+    """DXF のレイヤー表の設定と、形に付ける色（ACI 7 = 白/黒は背景で変わる色なので付けない）。"""
+    from ezdxf.colors import aci2rgb
+
+    settings: dict[str, Any] = {"color": None, "aci": None, "linetype": None, "off": False, "frozen": False, "locked": False}
+    if not doc.layers.has_entry(name):
+        return settings, None
+    entry = doc.layers.get(name)
+    rgb = entry.rgb
+    aci = entry.color
+    if rgb is None and aci not in (None, 0, 7, 256):
+        rgb = tuple(aci2rgb(aci))
+    color = tuple(int(c) for c in rgb) if rgb is not None else None
+    settings.update(
+        color=hex_color(color) if color else None,
+        aci=aci,
+        linetype=entry.dxf.get("linetype"),
+        off=bool(entry.is_off()),
+        frozen=bool(entry.is_frozen()),
+        locked=bool(entry.is_locked()),
+    )
+    return settings, color
 
 
 def to_shape(obj: Any) -> cq.Shape | None:
@@ -470,9 +498,11 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
             f"The shape needs {total} triangles even with a coarse tessellation, more than [cad_viewer] max_triangles ({options.max_triangles})."
         )
 
-    # 部品と色（面ごと）。
+    # 部品と色（面ごと）。DXF はレイヤーが 1 つでも部品として残す（サイドバーにレイヤーの設定を出すため）。
+    with_parts = len(parts) > 1 or any(p.layer is not None for p in parts)
     face_part = np.full(n_faces, -1, dtype=np.int64)
     edge_part = np.full(n_edges, -1, dtype=np.int64)
+    vertex_part = np.full(n_vertices, -1, dtype=np.int64)
     face_color: list[tuple[int, int, int] | None] = [None] * n_faces
     for pi, part in enumerate(parts):
         for i in _ids_in(part.shape, TopAbs_FACE, face_map):
@@ -480,6 +510,8 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
             face_color[i] = part.color
         for i in _ids_in(part.shape, TopAbs_EDGE, edge_map):
             edge_part[i] = pi
+        for i in _ids_in(part.shape, TopAbs_VERTEX, vertex_map):
+            vertex_part[i] = pi
         for sub_shape, color in part.face_colors:
             for i in _ids_in(sub_shape, TopAbs_FACE, face_map):
                 face_color[i] = color
@@ -530,7 +562,7 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
         elif len(adj) == 1 and edge_face_anc.Contains(e) and edge_face_anc.FindFromKey(e).Size() >= 2:
             # 同じ面に 2 回属するエッジ（円筒・球の継ぎ目）。形の角ではなく、面を閉じるための線。
             info["seam"] = True
-        if edge_part[i - 1] >= 0 and len(parts) > 1:
+        if edge_part[i - 1] >= 0 and with_parts:
             info["part"] = int(edge_part[i - 1])
         edges.append(info)
 
@@ -540,7 +572,7 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
         info["edges"] = sorted(face_edges[i - 1])
         if face_color[i - 1] is not None:
             info["color"] = hex_color(face_color[i - 1])
-        if len(parts) > 1 and face_part[i - 1] >= 0:
+        if with_parts and face_part[i - 1] >= 0:
             info["part"] = int(face_part[i - 1])
         faces.append(info)
 
@@ -554,6 +586,8 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
         info = {"id": i - 1, "kind": "vertex", "point": vec(_xyz(p)), "edges": adj}
         if not adj:
             info["free"] = True
+        if with_parts and vertex_part[i - 1] >= 0:
+            info["part"] = int(vertex_part[i - 1])
         vertices.append(info)
 
     for kind, items in (("face", faces), ("edge", edges), ("vertex", vertices)):
@@ -574,7 +608,7 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
         edges=edges,
         vertices=vertices,
     )
-    if len(parts) > 1:
+    if with_parts:
         data["parts"] = [_part_info(pi, part, face_part, edge_part) for pi, part in enumerate(parts)]
         data["stats"]["parts"] = len(parts)
     return data
@@ -602,6 +636,8 @@ def _part_info(pi: int, part: Part, face_part: np.ndarray, edge_part: np.ndarray
     }
     if part.color is not None:
         info["color"] = hex_color(part.color)
+    if part.layer is not None:
+        info["layer"] = part.layer
     try:
         info["volume"] = rnd(shape.Volume())
     except Exception:  # noqa: BLE001

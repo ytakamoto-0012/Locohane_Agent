@@ -803,7 +803,15 @@ def _patch_chainlit_websocket_ping_timeout() -> None:
 # Chainlit本体側にその区別が無い（_patch_chainlit_ignore_ui_action_first_interaction
 # のdocstring参照）。
 _NON_CHAT_ACTION_NAMES = frozenset(
-    {"pick_work_dir", "suggest_work_dir", "work_dir_server_info", "toggle_plan_mode", "set_language", "reasoning_effort_info"}
+    {
+        "pick_work_dir",
+        "suggest_work_dir",
+        "work_dir_server_info",
+        "toggle_plan_mode",
+        "set_language",
+        "reasoning_effort_info",
+        "cad_viewer_save",
+    }
 )
 
 
@@ -3216,6 +3224,24 @@ async def on_set_language(action: cl.Action) -> dict:
     await _send_work_dir_settings(work_dir or "")
     await _send_starter_prompts()
     return {"ok": True, "lang": lang}
+
+
+@cl.action_callback("cad_viewer_save")
+async def on_cad_viewer_save(action: cl.Action) -> dict:
+    """3D ビューア（CadViewerBar.tsx）の「保存」ボタンから呼ばれる action_callback。
+
+    変えた色・隠した部品を適用したビューア用データを JSON に書く（src/tools/cad_viewer.py の
+    save_viewer_edits）。ビューアは回答待ちのまま（閉じない）。
+
+    Args:
+        action: payload に save_id・colors・hidden_parts・visible が入る。
+
+    Returns:
+        {"ok": True, "path", "token", "color_changes"} か {"ok": False, "error"}。
+    """
+    from src.tools.cad_viewer import save_viewer_edits
+
+    return await save_viewer_edits(dict(action.payload or {}))
 
 
 @cl.action_callback("work_dir_server_info")
