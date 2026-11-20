@@ -505,6 +505,7 @@ DESCRIPTIONS: dict[str, str] = {
         '- dispatch_agent / dispatch_agent_batch / check_dispatch_agent_job / stop_dispatch_agent_job (the delegation mechanism itself; delegating to several folders in one turn is normal usage)\n'
         '- create_plan / approve_plan / update_task_progress / get_plan_status / lock_plan_mode (plans normally have several steps, and update_task_progress is called once per step)\n'
         '- AskUserQuestion / ask_user_choice (may be called several times to confirm several items)\n'
+        '- show_cad_viewer (lets the user select in the 3D viewer; it returns only the selected elements, so the token risk is low)\n'
         '- create_memory / update_memory / delete_memory / read_memory / search_memory / list_memories / save_glossary_term (may handle several memories in one turn; contents are small and the token risk is low)\n'
         '- read_skill / read_skill_file / get_tool_source (reading several skills in one turn is normal)\n'
         '- check_script_job / stop_script_job (job management)\n'
@@ -1480,6 +1481,29 @@ DESCRIPTIONS: dict[str, str] = {
     ),
     'user_response_timeouts.ask_user_choice_seconds': (
         'Waiting time for ask_user_choice (multiple-choice questions). 0 waits indefinitely.'
+    ),
+    'user_response_timeouts.show_cad_viewer_seconds': (
+        'Waiting time for show_cad_viewer (the user selects faces, edges, vertices or parts in the 3D viewer). Turning the model around takes time, so the default is no limit. 0 waits indefinitely.'
+    ),
+    'cad_viewer.enabled': (
+        'Settings of the 3D viewer in the chat (the show_cad_viewer tool; src/tools/cad_viewer.py, src/cad/).\n'
+        'It shows the shape of CadQuery code or of a STEP/IGES/BREP/BIN/DXF/STL file, lets the user rotate and zoom it, and returns the information of the elements the user selected to the LLM.\n'
+        'Reading files other than STL needs cadquery (requirements.txt). Running CadQuery code needs [scripts] code_execution_enabled and an approved plan, like execute_python_code (showing a file does not).\n'
+        'false makes the tool return an error.'
+    ),
+    'cad_viewer.max_triangles': (
+        'Upper limit of triangles sent to the viewer. A B-rep shape over it is tessellated again more coarsely, and it is an error if it is still over (an STL file is an error as soon as it is over).\n'
+        'The data sent to the browser is about 0.3 MB per 10,000 triangles (0.6 MB for STL). 0 or less means no limit.'
+    ),
+    'cad_viewer.linear_deflection_ratio': (
+        'Tolerance when splitting curved surfaces into triangles, as a ratio of the diagonal length of the shape. Smaller is smoother and makes more triangles.'
+    ),
+    'cad_viewer.angular_deflection_deg': (
+        'Angular tolerance (degrees) when splitting curved surfaces into triangles. Smaller is smoother and makes more triangles.'
+    ),
+    'cad_viewer.stl_region_angle_deg': (
+        'Upper limit of the angle (degrees) between normals when grouping the triangles of an STL file into one "face" (planar region).\n'
+        'A larger value for a curved STL makes fewer faces, but their information as a "plane" (the normal) becomes rough.'
     ),
     'plan.allow_badge_unlock': (
         'Behavior when clicking the Plan Mode / Edit Automatically badge shown near the send button.\n'

@@ -187,7 +187,7 @@ SUBAGENT_MESSAGE_AUTHOR = "サブエージェント"
 _SUBAGENT_DISPATCH_TOOLS = frozenset({"dispatch_agent", "dispatch_agent_batch"})
 # ユーザーへ質問して応答を待つツール。孤立した（応答を受け取る前に中断した）ものは、次のユーザー発言が
 # その答えでありうると LLM へ伝える（_build_orphaned_placeholder_messages 参照）。
-_ASK_USER_TOOLS = frozenset({"ask_user_choice", "AskUserQuestion", "approve_plan"})
+_ASK_USER_TOOLS = frozenset({"ask_user_choice", "AskUserQuestion", "approve_plan", "show_cad_viewer"})
 
 
 def _tool_step_label(event: dict) -> str:

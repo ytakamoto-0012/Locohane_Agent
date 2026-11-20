@@ -29,6 +29,7 @@ import { Composer, type PendingAttachment } from './components/Composer';
 import { AskActionBar } from './components/AskActionBar';
 import { AskFormBar } from './components/AskFormBar';
 import { AskChoiceFormBar } from './components/AskChoiceFormBar';
+import { CadViewerBar } from './components/CadViewerBar';
 import { AskTextBar } from './components/AskTextBar';
 import { AskFileDropzone } from './components/AskFileDropzone';
 import { StarterPrompts } from './components/StarterPrompts';
@@ -512,6 +513,7 @@ function App() {
         <AskActionBar />
         <AskFormBar />
         <AskChoiceFormBar />
+        <CadViewerBar />
         <AskTextBar />
         <AskFileDropzone />
         {!hasSentMessage && (

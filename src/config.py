@@ -1134,6 +1134,17 @@ class Config:
             には対応するキーが存在せず、環境変数 AUTH_USERS（.env 推奨）
             のみから読む機密情報専用フィールド（他フィールドと異なり
             config.ini 側フォールバックを持たない）。
+        cad_viewer_enabled: 3D ビューア（show_cad_viewer ツール、src/tools/cad_viewer.py）を
+            使えるようにするか（[cad_viewer].enabled）。False ならツールはエラーを返す。
+        cad_viewer_max_triangles: ビューアに送る三角形の上限（[cad_viewer].max_triangles）。
+            B-rep は超えたら粗く作り直し、それでも超えれば（STL は超えた時点で）エラー。0 以下で無制限。
+        cad_viewer_linear_deflection_ratio: 三角形化の許容差（形の対角線の長さに対する割合。
+            [cad_viewer].linear_deflection_ratio）。小さいほど曲面が滑らかで三角形が増える。
+        cad_viewer_angular_deflection_deg: 三角形化の角度の許容差（度。[cad_viewer].angular_deflection_deg）。
+        cad_viewer_stl_region_angle_deg: STL の三角形を 1 つの平面領域（面）にまとめる法線の角度差の上限
+            （度。[cad_viewer].stl_region_angle_deg）。
+        show_cad_viewer_timeout_seconds: 3D ビューアで利用者が選択を確定するのを待つ秒数
+            （[user_response_timeouts].show_cad_viewer_seconds）。0 以下は無期限待ち。
     """
 
     # --- LLM (llama.cpp server / OpenAI 互換) ---
@@ -1638,6 +1649,15 @@ class Config:
     # 埋め込みの接続先の取得元インスタンス名。空文字列なら自動で探す（admin/server.py）。
     admin_assistant_embedding_instance: str
     admin_assistant_max_history_messages: int
+
+    # --- 3D ビューア（[cad_viewer]、show_cad_viewer ツール） ---
+    # 既定値付き（テスト等で Config を直接組み立てる箇所に影響させないため）。
+    cad_viewer_enabled: bool = True
+    cad_viewer_max_triangles: int = 500_000
+    cad_viewer_linear_deflection_ratio: float = 0.001
+    cad_viewer_angular_deflection_deg: float = 20.0
+    cad_viewer_stl_region_angle_deg: float = 1.0
+    show_cad_viewer_timeout_seconds: int = 0
 
 
 def _resolve(base: Path, value: str) -> Path:
@@ -3421,6 +3441,7 @@ def load_config(
     graph = parser["graph"] if parser.has_section("graph") else {}
     subagent = parser["subagent"] if parser.has_section("subagent") else {}
     timeouts = parser["user_response_timeouts"] if parser.has_section("user_response_timeouts") else {}
+    cad_viewer = parser["cad_viewer"] if parser.has_section("cad_viewer") else {}
     plan_section = parser["plan"] if parser.has_section("plan") else {}
     thinking_loop_guard = parser["thinking_loop_guard"] if parser.has_section("thinking_loop_guard") else {}
     thinking_control = parser["thinking_control"] if parser.has_section("thinking_control") else {}
@@ -4621,6 +4642,21 @@ def load_config(
             os.getenv("ADMIN_ASSISTANT_MAX_HISTORY_MESSAGES", admin.get("assistant_max_history_messages", 20)),
             "[admin].assistant_max_history_messages",
         ),
+        cad_viewer_enabled=_as_bool(os.getenv("CAD_VIEWER_ENABLED", cad_viewer.get("enabled", True))),
+        cad_viewer_max_triangles=int(os.getenv("CAD_VIEWER_MAX_TRIANGLES", cad_viewer.get("max_triangles", 500_000))),
+        cad_viewer_linear_deflection_ratio=_positive_float(
+            os.getenv("CAD_VIEWER_LINEAR_DEFLECTION_RATIO", cad_viewer.get("linear_deflection_ratio", 0.001)),
+            "[cad_viewer].linear_deflection_ratio",
+        ),
+        cad_viewer_angular_deflection_deg=_positive_float(
+            os.getenv("CAD_VIEWER_ANGULAR_DEFLECTION_DEG", cad_viewer.get("angular_deflection_deg", 20)),
+            "[cad_viewer].angular_deflection_deg",
+        ),
+        cad_viewer_stl_region_angle_deg=_positive_float(
+            os.getenv("CAD_VIEWER_STL_REGION_ANGLE_DEG", cad_viewer.get("stl_region_angle_deg", 1)),
+            "[cad_viewer].stl_region_angle_deg",
+        ),
+        show_cad_viewer_timeout_seconds=int(os.getenv("SHOW_CAD_VIEWER_TIMEOUT_SECONDS", timeouts.get("show_cad_viewer_seconds", 0))),
     )
 
     # .locohane/settings.json の "mcp" ブロックがあれば、config.ini/環境変数由来の

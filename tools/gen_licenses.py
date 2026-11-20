@@ -43,7 +43,16 @@ TOP = [
     "onnxruntime",
     "tokenizers",
     "numpy",
+    "cadquery",
+    "ezdxf",
 ]
+# 改変せず別のライブラリとして使う（動的リンク）限り商用利用できる弱いコピーレフト。
+WEAK_COPYLEFT = {"LGPL", "MPL 2.0"}
+# メタデータにライセンスが書かれていないパッケージ（同梱の LICENSE ファイルを読んで確かめた値）。
+KNOWN_LICENSES = {
+    # LICENSE は BSD 2 条項（Anaconda）、同梱の LLVM は Apache 2.0 with LLVM Exceptions（LICENSE.thirdparty）。
+    "llvmlite": "BSD-2-Clause; Apache-2.0 WITH LLVM-exception (bundled LLVM)",
+}
 # 告知に含めない実行環境ツール。
 EXCLUDE = {"pip", "setuptools", "wheel"}
 
@@ -87,11 +96,15 @@ def license_of(meta) -> str:
         return expr.strip()
     # 2. License 分類子。
     classifiers = [v for k, v in meta.items() if k == "Classifier" and v.startswith("License")]
-    if classifiers:
-        return "; ".join(c.split("::")[-1].strip() for c in classifiers)
+    names = [c.split("::")[-1].strip() for c in classifiers]
+    # "License :: OSI Approved" だけ（種類が分からない）なら License フィールドを見る（casadi 等）。
+    if names and names != ["OSI Approved"]:
+        return "; ".join(names)
     # 3. License フィールド（自由記述の先頭行）。
     raw = (meta.get("License") or "").splitlines()
-    return raw[0][:45] if raw and raw[0].strip() else "（記載なし）"
+    if raw and raw[0].strip():
+        return raw[0][:60]
+    return "; ".join(names) if names else "（記載なし）"
 
 
 def url_of(meta) -> str:
@@ -136,7 +149,7 @@ def main() -> None:
             meta = md.distribution(name).metadata
         except md.PackageNotFoundError:
             continue
-        rows.append((name, meta.get("Version", "?"), license_of(meta), url_of(meta)))
+        rows.append((name, meta.get("Version", "?"), KNOWN_LICENSES.get(name) or license_of(meta), url_of(meta)))
 
     summary = Counter(simplify(r[2]) for r in rows)
 
@@ -162,10 +175,29 @@ def main() -> None:
         out.append(f"| {k} | {c} |")
     out.append(f"| **合計** | **{len(rows)}** |")
     out.append("")
-    out.append("> いずれも寛容ライセンス（MIT / Apache 2.0 / BSD / PSF / ISC）または")
-    out.append("> ファイル単位の弱いコピーレフト（MPL 2.0）であり、改変せず依存として利用する")
+    lgpl = [r[0] for r in rows if simplify(r[2]) == "LGPL"]
+    strong = [r[0] for r in rows if simplify(r[2]) in ("GPL", "AGPL")]
+    out.append("> 寛容ライセンス（MIT / Apache 2.0 / BSD / PSF / ISC）、ファイル単位の弱いコピーレフト（MPL 2.0）、")
+    out.append("> ライブラリ単位の弱いコピーレフト（LGPL）だけであれば、改変せず依存として利用する")
     out.append("> 限り本ソフトウェアへの組み込み・商用配布が可能です。")
-    out.append("> GPL / AGPL / LGPL は含まれません。各パッケージを改変する場合は当該ライセンス条項に従ってください。")
+    if strong:
+        out.append(f"> **GPL / AGPL が含まれています: {', '.join(strong)}。配布前に確認してください。**")
+    else:
+        out.append("> GPL / AGPL は含まれません。")
+    if lgpl:
+        out.append(f"> LGPL: {', '.join(lgpl)}（3D ビューア用の cadquery の依存）。改変せず、pip で入れた別のライブラリとして")
+        out.append("> 使う限り商用利用できます。改変して配布する場合や、1 つの実行ファイルへ静的にまとめる場合は LGPL の条項に従ってください。")
+    copyleft = [r[0] for r in rows if any(k in r[2].upper() for k in ("LGPL", "LESSER GENERAL", "MPL", "MOZILLA"))]
+    out.append("> 各パッケージを改変する場合は当該ライセンス条項に従ってください。")
+    if copyleft or lgpl:
+        out.append(">")
+        out.append(f"> **改変禁止**: {', '.join(copyleft)}、および cadquery-ocp に同梱の OpenCASCADE 本体（LGPL / MPL 2.0）。")
+        out.append("> ファイルの書き換え・パッチ・フォーク版への差し替えをせず、LGPL のものは静的にリンクしないこと")
+        out.append("> （README_DETAIL.md「依存パッケージ（商用利用可）」の「改変禁止のパッケージ」参照）。")
+    out.append("")
+    out.append("> `cadquery-ocp`（OCP）はラッパー自体は Apache 2.0 ですが、OpenCASCADE Technology（OCCT）の")
+    out.append("> ビルド済みライブラリを同梱しており、OCCT は LGPL-2.1 + Open CASCADE Exception です（上の集計では")
+    out.append("> パッケージのメタデータどおり Apache 2.0 に数えています）。")
     out.append("")
     out.append("> `pypdfium2` はビルド済みPDFiumバイナリに libpng / LibTIFF / FreeType（FTL） / zlib /")
     out.append("> libjpeg-turbo / ICU 等の第三者コードを同梱しており、パッケージの")

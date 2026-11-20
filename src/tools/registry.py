@@ -35,6 +35,7 @@ from .get_plan_status import get_plan_status
 from .lock_plan_mode import lock_plan_mode
 from .ask_user_question import ask_user_question
 from .ask_user_choice import ask_user_choice
+from .cad_viewer import show_cad_viewer
 from .memory_tools import create_memory, update_memory, delete_memory, read_memory, search_memory, list_memories
 from .glossary_tools import save_glossary_term
 from .show_help import show_help
@@ -110,6 +111,7 @@ _BASE_TOOLS: list[BaseTool] = [
     stop_dispatch_agent_job,
     ask_user_question,
     ask_user_choice,
+    show_cad_viewer,
     create_plan,
     approve_plan,
     update_task_progress,

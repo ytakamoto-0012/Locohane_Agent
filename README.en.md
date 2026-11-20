@@ -48,6 +48,7 @@ So rather than raw AI capability, it puts "**getting the same result every time 
 | PowerPoint | Read, create, edit parts of templates, render slides as images |
 | PDF | Extract text, render pages as images, create PDFs (Japanese supported) |
 | Images | Look at images and describe or judge them (with a model that supports images) |
+| 3D CAD | Rotate CAD files (STEP, IGES, BREP, DXF, STL including colored STL) or shapes the AI made with CadQuery in a 3D viewer in the chat, and click faces, edges, vertices or parts to tell the AI which ones you mean ("make a hole in this face", etc.) |
 | Many files | Apply the same processing to many files in a folder, split among several AIs in parallel |
 | Memory | Remember what you asked it to remember and use it in other conversations (persistent memory) |
 | Internal document search | Find the relevant parts of rules, manuals, etc. that the administrator ingested, and answer with sources (vector DB, when enabled by the administrator) |
@@ -196,6 +197,10 @@ The AI can write only inside this working folder.
 
 Created or processed files appear in the chat as **download buttons**.
 Images are previewed right there.
+
+3D shapes (CAD files or shapes the AI made) appear above the input box in a **3D viewer**. Drag to rotate and use the wheel to zoom,
+switch between "Face", "Edge" and "Vertex" ("Part" for an assembly), click to select, and press "Confirm" to tell the AI what you selected.
+For details, see "3D viewer (CAD)" in [README_DETAIL.en.md](README_DETAIL.en.md).
 
 ### Resume past conversations
 

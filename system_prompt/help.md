@@ -33,6 +33,7 @@ For multi-step work, a **checklist-style plan is shown before starting**.
 - It can check and describe the contents of image files
 - Files it creates or processes are offered as **download buttons**
 - Images can be **previewed** right away
+- 3D shapes (STEP, IGES, BREP, DXF and STL files, including colored STL, or shapes made with CadQuery code) are shown in a **3D viewer** you can rotate; click faces, edges, vertices or parts and confirm to tell it which ones you mean (e.g. "make a hole in this face")
 
 ### 6. Persistent memory
 It remembers information you want to carry over between conversations and uses it in later conversations.

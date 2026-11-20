@@ -192,7 +192,7 @@ _LOOKUP_TOOL_NAMES = frozenset(
 )
 # 委譲と同じ応答に並べてはいけない、ユーザーへの質問ツール。dispatch_agent が [graph].max_parallel の
 # 枠から外れた（_UNGUARDED_TOOL_NAMES）ため、同じ応答に並ぶと回答を待たずに委譲が始まってしまう。
-_ASK_TOOL_NAMES = frozenset({"AskUserQuestion", "ask_user_choice"})
+_ASK_TOOL_NAMES = frozenset({"AskUserQuestion", "ask_user_choice", "show_cad_viewer"})
 
 # `_tmp_<name>`（execute_python_code / run_script の中間生成物置き場）の
 # `<name>` 部分（作成時刻プレフィックス付きthread_id）を、スレッド（thread_id）

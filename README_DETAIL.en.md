@@ -129,7 +129,7 @@ whether to reflect them in the official procedures is decided through external e
                  └───┬───────────────────────────┬──────────────┘
                      │ model calls               │ tool execution
        ┌─────────────▼───────────┐   ┌───────────▼──────────────────────┐
-       │ ChatOpenAI              │   │ src/tools/ (41 tools)               │
+       │ ChatOpenAI              │   │ src/tools/ (42 tools)               │
        │  → llama-server /v1     │   │  read_skill / read_skill_file /    │
        │  (OpenAI-compatible)    │   │  run_script / execute_python_code /│
        └─────────────────────────┘   │  get_tool_source / check_work_dir_status /│
@@ -253,7 +253,7 @@ but **the `tools` field itself, sent with each request**
 Only the skills' frontmatter (name/description) is separately injected as text into the system prompt
 at startup by `src/skills.py` (the Discovery stage, which is prompt-based).
 
-Besides the 3 stages above, there are the following 41 tools independent of skill loading (all under the `src/tools/` package, as a rule one file per tool).
+Besides the 3 stages above, there are the following 42 tools independent of skill loading (all under the `src/tools/` package, as a rule one file per tool).
 Tool descriptions and return values are written in English (the LLM relays them to the user in the user's language).
 
 | Tool | Role |
@@ -281,6 +281,7 @@ Tool descriptions and return values are written in English (the LLM relays them 
 | `check_dispatch_agent_job` / `stop_dispatch_agent_job` | Used only in the fallback after the safety limit above: checking the status of the job and forcibly stopping it |
 | `create_plan` / `approve_plan` / `update_task_progress` | Create, approve and update the progress of a multi-step execution plan (after approval, the individual confirmations of `run_script` are skipped). Each step has `content` (what to do) and `activeForm` (the present progressive form shown while running) |
 | `get_plan_status` / `lock_plan_mode` | Checks whether it is currently Plan Mode (the locked state where write tools are blocked) or Edit Automatically (the state where an approved plan can be executed), and manually goes back from the latter to the former without user approval |
+| `show_cad_viewer` | Shows a shape (CAD file or CadQuery code) in a 3D viewer in the chat that can be rotated and zoomed, and returns the geometry (type, area, normal, radius, CadQuery selectors, etc.) of the faces, edges, vertices or parts the user clicked and confirmed. Passing CadQuery code needs an approved plan, like `execute_python_code` (see "3D viewer (CAD)" below) |
 | `AskUserQuestion` / `ask_user_choice` | Asks the user for additional information needed to continue the conversation (`AskUserQuestion` is free text: a single input when `labels` is omitted, several items presented together when given. `ask_user_choice` is multiple choice, and "✏️ Other (free input)" and "❌ Cancel" are always added automatically to the displayed choices) |
 | `create_memory` / `update_memory` / `delete_memory` / `read_memory` / `search_memory` / `list_memories` | Save, update, delete, read in full, search and list persistent memory across threads (`src/memory.py`). The main agent has all 6 tools. `dispatch_agent` sub-agents get narrowed sets per kind: `explore` and `worker` have all 6 plus `save_glossary_term` (memory is the only thing `explore` can write, so that it records what it found on the spot instead of handing it to `worker`), and `verifier` has only the reading tools (see `tools:` of `agents/*.md`). Glossary entries cannot be saved with `create_memory`/`update_memory` |
 | `save_glossary_term` | Registers one term in the glossary as one file (`src/glossary.py`). The meaning (a text that only points to a file is rejected) and the sources are required. The name is made from the term. A saved entry with the same term or alias is updated instead (merging duplicates), and related terms are written into both entries. After saving it returns a few passages of the knowledge that mention the term (see "Glossary" under "Persistent memory") |
@@ -295,7 +296,7 @@ if not approved, they return an error (Plan Mode). The approval itself is done w
 (including `execute_python_code_background`) can be disabled as a tool with `[scripts] code_execution_enabled`
 in `config.ini`.
 
-Not all of the 41 tools and skills above can be called directly from the main agent.
+Not all of the 42 tools and skills above can be called directly from the main agent.
 `[main_agent_tool_guard]` in `config.ini` (default `mode = all`) restricts the main agent's
 own direct calls to built-in tools and skill scripts under `run_script` with the whitelist
 `allow_entries` (sub-agents under `dispatch_agent` are not covered). The `Read`/`Grep`/`json_query`/`analyze_image`/`execute_python_code` family
@@ -381,7 +382,7 @@ Locohane/
 │   └── agents/              # additional agent kinds merged into the scan of agents_dir (same names take precedence; currently only README.txt and empty)
 ├── frontend/                # custom React frontend
 │   ├── src/
-│   │   ├── components/      # UI components (AskFormBar, PlanCard, SidePanel, etc.)
+│   │   ├── components/      # UI components (AskFormBar, PlanCard, SidePanel, etc. CadViewerBar and cad/ are the 3D viewer; only cad/CadScene.ts loads three.js, lazily)
 │   │   ├── i18n/            # display language (Japanese/English texts, LanguageProvider, useI18n)
 │   │   └── utils/           # utilities
 │   └── public/
@@ -454,6 +455,11 @@ Locohane/
 │   │   ├── journal.py        # ingestion journal (ingest_journal.sqlite; cleans up files left half-written by a forced termination)
 │   │   ├── gc_pacer.py       # periodic collection of cyclic garbage (httpx responses) during ingestion and copying
 │   │   └── ingest.py / search.py # differential ingestion (CLI: python -m src.vector_db.ingest), search
+│   ├── cad/                  # shape processing of the 3D viewer (show_cad_viewer); runs in a subprocess ("3D viewer (CAD)" section)
+│   │   ├── run_cad.py         # entry point of the subprocess (reading files; the parts put before and after CadQuery code)
+│   │   ├── export_mesh.py     # B-rep (STEP/IGES/BREP/BIN/DXF, result of code) -> viewer data (needs cadquery)
+│   │   ├── stl_reader.py / mesh_data.py # reading STL (including colored), grouping into planar regions, building viewer data (numpy only)
+│   │   └── formats.py         # supported extensions
 │   ├── project_instructions.py # loading .locohane/LOCOHANE.md
 │   ├── graph.py             # ReAct loop (switches between handwritten / prebuilt)
 │   ├── llm/                  # building ChatOpenAI (llama-server connection)
@@ -1804,6 +1810,54 @@ With `[vector_db] backend = qdrant` and `qdrant_url = http://localhost:6333`, ve
 
 ---
 
+## 3D viewer (CAD)
+
+The `show_cad_viewer` tool (`src/tools/cad_viewer.py`) shows a 3D viewer in the chat, lets the user rotate and zoom the shape,
+and returns to the LLM the information of the faces, edges, vertices or parts the user clicked. Use it when the user wants to point at
+part of a shape ("make a hole in this face", "round this edge"), or wants to look inside a CAD file.
+
+**Where the shape comes from** (exactly one):
+
+- `file_path`: a CAD file (absolute path or `@N`). No code runs, so no plan approval is needed.
+- `code`: CadQuery Python code. Put the shape in a variable named `result` or call `show_object(shape)` (as in CQ-editor; several calls are shown together).
+  It runs arbitrary code, so it is treated like `execute_python_code`: it needs `[scripts] code_execution_enabled` and an approved plan (`create_plan`/`approve_plan`),
+  and it can write only to the working directory and the session's `_tmp_` folder. Files the code writes (`.step` etc.) are registered as `@N`.
+
+**Supported file formats** (by extension, case-insensitive):
+
+| Format | Extensions | How it is read | Selectable elements |
+|------|--------|-------------|-----------|
+| STEP | `.step` `.stp` | OCP's XCAF (`STEPCAFControl_Reader`); keeps assembly parts, names, placements and colors | faces, edges, vertices, parts |
+| IGES | `.iges` `.igs` | OCP's XCAF (`IGESCAFControl_Reader`; CadQuery itself cannot read IGES); faces are sewn together | faces, edges, vertices, parts |
+| BREP | `.brep` `.brp` | CadQuery `importers.importBrep` | faces, edges, vertices |
+| Binary BREP | `.bin` | CadQuery `importers.importBin` | faces, edges, vertices |
+| DXF (2D) | `.dxf` | ezdxf + CadQuery's DXF conversion. Closed outlines become faces, open lines free curves, POINTs free points, layers parts | faces, edges, vertices, parts |
+| STL | `.stl` | Own reader (numpy only; ASCII, binary and colored binary). STL has no B-rep, so adjacent triangles with the same direction and color form a "face" (planar region), and borders between faces are "edges" | faces, edges |
+| Viewer data | `.json` | Written by this tool before; shows the same shape again without rebuilding it | same as the original |
+
+For colored STL, the color in the 2 attribute bytes of each triangle of a binary STL is read. Both the VisCAM / SolidView convention (bit15=1 means colored, red in the high bits) and
+the Materialise Magics convention (`COLOR=` in the header is the default color, bit15=0 means colored, red in the low bits) are handled.
+STL can be shown without cadquery (the other formats and running code need cadquery).
+
+**What is returned to the LLM**: for each confirmed element, its type (`PLANE`/`CYLINDER`/`LINE`/`CIRCLE`, etc.), area or length, center, normal, radius, axis, bounding box,
+the IDs of neighbouring elements, the path and color of its part (assembly), whether it is a free curve or point (`free`), whether it is a seam of a cylinder etc. (`seam`),
+and the CadQuery selectors verified to pick exactly that one element (`>Z`, `%CYLINDER`, `>Z[1]`, etc.).
+IDs follow the order of CadQuery's `Workplane().add(shape).faces().vals()` (0-based; the same for edges and vertices), so code can refer to them directly.
+It also returns an `@N` of the viewer data; passing it as `file_path` shows the same shape again at once.
+
+**How it works**: reading the shape, tessellating it and computing the information run in a subprocess (`src/cad/run_cad.py`, Python is `[scripts] python`), not in the app itself,
+and the resulting viewer data (JSON) is put in the session's `_tmp_` folder. The viewer is shown, like the multiple choice of `ask_user_choice`, with
+`cl.AskElementMessage` + `CustomElement` (name `CadViewer`), and drawn by `frontend/src/components/CadViewerBar.tsx` in the frontend.
+three.js is loaded only when a viewer opens (`frontend/src/components/cad/CadScene.ts`; it is not part of the main chat bundle).
+In the viewer, drag to rotate, right-drag to pan, use the wheel to zoom, click to select / deselect, switch the kind of element and the view (iso, front, top, right) with the buttons at the top,
+and use "Expand" to fill the screen (Esc to restore). As with the other question tools, it can be answered on the screen you come back to after switching conversations.
+
+**Settings**: `[cad_viewer]` (`enabled`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`) and
+`[user_response_timeouts] show_cad_viewer_seconds` (default 0 = no limit). It is registered in `[main_agent_tool_guard] allow_entries` so the main agent can call it directly.
+It is not given to sub-agents (it shows something on the screen).
+
+**Out of scope**: CadQuery's own assembly files (`.xml`, `.xbf`), other mesh formats such as OBJ, glTF, PLY and 3MF, and selecting vertices of STL.
+
 ## Automatic tuning loop for prompt assets (evals/)
 
 A mechanism that automatically evaluates the "prompt assets passed to the LLM", such as `system_prompt.md`, `SKILL.md` and tool docstrings,
@@ -1943,6 +1997,12 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[user_response_timeouts]` | `approval_seconds` | Seconds to wait for a user response to `approve_plan` / the individual confirmation of `run_script`/`execute_python_code`. `0` waits indefinitely | `APPROVAL_TIMEOUT_SECONDS` |
 | `[user_response_timeouts]` | `ask_user_question_seconds` | Seconds to wait for a user response to `AskUserQuestion` (free-text questions; a single input when `labels` is omitted, a multi-item form when given). `0` waits indefinitely | `ASK_USER_QUESTION_TIMEOUT_SECONDS` |
 | `[user_response_timeouts]` | `ask_user_choice_seconds` | Seconds to wait for a user response to `ask_user_choice` (multiple-choice questions). `0` waits indefinitely | `ASK_USER_CHOICE_TIMEOUT_SECONDS` |
+| `[user_response_timeouts]` | `show_cad_viewer_seconds` | Seconds to wait for the user to confirm a selection in `show_cad_viewer` (3D viewer). `0` waits indefinitely (default) | `SHOW_CAD_VIEWER_TIMEOUT_SECONDS` |
+| `[cad_viewer]` | `enabled` | Whether the 3D viewer (`show_cad_viewer`) can be used. With `false` the tool returns an error | `CAD_VIEWER_ENABLED` |
+| `[cad_viewer]` | `max_triangles` | Upper limit of triangles sent to the viewer (default 500000). A B-rep shape over it is tessellated again more coarsely, and it is an error if still over (STL is an error as soon as it is over). 0 or less means no limit | `CAD_VIEWER_MAX_TRIANGLES` |
+| `[cad_viewer]` | `linear_deflection_ratio` | Tolerance when splitting curved surfaces into triangles (ratio to the diagonal length of the shape, default 0.001) | `CAD_VIEWER_LINEAR_DEFLECTION_RATIO` |
+| `[cad_viewer]` | `angular_deflection_deg` | Angular tolerance when splitting curved surfaces into triangles (degrees, default 20) | `CAD_VIEWER_ANGULAR_DEFLECTION_DEG` |
+| `[cad_viewer]` | `stl_region_angle_deg` | Upper limit of the angle between normals when grouping STL triangles into one face (planar region) (degrees, default 1) | `CAD_VIEWER_STL_REGION_ANGLE_DEG` |
 | `[plan]` | `allow_badge_unlock` | Whether to allow switching the Plan Mode badge both ways | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | Whether to reset `plan_approved` unconditionally back to Plan Mode when `create_plan` is called again in the approved (Edit Automatically) state. If `false`, only the steps are replaced while keeping the approval | `PLAN_RESET_APPROVAL_ON_RECREATE` |
 | `[plan]` | `reset_approval_on_new_message` | Whether to reset `plan_approved` unconditionally back to Plan Mode on every new user message. If `false`, the approval is kept across messages (after `thinking_loop_guard` reaches its retry limit, re-approval is not needed even when the user sends a message to continue) | `PLAN_RESET_APPROVAL_ON_NEW_MESSAGE` |
@@ -3030,25 +3090,47 @@ This software is under the **MIT License**. For details, see [LICENSE](LICENSE).
 
 ### Dependencies (commercial use OK)
 
-License breakdown of all 173 packages, the runtime transitive dependencies reachable from the direct dependencies in
+License breakdown of all 203 packages, the runtime transitive dependencies reachable from the direct dependencies in
 `requirements.txt` (pip):
 
 | License type | Count | Commercial use |
 |---|---:|---|
-| Apache 2.0 | 78 | ✅ |
-| MIT | 60 | ✅ |
-| BSD | 30 | ✅ |
-| PSF | 3 | ✅ |
+| Apache 2.0 | 89 | ✅ |
+| MIT | 69 | ✅ |
+| BSD | 38 | ✅ |
+| PSF | 4 | ✅ |
 | MPL 2.0 | 2 | ✅ (as long as used unmodified) |
+| LGPL | 1 | ✅ (as long as used unmodified, as a separate library) |
 
-**No GPL / AGPL / LGPL is included.** All are permissive licenses or file-level
-weak copyleft (MPL 2.0), so as long as they are used unmodified as dependencies, this software can be
-built in and distributed commercially. The complete list of all packages and attributions is in
+**No GPL / AGPL is included.** All are permissive licenses, file-level weak copyleft (MPL 2.0) or
+library-level weak copyleft (LGPL), so as long as they are used unmodified as dependencies, this software can be
+built in and distributed commercially.
+
+**Packages that must not be modified**: the following are copyleft (LGPL / MPL 2.0), so **do not modify** them, to keep the conditions for commercial use simple.
+
+| Package | License | Why it is installed |
+|---|---|---|
+| `casadi` | LGPL-3.0+ | dependency of `cadquery` for the 3D viewer (`show_cad_viewer`) |
+| OpenCASCADE Technology (OCCT) DLLs bundled in `cadquery-ocp` | LGPL-2.1 + Open CASCADE Exception | same as above (the package metadata says Apache 2.0, so the table above counts it as Apache 2.0) |
+| `bidict` | MPL 2.0 | dependency of Chainlit (python-socketio) |
+| `certifi` | MPL 2.0 | dependency of httpx, httpcore and requests |
+| `orjson` | MPL-2.0 AND (Apache-2.0 OR MIT) | dependency of langgraph-sdk and langsmith |
+| `tqdm` | MPL-2.0 AND MIT | dependency of huggingface-hub and openai |
+
+"Do not modify" means the following (the code of this project follows all of them).
+
+- Do not rewrite or patch the files of the installed packages (`.py`, `.pyd`, `.dll`, etc.), and do not replace them with a forked version.
+- Load the LGPL ones (`casadi`, OCCT) only dynamically, as separate libraries installed with pip. Do not link them statically into the executable.
+  When bundling everything into one package with PyInstaller etc. for distribution, keep the LGPL libraries replaceable by the user (separate DLLs, packages as is),
+  and include the license texts and where to get them (`THIRD_PARTY_LICENSES.md`).
+
+If you have to modify one, you must publish the source of the modified files as required by its license (LGPL per library, MPL 2.0 per file).
+If you do not want LGPL components, do not install `cadquery` (the 3D viewer can then show only STL, and other formats and CadQuery code return an error). The complete list of all packages and attributions is in
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) (regenerate it with
 `tools/gen_licenses.py` when adding dependencies).
 
 The above covers only pip dependencies. The npm dependencies of `frontend/` (react, recoil,
-`@chainlit/react-client`, vite, etc., all MIT / Apache 2.0) have been checked manually separately and
+`@chainlit/react-client`, vite, three (3D viewer), etc., all MIT / Apache 2.0) have been checked manually separately and
 include no GPL / AGPL / LGPL family licenses, but they are not included in the automatic tally of `tools/gen_licenses.py`
 or in THIRD_PARTY_LICENSES.md. When you add or update npm dependencies,
 check the licenses in `frontend/package-lock.json` separately.
@@ -3107,6 +3189,8 @@ packages, the licenses of those packages also need to be checked separately
 
 - [ ] Check the **license** of the model you use (GGUF / vLLM-compatible format) (-> the note in "Examples of starting the inference server (llama.cpp / vLLM)" above)
 - [ ] When adding or updating dependencies, regenerate the notice file with `tools/gen_licenses.py`
+- [ ] Make sure the **packages that must not be modified** in "Dependencies" above (`casadi`, OCCT, `bidict`, `certifi`, `orjson`, `tqdm`) are not modified,
+      and that the LGPL ones are not linked statically
 - [ ] When adding third-party Agent Skills, check the licenses of the skill itself and its additional dependent
       packages individually (see "Licenses of third-party Agent Skills" above)
 

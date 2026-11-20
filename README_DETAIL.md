@@ -132,7 +132,7 @@
                  └───┬───────────────────────────┬──────────────┘
                      │ モデル呼び出し             │ ツール実行
        ┌─────────────▼───────────┐   ┌───────────▼──────────────────────┐
-       │ ChatOpenAI              │   │ src/tools/ (41ツール)               │
+       │ ChatOpenAI              │   │ src/tools/ (42ツール)               │
        │  → llama-server /v1     │   │  read_skill / read_skill_file /    │
        │  (OpenAI 互換)          │   │  run_script / execute_python_code /│
        └─────────────────────────┘   │  get_tool_source / check_work_dir_status /│
@@ -257,7 +257,7 @@ LLM は `read_skill`/`read_skill_file`/`run_script` という**ビルトイン�
 スキルの frontmatter（name/description）だけはこれとは別に、`src/skills.py` が
 起動時にシステムプロンプトへテキスト注入する（Discovery 段階、こちらはプロンプトベース）。
 
-上記3段階に加えて、スキルの読み込みとは独立したツールが以下の41個ある（いずれも `src/tools/` パッケージ配下、ツール1つにつき原則1ファイル）。
+上記3段階に加えて、スキルの読み込みとは独立したツールが以下の42個ある（いずれも `src/tools/` パッケージ配下、ツール1つにつき原則1ファイル）。
 
 | ツール | 役割 |
 |--------|------|
@@ -285,6 +285,7 @@ LLM は `read_skill`/`read_skill_file`/`run_script` という**ビルトイン�
 | `create_plan` / `approve_plan` / `update_task_progress` | 複数ステップの実行計画を作成・承認・進捗更新（承認後は`run_script`の個別確認をスキップ）。各ステップは `content`（内容）と `activeForm`（実行中表示用の現在進行形）を持つ |
 | `get_plan_status` / `lock_plan_mode` | 現在 Plan Mode（書き込み系ツールがブロックされたロック状態）か Edit Automatically（承認済み計画を実行できる状態）かを確認し、後者から前者へユーザー承認なしに手動で戻す |
 | `AskUserQuestion` / `ask_user_choice` | 会話継続に必要な追加情報をユーザーへ質問（`AskUserQuestion` は自由記述。`labels` 省略時は単一入力、指定時は複数項目をまとめて提示。`ask_user_choice` は選択肢形式で、表示される選択肢には常に「✏️ その他（自由入力）」「❌ キャンセル」が自動で追加される） |
+| `show_cad_viewer` | チャット内の 3D ビューアで形（CAD ファイル・CadQuery コード）を回転・拡大して見せ、利用者がクリックで選んで確定した面・エッジ・頂点・部品の幾何情報（種類・面積・法線・半径・CadQuery セレクタ等）を返す。CadQuery コードを渡す場合は `execute_python_code` と同じく計画の承認が要る（後述「3D ビューア（CAD）」参照） |
 | `create_memory` / `update_memory` / `delete_memory` / `read_memory` / `search_memory` / `list_memories` | スレッドをまたぐ永続メモリー（`src/memory.py`）の保存・更新・削除・全文読込・検索・一覧。主エージェントは全6ツールを持つ。`dispatch_agent` のサブエージェントには種別ごとに絞って委譲し、`explore`・`worker` は全6ツールと `save_glossary_term` を持ち（`explore` が書き込めるのはメモリーだけ。調べた結果を `worker` へ渡し直さずにその場で記録するため）、`verifier` は読み込み系だけを持つ（`agents/*.md` の `tools:` 参照）。用語集（`glossary`）は `create_memory`/`update_memory` では保存できない |
 | `save_glossary_term` | 用語集へ1語1ファイルで登録する（`src/glossary.py`）。意味（ファイルを指すだけの書き方は拒否）と出典は必須。名前は用語から自動で作る。同じ用語・別名の登録があればそれへまとめ、関連用語は互いの本文に載せる。保存後、ナレッジでその用語が出てくる箇所を数件返す（「永続メモリー」の「用語集」参照） |
 | `list_document_collections` / `search_documents` / `search_document_paths` | ベクターDB（`src/vector_db/`）に取り込んだ社内文書のコレクション一覧と意味検索（読み取り専用。`search_document_paths` はファイル名・フォルダ名で探す）。検索結果には出典のパス（`@N`）・ページ等を添え、全体を `[vector_db] max_result_chars` で切り詰める。`[vector_db] enabled = false` の間は「無効です」を返す（「ベクターDB（社内文書の意味検索）」参照） |
@@ -298,7 +299,7 @@ LLM は `read_skill`/`read_skill_file`/`run_script` という**ビルトイン�
 （`execute_python_code_background` 含む）は `config.ini` の `[scripts] code_execution_enabled`
 でツール自体を無効化できる。
 
-上記の41ツール・スキルすべてがメインエージェントから直接呼べるわけではない。
+上記の42ツール・スキルすべてがメインエージェントから直接呼べるわけではない。
 `config.ini` の `[main_agent_tool_guard]`（既定 `mode = all`）が、メインエージェント
 自身によるビルトインツール・`run_script` 配下スキルスクリプトの直接呼び出しを
 `allow_entries` のホワイトリストで制限する（`dispatch_agent` 配下のサブエージェントは
@@ -385,7 +386,7 @@ Locohane/
 │   └── agents/              # agents_dir にマージ走査される追加エージェント種別置き場（同名は優先。現状は README.txt のみで中身は空）
 ├── frontend/                # カスタムReactフロントエンド
 │   ├── src/
-│   │   ├── components/      # UIコンポーネント（AskFormBar, PlanCard, SidePanel等）
+│   │   ├── components/      # UIコンポーネント（AskFormBar, PlanCard, SidePanel等。CadViewerBar と cad/ は 3D ビューア、three.js は cad/CadScene.ts だけが遅延読み込みする）
 │   │   ├── i18n/            # 表示言語（日本語/英語の文言・LanguageProvider・useI18n）
 │   │   └── utils/           # ユーティリティ
 │   └── public/
@@ -437,7 +438,7 @@ Locohane/
 │   ├── version.py           # VERSION ファイルからバージョン番号を読む（__version__）
 │   ├── skills.py            # スキル発見ミドルウェア（第1段階 Discovery）
 │   ├── agent_types.py       # エージェント種別発見（agents/*.md）
-│   ├── tools/                # LangGraph ツール39種（第2・第3段階＋独立ツール）。ツール1つにつき原則1ファイル
+│   ├── tools/                # LangGraph ツール42種（第2・第3段階＋独立ツール）。ツール1つにつき原則1ファイル
 │   │   ├── registry.py       # get_all_tools()・MCPツール登録・_BASE_TOOLS/_SUBAGENT_TOOLS一覧
 │   │   ├── tool_node.py      # ImageAwareToolNode・メインエージェント向けツールのフィルタリング
 │   │   ├── _state.py         # モジュール共有状態（config値・セマフォ・レジストリ等）の一元管理
@@ -458,6 +459,11 @@ Locohane/
 │   │   ├── journal.py        # 取り込みジャーナル（ingest_journal.sqlite。強制終了で書きかけになったファイルの片付け用）
 │   │   ├── gc_pacer.py       # 取り込み・コピー中の循環参照のゴミ（httpx の応答）の定期回収
 │   │   └── ingest.py / search.py # 差分取り込み（CLI: python -m src.vector_db.ingest）・検索
+│   ├── cad/                  # 3D ビューア（show_cad_viewer）の形の処理。サブプロセスで動く（「3D ビューア（CAD）」節）
+│   │   ├── run_cad.py         # サブプロセスの入口（ファイルの読み込み・CadQuery コードの前後に付ける部分）
+│   │   ├── export_mesh.py     # B-rep（STEP/IGES/BREP/BIN/DXF・コードの結果）→ ビューア用データ（cadquery が要る）
+│   │   ├── stl_reader.py / mesh_data.py # STL（色付き含む）の読み込み・平面領域へのまとめ・ビューア用データの組み立て（numpy のみ）
+│   │   └── formats.py         # 対応する拡張子
 │   ├── project_instructions.py # .locohane/LOCOHANE.md の読込
 │   ├── graph.py             # ReAct ループ（handwritten / prebuilt を切替）
 │   ├── llm/                  # ChatOpenAI（llama-server接続）の構築
@@ -1847,6 +1853,54 @@ python -m src.vector_db.ingest --instance default --collection manuals --rebuild
 
 ---
 
+## 3D ビューア（CAD）
+
+チャットの中に 3D ビューアを出し、形を回転・拡大して見せ、利用者がクリックで選んだ面・エッジ・頂点・部品の情報を
+LLM へ返すツール `show_cad_viewer`（`src/tools/cad_viewer.py`）がある。「この面に穴を開けて」「この辺を丸めて」のように
+形の一部を指して指示したいときや、CAD ファイルの中身を見たいときに使う。
+
+**形の出どころ**（どちらか 1 つ）:
+
+- `file_path`: CAD ファイル（絶対パスか `@N`）。コードを実行しないので計画の承認は要らない。
+- `code`: CadQuery の Python コード。形を `result` 変数に入れるか `show_object(形)` を呼ぶ（CQ-editor と同じ書き方。複数回呼ぶとまとめて表示）。
+  任意のコードを実行するため `execute_python_code` と同じ扱いで、`[scripts] code_execution_enabled` と計画の承認（`create_plan`/`approve_plan`）が要り、
+  書き込めるのは作業ディレクトリとそのセッションの `_tmp_` フォルダだけ。コードが書き出したファイル（`.step` 等）は `@N` に登録される。
+
+**対応ファイル形式**（拡張子で判定、大文字小文字は区別しない）:
+
+| 形式 | 拡張子 | 読み込み方法 | 選べる要素 |
+|------|--------|-------------|-----------|
+| STEP | `.step` `.stp` | OCP の XCAF（`STEPCAFControl_Reader`）。アセンブリの部品・名前・配置・色を残す | 面・エッジ・頂点・部品 |
+| IGES | `.iges` `.igs` | OCP の XCAF（`IGESCAFControl_Reader`。CadQuery 本体は IGES を読めない）。面どうしを縫い合わせる | 面・エッジ・頂点・部品 |
+| BREP | `.brep` `.brp` | CadQuery `importers.importBrep` | 面・エッジ・頂点 |
+| バイナリ BREP | `.bin` | CadQuery `importers.importBin` | 面・エッジ・頂点 |
+| DXF（2D） | `.dxf` | ezdxf + CadQuery の DXF 変換。閉じた輪郭は面、開いた線は単独のカーブ、POINT は単独の点、レイヤーは部品 | 面・エッジ・頂点・部品 |
+| STL | `.stl` | 自前の読み込み（numpy のみ。ASCII・バイナリ・色付きバイナリ）。B-rep を持たないので、隣り合い向きと色が同じ三角形を「面」（平面領域）、面の境目を「エッジ」にする | 面・エッジ |
+| ビューア用データ | `.json` | このツールが前に書き出したもの。同じ形を作り直さずにもう一度選ばせる | 元と同じ |
+
+色付き STL は、バイナリ STL の三角形ごとの属性 2 バイトに入った色を読む。VisCAM / SolidView 方式（bit15=1 で色あり、赤が上位）と
+Materialise Magics 方式（ヘッダーの `COLOR=` が既定色、bit15=0 で色あり、赤が下位）の両方を扱う。
+STL は cadquery が無くても表示できる（それ以外の形式とコードの実行には cadquery が要る）。
+
+**LLM へ返す情報**: 確定した要素ごとに、種類（`PLANE`/`CYLINDER`/`LINE`/`CIRCLE` 等）・面積や長さ・中心・法線・半径・軸・バウンディングボックス・
+隣り合う要素の ID、部品（アセンブリ）のパスと色、単独のカーブ・点かどうか（`free`）、円筒等の継ぎ目か（`seam`）、
+そしてその要素 1 つだけを選ぶと実際に確かめた CadQuery のセレクタ（`>Z`・`%CYLINDER`・`>Z[1]` 等）を返す。
+ID は CadQuery の `Workplane().add(shape).faces().vals()` の順（0 始まり、エッジ・頂点も同様）なので、コードでそのまま参照できる。
+あわせてビューア用データの `@N` を返し、`file_path` に渡せば同じ形をすぐ出し直せる。
+
+**仕組み**: 形の読み込み・三角形化・情報の計算は、アプリ本体ではなくサブプロセス（`src/cad/run_cad.py`、Python は `[scripts] python`）で行い、
+結果のビューア用データ（JSON）をそのセッションの `_tmp_` フォルダに置く。ビューアは `ask_user_choice` の複数選択と同じく
+`cl.AskElementMessage` + `CustomElement`（名前 `CadViewer`）で出し、フロントエンドの `frontend/src/components/CadViewerBar.tsx` が描く。
+three.js はビューアを開いたときだけ読み込む（`frontend/src/components/cad/CadScene.ts`、チャット画面の本体には含めない）。
+ビューアでは、ドラッグで回転・右ドラッグで移動・ホイールで拡大縮小、クリックで選択／解除、上部のボタンで選ぶ要素の種類と視点（斜め・正面・上・右）を切り替え、
+「拡大」で画面いっぱいに広げる（Esc で戻る）。会話の切り替えをまたいでも、ほかの質問ツールと同じく戻ってきた画面で答えられる。
+
+**設定**: `[cad_viewer]`（`enabled`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`）と
+`[user_response_timeouts] show_cad_viewer_seconds`（既定 0 = 無期限）。メインエージェントから直接呼べるよう `[main_agent_tool_guard] allow_entries` に登録済み。
+サブエージェントには渡さない（画面に出すツールのため）。
+
+**対象外**: CadQuery 独自のアセンブリファイル（`.xml`・`.xbf`）、OBJ・glTF・PLY・3MF 等のほかのメッシュ形式、STL の頂点の選択。
+
 ## プロンプト資産の自動チューニングループ（evals/）
 
 `system_prompt.md`・`SKILL.md`・ツール docstring などの「LLM に渡すプロンプト資産」を、
@@ -1984,6 +2038,12 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[user_response_timeouts]` | `approval_seconds` | `approve_plan`／`run_script`・`execute_python_code`の個別実行確認でユーザー応答を待つ秒数。`0`で無期限待ち | `APPROVAL_TIMEOUT_SECONDS` |
 | `[user_response_timeouts]` | `ask_user_question_seconds` | `AskUserQuestion`（自由記述質問。`labels`省略時は単一入力、指定時は複数項目フォーム）でユーザー応答を待つ秒数。`0`で無期限待ち | `ASK_USER_QUESTION_TIMEOUT_SECONDS` |
 | `[user_response_timeouts]` | `ask_user_choice_seconds` | `ask_user_choice`（選択肢質問）でユーザー応答を待つ秒数。`0`で無期限待ち | `ASK_USER_CHOICE_TIMEOUT_SECONDS` |
+| `[user_response_timeouts]` | `show_cad_viewer_seconds` | `show_cad_viewer`（3D ビューアでの選択）でユーザーの確定を待つ秒数。`0`で無期限待ち（既定） | `SHOW_CAD_VIEWER_TIMEOUT_SECONDS` |
+| `[cad_viewer]` | `enabled` | 3D ビューア（`show_cad_viewer`）を使えるようにするか。`false` ならツールはエラーを返す | `CAD_VIEWER_ENABLED` |
+| `[cad_viewer]` | `max_triangles` | ビューアへ送る三角形の上限（既定 500000）。B-rep は超えたら粗く作り直し、それでも超えれば（STL は超えた時点で）エラー。0 以下で無制限 | `CAD_VIEWER_MAX_TRIANGLES` |
+| `[cad_viewer]` | `linear_deflection_ratio` | 曲面を三角形に分けるときの許容差（形の対角線の長さに対する割合、既定 0.001） | `CAD_VIEWER_LINEAR_DEFLECTION_RATIO` |
+| `[cad_viewer]` | `angular_deflection_deg` | 曲面を三角形に分けるときの角度の許容差（度、既定 20） | `CAD_VIEWER_ANGULAR_DEFLECTION_DEG` |
+| `[cad_viewer]` | `stl_region_angle_deg` | STL の三角形を 1 つの面（平面領域）にまとめる法線の角度差の上限（度、既定 1） | `CAD_VIEWER_STL_REGION_ANGLE_DEG` |
 | `[plan]` | `allow_badge_unlock` | Plan Mode バッジの双方向切り替えを許可するか | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | 承認済み（Edit Automatically）状態で`create_plan`を再度呼んだ際、`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態を維持したままstepsだけ差し替える | `PLAN_RESET_APPROVAL_ON_RECREATE` |
 | `[plan]` | `reset_approval_on_new_message` | 新しいユーザーメッセージを受け取るたびに`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態をメッセージをまたいで維持する（`thinking_loop_guard`のリトライ上限到達後、ユーザーが続行メッセージを送っても再承認が不要になる） | `PLAN_RESET_APPROVAL_ON_NEW_MESSAGE` |
@@ -3124,25 +3184,47 @@ Claude Code からは `/release` スキル（`.claude/skills/release/`）でこ�
 
 ### 依存パッケージ（商用利用可）
 
-`requirements.txt`（pip）の直接依存から到達する実行時の推移的依存、全 173 パッケージの
+`requirements.txt`（pip）の直接依存から到達する実行時の推移的依存、全 203 パッケージの
 ライセンス内訳:
 
 | ライセンス種別 | 数 | 商用利用 |
 |---|---:|---|
-| Apache 2.0 | 78 | ✅ |
-| MIT | 60 | ✅ |
-| BSD | 30 | ✅ |
-| PSF | 3 | ✅ |
+| Apache 2.0 | 89 | ✅ |
+| MIT | 69 | ✅ |
+| BSD | 38 | ✅ |
+| PSF | 4 | ✅ |
 | MPL 2.0 | 2 | ✅（改変せず利用する限り） |
+| LGPL | 1 | ✅（改変せず、別のライブラリとして利用する限り） |
 
-**GPL / AGPL / LGPL は含まれません。** すべて寛容ライセンス、またはファイル単位の
-弱いコピーレフト（MPL 2.0）であり、改変せず依存として利用する限り本ソフトウェアへの
-組み込み・商用配布が可能です。全パッケージの完全な一覧と帰属表示は
+**GPL / AGPL は含まれません。** 寛容ライセンス、ファイル単位の弱いコピーレフト（MPL 2.0）、
+ライブラリ単位の弱いコピーレフト（LGPL）だけであり、改変せず依存として利用する限り本ソフトウェアへの
+組み込み・商用配布が可能です。
+
+**改変禁止のパッケージ**: 次のものはコピーレフト（LGPL / MPL 2.0）のため、商用利用の条件を簡単に保つよう**改変しない**こと。
+
+| パッケージ | ライセンス | 入る理由 |
+|---|---|---|
+| `casadi` | LGPL-3.0+ | 3D ビューア（`show_cad_viewer`）の `cadquery` の依存 |
+| `cadquery-ocp` に同梱の OpenCASCADE Technology（OCCT）本体の DLL | LGPL-2.1 + Open CASCADE Exception | 同上（パッケージのメタデータは Apache 2.0 のため、上の表では Apache 2.0 に数えている） |
+| `bidict` | MPL 2.0 | Chainlit（python-socketio）の依存 |
+| `certifi` | MPL 2.0 | httpx・httpcore・requests の依存 |
+| `orjson` | MPL-2.0 AND (Apache-2.0 OR MIT) | langgraph-sdk・langsmith の依存 |
+| `tqdm` | MPL-2.0 AND MIT | huggingface-hub・openai の依存 |
+
+「改変しない」とは次のことを指す（本プロジェクトのコードはいずれも守っている）。
+
+- インストールされたパッケージのファイル（`.py`・`.pyd`・`.dll` 等）を書き換えない・パッチを当てない。フォークした版に差し替えない。
+- LGPL のもの（`casadi`・OCCT）は、pip で入れた別のライブラリとして動的に読み込むだけにする。本体の実行ファイルへ静的にリンクしない。
+  PyInstaller 等で 1 つにまとめて配布する場合は、利用者が LGPL のライブラリを差し替えられる形（別ファイルの DLL・パッケージのまま）にし、
+  ライセンス文と入手先（`THIRD_PARTY_LICENSES.md`）を添える。
+
+やむを得ず改変する場合は、改変したファイルのソースを各ライセンスの条項どおりに公開する義務が生じる（LGPL はライブラリ単位、MPL 2.0 はファイル単位）。
+LGPL のものを入れたくない場合は `cadquery` を入れなければよい（3D ビューアは STL だけ表示でき、ほかの形式と CadQuery コードはエラーを返す）。全パッケージの完全な一覧と帰属表示は
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) に記載しています（依存追加時は
 `tools/gen_licenses.py` で再生成）。
 
 上記は pip 依存のみが対象です。`frontend/` の npm 依存（react、recoil、
-`@chainlit/react-client`、vite 等、いずれも MIT / Apache 2.0）は別途手動確認済みで
+`@chainlit/react-client`、vite、three（3D ビューア）等、いずれも MIT / Apache 2.0）は別途手動確認済みで
 GPL / AGPL / LGPL 系は含まれませんが、`tools/gen_licenses.py` の自動集計・
 THIRD_PARTY_LICENSES.md には含まれていません。npm 依存を追加・更新した場合は
 `frontend/package-lock.json` のライセンスも別途確認してください。
@@ -3205,6 +3287,8 @@ LICENSEファイル・SKILL.mdのfrontmatter（`license`キー）を確認し、
 
 - [ ] 使用するモデル（GGUF/vLLM対応形式）の**ライセンス**を確認する（→ 上記「推論サーバー（llama.cpp / vLLM）の起動例」の注記）
 - [ ] 依存を追加・更新したら `tools/gen_licenses.py` で告知ファイルを再生成する
+- [ ] 上記「依存パッケージ」の**改変禁止のパッケージ**（`casadi`・OCCT・`bidict`・`certifi`・`orjson`・`tqdm`）を改変していない、
+      LGPL のものを静的にリンクしていないことを確かめる
 - [ ] サードパーティ製Agent Skillsを追加した場合、そのスキル自体と追加依存
       パッケージのライセンスを個別に確認する（上記「サードパーティ製Agent
       Skillsのライセンス」参照）

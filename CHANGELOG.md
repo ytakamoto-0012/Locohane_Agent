@@ -12,6 +12,20 @@
 
 ## [Unreleased]
 
+### 追加
+
+- チャット内の 3D ビューア（`show_cad_viewer` ツール）を追加しました。CAD ファイル（STEP・IGES・BREP・バイナリ BREP・DXF・
+  STL〔ASCII・バイナリ・色付き〕）や、AI が書いた CadQuery コードの形を回転・拡大して見せ、利用者がクリックで選んだ面・エッジ・
+  頂点・単独のカーブや点・部品（STEP/IGES のアセンブリ、DXF のレイヤー）の情報（種類・面積・法線・半径・CadQuery のセレクタ等）を
+  AI へ返します。CadQuery コードの実行は `execute_python_code` と同じく計画の承認が要ります。設定は `[cad_viewer]` と
+  `[user_response_timeouts] show_cad_viewer_seconds`（README_DETAIL.md「3D ビューア（CAD）」）。
+
+### 移行時の注意
+
+- 依存に `cadquery` を追加しました。`pip install -r requirements.txt` を実行し直してください（STL の表示だけなら無くても動きます）。
+  `cadquery` は LGPL の `casadi` と OpenCASCADE 本体を連れてくるため、README_DETAIL.md「依存パッケージ」の記述を更新し、
+  改変してはいけないパッケージ（LGPL・MPL 2.0 のもの）を「改変禁止のパッケージ」として明記しました。
+
 ## [0.7.12] - 2026-11-20
 
 ### 追加

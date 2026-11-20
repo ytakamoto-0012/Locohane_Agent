@@ -35,6 +35,9 @@ LangChain の @tool として定義する。read_skill/read_skill_file/run_scrip
 - ask_user_choice … ユーザーへ選択肢形式で追加質問する。multi_select省略/False時は
   単一選択（Chainlit AskActionMessage）、multi_select=True時は複数選択可能な
   チェックボックスフォーム（Chainlit AskElementMessage + CustomElement）
+- show_cad_viewer … チャット内の 3D ビューアで形（CAD ファイル・CadQuery コード）を見せ、
+  利用者が選んだ面・エッジ・頂点・部品の情報を返す（Chainlit AskElementMessage +
+  CustomElement "CadViewer"。形の処理は src/cad/）
 - create_memory / update_memory / delete_memory / read_memory / search_memory /
   list_memories … スレッドをまたぐ永続メモリー（src/memory.py）の読み書き。
   主エージェントのみに公開し、dispatch_agent のサブエージェントには渡さない。
@@ -87,6 +90,7 @@ from .registry import get_all_tools, register_mcp_tools
 # アクセスするため）。実体は registry.py が各ファイルから import 済み。
 from .registry import (  # noqa: F401
     ask_user_choice,
+    show_cad_viewer,
     ask_user_question,
     analyze_image,
     approve_plan,

@@ -258,6 +258,11 @@ MESSAGES: dict[str, dict[str, str]] = {
     "ask.cancel": {"ja": "❌ キャンセル", "en": "❌ Cancel"},
     "ask.other": {"ja": "✏️ その他（自由入力）", "en": "✏️ Other (free text)"},
     "ask.none_selected": {"ja": "(選択なし)", "en": "(nothing selected)"},
+    # --- 3D ビューア（src/tools/cad_viewer.py）で選んだ要素の表示 ---
+    "cad.kind.face": {"ja": "面", "en": "Face"},
+    "cad.kind.edge": {"ja": "エッジ", "en": "Edge"},
+    "cad.kind.vertex": {"ja": "頂点", "en": "Vertex"},
+    "cad.kind.part": {"ja": "部品", "en": "Part"},
     # --- 大量のファイルを読む前の確認（src/tools/_read_volume_guard.py） ---
     "read_volume.question": {
         "ja": "読み取りの対象になるファイルが {total} 件あります（{breakdown}、{folders} フォルダ）。"
@@ -308,6 +313,7 @@ MESSAGES: dict[str, dict[str, str]] = {
     "tool.dispatch_agent_batch": {"ja": "サブエージェント一括実行", "en": "Run sub-agents (batch)"},
     "tool.AskUserQuestion": {"ja": "ユーザーへの質問（自由記述）", "en": "Ask user (free text)"},
     "tool.ask_user_choice": {"ja": "ユーザーへの質問（選択式）", "en": "Ask user (choices)"},
+    "tool.show_cad_viewer": {"ja": "3Dビューア", "en": "3D viewer"},
     "tool.create_plan": {"ja": "実行計画作成", "en": "Create plan"},
     "tool.approve_plan": {"ja": "計画承認確認", "en": "Request plan approval"},
     "tool.update_task_progress": {"ja": "進捗更新", "en": "Update progress"},
