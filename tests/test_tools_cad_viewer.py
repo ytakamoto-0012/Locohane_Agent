@@ -538,6 +538,33 @@ async def test_save_exports_a_dxf_with_layer_changes(env, tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_undo_history_is_saved_and_colors_can_be_cleared(env, tmp_path) -> None:
+    """自動保存したデータに「元に戻す」の履歴を入れ、開き直したビューアが色なしの元の状態へ戻せる（色の null）。"""
+    start = {"colors": {"faces": {}, "parts": {}}, "hiddenParts": [], "visible": {"face": True, "edge": True, "vertex": True}, "attributes": {}}
+    history = {"past": [start], "future": [], "base": {"faces": {"1": None, "999": "#000000"}, "parts": {}, "attributes": {}}}
+    _viewer.response = {"submitted": True, "selected": [], "colors": {"faces": {"1": "#00ff00"}, "parts": {}}, "history": history}
+    out = json.loads(await _call(file_path=str(_cube_stl(tmp_path))))
+    saved = json.loads(Path(out["viewer_data"]).read_text(encoding="utf-8"))
+    assert saved["faces"][1]["color"] == "#00ff00"
+    # 範囲外の面は捨てる。
+    assert saved["viewState"]["history"] == {"past": [start], "future": [], "base": {"faces": {"1": None}, "parts": {}, "attributes": {}}}
+
+    # 開き直したビューアで「元に戻す」して確定 → 面 1 の色を外す（to: null）。
+    _viewer.response = {"submitted": True, "selected": [], "colors": {"faces": {"1": None, "2": None}, "parts": {}}}
+    out2 = json.loads(await _call(file_path=out["viewer_data"]))
+    assert out2["color_change_count"] == 1  # 面 2 は元から色が無いので変更ではない
+    sel = json.loads(Path(out2["selection_file"]).read_text(encoding="utf-8"))
+    assert sel["color_changes"] == [{"kind": "face", "id": 1, "from": "#00ff00", "to": None}]
+    again = json.loads(Path(out2["viewer_data"]).read_text(encoding="utf-8"))
+    assert again["faces"][1]["color"] is None
+    # 戻れる時点が無ければ（ブラウザが送らなければ）履歴は残さない。形のおかしい履歴も捨てる。
+    assert "history" not in again["viewState"]
+    _viewer.response = {"submitted": True, "selected": [], "colors": {"faces": {"3": "#ff0000"}}, "history": {"past": "x", "future": [], "base": {}}}
+    out3 = json.loads(await _call(file_path=str(_cube_stl(tmp_path))))
+    assert "history" not in json.loads(Path(out3["viewer_data"]).read_text(encoding="utf-8"))["viewState"]
+
+
+@pytest.mark.asyncio
 async def test_measurements_are_validated_and_returned(env, tmp_path) -> None:
     from src import i18n
 

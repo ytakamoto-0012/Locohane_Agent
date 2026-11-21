@@ -17,6 +17,7 @@ import {
   type CadData,
   type CadItemInfo,
   type CadKind,
+  type CadSavedHistory,
   type CadSelection,
   type CadViewerProps
 } from './cad/cadData';
@@ -35,6 +36,7 @@ import {
 } from './cad/measure';
 import { CadSidebar } from './cad/CadSidebar';
 import type { CadAttributeEdits } from './cad/CadStepPanel';
+import { restoreHistory, serializeHistory, type EditSnapshot } from './cad/editHistory';
 
 const KIND_LABEL: Record<CadKind, MessageKey> = {
   face: 'cad.kind.face',
@@ -64,8 +66,8 @@ function measureTitle(m: CadMeasurement, t: (k: MessageKey) => string): string {
 
 /** 確定時に返す、変えた色（キーは ID の文字列）。 */
 export interface CadColorChanges {
-  faces: Record<string, string>;
-  parts: Record<string, string>;
+  faces: Record<string, string | null>;
+  parts: Record<string, string | null>;
 }
 
 /** 画面のテーマ（ライト / ダーク）から 3D 表示の色を決める。 */
@@ -193,6 +195,8 @@ interface CadViewState {
   visible: { face: boolean; edge: boolean; vertex: boolean };
   /** STEP の属性を編集した製品（製品名 → 編集後の一覧）。編集が無ければ入れない。 */
   attributes?: CadAttributeEdits;
+  /** 元に戻す・やり直すの履歴（backend はビューア用データの viewState.history に入れる）。戻れる時点が無ければ入れない。 */
+  history?: CadSavedHistory;
 }
 
 function initialHiddenParts(data: CadData): Set<number> {
@@ -203,14 +207,6 @@ function initialHiddenParts(data: CadData): Set<number> {
 }
 
 /** 元に戻す・やり直すの対象（選択・変えた色・隠した部品・種類ごとの表示・属性の編集）。カメラの向きは含めない。 */
-interface EditSnapshot {
-  selection: CadSelection[];
-  colors: CadColorOverrides;
-  hiddenParts: Set<number>;
-  kindVisible: { face: boolean; edge: boolean; vertex: boolean };
-  attributeEdits: CadAttributeEdits;
-}
-
 // 覚えておく変更の数の上限（古いものから捨てる）。
 const HISTORY_LIMIT = 200;
 // 属性の入力欄を続けて打った変更は、この時間（ミリ秒）内なら 1 回の変更にまとめる（1 文字ずつ戻らないように）。
@@ -224,9 +220,12 @@ function changedKeys(a: EditSnapshot, b: EditSnapshot): string {
  * 編集の履歴。state が変わるたびに変わる前の状態を積み、undo / redo で apply に渡して戻す。
  * 各 state は変更のたびに新しいオブジェクトになる（React の state の作法）ので、参照の違いで変更を見分ける。
  */
-function useEditHistory(state: EditSnapshot, apply: (s: EditSnapshot) => void) {
-  const past = useRef<EditSnapshot[]>([]);
-  const future = useRef<EditSnapshot[]>([]);
+function useEditHistory(state: EditSnapshot, apply: (s: EditSnapshot) => void, initial?: () => { past: EditSnapshot[]; future: EditSnapshot[] }) {
+  // 自動保存・保存したデータを開き直したときは、前に開いていたときの履歴から始める（editHistory.ts の restoreHistory）。
+  const seeded = useRef<{ past: EditSnapshot[]; future: EditSnapshot[] } | null>(null);
+  if (seeded.current === null) seeded.current = initial?.() ?? { past: [], future: [] };
+  const past = useRef<EditSnapshot[]>(seeded.current.past);
+  const future = useRef<EditSnapshot[]>(seeded.current.future);
   const last = useRef<EditSnapshot>(state);
   const lastChange = useRef({ keys: '', at: 0 });
   const applyRef = useRef(apply);
@@ -262,9 +261,11 @@ function useEditHistory(state: EditSnapshot, apply: (s: EditSnapshot) => void) {
   }, []);
   const undo = useCallback(() => step(past, future), [step]);
   const redo = useCallback(() => step(future, past), [step]);
+  // 保存するときに履歴を読む（ビューア用データの viewState.history に入れる）。
+  const entries = useCallback(() => ({ past: past.current, future: future.current, current: last.current }), []);
   const canUndo = past.current.length > 0;
   const canRedo = future.current.length > 0;
-  return useMemo(() => ({ undo, redo, canUndo, canRedo }), [undo, redo, canUndo, canRedo]);
+  return useMemo(() => ({ undo, redo, canUndo, canRedo, entries }), [undo, redo, canUndo, canRedo, entries]);
 }
 
 type SaveState ={ kind: 'idle' } | { kind: 'saving' } | { kind: 'saved'; path: string } | { kind: 'error'; message: string };
@@ -318,7 +319,8 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
       setHiddenParts(s.hiddenParts);
       setKindVisible(s.kindVisible);
       setAttributeEdits(s.attributeEdits);
-    }
+    },
+    () => restoreHistory(data)
   );
   const barRef = useRef<HTMLDivElement>(null);
   // Ctrl+Z / Ctrl+Y（Ctrl+Shift+Z）: ポインタがビューアの上にあるか、ビューアの中にフォーカスがあるときだけ
@@ -549,11 +551,16 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
     colors.parts.forEach((hex, id) => (changes.parts[String(id)] = hex));
     return changes;
   };
-  const viewState = (): CadViewState => ({
-    hidden_parts: [...hiddenParts],
-    visible: kindVisible,
-    ...(Object.keys(attributeEdits).length ? { attributes: attributeEdits } : {})
-  });
+  const viewState = (): CadViewState => {
+    const h = history.entries();
+    const saved = serializeHistory(data, h.past, h.future, { selection, colors, hiddenParts, kindVisible, attributeEdits });
+    return {
+      hidden_parts: [...hiddenParts],
+      visible: kindVisible,
+      ...(Object.keys(attributeEdits).length ? { attributes: attributeEdits } : {}),
+      ...(saved ? { history: saved } : {})
+    };
+  };
   const cancel = () => {
     if (closing) return;
     setClosing('cancel');

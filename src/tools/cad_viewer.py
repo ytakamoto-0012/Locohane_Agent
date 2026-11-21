@@ -65,6 +65,9 @@ _MESSAGE_MAX_CHARS = 4000
 # ビューアで測った結果を受け取る数の上限（frontend の CadViewerBar.tsx の MEASUREMENTS_MAX と同じ）。
 # 1 件は数十文字なので、戻り値にそのまま入れても大きさは抑えられる。
 _MEASUREMENTS_MAX = 50
+# ビューア用データに書く「元に戻す」の履歴の上限（frontend の editHistory.ts・CadViewerBar.tsx の上限に余裕を持たせた値）。
+_HISTORY_MAX_STEPS = 200
+_HISTORY_MAX_CHARS = 4_000_000
 # ビューアの答えを受け取った後、重い処理の前にイベントループへ譲る時間（閉じる合図をブラウザへ届けるため）。
 _UI_FLUSH_SECONDS = 0.05
 # 計測の種類（frontend/src/components/cad/measure.ts の MeasureResult.type）ごとに受け取る項目。
@@ -419,6 +422,7 @@ def _view_edits(data: dict, payload: dict[str, Any], colors: list[dict[str, Any]
         visible=visible,
         color_changes=colors,
         saved_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+        history=_valid_history(data, payload.get("history")),
     )
     if attrs:
         # 製品の属性を置き換え、その製品の部品の情報にも写す（保存・開き直しで編集後の属性になる）。
@@ -739,9 +743,70 @@ def _valid_selection(data: dict, kinds: list[str], selected: Any) -> list[tuple[
     return out
 
 
+def _valid_color_map(raw: Any, count: int) -> dict[str, str | None] | None:
+    """{ID の文字列: "#rrggbb" か null}（範囲外の ID・形の違う値は捨てる）。dict でなければ None。"""
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, str | None] = {}
+    for k, v in raw.items():
+        try:
+            eid = int(k)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= eid < count and (v is None or (isinstance(v, str) and _HEX_COLOR.fullmatch(v))):
+            out[str(eid)] = v.lower() if v else None
+    return out
+
+
+def _valid_history(data: dict, raw: Any) -> dict[str, Any] | None:
+    """ビューアの「元に戻す」「やり直す」の履歴（frontend の editHistory.ts の CadSavedHistory）。
+
+    中身はビューアだけが使うが、ビューア用データに書くので形と大きさを確かめる。おかしければ履歴を捨てる
+    （開き直したときに前の操作まで戻れなくなるだけで、今の状態は変わらない）。
+    """
+    if not isinstance(raw, dict) or len(json.dumps(raw)) > _HISTORY_MAX_CHARS:
+        return None
+    n_faces = len(data.get("faces") or [])
+    n_parts = len(data.get("parts") or [])
+
+    def edit(item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict) or not isinstance(item.get("colors"), dict):
+            return None
+        faces = _valid_color_map(item["colors"].get("faces"), n_faces)
+        parts = _valid_color_map(item["colors"].get("parts"), n_parts)
+        hidden = item.get("hiddenParts")
+        vis = item.get("visible")
+        if faces is None or parts is None or not isinstance(hidden, list) or not isinstance(vis, dict):
+            return None
+        return {
+            "colors": {"faces": faces, "parts": parts},
+            "hiddenParts": sorted({p for p in hidden if isinstance(p, int) and not isinstance(p, bool) and 0 <= p < n_parts}),
+            "visible": {k: vis.get(k) is not False for k in ("face", "edge", "vertex")},
+            "attributes": _valid_attributes(data, item.get("attributes")),
+        }
+
+    past, future, base = raw.get("past"), raw.get("future"), raw.get("base")
+    if not isinstance(past, list) or not isinstance(future, list) or not isinstance(base, dict):
+        return None
+    if len(past) > _HISTORY_MAX_STEPS or len(future) > _HISTORY_MAX_STEPS:
+        return None
+    past_edits = [edit(i) for i in past]
+    future_edits = [edit(i) for i in future]
+    base_faces = _valid_color_map(base.get("faces"), n_faces)
+    base_parts = _valid_color_map(base.get("parts"), n_parts)
+    if None in past_edits or None in future_edits or base_faces is None or base_parts is None or not (past_edits or future_edits):
+        return None
+    return {
+        "past": past_edits,
+        "future": future_edits,
+        "base": {"faces": base_faces, "parts": base_parts, "attributes": _valid_attributes(data, base.get("attributes"), keep_unchanged=True)},
+    }
+
+
 def _valid_colors(data: dict, colors: Any) -> list[dict[str, Any]]:
-    """ブラウザから来た色の変更（{"faces": {ID: "#rrggbb"}, "parts": {...}}）のうち、正しいものを
-    [{"kind", "id", "from", "to"}] で返す。from は元の色（無ければ None）。"""
+    """ブラウザから来た色の変更（{"faces": {ID: "#rrggbb" か null}, "parts": {...}}）のうち、正しいものを
+    [{"kind", "id", "from", "to"}] で返す。from は元の色（無ければ None）。to が None は「色なしに戻す」
+    （自動保存したデータを開き直して「元に戻す」で、色の無かった元の状態へ戻したとき）。"""
     out: list[dict[str, Any]] = []
     if not isinstance(colors, dict):
         return out
@@ -753,12 +818,12 @@ def _valid_colors(data: dict, colors: Any) -> list[dict[str, Any]]:
                 eid = int(sid)
             except (TypeError, ValueError):
                 continue
-            if not (0 <= eid < len(items)) or not isinstance(hex_color, str) or not _HEX_COLOR.fullmatch(hex_color):
+            if not (0 <= eid < len(items)) or not (hex_color is None or (isinstance(hex_color, str) and _HEX_COLOR.fullmatch(hex_color))):
                 continue
             before = items[eid].get("color")
-            if (before or "").lower() == hex_color.lower():
+            if (before or "").lower() == (hex_color or "").lower():
                 continue
-            out.append({"kind": kind, "id": eid, "from": before, "to": hex_color.lower()})
+            out.append({"kind": kind, "id": eid, "from": before, "to": hex_color.lower() if hex_color else None})
     out.sort(key=lambda c: (c["kind"], c["id"]))
     return out
 
@@ -769,8 +834,9 @@ _ATTR_MAX_NAME = 200
 _ATTR_MAX_VALUE = 2000
 
 
-def _valid_attributes(data: dict, raw: Any) -> dict[str, list[dict[str, Any]]]:
-    """ブラウザから来た STEP の属性の編集（{製品名: [{name, value, type?}]}）のうち、正しいもので、元と違うもの。"""
+def _valid_attributes(data: dict, raw: Any, keep_unchanged: bool = False) -> dict[str, list[dict[str, Any]]]:
+    """ブラウザから来た STEP の属性の編集（{製品名: [{name, value, type?}]}）のうち、正しいもので、元と違うもの
+    （keep_unchanged なら元と同じものも。「元に戻す」の履歴の base は元の属性そのものなので）。"""
     products = {p.get("name"): p for p in (data.get("step") or {}).get("products") or [] if p.get("name")}
     out: dict[str, list[dict[str, Any]]] = {}
     if not isinstance(raw, dict):
@@ -793,7 +859,7 @@ def _valid_attributes(data: dict, raw: Any) -> dict[str, list[dict[str, Any]]]:
             if isinstance(row.get("group"), str) and row["group"]:
                 item["group"] = row["group"][:_ATTR_MAX_NAME]
             clean.append(item)
-        if clean != list(products[name].get("attributes") or []):
+        if keep_unchanged or clean != list(products[name].get("attributes") or []):
             out[name] = clean
     return out
 
@@ -1113,7 +1179,7 @@ def _format_result(
             result["how_to_read"] = (
                 f"Only when the task needs the details: {sel_token} has one entry per selected element under 'selected' (kind, id, geomType, area/length, center, normal, "
                 f"radius, bbox, neighbouring faces/edges, selectors)"
-                + (", and the color changes under 'color_changes' ({kind, id, from, to} as #rrggbb; from null = no color in the model)" if colors else "")
+                + (", and the color changes under 'color_changes' ({kind, id, from, to} as #rrggbb; from null = no color in the model, to null = color removed)" if colors else "")
                 + ". It can be very large, so never read it whole: query only the fields you need with json_query, "
                 f"e.g. file_path={sel_token}, query=\"selected[].id\" or \"selected[?kind=='face'].{{id: id, normal: normal, selectors: selectors}}\"."
             )

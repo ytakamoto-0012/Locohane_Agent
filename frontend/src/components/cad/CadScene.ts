@@ -16,6 +16,7 @@ import {
   decodeFloat32,
   decodeUint32,
   decodeUint8,
+  overrideOf,
   type BoxMode,
   type CadColorOverrides,
   type CadData,
@@ -951,9 +952,11 @@ export class CadScene {
       this.faceVertexRanges.forEach(([lo, hi], id) => {
         const state = this.stateOf('face', id);
         const part = this.data.faces[id]?.part;
-        const changed = overrides.faces.get(id) ?? (part !== undefined ? overrides.parts.get(part) : undefined);
+        // 変えた色（null は「色なし」に戻した = テーマの既定色。undefined は変えていない）。
+        let changed = overrideOf(overrides.faces, id);
+        if (changed === undefined) changed = overrideOf(overrides.parts, part);
         // ファイルの色（頂点色）は、色を持つ面だけに使う（色の無い面はテーマの既定色）。
-        if (state === null && !changed && this.baseFaceColors && this.data.faces[id]?.color) {
+        if (state === null && changed === undefined && this.baseFaceColors && this.data.faces[id]?.color) {
           arr.set(this.baseFaceColors.subarray(lo * 3, hi * 3), lo * 3);
           return;
         }
@@ -976,7 +979,8 @@ export class CadScene {
         // DXF のレイヤー（部品）の線は、レイヤーの色（変えたらその色）で描く。
         const pi = this.data.edgeList[id]?.part;
         const layerPart = pi !== undefined && parts[pi]?.layer ? parts[pi] : undefined;
-        const layerColor = layerPart ? (overrides.parts.get(pi!) ?? layerPart.color ?? null) : null;
+        const layerOverride = overrideOf(overrides.parts, pi);
+        const layerColor = layerPart ? (layerOverride !== undefined ? layerOverride : (layerPart.color ?? null)) : null;
         const c = pick(state, layerColor ? colorOf(layerColor) : edge);
         for (let v = s * 2; v < (s + n) * 2; v++) {
           arr[v * 3] = c.r;

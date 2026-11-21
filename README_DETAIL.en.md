@@ -1895,7 +1895,12 @@ and does not stop at the top or bottom; in exchange, the up direction is not kep
 - **Undo / Redo**: undoes or redoes changes to the selection, colors, hidden parts, per-kind display and attribute edits one at a time (buttons and
   Ctrl+Z / Ctrl+Y, Ctrl+Shift+Z; the keys work only while the pointer is over the viewer or the focus is inside it, and inside text fields the browser's
   own undo is used). Typing in an attribute field within 1 second counts as one change. The view (rotation, zoom) is not undone. Up to 200 steps are kept
-  in browser memory as references to each state (the shape data is not copied), so it is small, and it is gone when the viewer closes.
+  in browser memory as references to each state (the shape data is not copied), so it is small.
+  The viewer data auto-saved on confirm / cancel (or by "Save") also holds the history without the selection in `viewState.history`, so reopening that
+  `viewer_data` lets you keep undoing past what you did when it was open before (`frontend/src/components/cad/editHistory.ts`). Since the saved data
+  has the color and attribute changes baked in, the history keeps the original colors (`null` = no color) and attributes of the changed faces / parts
+  in `base`, and on reopening turns each step into overrides on the new data (a `null` color override means "back to no color", reported to the AI as
+  `to: null`). History JSON over about 2 MB drops its oldest steps. Opening the original CAD file starts with an empty history.
 - **Fit all**: keeps the current direction and fits the whole visible model (hidden parts excluded) in the view. The rotation center returns to its center.
 - **Rotation center**: after pressing it, the point you click on a face / edge / vertex becomes the rotation center (once; press it again to stop).
   The view moves in parallel, without turning, so that the point is in the middle of the view, and a red dot marks it. The point stays the rotation

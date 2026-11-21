@@ -55,19 +55,31 @@ export interface CadVisibility {
   hiddenParts: ReadonlySet<number>;
 }
 
-/** 利用者がビューアで変えた色（#rrggbb）。キーは面の ID・部品の ID。 */
+/**
+ * 利用者がビューアで変えた色。キーは面の ID・部品の ID、値は #rrggbb か null（色なしに戻す。自動保存したデータを
+ * 開き直して「元に戻す」で、色の無かった元の状態へ戻すときに使う）。
+ */
 export interface CadColorOverrides {
-  faces: ReadonlyMap<number, string>;
-  parts: ReadonlyMap<number, string>;
+  faces: ReadonlyMap<number, string | null>;
+  parts: ReadonlyMap<number, string | null>;
+}
+
+/** 上書きの値。上書きが無ければ undefined（null は「色なし」の上書き）。 */
+export function overrideOf(map: ReadonlyMap<number, string | null>, id: number | undefined): string | null | undefined {
+  return id !== undefined && map.has(id) ? (map.get(id) ?? null) : undefined;
 }
 
 /** 要素の今の色（変えた色 → 部品の変えた色 → ファイルの色）。色が無ければ null（テーマの既定色で描く）。 */
 export function effectiveColor(data: CadData, overrides: CadColorOverrides, s: CadSelection): string | null {
-  if (s.kind === 'part') return overrides.parts.get(s.id) ?? data.parts?.[s.id]?.color ?? null;
+  if (s.kind === 'part') {
+    const o = overrideOf(overrides.parts, s.id);
+    return o !== undefined ? o : (data.parts?.[s.id]?.color ?? null);
+  }
   if (s.kind !== 'face') return null;
   const info = data.faces[s.id];
-  const part = info?.part;
-  return overrides.faces.get(s.id) ?? (part !== undefined ? overrides.parts.get(part) : undefined) ?? info?.color ?? null;
+  let o = overrideOf(overrides.faces, s.id);
+  if (o === undefined) o = overrideOf(overrides.parts, info?.part);
+  return o !== undefined ? o : (info?.color ?? null);
 }
 
 /** 「同じ部品・レイヤー」でまとめて選ぶときの、要素が属する部品（DXF ではレイヤー）。無ければ null。 */
@@ -181,7 +193,35 @@ export interface CadData {
   /** 前の版との比較（show_cad_viewer の compare_with）。added / removed は増えた・削った部分の三角形。 */
   diff?: { added?: CadTriangles; removed?: CadTriangles; error?: string; [key: string]: unknown };
   /** 「保存」で書いたデータにある、保存したときの表示（隠した部品・種類ごとの表示）。 */
-  viewState?: { hiddenParts?: number[]; visible?: Partial<Record<'face' | 'edge' | 'vertex', boolean>> };
+  viewState?: {
+    hiddenParts?: number[];
+    visible?: Partial<Record<'face' | 'edge' | 'vertex', boolean>>;
+    /** 自動保存・保存したときの「元に戻す」「やり直す」の履歴（開き直しても続きから戻せる。CadViewerBar.tsx）。 */
+    history?: CadSavedHistory;
+  };
+}
+
+/** 保存した履歴の 1 時点（選択は含めない）。色・属性は history.base のデータに対する上書き。 */
+export interface CadSavedEdit {
+  colors: { faces: Record<string, string | null>; parts: Record<string, string | null> };
+  hiddenParts: number[];
+  visible: { face: boolean; edge: boolean; vertex: boolean };
+  attributes: Record<string, CadAttribute[]>;
+}
+
+/**
+ * 保存した履歴。base は履歴が基準にしたデータ（保存する前に開いていたデータ）の、どこかの時点で変えた面・部品の色
+ * （null = 色なし）と属性。保存したデータは変更を焼き込んであるので、開き直したときはこれを使って各時点を
+ * 新しいデータに対する上書きに直す。
+ */
+export interface CadSavedHistory {
+  past: CadSavedEdit[];
+  future: CadSavedEdit[];
+  base: {
+    faces: Record<string, string | null>;
+    parts: Record<string, string | null>;
+    attributes: Record<string, CadAttribute[]>;
+  };
 }
 
 export interface CadViewerProps {
