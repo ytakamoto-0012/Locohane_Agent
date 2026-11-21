@@ -5,8 +5,10 @@ import { useI18n } from '../i18n';
 import type { MessageKey } from '../i18n/messages';
 import {
   CAD_DATA_FORMAT,
+  attributeColor,
   effectiveColor,
   itemsOf,
+  partOf,
   rgbText,
   sameSelection,
   type BoxMode,
@@ -105,8 +107,11 @@ export function CadViewerBar() {
       kinds={props.select?.length ? props.select : ['face']}
       data={props.data}
       saveId={props.save_id ?? ''}
-      onSubmit={(selected, colors, message) => askUser.callback({ submitted: true, selected, colors, message })}
-      onCancel={() => askUser.callback({ submitted: false, selected: [] })}
+      screenshotLongSide={props.screenshot_long_side ?? 0}
+      onSubmit={(selected, colors, message, view, screenshot) =>
+        askUser.callback({ submitted: true, selected, colors, message, ...view, ...(screenshot ? { screenshot } : {}) })
+      }
+      onCancel={(colors, view) => askUser.callback({ submitted: false, selected: [], colors, ...view })}
     />
   );
 }
@@ -116,8 +121,16 @@ interface PanelProps {
   kinds: CadKind[];
   data: CadData;
   saveId: string;
-  onSubmit: (selected: CadSelection[], colors: CadColorChanges, message: string) => void;
-  onCancel: () => void;
+  screenshotLongSide: number;
+  /** screenshot: 指示があるときだけ撮った今の画面（PNG の data URL）。 */
+  onSubmit: (selected: CadSelection[], colors: CadColorChanges, message: string, view: CadViewState, screenshot: string | null) => void;
+  onCancel: (colors: CadColorChanges, view: CadViewState) => void;
+}
+
+/** 確定・閉じる・保存のときに返す表示の状態（backend は変更があればビューア用データに反映して自動で保存する）。 */
+interface CadViewState {
+  hidden_parts: number[];
+  visible: { face: boolean; edge: boolean; vertex: boolean };
 }
 
 function initialHiddenParts(data: CadData): Set<number> {
@@ -129,7 +142,7 @@ function initialHiddenParts(data: CadData): Set<number> {
 
 type SaveState = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved'; path: string } | { kind: 'error'; message: string };
 
-function CadViewerPanel({ question, kinds, data, saveId, onSubmit, onCancel }: PanelProps) {
+function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onSubmit, onCancel }: PanelProps) {
   const { t } = useI18n();
   const client = useContext(ChainlitContext);
   const sessionId = useRecoilValue(sessionIdState);
@@ -144,6 +157,10 @@ function CadViewerPanel({ question, kinds, data, saveId, onSubmit, onCancel }: P
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [expanded, setExpanded] = useState(false);
   const [boxMode, setBoxMode] = useState<BoxMode>('off');
+  // 「回転中心」: 次にクリックした点を回転の中心にする（その 1 回だけ）。
+  const [pivotPicking, setPivotPicking] = useState(false);
+  // 空間の原点 (0, 0, 0) の XYZ 軸の表示。
+  const [originAxes, setOriginAxes] = useState(true);
   const hasParts = (data.parts?.length ?? 0) > 0;
   const [sidebarOpen, setSidebarOpen] = useState(hasParts);
   const [kindVisible, setKindVisible] = useState({ face: true, edge: true, vertex: true, ...data.viewState?.visible });
@@ -177,7 +194,12 @@ function CadViewerPanel({ question, kinds, data, saveId, onSubmit, onCancel }: P
     import('./cad/CadScene')
       .then(({ CadScene }) => {
         if (disposed) return;
-        sceneRef.current = new CadScene(host, data, { onHover: setHover, onPick: toggle, onBoxPick: boxPick }, sceneColors(host));
+        sceneRef.current = new CadScene(
+          host,
+          data,
+          { onHover: setHover, onPick: toggle, onBoxPick: boxPick, onPivotSet: () => setPivotPicking(false) },
+          sceneColors(host)
+        );
         sceneRef.current.setMode(kinds[0]);
         setStatus('ready');
       })
@@ -202,6 +224,12 @@ function CadViewerPanel({ question, kinds, data, saveId, onSubmit, onCancel }: P
   useEffect(() => {
     sceneRef.current?.setBoxMode(boxMode);
   }, [boxMode, status]);
+  useEffect(() => {
+    sceneRef.current?.setPivotPicking(pivotPicking);
+  }, [pivotPicking, status]);
+  useEffect(() => {
+    sceneRef.current?.setOriginAxesVisible(originAxes);
+  }, [originAxes, status]);
   useEffect(() => {
     sceneRef.current?.setVisibility({ ...kindVisible, hiddenParts });
   }, [kindVisible, hiddenParts, status]);
@@ -234,12 +262,43 @@ function CadViewerPanel({ question, kinds, data, saveId, onSubmit, onCancel }: P
   }, [expanded]);
 
   const hoverText = useMemo(() => {
+    if (pivotPicking) return t('cad.hintPivot');
     if (!hover) return t(boxMode === 'off' ? 'cad.hint' : 'cad.hintBox');
     return describe(itemsOf(data, hover.kind)[hover.id], label(hover), effectiveColor(data, colors, hover), t);
-  }, [hover, data, label, t, colors, boxMode]);
+  }, [hover, data, label, t, colors, boxMode, pivotPicking]);
 
   const selectAll = () => {
     const ids = sceneRef.current?.selectableIds(mode) ?? [];
+    boxPick(
+      ids.map((id) => ({ kind: mode, id })),
+      false
+    );
+  };
+
+  // 選んでいる要素（種類を問わない）と同じ色・同じ部品（レイヤー）の、今の種類の見えている要素をまとめて選ぶ。
+  const sameKeys = useMemo(() => {
+    const colorSet = new Set<string>();
+    const partSet = new Set<number>();
+    for (const s of selection) {
+      const c = attributeColor(data, colors, s);
+      if (c) colorSet.add(c);
+      const p = partOf(data, s);
+      if (p !== null) partSet.add(p);
+    }
+    return { colors: colorSet, parts: partSet };
+  }, [selection, data, colors]);
+  const canSameColor = sameKeys.colors.size > 0;
+  const canSamePart = sameKeys.parts.size > 0 && mode !== 'part';
+  const selectSame = (by: 'color' | 'part') => {
+    const ids = (sceneRef.current?.selectableIds(mode) ?? []).filter((id) => {
+      const s = { kind: mode, id };
+      if (by === 'part') {
+        const p = partOf(data, s);
+        return p !== null && sameKeys.parts.has(p);
+      }
+      const c = attributeColor(data, colors, s);
+      return c !== null && sameKeys.colors.has(c);
+    });
     boxPick(
       ids.map((id) => ({ kind: mode, id })),
       false
@@ -252,16 +311,23 @@ function CadViewerPanel({ question, kinds, data, saveId, onSubmit, onCancel }: P
     colors.parts.forEach((hex, id) => (changes.parts[String(id)] = hex));
     return changes;
   };
-  const submit = () => onSubmit(selection, colorChanges(), message.trim());
+  const viewState = (): CadViewState => ({ hidden_parts: [...hiddenParts], visible: kindVisible });
+  const submit = () => {
+    const text = message.trim();
+    // 指示があるときだけ、今の画面（選んだ要素の強調を含む）を低解像度で撮って AI へ一緒に見せる。
+    const screenshot = text ? (sceneRef.current?.snapshot(screenshotLongSide) ?? null) : null;
+    onSubmit(selection, colorChanges(), text, viewState(), screenshot);
+  };
 
-  // 変えた色・隠した部品を適用したデータを JSON に書く（app.py の cad_viewer_save）。ビューアは閉じない。
+  // 変えた色・隠した部品を反映した 3D モデル（STEP / DXF / 色付き STL）を書き出す（app.py の cad_viewer_save）。
+  // ダウンロードボタンは backend がチャットに出す。ビューアは閉じない。
   const save = async () => {
     if (!saveId || saveState.kind === 'saving') return;
     setSaveState({ kind: 'saving' });
     const action: IAction = {
       id: '',
       name: 'cad_viewer_save',
-      payload: { save_id: saveId, colors: colorChanges(), hidden_parts: [...hiddenParts], visible: kindVisible },
+      payload: { save_id: saveId, colors: colorChanges(), ...viewState() },
       label: '',
       tooltip: '',
       forId: '',
@@ -330,6 +396,26 @@ function CadViewerPanel({ question, kinds, data, saveId, onSubmit, onCancel }: P
           >
             {t('cad.deselectAll')}
           </button>
+          <button
+            type="button"
+            className="cad-viewer-chip"
+            title={t('cad.sameColorTitle')}
+            disabled={!canSameColor}
+            onClick={() => selectSame('color')}
+          >
+            {t('cad.sameColor')}
+          </button>
+          {hasParts && (
+            <button
+              type="button"
+              className="cad-viewer-chip"
+              title={t('cad.samePartTitle')}
+              disabled={!canSamePart}
+              onClick={() => selectSame('part')}
+            >
+              {t('cad.samePart')}
+            </button>
+          )}
         </div>
         <div className="cad-viewer-views">
           {VIEWS.map((v) => (
@@ -343,6 +429,27 @@ function CadViewerPanel({ question, kinds, data, saveId, onSubmit, onCancel }: P
               {v.toUpperCase()}
             </button>
           ))}
+          <button type="button" className="cad-viewer-chip" title={t('cad.fitTitle')} onClick={() => sceneRef.current?.fitAll()}>
+            {t('cad.fit')}
+          </button>
+          <button
+            type="button"
+            className={`cad-viewer-chip${pivotPicking ? ' active' : ''}`}
+            aria-pressed={pivotPicking}
+            title={t('cad.pivotTitle')}
+            onClick={() => setPivotPicking((x) => !x)}
+          >
+            {t('cad.pivot')}
+          </button>
+          <button
+            type="button"
+            className={`cad-viewer-chip${originAxes ? ' active' : ''}`}
+            aria-pressed={originAxes}
+            title={t('cad.originAxesTitle')}
+            onClick={() => setOriginAxes((x) => !x)}
+          >
+            {t('cad.originAxes')}
+          </button>
           <button
             type="button"
             className={`cad-viewer-chip${sidebarOpen ? ' active' : ''}`}
@@ -421,7 +528,7 @@ function CadViewerPanel({ question, kinds, data, saveId, onSubmit, onCancel }: P
       />
       <div className="ask-form-actions">
         {/* 左端はキャンセル（ほかの質問ツールと同じ位置）。保存・確定は右にまとめる。 */}
-        <button type="button" className="ask-form-cancel" title={t('cad.cancelTitle')} onClick={onCancel}>
+        <button type="button" className="ask-form-cancel" title={t('cad.cancelTitle')} onClick={() => onCancel(colorChanges(), viewState())}>
           {t('cad.close')}
         </button>
         <div className="cad-viewer-actions-right">

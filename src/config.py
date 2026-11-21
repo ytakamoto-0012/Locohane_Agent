@@ -1143,6 +1143,8 @@ class Config:
         cad_viewer_angular_deflection_deg: 三角形化の角度の許容差（度。[cad_viewer].angular_deflection_deg）。
         cad_viewer_stl_region_angle_deg: STL の三角形を 1 つの平面領域（面）にまとめる法線の角度差の上限
             （度。[cad_viewer].stl_region_angle_deg）。
+        cad_viewer_screenshot_long_side_pixels: 指示付きで確定したときに撮るビューアの画面の長辺
+            （ピクセル。[cad_viewer].screenshot_long_side_pixels）。PNG に保存して指示と一緒に LLM へ見せる。0 以下で撮らない。
         show_cad_viewer_timeout_seconds: 3D ビューアで利用者が選択を確定するのを待つ秒数
             （[user_response_timeouts].show_cad_viewer_seconds）。0 以下は無期限待ち。
     """
@@ -1657,6 +1659,7 @@ class Config:
     cad_viewer_linear_deflection_ratio: float = 0.001
     cad_viewer_angular_deflection_deg: float = 20.0
     cad_viewer_stl_region_angle_deg: float = 1.0
+    cad_viewer_screenshot_long_side_pixels: int = 512
     show_cad_viewer_timeout_seconds: int = 0
 
 
@@ -4655,6 +4658,9 @@ def load_config(
         cad_viewer_stl_region_angle_deg=_positive_float(
             os.getenv("CAD_VIEWER_STL_REGION_ANGLE_DEG", cad_viewer.get("stl_region_angle_deg", 1)),
             "[cad_viewer].stl_region_angle_deg",
+        ),
+        cad_viewer_screenshot_long_side_pixels=int(
+            os.getenv("CAD_VIEWER_SCREENSHOT_LONG_SIDE_PIXELS", cad_viewer.get("screenshot_long_side_pixels", 512))
         ),
         show_cad_viewer_timeout_seconds=int(os.getenv("SHOW_CAD_VIEWER_TIMEOUT_SECONDS", timeouts.get("show_cad_viewer_seconds", 0))),
     )

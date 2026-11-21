@@ -102,8 +102,16 @@ class CodeCollector:
                 "Assembly, Vector/Location (a point) or a list of them."
             )
             return
+        # 「保存」ボタンで 3D モデルを書き出すときに形を読み直せるよう、ビューア用データの隣に BREP で残す。
+        brep = str(Path(out_path).with_suffix(".brep"))
+        source: dict[str, Any] = {"kind": "code", "format": "CADQUERY"}
         try:
-            data = shape_to_viewer_data(shape, _options(raw_options), {"kind": "code", "format": "CADQUERY"})
+            if shape.exportBrep(brep):
+                source["brep"] = brep
+        except Exception:  # noqa: BLE001 - 残せなくても表示はできる（書き出しだけができなくなる）
+            pass
+        try:
+            data = shape_to_viewer_data(shape, _options(raw_options), source)
         except (CadLoadError, TooManyTrianglesError) as e:
             _fail(f"Error: {e}")
             return
@@ -113,12 +121,36 @@ class CodeCollector:
         _done(data, out_path)
 
 
+def _export(data_path: str, out_path: str) -> None:
+    """3D ビューアの「保存」: ビューア用データから 3D モデルを書き、標準出力に ``CAD_VIEWER_OK {"notes": [...]}``。"""
+    from src.cad.export_model import ExportError, export_model
+
+    try:
+        data = json.loads(Path(data_path).read_text(encoding="utf-8"))
+        notes = export_model(data, out_path)
+    except ImportError as e:
+        _fail(f"Error: cadquery / ezdxf is not installed ({e}), so this model cannot be exported. Install them with pip install -r requirements.txt.")
+        return
+    except (ExportError, OSError, ValueError) as e:
+        _fail(f"Error: {e}")
+        return
+    except Exception as e:  # noqa: BLE001 - OCP の C++ 例外は Python の別の型で来る
+        _fail(f"Error: could not export the model ({type(e).__name__}: {e})")
+        return
+    print(f"{OK_MARKER} {json.dumps({'notes': notes}, ensure_ascii=False)}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--file", required=True)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--file")
+    group.add_argument("--export", help="変更を反映したビューア用データの JSON。--out に 3D モデルを書き出す。")
     parser.add_argument("--out", required=True)
     parser.add_argument("--options", default="{}")
     args = parser.parse_args(argv)
+    if args.export:
+        _export(args.export, args.out)
+        return
     raw = json.loads(args.options)
     path = Path(args.file)
     fmt = format_of(path)

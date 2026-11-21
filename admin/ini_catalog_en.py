@@ -1506,6 +1506,10 @@ DESCRIPTIONS: dict[str, str] = {
         'Upper limit of the angle (degrees) between normals when grouping the triangles of an STL file into one "face" (planar region).\n'
         'A larger value for a curved STL makes fewer faces, but their information as a "plane" (the normal) becomes rough.'
     ),
+    'cad_viewer.screenshot_long_side_pixels': (
+        'When the user types an instruction and presses "Confirm", the viewer screen at that moment is captured, saved as PNG and shown to the LLM together with the instruction. This is the long side of that image (pixels).\n'
+        'Images use many tokens, so keep it small. Nothing is captured when the instruction is empty. 0 or less captures nothing (do so for a model that cannot read images).'
+    ),
     'plan.allow_badge_unlock': (
         'Behavior when clicking the Plan Mode / Edit Automatically badge shown near the send button.\n'
         'true : can switch both ways (including Plan Mode -> Edit Automatically).\n'

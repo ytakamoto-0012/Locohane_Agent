@@ -462,6 +462,7 @@ Locohane/
 │   ├── cad/                  # 3D ビューア（show_cad_viewer）の形の処理。サブプロセスで動く（「3D ビューア（CAD）」節）
 │   │   ├── run_cad.py         # サブプロセスの入口（ファイルの読み込み・CadQuery コードの前後に付ける部分）
 │   │   ├── export_mesh.py     # B-rep（STEP/IGES/BREP/BIN/DXF・コードの結果）→ ビューア用データ（cadquery が要る）
+│   │   ├── export_model.py    # ビューアの「保存」: 色・隠した部品を反映した 3D モデルを STEP / DXF / 色付き STL に書き出す
 │   │   ├── stl_reader.py / mesh_data.py # STL（色付き含む）の読み込み・平面領域へのまとめ・ビューア用データの組み立て（numpy のみ）
 │   │   └── formats.py         # 対応する拡張子
 │   ├── project_instructions.py # .locohane/LOCOHANE.md の読込
@@ -1906,25 +1907,48 @@ ID は CadQuery の `Workplane().add(shape).faces().vals()` の順（0 始まり
 three.js はビューアを開いたときだけ読み込む（`frontend/src/components/cad/CadScene.ts`、チャット画面の本体には含めない）。
 ビューアでは、ドラッグで回転・右ドラッグで移動・ホイールで拡大縮小、クリックで選択／解除、上部のボタンで選ぶ要素の種類を切り替え、
 「拡大」で画面いっぱいに広げる（Esc で戻る）。会話の切り替えをまたいでも、ほかの質問ツールと同じく戻ってきた画面で答えられる。
+回転は three.js の `ArcballControls` で、CAD ソフトと同じく画面を基準に回す（縦のドラッグは画面の横軸まわりにだけ回り、真上・真下でも止まらない。
+代わりに上の向きは保たれず、画面の端寄りをドラッグすると画面の奥行き方向の軸まわりにも回る）。ホイールの拡大縮小はカーソルの位置に向かう。
 
 - **視点**: `XY+` `YZ+` `ZX+` `XY-` `YZ-` `ZX-`。平面の 1 つめの軸が右・2 つめの軸が上で、`+` は法線（1 つめ × 2 つめ）の正の側から、
   `-` は裏側から見る（例: `XY+` は +Z 側から X が右・Y が上、`ZX+` は +Y 側から Z が右・X が上）。開いたときは斜めから見る。
 - **範囲選択**: 「範囲：完全包囲」は左ドラッグの枠に完全に入る要素、「範囲：包囲＋交差」は枠に入る要素と枠に掛かる要素を選ぶ（枠は実線／破線で区別）。
   奥に隠れている要素も含む。Ctrl（⌘）を押しながら囲むと選択から外す。範囲選択のモードでも右ドラッグの移動・ホイールの拡大縮小は使える。
 - **全選択／全選択解除**: 全選択は今の種類の、見えている要素をすべて選ぶ。全選択解除は種類を問わず選択をすべて外す。
+- **同じ色／同じ部品・レイヤー**: 選んでいる要素（種類を問わない）と同じ色、または同じ部品（DXF ではレイヤー）に属する、今の種類の見えている要素を
+  選択に加える（例: 面を 1 つクリック →「同じ色」で同じ色の面をすべて選ぶ。エッジモードに切り替えて「同じ部品・レイヤー」でそのレイヤーのエッジをすべて選ぶ）。
+  色は変えた後の色で比べ、自身の色を持たないエッジ・頂点は属する部品・レイヤーの色で比べる。「同じ部品・レイヤー」は部品のあるモデルだけに出る。
 - **パネル（左のサイドバー）**: 面・エッジ・頂点の表示／非表示、選んだ面・部品の色（RGB）の表示と変更、部品の構成ツリー（STEP/IGES のアセンブリ）
   またはレイヤー（DXF。色・線種・非表示／フリーズ／ロック）。部品・レイヤーごとに表示／非表示と色を変えられ、名前のクリックで部品を選ぶ。
   DXF で非表示・フリーズのレイヤーは最初から隠す。隠したものはクリック・範囲選択・全選択の対象にならない。
   変えた色は元の CAD ファイルには書かず、選択結果ファイルの `color_changes`（`{kind, id, from, to}`）で LLM へ伝える（戻り値には件数だけ）。
 - **指示欄**: ビューアの下の入力欄に書いた AI への指示（任意。例:「選んだ面に φ5 の穴を開けて」）を、「確定」（Ctrl+Enter）で選択・色の変更と一緒に返す。
   戻り値の先頭に `user_instruction` として入り、チャットにも選択と一緒に残る（4000 文字まで）。
-- **保存（💾）**: 変えた色・隠した部品・種類ごとの表示を適用したビューア用データを、作業フォルダ（書き込めなければこのスレッドの `_tmp_` フォルダ）の
-  `<元のファイル名>_edited_<日時>.json` に書き出して `@N` に登録する。ビューアは閉じず、同じビューアで何度押しても同じファイルを上書きする。
-  色は面の `color` と三角形の頂点色の両方に入り、隠した部品は `viewState`、変更の一覧は `edits.color_changes` に残るので、
-  この JSON を `file_path` に渡すと保存したときの見た目で開き直せる。保存したファイルの `@N` はツールの戻り値の `notes` で LLM へ伝える。
+  指示があるときは、確定した瞬間のビューアの画面（選んだ要素の強調を含む）を長辺 `[cad_viewer].screenshot_long_side_pixels`（既定 512）の
+  PNG に縮めて撮り、このスレッドの `_tmp_` フォルダの `cad_screenshot_<日時>.png` に保存して `@N` に登録する。戻り値の `screenshot` にその `@N` が入り、
+  画像は `analyze_image` と同じ経路（ツール結果の直後の画像付きメッセージ）で LLM へ見せる。指示が空のとき・0 以下の設定のときは撮らない。
+  指示欄が空のまま確定したときは、代わりに `next_step` が入り、「元の依頼に選択の使い道が書かれていなければ、選択結果ファイルを読まず・
+  ツールもサブエージェントも呼ばず、選んだ内容を短く報告して次の依頼を待つ」よう LLM へ指示する。
+- **全体表示**: 今の向きのまま、見えているモデル全体（隠した部品を除く）が画面に収まるように寄せる。回転の中心もその中心に戻す。
+- **回転中心**: 押した後にクリックした面・エッジ・頂点の上の点を回転の中心にする（1 回だけ。もう一度押すとやめる）。向きは変えずに平行移動して
+  その点を画面の中央に寄せ、赤い点で示す（ArcballControls は常に回転の中心を見るため）。「全体表示」・視点のボタンでモデルの中心に戻る。
+- **原点の軸**: 空間の原点 (0, 0, 0) に XYZ 軸（X 赤・Y 緑・Z 青、ラベル付き）を描く（既定で表示。ボタンで表示／非表示）。長さはモデルの大きさの半分で、
+  形に隠れないよう手前に重ねる。左下の小さな軸は向きだけを示すもので、こちらは原点の位置を示す。
+- **保存（💾）**: 変えた色・隠した部品を反映した 3D モデルを、作業フォルダ（書き込めなければこのスレッドの `_tmp_` フォルダ）の
+  `<元のファイル名>_edited_<日時>.<拡張子>` に書き出して `@N` に登録し、チャットにそのダウンロードボタンを出す
+  （LLM の `provide_download` を待たない。`cl.File` は送った時点の中身を持つため、上書きのたびに出し直す）。ビューアは閉じず、同じビューアで何度押しても同じファイルを上書きする。
+  書き出す形式は元の形式で決まる（`src/cad/export_model.py`。サブプロセス `src/cad/run_cad.py --export` で動かす）:
+  - STEP・IGES・BREP・バイナリ BREP・CadQuery コード → **STEP**。形は元のファイル（コードのときはビューア用データを作ったときに隣に書いた
+    `.brep`）から読み直し、部品の名前・部品の色・面の色（部品の色と違う面だけ）を付ける。隠した部品は含めない。
+  - DXF → **DXF**。元のファイルの写しのレイヤーの色を変え、隠したレイヤーを非表示（見せたレイヤーは表示・フリーズ解除）にする。DXF は面ごとの色を持てないので、面の色の変更は書かない。
+  - STL → **色付きバイナリ STL**（VisCAM / SolidView 方式。面＝平面領域ごとの色。色の無い面は色なし）。
+  書き出したファイルの `@N` はツールの戻り値の `notes` で LLM へ伝える。書き出したファイルはそのまま `file_path` に渡して開き直せる。
   ボタンはアプリの action_callback `cad_viewer_save`（`src/tools/cad_viewer.py` の `save_viewer_edits`）を呼び、そのビューアが回答待ちの間だけ受け付ける。
+- **ビューア用データの自動保存**: 色・隠した部品・種類ごとの表示を変えて「確定」または「閉じる」と、変更を反映したビューア用データを
+  このスレッドの `_tmp_` フォルダの `cad_view_edited_<日時>.json` に自動で書き、戻り値の `viewer_data`（閉じたときはエラー文の後ろ）で LLM へ渡す。
+  色は面の `color` と三角形の頂点色の両方、隠した部品は `viewState`、変更の一覧は `edits.color_changes` に入るので、`file_path` に渡すと閉じたときの見た目で開き直せる。
 
-**設定**: `[cad_viewer]`（`enabled`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`）と
+**設定**: `[cad_viewer]`（`enabled`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`・`screenshot_long_side_pixels`）と
 `[user_response_timeouts] show_cad_viewer_seconds`（既定 0 = 無期限）。メインエージェントから直接呼べるよう `[main_agent_tool_guard] allow_entries` に登録済み。
 サブエージェントには渡さない（画面に出すツールのため）。
 
@@ -2073,6 +2097,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[cad_viewer]` | `linear_deflection_ratio` | 曲面を三角形に分けるときの許容差（形の対角線の長さに対する割合、既定 0.001） | `CAD_VIEWER_LINEAR_DEFLECTION_RATIO` |
 | `[cad_viewer]` | `angular_deflection_deg` | 曲面を三角形に分けるときの角度の許容差（度、既定 20） | `CAD_VIEWER_ANGULAR_DEFLECTION_DEG` |
 | `[cad_viewer]` | `stl_region_angle_deg` | STL の三角形を 1 つの面（平面領域）にまとめる法線の角度差の上限（度、既定 1） | `CAD_VIEWER_STL_REGION_ANGLE_DEG` |
+| `[cad_viewer]` | `screenshot_long_side_pixels` | 指示付きで確定したときに撮って LLM へ見せるビューアの画面の長辺（ピクセル、既定 512。0 以下で撮らない） | `CAD_VIEWER_SCREENSHOT_LONG_SIDE_PIXELS` |
 | `[plan]` | `allow_badge_unlock` | Plan Mode バッジの双方向切り替えを許可するか | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | 承認済み（Edit Automatically）状態で`create_plan`を再度呼んだ際、`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態を維持したままstepsだけ差し替える | `PLAN_RESET_APPROVAL_ON_RECREATE` |
 | `[plan]` | `reset_approval_on_new_message` | 新しいユーザーメッセージを受け取るたびに`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態をメッセージをまたいで維持する（`thinking_loop_guard`のリトライ上限到達後、ユーザーが続行メッセージを送っても再承認が不要になる） | `PLAN_RESET_APPROVAL_ON_NEW_MESSAGE` |

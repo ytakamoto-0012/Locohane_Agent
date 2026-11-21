@@ -458,6 +458,7 @@ Locohane/
 │   ├── cad/                  # shape processing of the 3D viewer (show_cad_viewer); runs in a subprocess ("3D viewer (CAD)" section)
 │   │   ├── run_cad.py         # entry point of the subprocess (reading files; the parts put before and after CadQuery code)
 │   │   ├── export_mesh.py     # B-rep (STEP/IGES/BREP/BIN/DXF, result of code) -> viewer data (needs cadquery)
+│   │   ├── export_model.py    # the viewer's "Save": exports the 3D model with colors / hidden parts applied as STEP / DXF / colored STL
 │   │   ├── stl_reader.py / mesh_data.py # reading STL (including colored), grouping into planar regions, building viewer data (numpy only)
 │   │   └── formats.py         # supported extensions
 │   ├── project_instructions.py # loading .locohane/LOCOHANE.md
@@ -1864,25 +1865,54 @@ and the resulting viewer data (JSON) is put in the session's `_tmp_` folder. The
 three.js is loaded only when a viewer opens (`frontend/src/components/cad/CadScene.ts`; it is not part of the main chat bundle).
 In the viewer, drag to rotate, right-drag to pan, use the wheel to zoom, click to select / deselect, switch the kind of element with the buttons at the top,
 and use "Expand" to fill the screen (Esc to restore). As with the other question tools, it can be answered on the screen you come back to after switching conversations.
+Rotation uses three.js `ArcballControls` and, as in CAD software, is relative to the screen (a vertical drag rotates only around the screen's horizontal axis
+and does not stop at the top or bottom; in exchange, the up direction is not kept, and dragging near the edge of the view also rolls around the screen's depth axis). Wheel zoom moves toward the cursor.
 
 - **Views**: `XY+` `YZ+` `ZX+` `XY-` `YZ-` `ZX-`. The first axis of the plane points right and the second up; `+` looks from the positive side of the normal
   (first × second), `-` from the back side (e.g. `XY+` looks from +Z with X right and Y up, `ZX+` from +Y with Z right and X up). The viewer opens with an iso view.
 - **Box selection**: "Box: inside" selects the elements fully inside the left-dragged box, "Box: inside + crossing" also those crossing it (solid / dashed box).
   Elements hidden behind others are included. Hold Ctrl (⌘) while dragging to deselect. Right-drag pan and wheel zoom still work in box mode.
 - **Select all / Deselect all**: "Select all" selects every visible element of the current kind; "Deselect all" deselects everything, of any kind.
+- **Same color / Same part / layer**: adds to the selection every visible element of the current kind that has the same color as, or belongs to the same part
+  (layer in DXF) as, a selected element of any kind (e.g. click one face, then "Same color" selects every face of that color; switch to edges and
+  "Same part / layer" selects every edge of that layer). Colors are compared after your changes; edges and vertices, which have no color of their own,
+  use the color of their part / layer. "Same part / layer" appears only for models with parts.
 - **Panel (left sidebar)**: show / hide faces, edges and vertices; see and change the color (RGB) of the selected faces / parts; the part structure tree
   (STEP/IGES assemblies) or the layers (DXF: color, linetype, off / frozen / locked). Each part or layer can be hidden and recolored, and clicking its name selects it.
   DXF layers that are off or frozen start hidden. Hidden elements are not picked by clicking, box selection or select all.
   Changed colors are not written to the original CAD file; they reach the LLM as `color_changes` (`{kind, id, from, to}`) in the selection file (the return value has only their count).
 - **Instruction box**: an instruction for the AI typed in the box under the viewer (optional, e.g. "make a 5 mm hole in the selected face") is returned with the
   selection and color changes on "Confirm" (Ctrl+Enter). It comes first in the return value as `user_instruction` and stays in the chat with the selection (up to 4000 characters).
-- **Save (💾)**: writes the viewer data with the changed colors, hidden parts and per-kind display applied to `<original file name>_edited_<date time>.json`
-  in the working folder (or this thread's `_tmp_` folder if it is not writable) and registers it as an `@N`. The viewer stays open, and pressing it again overwrites the same file.
-  Colors go into both the faces' `color` and the triangle vertex colors, hidden parts into `viewState`, and the list of changes into `edits.color_changes`,
-  so passing this JSON as `file_path` reopens the model as it looked when saved. The `@N` of the saved file reaches the LLM in the `notes` of the tool's return value.
+  With an instruction, the viewer screen at the moment of confirming (selected elements highlighted) is captured as a PNG whose long side is
+  `[cad_viewer].screenshot_long_side_pixels` (default 512), saved to `cad_screenshot_<date time>.png` in this thread's `_tmp_` folder and registered as an `@N`.
+  The return value has that `@N` as `screenshot`, and the image is shown to the LLM the same way as `analyze_image` (an image message right after the tool result).
+  Nothing is captured when the instruction is empty or the setting is 0 or less.
+  When the field is left empty, the return value has `next_step` instead, telling the LLM that unless the earlier request said what to do with the
+  selection, it should not read the selection file or call any tool or sub-agent, and should just report the selection briefly and wait.
+- **Fit all**: keeps the current direction and fits the whole visible model (hidden parts excluded) in the view. The rotation center returns to its center.
+- **Rotation center**: after pressing it, the point you click on a face / edge / vertex becomes the rotation center (once; press it again to stop).
+  The view moves in parallel, without turning, so that the point is in the middle of the view, and a red dot marks it (ArcballControls always looks at
+  the rotation center). "Fit all" and the view buttons return it to the model center.
+- **Origin axes**: draws XYZ axes (X red, Y green, Z blue, labeled) at the origin (0, 0, 0) of the space (shown by default; the button shows / hides them).
+  They are half the model size long and drawn on top so that the shape does not hide them. The small axes at the bottom left show only the direction; these show where the origin is.
+- **Save (💾)**: exports the 3D model with the changed colors and hidden parts applied to `<original file name>_edited_<date time>.<ext>` in the
+  working folder (or this thread's `_tmp_` folder if it is not writable), registers it as an `@N`, and posts its download button in the chat
+  (without waiting for the LLM's `provide_download`; a `cl.File` keeps the content at the time it is sent, so it is posted again after each overwrite).
+  The viewer stays open, and pressing it again overwrites the same file. The output format follows the original format (`src/cad/export_model.py`,
+  run in the subprocess `src/cad/run_cad.py --export`):
+  - STEP, IGES, BREP, binary BREP and CadQuery code → **STEP**. The shape is read again from the original file (for code, from the `.brep` written next to the
+    viewer data when it was made), with part names, part colors and face colors (only faces whose color differs from their part). Hidden parts are left out.
+  - DXF → **DXF**. A copy of the original file with the layer colors changed and hidden layers turned off (shown layers are turned on and thawed).
+    DXF cannot hold per-face colors, so face color changes are not written.
+  - STL → **colored binary STL** (VisCAM / SolidView style, one color per face = planar region; faces without a color stay uncolored).
+  The `@N` of the exported file reaches the LLM in the `notes` of the tool's return value. The exported file can be passed as `file_path` to open it again.
   The button calls the app's action_callback `cad_viewer_save` (`save_viewer_edits` in `src/tools/cad_viewer.py`), which is accepted only while that viewer waits for an answer.
+- **Automatic save of the viewer data**: when you "Confirm" or "Close" after changing colors, hidden parts or the per-kind display, the viewer data
+  with those changes is written automatically to `cad_view_edited_<date time>.json` in this thread's `_tmp_` folder and passed to the LLM as
+  `viewer_data` in the return value (after the error message when closed). Colors go into both the faces' `color` and the triangle vertex colors,
+  hidden parts into `viewState`, and the list of changes into `edits.color_changes`, so passing it as `file_path` reopens the model as you left it.
 
-**Settings**: `[cad_viewer]` (`enabled`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`) and
+**Settings**: `[cad_viewer]` (`enabled`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`, `screenshot_long_side_pixels`) and
 `[user_response_timeouts] show_cad_viewer_seconds` (default 0 = no limit). It is registered in `[main_agent_tool_guard] allow_entries` so the main agent can call it directly.
 It is not given to sub-agents (it shows something on the screen).
 
@@ -2033,6 +2063,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[cad_viewer]` | `linear_deflection_ratio` | Tolerance when splitting curved surfaces into triangles (ratio to the diagonal length of the shape, default 0.001) | `CAD_VIEWER_LINEAR_DEFLECTION_RATIO` |
 | `[cad_viewer]` | `angular_deflection_deg` | Angular tolerance when splitting curved surfaces into triangles (degrees, default 20) | `CAD_VIEWER_ANGULAR_DEFLECTION_DEG` |
 | `[cad_viewer]` | `stl_region_angle_deg` | Upper limit of the angle between normals when grouping STL triangles into one face (planar region) (degrees, default 1) | `CAD_VIEWER_STL_REGION_ANGLE_DEG` |
+| `[cad_viewer]` | `screenshot_long_side_pixels` | Long side (pixels) of the viewer screenshot captured and shown to the LLM when confirming with an instruction (default 512; 0 or less captures nothing) | `CAD_VIEWER_SCREENSHOT_LONG_SIDE_PIXELS` |
 | `[plan]` | `allow_badge_unlock` | Whether to allow switching the Plan Mode badge both ways | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | Whether to reset `plan_approved` unconditionally back to Plan Mode when `create_plan` is called again in the approved (Edit Automatically) state. If `false`, only the steps are replaced while keeping the approval | `PLAN_RESET_APPROVAL_ON_RECREATE` |
 | `[plan]` | `reset_approval_on_new_message` | Whether to reset `plan_approved` unconditionally back to Plan Mode on every new user message. If `false`, the approval is kept across messages (after `thinking_loop_guard` reaches its retry limit, re-approval is not needed even when the user sends a message to continue) | `PLAN_RESET_APPROVAL_ON_NEW_MESSAGE` |

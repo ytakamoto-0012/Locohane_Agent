@@ -12,6 +12,7 @@ frontend/src/components/CadViewerBar.tsx が {submitted, selected: [{kind, id}]}
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ from ..cad.formats import format_of, supported_extensions_text
 from ..cad.mesh_data import FORMAT as VIEWER_FORMAT
 from ..cad.mesh_data import apply_view_edits, write_viewer_json
 from ..i18n import t
+from ..images import image_ref, to_data_url
 from . import _state
 from ._ask_echo import ASK_TIMEOUT_MESSAGE, _echo_ask_answer
 from ._ask_relay_helper import _ask_with_cross_session_relay
@@ -76,17 +78,17 @@ def _tail(text: str) -> str:
     return text if len(text) <= _OUTPUT_TAIL_CHARS else "...\n" + text[-_OUTPUT_TAIL_CHARS:]
 
 
-@tool
+@tool(response_format="content_and_artifact")
 async def show_cad_viewer(
     question: str,
     file_path: str = "",
     code: str = "",
     select: list[SelectKind] | None = None,
-) -> str:
+) -> tuple[str, dict | None]:
     """Show a 3D model in an interactive viewer in the chat, and return the elements the user selects.
 
     The user can rotate, zoom and pan the model, select faces / edges / vertices (or whole parts of an
-    assembly) by clicking, box selection or "select all", hide parts / layers, change face and part
+    assembly) by clicking, box selection, "select all" or "same color" / "same part / layer", hide parts / layers, change face and part
     colors, type an instruction for you, and press "Confirm". This tool waits for that, writes the geometry of
     each selected element (type such as PLANE/CYLINDER/LINE/CIRCLE, area or length, center, normal,
     radius, bounding box, neighbouring elements, and CadQuery selectors that pick exactly that
@@ -131,13 +133,31 @@ async def show_cad_viewer(
         and its geometry under "selected", and the color changes under "color_changes"; it can be
         very large, so read only the fields you need with json_query), model (format, units, size,
         element counts), and viewer_data (@N of the viewer data). If the user changed face / part
-        colors in the viewer, also color_change_count (the model file itself is not changed).
+        colors in the viewer, also color_change_count (the original model file itself is not changed).
         If the user typed an instruction in the viewer, it comes first as user_instruction: treat it
-        as the user's next request about the selected elements.
+        as the user's next request about the selected elements. Then a small screenshot of the viewer
+        as the user saw it when confirming (selected elements highlighted) is also shown to you as an
+        image, and screenshot is its @N. If not, it has next_step instead: unless
+        the user's earlier request said what to do with the selection, just report the selection briefly
+        and stop (do not read selection_file or dispatch agents).
+        When the user pressed "Save" in the viewer, the 3D model with the viewer's colors and hidden
+        parts applied was exported (STEP for STEP/IGES/BREP/CadQuery, DXF for DXF, colored STL for STL),
+        and its download button has already been shown in the chat (no need for provide_download).
+        If the user changed colors or the display, viewer_data is viewer data with those changes
+        (saved automatically).
         It returns an "Error: ..." string (never raises) if the input is wrong, the code or file
         fails, the plan is not approved for code, the user closes the viewer
         ("Error: the user closed the 3D viewer ..."), or there is no answer within the timeout.
     """
+    shot: dict[str, Any] = {}
+    text = await _show_cad_viewer(question, file_path, code, select, shot)
+    return text, shot.get("artifact")
+
+
+async def _show_cad_viewer(
+    question: str, file_path: str, code: str, select: list[str] | None, shot: dict[str, Any]
+) -> str:
+    """show_cad_viewer の本体。指示付きの確定で画面を撮っていれば、LLM へ見せる画像を shot["artifact"] に入れる。"""
     if not _setting("cad_viewer_enabled", True):
         return "Error: the 3D viewer is disabled in config.ini ([cad_viewer] enabled=false)."
     file_path, code = (file_path or "").strip(), code or ""
@@ -166,12 +186,72 @@ async def show_cad_viewer(
         answer = await _ask_selection(question, data, kinds, save_id)
     finally:
         target = _SAVE_TARGETS.pop(save_id, None)
+    # 閉じた・時間切れでも LLM へ伝える注意（書き出したモデル・自動で保存したビューア用データ）。
+    extra: list[str] = []
     if target is not None and target.saved is not None:
-        notes = [*notes, f"The user saved the edited view (colors and hidden parts applied) to {target.saved_token}. Pass it as file_path to show it again."]
+        extra.append(
+            f"The user exported the 3D model with the viewer's colors and hidden parts applied to {target.saved_token} "
+            "(its download button is already in the chat; no need for provide_download)."
+        )
     if isinstance(answer, str):
-        return answer + (f"\n{notes[-1]}" if target is not None and target.saved is not None else "")
-    picked, colors, message = answer
-    return _format_result(data, picked, data_token, notes, colors, message)
+        return "\n".join([answer, *extra])
+    res, picked, colors, message = answer
+    # 色・表示を変えていれば、変更を反映したビューア用データを自動で保存し、それを viewer_data として返す。
+    edited_token = _auto_save_view(data, res, colors)
+    if not res.get("submitted", True):
+        if edited_token:
+            extra.append(f"The viewer data with the user's color and display changes was saved to {edited_token} (pass it as file_path to show it again).")
+        return "\n".join([_CANCEL_MESSAGE, *extra])
+    if edited_token:
+        data_token = edited_token
+        extra.append("viewer_data has the user's color and display changes (saved automatically).")
+    screenshot_token = ""
+    if message:
+        saved = _save_screenshot(res.get("screenshot"))
+        if saved is not None:
+            screenshot_token = _register_file(saved, "3D viewer screenshot (show_cad_viewer)")
+            shot["artifact"] = {
+                "image_url": to_data_url(saved),
+                "ref": image_ref(saved, screenshot_token if screenshot_token != str(saved) else None),
+            }
+    return _format_result(data, picked, data_token, [*notes, *extra], colors, message, screenshot_token)
+
+
+_PNG_DATA_URL_PREFIX = "data:image/png;base64,"
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# ブラウザから受け取る画面の画像の大きさの上限（低解像度で撮るので、これを超えるものは受け付けない）。
+_SCREENSHOT_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _save_screenshot(raw: Any) -> Path | None:
+    """ビューアが撮った画面（PNG の data URL）を、そのセッションの `_tmp_` フォルダに PNG で保存する。
+
+    撮っていない・形がおかしい・大きすぎる・書けないときは None（選択と指示はそのまま返す）。
+    """
+    if _setting("cad_viewer_screenshot_long_side_pixels", 512) <= 0:
+        return None
+    if not isinstance(raw, str) or not raw.startswith(_PNG_DATA_URL_PREFIX):
+        return None
+    b64 = raw[len(_PNG_DATA_URL_PREFIX) :]
+    if len(b64) > _SCREENSHOT_MAX_BYTES * 4 // 3 + 4:
+        logger.warning("show_cad_viewer: the screenshot is too large (%d chars); ignored", len(b64))
+        return None
+    try:
+        png = base64.b64decode(b64, validate=True)
+    except ValueError:
+        logger.warning("show_cad_viewer: the screenshot is not valid base64; ignored")
+        return None
+    if not png.startswith(_PNG_SIGNATURE):
+        logger.warning("show_cad_viewer: the screenshot is not a PNG; ignored")
+        return None
+    path = _new_data_path(_resolve_exec_workdir(), prefix="cad_screenshot").with_suffix(".png")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(png)
+    except OSError:
+        logger.warning("show_cad_viewer: could not save the screenshot", exc_info=True)
+        return None
+    return path
 
 
 @dataclass
@@ -189,34 +269,29 @@ class _SaveTarget:
 _SAVE_TARGETS: dict[str, _SaveTarget] = {}
 
 
-def _saved_path(target: _SaveTarget) -> Path:
+def _model_path(target: _SaveTarget, suffix: str) -> Path:
     src = target.data.get("source") or {}
     stem = Path(src["path"]).stem if src.get("path") else "cadquery"
-    return target.out_dir / f"{stem}_edited_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    return target.out_dir / f"{stem}_edited_{time.strftime('%Y%m%d_%H%M%S')}{suffix}"
 
 
-async def save_viewer_edits(payload: dict[str, Any]) -> dict[str, Any]:
-    """ビューアの「保存」ボタン（app.py の action_callback "cad_viewer_save"）。
+def _initial_hidden(data: dict) -> set[int]:
+    """ビューアを開いたときに隠れている部品（CadViewerBar.tsx の initialHiddenParts と同じ）。"""
+    view = data.get("viewState") or {}
+    if view.get("hiddenParts") is not None:
+        return {int(p) for p in view["hiddenParts"]}
+    return {int(p["id"]) for p in data.get("parts") or [] if (p.get("layer") or {}).get("off") or (p.get("layer") or {}).get("frozen")}
 
-    変えた色・隠した部品・種類ごとの表示を適用したビューア用データを JSON に書き、@N に登録する。
-    同じビューアで何度保存しても同じファイルを上書きする。ビューアは閉じない。
 
-    Returns:
-        {"ok": True, "path", "token", "color_changes"} か {"ok": False, "error"}。
-    """
-    save_id = str(payload.get("save_id") or "")
-    target = _SAVE_TARGETS.get(save_id)
-    if target is None:
-        return {"ok": False, "error": "This viewer is no longer waiting for an answer."}
-    if (cl.user_session.get("thread_id") or "_no_session") != target.thread_id:
-        return {"ok": False, "error": "This viewer belongs to another conversation."}
-    data = target.data
-    colors = _valid_colors(data, payload.get("colors"))
+def _view_edits(data: dict, payload: dict[str, Any], colors: list[dict[str, Any]]) -> tuple[dict, bool]:
+    """ブラウザから来た色・隠した部品・種類ごとの表示を適用したビューア用データと、開いたときから変わったか。"""
     parts = data.get("parts") or []
     hidden = payload.get("hidden_parts")
     hidden_parts = [p for p in (hidden if isinstance(hidden, list) else []) if isinstance(p, int) and not isinstance(p, bool) and 0 <= p < len(parts)]
     vis = payload.get("visible")
     visible = {k: bool(vis[k]) for k in ("face", "edge", "vertex") if isinstance(vis, dict) and isinstance(vis.get(k), bool)}
+    before_visible = {"face": True, "edge": True, "vertex": True, **((data.get("viewState") or {}).get("visible") or {})}
+    changed = bool(colors) or set(hidden_parts) != _initial_hidden(data) or any(before_visible.get(k) != v for k, v in visible.items())
     edited = apply_view_edits(
         data,
         face_colors={c["id"]: c["to"] for c in colors if c["kind"] == "face"},
@@ -226,20 +301,97 @@ async def save_viewer_edits(payload: dict[str, Any]) -> dict[str, Any]:
         color_changes=colors,
         saved_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
-    out = target.saved or _saved_path(target)
+    return edited, changed
+
+
+def _auto_save_view(data: dict, res: dict[str, Any], colors: list[dict[str, Any]]) -> str:
+    """確定・閉じたときに、色・表示を変えていれば変更を反映したビューア用データを `_tmp_` に書き、@N を返す。"""
+    edited, changed = _view_edits(data, res, colors)
+    if not changed:
+        return ""
+    path = _new_data_path(_resolve_exec_workdir(), prefix="cad_view_edited")
     try:
-        await asyncio.to_thread(_write_atomic, edited, out)
+        _write_atomic(edited, path)
+    except OSError:
+        logger.warning("show_cad_viewer: could not save the edited viewer data to %s", path, exc_info=True)
+        return ""
+    return _register_file(path, "3D viewer data with the user's edits (show_cad_viewer)")
+
+
+async def save_viewer_edits(payload: dict[str, Any]) -> dict[str, Any]:
+    """ビューアの「保存」ボタン（app.py の action_callback "cad_viewer_save"）。
+
+    変えた色・隠した部品を反映した 3D モデルを CAD ファイルに書き出し（src/cad/export_model.py。STEP 系 → STEP、
+    DXF → DXF、STL → 色付き STL）、@N に登録してチャットにダウンロードボタンを出す。同じビューアで何度保存しても
+    同じファイルを上書きする。ビューアは閉じない。
+
+    Returns:
+        {"ok": True, "path", "token", "color_changes", "notes"} か {"ok": False, "error"}。
+    """
+    from ..cad.export_model import output_suffix
+
+    save_id = str(payload.get("save_id") or "")
+    target = _SAVE_TARGETS.get(save_id)
+    if target is None:
+        return {"ok": False, "error": "This viewer is no longer waiting for an answer."}
+    if (cl.user_session.get("thread_id") or "_no_session") != target.thread_id:
+        return {"ok": False, "error": "This viewer belongs to another conversation."}
+    data = target.data
+    suffix = output_suffix(data)
+    if suffix is None:
+        return {"ok": False, "error": "This model cannot be exported."}
+    colors = _valid_colors(data, payload.get("colors"))
+    edited, _changed = _view_edits(data, payload, colors)
+    out = target.saved or _model_path(target, suffix)
+    workdir = _resolve_exec_workdir()
+    spec = _new_data_path(workdir, prefix="cad_export")
+    try:
+        await asyncio.to_thread(_write_atomic, edited, spec)
+        tmp_out = out.with_name(f".{out.stem}.writing{out.suffix}")
+        cmd = [_state._SCRIPT_PYTHON, str(_RUN_CAD), "--export", str(spec), "--out", str(tmp_out)]
+        failed = await _run(cmd, workdir)
+        if failed:
+            tmp_out.unlink(missing_ok=True)
+            logger.warning("show_cad_viewer: could not export the model: %s", failed)
+            # 画面に出すのはサブプロセスが標準エラーに書いた理由だけにする。
+            reason = failed.split("[stderr]\n", 1)[-1].split("\n[stdout]", 1)[0].strip()
+            return {"ok": False, "error": reason.removeprefix("Error: ")}
+        os.replace(tmp_out, out)
     except OSError as e:
-        logger.warning("show_cad_viewer: could not save the edited view to %s", out, exc_info=True)
+        logger.warning("show_cad_viewer: could not export the model to %s", out, exc_info=True)
         return {"ok": False, "error": str(e)}
+    finally:
+        spec.unlink(missing_ok=True)
     if target.saved is None:
         target.saved = out
         target.saved_token = next(
-            iter(_register_path_memory([str(out)], description="3D viewer data with edits (show_cad_viewer)", thread_id=target.thread_id)),
+            iter(_register_path_memory([str(out)], description="3D model exported from the 3D viewer (show_cad_viewer)", thread_id=target.thread_id)),
             str(out),
         )
-    logger.info("show_cad_viewer: saved the edited view (%d color changes) to %s", len(colors), out)
+    logger.info("show_cad_viewer: exported the model (%d color changes) to %s", len(colors), out)
+    await _offer_download(out)
     return {"ok": True, "path": str(out), "token": target.saved_token, "color_changes": len(colors)}
+
+
+async def _offer_download(path: Path) -> None:
+    """保存したファイルのダウンロードボタンをチャットに出す（LLM が provide_download を呼ぶのを待たない）。
+
+    保存するたびに出す（cl.File は送った時点の中身を持つので、上書き後は新しいボタンが要る）。
+    出せなくても保存自体は成功なので、失敗はログだけにする。
+    """
+    from .provide_download import download_access_error
+
+    if download_access_error(path):
+        logger.warning("show_cad_viewer: did not offer the saved file for download: %s", path)
+        return
+    try:
+        await cl.Message(
+            content=t("notice.generated_files", names=path.name),
+            elements=[cl.File(name=path.name, path=str(path))],
+            type="system_message",
+        ).send()
+    except Exception:  # noqa: BLE001 - ボタンを出せなくても保存の結果は返す
+        logger.warning("show_cad_viewer: could not show the download button for %s", path, exc_info=True)
 
 
 def _write_atomic(data: dict, out: Path) -> None:
@@ -329,8 +481,10 @@ async def _viewer_data_from_code(code: str) -> tuple[dict, Path, list[str]] | st
     finally:
         script_path.unlink(missing_ok=True)
     # ビューア用データ自体は「コードが作ったファイル」に数えない（今の更新時刻を実行前の値として渡す）。
-    if out.exists():
-        before[out] = out.stat().st_mtime
+    # 「保存」で書き出すために残す形の BREP（run_cad.py）も同じ。
+    for own in (out, out.with_suffix(".brep")):
+        if own.exists():
+            before[own] = own.stat().st_mtime
     note = _register_exec_output_files(workdir, before, cl.user_session.get("thread_id") or "_no_session")
     if failed:
         return failed + (f"\n{note}" if note else "")
@@ -449,13 +603,23 @@ def _echo_text(data: dict, picked: list[tuple[str, int]], colors: list[dict[str,
 
 async def _ask_selection(
     question: str, data: dict, kinds: list[str], save_id: str = ""
-) -> tuple[list[tuple[str, int]], list[dict[str, Any]], str] | str:
+) -> tuple[dict[str, Any], list[tuple[str, int]], list[dict[str, Any]], str] | str:
     timeout = _resolve_ask_timeout(_setting("show_cad_viewer_timeout_seconds", 0))
     thread_id = cl.user_session.get("thread_id") or "_no_session"
 
     async def _factory():
         # CustomElement はセッション文脈に依存するため、中継時に作り直せるよう毎回ここで作る。
-        element = cl.CustomElement(name="CadViewer", props={"question": question, "select": kinds, "data": data, "save_id": save_id})
+        element = cl.CustomElement(
+            name="CadViewer",
+            props={
+                "question": question,
+                "select": kinds,
+                "data": data,
+                "save_id": save_id,
+                # 指示付きで確定したときに撮る画面の長辺（0 以下なら撮らない）。
+                "screenshot_long_side": max(0, int(_setting("cad_viewer_screenshot_long_side_pixels", 512))),
+            },
+        )
         ask_message = cl.AskElementMessage(content=question, element=element, timeout=timeout)
         res = await ask_message.send()
         # Chainlit は要素（props にビューア用データ全体、数 MB になりうる）を会話の保存にも書く。ビューアは
@@ -481,10 +645,10 @@ async def _ask_selection(
         res = await _ask_with_cross_session_relay(thread_id, _factory, timeout)
     if res is None:
         return ASK_TIMEOUT_MESSAGE
-    if not res.get("submitted", True):
-        return _CANCEL_MESSAGE
+    # 閉じた（submitted: false）ときも返す（色・表示の変更を自動で保存するため。選択は使わない）。
     return (
-        _valid_selection(data, kinds, res.get("selected")),
+        res,
+        _valid_selection(data, kinds, res.get("selected")) if res.get("submitted", True) else [],
         _valid_colors(data, res.get("colors")),
         _valid_message(res.get("message")),
     )
@@ -533,6 +697,7 @@ def _format_result(
     notes: list[str],
     colors: list[dict[str, Any]] | None = None,
     message: str = "",
+    screenshot_token: str = "",
 ) -> str:
     """LLM へ返す概要（JSON 文字列）。
 
@@ -549,6 +714,21 @@ def _format_result(
             "The user wrote this instruction in the 3D viewer together with the selection below. "
             "Treat it as the user's next request about the selected elements."
         )
+        if screenshot_token:
+            # 確定したときの画面（選んだ要素は強調表示）。画像はこの結果の直後に見せる。
+            result["screenshot"] = screenshot_token
+            result["screenshot_note"] = (
+                "A small screenshot of the viewer as the user saw it when confirming (selected elements highlighted) "
+                "is attached as an image. Use it to understand which part of the model the instruction is about."
+            )
+    else:
+        # 指示欄が空のまま確定した。選択の詳細を読みにサブエージェントを出す等の無駄な作業をさせない。
+        result["next_step"] = (
+            "The user confirmed without typing an instruction. If the user's earlier request already said what to do "
+            "with the selection (e.g. 'make a hole in the face I pick'), do that. Otherwise do nothing more: do not read "
+            "selection_file, do not call json_query or any other tool, and do not dispatch agents. Just reply in one or "
+            "two short sentences with what was selected (selected_by_kind) and wait for the user's next request."
+        )
     result |= {
         "selected_count": len(picked),
         "selected_by_kind": {k: n for k in _ALL_KINDS if (n := sum(1 for kind, _ in picked if kind == k))},
@@ -564,7 +744,7 @@ def _format_result(
         else:
             result["selection_file"] = sel_token
             result["how_to_read"] = (
-                f"{sel_token} has one entry per selected element under 'selected' (kind, id, geomType, area/length, center, normal, "
+                f"Only when the task needs the details: {sel_token} has one entry per selected element under 'selected' (kind, id, geomType, area/length, center, normal, "
                 f"radius, bbox, neighbouring faces/edges, selectors)"
                 + (", and the color changes under 'color_changes' ({kind, id, from, to} as #rrggbb; from null = no color in the model)" if colors else "")
                 + ". It can be very large, so never read it whole: query only the fields you need with json_query, "
@@ -572,7 +752,8 @@ def _format_result(
             )
     if colors:
         result["color_note"] = (
-            "The user changed colors in the viewer. The viewer does not change the model file; apply them yourself if the user wants the colors saved."
+            "The user changed colors in the viewer. The original model file is not changed; the user can export a model "
+            "with the colors applied with the viewer's Save button."
         )
     result["model"] = _model_summary(data)
     result["viewer_data"] = data_token

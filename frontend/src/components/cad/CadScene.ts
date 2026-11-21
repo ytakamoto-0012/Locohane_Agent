@@ -8,7 +8,7 @@
  * （src/cad/mesh_data.py）。描画は変化があったときだけ行う（常時のアニメーションループは回さない）。
  */
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { ArcballControls } from 'three/examples/jsm/controls/ArcballControls.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
@@ -38,6 +38,8 @@ export interface CadSceneCallbacks {
   onPick: (item: CadSelection) => void;
   /** 範囲選択で囲んだ要素。remove は Ctrl（⌘）を押しながら囲んだとき（選択から外す）。 */
   onBoxPick: (items: CadSelection[], remove: boolean) => void;
+  /** 「回転中心」でクリックした点を回転の中心にしたとき（ビューアは指定のモードを終える）。 */
+  onPivotSet?: () => void;
 }
 
 /** 視点。'xy+' は XY 平面を +Z 側から見る（X が右・Y が上）。'-' は裏側から見る（上の向きは同じ）。 */
@@ -63,8 +65,27 @@ const CLICK_MOVE_PIXELS = 4;
 const HIGHLIGHT_LINE_WIDTH = 3.5;
 // 視点を合わせるとき、形がちょうど画面に収まる距離に掛ける余白。
 const FIT_MARGIN = 1.12;
+// 平行投影のカメラを回転の中心から離す距離（モデルの半径の倍数）。見え方には影響せず、奥行きの切れ目にだけ効く。
+const CAMERA_DISTANCE = 10;
 
 type Range = [number, number];
+
+const AXIS_LABELS = ['X', 'Y', 'Z'];
+const AXIS_COLORS = ['#e5484d', '#30a46c', '#3e63dd'];
+
+/** 軸のラベル（文字を描いたスプライト）。sizeAttenuation が false なら距離によらず画面上で同じ大きさ。 */
+function axisLabel(text: string, color: string, sizeAttenuation: boolean): THREE.Sprite | null {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.fillStyle = color;
+  ctx.font = 'bold 44px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 32, 34);
+  return new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false, sizeAttenuation }));
+}
 
 export class CadScene {
   private readonly container: HTMLElement;
@@ -76,8 +97,9 @@ export class CadScene {
   // 左下に出す XYZ 軸（本体のカメラの向きに合わせて回す）。
   private readonly gizmoScene = new THREE.Scene();
   private readonly gizmoCamera = new THREE.OrthographicCamera(-1.6, 1.6, 1.6, -1.6, 0.1, 10);
-  private readonly camera: THREE.PerspectiveCamera;
-  private readonly controls: OrbitControls;
+  // 平行投影（CAD と同じく、奥のものも同じ大きさに見える）。拡大縮小は camera.zoom で行う。
+  private readonly camera: THREE.OrthographicCamera;
+  private readonly controls: ArcballControls;
   private readonly raycaster = new THREE.Raycaster();
   private readonly resizeObserver: ResizeObserver;
   private readonly center = new THREE.Vector3();
@@ -109,6 +131,13 @@ export class CadScene {
   private downAt: { x: number; y: number } | null = null;
   private boxing = false;
   private renderQueued = false;
+  // true の間は、クリックした点を回転の中心にする（選択はしない）。
+  private pivotPicking = false;
+  // 指定した回転の中心の印（形の中心に戻したら隠す）。
+  private pivotMarker: THREE.Points | null = null;
+  // 空間の原点 (0, 0, 0) に描く XYZ 軸（X 赤・Y 緑・Z 青、ラベル付き）。
+  private originAxes: THREE.Group | null = null;
+  private originAxesLine: LineSegments2 | null = null;
 
   constructor(container: HTMLElement, data: CadData, callbacks: CadSceneCallbacks, colors: CadSceneColors) {
     this.container = container;
@@ -130,7 +159,10 @@ export class CadScene {
     this.center.addVectors(min, max).multiplyScalar(0.5);
     this.radius = Math.max(max.distanceTo(min) / 2, 1e-6);
 
-    this.camera = new THREE.PerspectiveCamera(40, 1, this.radius / 1000, this.radius * 1000);
+    // zoom = 1 のとき画面の縦の半分が radius。カメラは回転の中心から CAMERA_DISTANCE * radius 離して置き、
+    // 形（中心から radius 以内）が near〜far に必ず入るようにする。
+    const h = this.radius;
+    this.camera = new THREE.OrthographicCamera(-h, h, h, -h, 0, this.radius * CAMERA_DISTANCE * 2);
     this.scene.add(this.camera);
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8a96, 1.6));
     const light = new THREE.DirectionalLight(0xffffff, 1.4);
@@ -140,10 +172,23 @@ export class CadScene {
     this.buildMesh();
     this.buildLines();
     this.buildPoints();
+    this.buildPivotMarker();
+    this.buildOriginAxes();
     this.addAxes();
 
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.target.copy(this.center);
+    // ArcballControls: 画面を基準に回す（縦ドラッグは常に画面の横軸まわりの回転になる）。CAD ソフトに近い操作感。
+    // OrbitControls は上の向きを軸にした方位角・仰角で回すため、真上へのドラッグでも横に回ったり、真上・真下付近で詰まったりした。
+    // scene を渡さないので回転の目安の円（ギズモ）は描かれない。
+    this.controls = new ArcballControls(this.camera, this.renderer.domElement);
+    // ダブルクリックでの注目点の移動は、クリックでの選択と重なるので使わない。
+    this.controls.enableFocus = false;
+    // 速く離したときに回り続ける動き（慣性）を付けない。
+    this.controls.enableAnimations = false;
+    // ホイールの拡大縮小はカーソルの位置に向かって行う。
+    this.controls.cursorZoom = true;
+    // Shift + ホイール・中ボタンの画角変更（めまい効果）は使わない。
+    this.controls.unsetMouseAction('WHEEL', 'SHIFT');
+    this.controls.unsetMouseAction(1, 'SHIFT');
     this.controls.addEventListener('change', () => this.requestRender());
     this.resize();
     this.setView('iso');
@@ -243,36 +288,68 @@ export class CadScene {
     this.scene.add(this.points);
   }
 
+  private buildPivotMarker(): void {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3), 3));
+    const material = new THREE.PointsMaterial({ size: 11, sizeAttenuation: false, color: 0xe5484d, depthTest: false, transparent: true });
+    this.pivotMarker = new THREE.Points(geometry, material);
+    this.pivotMarker.renderOrder = 4;
+    this.pivotMarker.visible = false;
+    this.scene.add(this.pivotMarker);
+  }
+
+  /**
+   * 空間の原点に XYZ 軸を作る。長さはモデルの大きさの半分（原点がモデルから離れていても見える長さ）。
+   * 線は太線（WebGL の通常の線は 1px 固定）、ラベルは距離によらず同じ大きさで描く。形に隠れないよう手前に重ねる。
+   */
+  private buildOriginAxes(): void {
+    const len = this.radius * 0.5;
+    const group = new THREE.Group();
+    const geometry = new LineSegmentsGeometry();
+    geometry.setPositions([0, 0, 0, len, 0, 0, 0, 0, 0, 0, len, 0, 0, 0, 0, 0, 0, len]);
+    const rgb = AXIS_COLORS.map((c) => new THREE.Color(c));
+    geometry.setColors(rgb.flatMap((c) => [c.r, c.g, c.b, c.r, c.g, c.b]));
+    const line = new LineSegments2(geometry, new LineMaterial({ linewidth: 2, vertexColors: true, depthTest: false, transparent: true, opacity: 0.85 }));
+    line.renderOrder = 2;
+    group.add(line);
+    const tips = [new THREE.Vector3(len * 1.08, 0, 0), new THREE.Vector3(0, len * 1.08, 0), new THREE.Vector3(0, 0, len * 1.08)];
+    AXIS_LABELS.forEach((text, i) => {
+      const sprite = axisLabel(text, AXIS_COLORS[i], false);
+      if (!sprite) return;
+      sprite.position.copy(tips[i]);
+      sprite.scale.set(0.035, 0.035, 1);
+      sprite.renderOrder = 2;
+      group.add(sprite);
+    });
+    this.originAxes = group;
+    this.originAxesLine = line;
+    this.scene.add(group);
+  }
+
+  /** 原点の XYZ 軸を見せる・隠す。 */
+  setOriginAxesVisible(on: boolean): void {
+    if (this.originAxes) this.originAxes.visible = on;
+    this.requestRender();
+  }
+
   /** 左下の XYZ 軸（X 赤・Y 緑・Z 青、ラベル付き）を作る。 */
   private addAxes(): void {
     this.gizmoScene.add(new THREE.AxesHelper(1));
-    const labels: [string, string, THREE.Vector3][] = [
-      ['X', '#e5484d', new THREE.Vector3(1.3, 0, 0)],
-      ['Y', '#30a46c', new THREE.Vector3(0, 1.3, 0)],
-      ['Z', '#3e63dd', new THREE.Vector3(0, 0, 1.3)],
-    ];
-    for (const [text, color, pos] of labels) {
-      const canvas = document.createElement('canvas');
-      canvas.width = canvas.height = 64;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) continue;
-      ctx.fillStyle = color;
-      ctx.font = 'bold 44px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(text, 32, 34);
-      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false }));
-      sprite.position.copy(pos);
+    const pos = [new THREE.Vector3(1.3, 0, 0), new THREE.Vector3(0, 1.3, 0), new THREE.Vector3(0, 0, 1.3)];
+    AXIS_LABELS.forEach((text, i) => {
+      const sprite = axisLabel(text, AXIS_COLORS[i], true);
+      if (!sprite) return;
+      sprite.position.copy(pos[i]);
       sprite.scale.set(0.55, 0.55, 1);
       this.gizmoScene.add(sprite);
-    }
+    });
   }
 
   private renderGizmo(): void {
     const size = Math.round(Math.min(96, this.container.clientWidth / 4, this.container.clientHeight / 3));
     if (size < 32) return;
     // 本体のカメラと同じ向きで、原点を見る。
-    const dir = new THREE.Vector3().subVectors(this.camera.position, this.controls.target).normalize();
+    const dir = new THREE.Vector3().subVectors(this.camera.position, this.pivot()).normalize();
     this.gizmoCamera.position.copy(dir).multiplyScalar(4);
     this.gizmoCamera.up.copy(this.camera.up);
     this.gizmoCamera.lookAt(0, 0, 0);
@@ -346,65 +423,161 @@ export class CadScene {
   /** 範囲選択のしかたを変える。'off' 以外では左ドラッグが回転でなく範囲選択になる。 */
   setBoxMode(mode: BoxMode): void {
     this.boxMode = mode;
-    // 左ボタンを OrbitControls に渡さない（Ctrl + 左ドラッグの移動も含めて）。右ドラッグの移動・ホイールの拡大縮小はそのまま。
-    (this.controls.mouseButtons as { LEFT: THREE.MOUSE | null }).LEFT = mode === 'off' ? THREE.MOUSE.ROTATE : null;
+    // 左ボタンを ArcballControls に渡さない（Ctrl + 左ドラッグの移動も含めて）。右ドラッグの移動・ホイールの拡大縮小はそのまま。
+    if (mode === 'off') {
+      this.controls.setMouseAction('ROTATE', 0);
+      this.controls.setMouseAction('PAN', 0, 'CTRL');
+    } else {
+      this.controls.unsetMouseAction(0);
+      this.controls.unsetMouseAction(0, 'CTRL');
+    }
     this.boxEl.classList.toggle('crossing', mode === 'crossing');
   }
 
   setView(view: ViewName): void {
     const { dir: d, up } = VIEW_DIRS[view];
-    const dir = new THREE.Vector3(...d).normalize();
-    this.setUp(new THREE.Vector3(...up));
-    this.camera.position.copy(this.center).addScaledVector(dir, this.fitDistance(dir));
-    this.controls.target.copy(this.center);
-    this.camera.lookAt(this.center);
-    this.controls.update();
+    this.camera.up.set(...up);
+    this.fitAlong(new THREE.Vector3(...d).normalize(), this.data.bbox.min, this.data.bbox.max);
+  }
+
+  /**
+   * 全体表示: 今の向きのまま、見えている部品（隠した部品を除く）が画面いっぱいに収まるよう寄せる。
+   * 回転の中心もその中心に戻す。
+   */
+  fitAll(): void {
+    // ArcballControls は回転でカメラの up を書き換えないので、今の画面の上の向きを姿勢から求める。
+    this.camera.up.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
+    const dir = new THREE.Vector3().subVectors(this.camera.position, this.pivot()).normalize();
+    const box = this.visibleBox();
+    this.fitAlong(dir, box.min, box.max);
+  }
+
+  /** 見えている部品のバウンディングボックス（部品が無い・全部見えているならモデル全体）。 */
+  private visibleBox(): { min: number[]; max: number[] } {
+    const parts = this.data.parts ?? [];
+    const hidden = this.visibility.hiddenParts;
+    if (!parts.length || !hidden.size) return this.data.bbox;
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+    for (const p of parts) {
+      const bb = p.bbox as { min: number[]; max: number[] } | undefined;
+      if (hidden.has(p.id) || !bb) continue;
+      for (let k = 0; k < 3; k++) {
+        min[k] = Math.min(min[k], bb.min[k]);
+        max[k] = Math.max(max[k], bb.max[k]);
+      }
+    }
+    return min[0] === Infinity ? this.data.bbox : { min, max };
+  }
+
+  /** dir の向き（中心からカメラへ）から、min〜max の箱がちょうど収まる位置にカメラを置き、回転の中心を箱の中心にする。 */
+  private fitAlong(dir: THREE.Vector3, min: number[], max: number[]): void {
+    const center = new THREE.Vector3(...min).add(new THREE.Vector3(...max)).multiplyScalar(0.5);
+    this.camera.position.copy(center).addScaledVector(dir, this.radius * CAMERA_DISTANCE);
+    this.camera.zoom = this.fitZoom(dir, min, max, center);
+    this.camera.updateProjectionMatrix();
+    this.arcball().target.copy(center);
+    // ArcballControls は操作の起点となるカメラの状態・回転の中心を内部に持つので、カメラを動かしたら読み直させる。
+    this.controls.setCamera(this.camera);
+    if (this.pivotMarker) this.pivotMarker.visible = false;
+    this.requestRender();
+  }
+
+  /** true の間、クリックした点（面・エッジ・頂点の上）を回転の中心にする。 */
+  setPivotPicking(on: boolean): void {
+    this.pivotPicking = on;
+    this.renderer.domElement.classList.toggle('cad-viewer-pivot-picking', on);
+  }
+
+  /** p を回転の中心にする。向きは変えずに平行移動して、p を画面の中央に寄せる（ArcballControls は常に中心を見るため）。 */
+  private setPivot(p: THREE.Vector3): void {
+    const delta = new THREE.Vector3().subVectors(p, this.pivot());
+    this.camera.position.add(delta);
+    this.camera.up.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
+    this.arcball().target.copy(p);
+    this.controls.setCamera(this.camera);
+    if (this.pivotMarker) {
+      const attr = this.pivotMarker.geometry.getAttribute('position') as THREE.BufferAttribute;
+      attr.setXYZ(0, p.x, p.y, p.z);
+      attr.needsUpdate = true;
+      this.pivotMarker.geometry.computeBoundingSphere();
+      this.pivotMarker.visible = true;
+    }
     this.requestRender();
   }
 
   /**
-   * 画面の上の向きを変える。OrbitControls は作られたときの camera.up を回転の軸として持ち続ける
-   * （内部の _quat）ので、合わせて直す。直さないと、上の向きを変えた視点で回転が傾く。
+   * 回転の中心。ArcballControls は右ドラッグの移動で target でなく内部のギズモの位置を動かすので、そちらを読む。
    */
-  private setUp(up: THREE.Vector3): void {
-    this.camera.up.copy(up);
-    const c = this.controls as unknown as { _quat?: THREE.Quaternion; _quatInverse?: THREE.Quaternion };
-    if (c._quat && c._quatInverse) {
-      c._quat.setFromUnitVectors(up, new THREE.Vector3(0, 1, 0));
-      c._quatInverse.copy(c._quat).invert();
-    }
+  private pivot(): THREE.Vector3 {
+    const c = this.arcball();
+    return c._gizmos?.position ?? c.target;
   }
 
-  /** dir の向きから中心を見たとき、バウンディングボックスの 8 つの角が画面に収まるカメラの距離。 */
-  private fitDistance(dir: THREE.Vector3): number {
-    const tanV = Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
-    const tanH = tanV * this.camera.aspect;
+  /** @types/three に無い ArcballControls のプロパティ（target は公開、_gizmos は内部）。 */
+  private arcball(): ArcballControls & { target: THREE.Vector3; _gizmos?: THREE.Object3D } {
+    return this.controls as ArcballControls & { target: THREE.Vector3; _gizmos?: THREE.Object3D };
+  }
+
+  /** dir の向きから center を見たとき、min〜max の箱の 8 つの角が画面に収まる camera.zoom。 */
+  private fitZoom(dir: THREE.Vector3, min: number[], max: number[], center: THREE.Vector3): number {
+    const halfV = this.camera.top;
+    const halfH = this.camera.right;
     // カメラの右・上の向き（lookAt と同じ作り方）。
     const right = new THREE.Vector3().crossVectors(this.camera.up, dir);
     if (right.lengthSq() < 1e-12) right.set(1, 0, 0);
     right.normalize();
     const up = new THREE.Vector3().crossVectors(dir, right).normalize();
-    const [x0, y0, z0] = this.data.bbox.min;
-    const [x1, y1, z1] = this.data.bbox.max;
-    let distance = 0;
+    const [x0, y0, z0] = min;
+    const [x1, y1, z1] = max;
+    // 画面の縦・横の半分に対して、角がどこまで出ているかの割合（平行投影なので奥行きは関係しない）。
+    let ratio = 0;
     for (const x of [x0, x1])
       for (const y of [y0, y1])
         for (const z of [z0, z1]) {
-          const p = new THREE.Vector3(x, y, z).sub(this.center);
-          // 角がカメラ側へ出ている分（p・dir）だけ近くなるので、その分も足す。
-          const toward = p.dot(dir);
-          distance = Math.max(distance, toward + Math.abs(p.dot(right)) / tanH, toward + Math.abs(p.dot(up)) / tanV);
+          const p = new THREE.Vector3(x, y, z).sub(center);
+          ratio = Math.max(ratio, Math.abs(p.dot(right)) / halfH, Math.abs(p.dot(up)) / halfV);
         }
-    return Math.max(distance, this.radius * 0.1) * FIT_MARGIN;
+    return 1 / (Math.max(ratio, 0.1) * FIT_MARGIN);
+  }
+
+  /**
+   * 今の画面を、長辺 maxLongSide ピクセル以下に縮めた PNG の data URL にする（指示と一緒に AI へ見せる）。
+   * WebGL の描画結果は次の描画で消えるので、描き直した直後に同じ処理の中で読む。撮れなければ null。
+   */
+  snapshot(maxLongSide: number): string | null {
+    const src = this.renderer.domElement;
+    if (maxLongSide <= 0 || !src.width || !src.height) return null;
+    try {
+      this.render();
+      const scale = Math.min(1, maxLongSide / Math.max(src.width, src.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(src.width * scale));
+      canvas.height = Math.max(1, Math.round(src.height * scale));
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL('image/png');
+    } catch (err) {
+      console.warn('Could not capture the 3D viewer', err);
+      return null;
+    }
   }
 
   resize(): void {
     const w = Math.max(this.container.clientWidth, 1);
     const h = Math.max(this.container.clientHeight, 1);
     this.renderer.setSize(w, h, false);
-    this.camera.aspect = w / h;
+    // 縦の見える範囲はそのままで、横を画面の縦横比に合わせる。
+    const halfV = this.radius;
+    this.camera.top = halfV;
+    this.camera.bottom = -halfV;
+    this.camera.right = halfV * (w / h);
+    this.camera.left = -halfV * (w / h);
     this.camera.updateProjectionMatrix();
     (this.edgeHighlight?.material as LineMaterial | undefined)?.resolution.set(w, h);
+    (this.originAxesLine?.material as LineMaterial | undefined)?.resolution.set(w, h);
     this.requestRender();
   }
 
@@ -600,9 +773,40 @@ export class CadScene {
   // 当たり判定
   // ---------------------------------------------------------------------------
 
-  private worldPerPixel(distance: number): number {
+  /** 画面の 1 ピクセルがモデルの空間でどれだけの長さか（平行投影なので奥行きによらない）。 */
+  private worldPerPixel(): number {
     const h = Math.max(this.container.clientHeight, 1);
-    return (2 * distance * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))) / h;
+    return (this.camera.top - this.camera.bottom) / this.camera.zoom / h;
+  }
+
+  /** クリックした位置の、見えている面の上の点（面に当たらなければ手前のエッジ・頂点の点）。何も無ければ null。 */
+  private pointAt(clientX: number, clientY: number): THREE.Vector3 | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    this.raycaster.setFromCamera(ndc, this.camera);
+    const hits: { distance: number; point: THREE.Vector3 }[] = [];
+    if (this.mesh && this.visibility.face) {
+      // 隠した部品の三角形は面積 0 に潰してあるので当たらない。
+      const h = this.raycaster.intersectObject(this.mesh, false).find((x) => x.faceIndex != null);
+      if (h) hits.push(h);
+    }
+    const scale = this.worldPerPixel();
+    if (this.lines && this.visibility.edge) {
+      this.raycaster.params.Line = { threshold: scale * PICK_PIXELS_LINE };
+      const h = this.raycaster
+        .intersectObject(this.lines, false)
+        .find((x) => x.index !== undefined && this.visible('edge', rangeIndex(this.edgeSegStarts, Math.floor(x.index / 2))));
+      if (h) hits.push(h);
+    }
+    if (this.points && this.visibility.vertex) {
+      this.raycaster.params.Points = { threshold: scale * PICK_PIXELS_POINT };
+      const h = this.raycaster.intersectObject(this.points, false).find((x) => x.index !== undefined && this.visible('vertex', x.index));
+      // 点の当たりは光線上の点なので、頂点そのものの位置を使う。
+      if (h && h.index !== undefined && this.vertexPositions)
+        hits.push({ distance: h.distance, point: new THREE.Vector3().fromArray(this.vertexPositions, h.index * 3) });
+    }
+    if (!hits.length) return null;
+    return hits.reduce((a, b) => (b.distance < a.distance ? b : a)).point.clone();
   }
 
   private pickAt(clientX: number, clientY: number): CadSelection | null {
@@ -612,7 +816,7 @@ export class CadScene {
     const meshHit =
       this.mesh && this.visibility.face ? this.raycaster.intersectObject(this.mesh, false).find((h) => h.faceIndex != null) : undefined;
     const meshDistance = meshHit?.distance ?? Infinity;
-    const scale = this.worldPerPixel(this.camera.position.distanceTo(this.controls.target));
+    const scale = this.worldPerPixel();
     // 面の手前にあるもの（同じ面上の線・点を含む）だけを当てる。
     const inFront = (d: number) => d <= meshDistance + this.radius * 0.004;
     const edgeAt = (): number | null => {
@@ -831,6 +1035,14 @@ export class CadScene {
       if (boxing && rect) this.callbacks.onBoxPick(this.boxPick(rect, this.boxMode === 'crossing'), e.ctrlKey || e.metaKey);
       return;
     }
+    if (this.pivotPicking) {
+      const p = this.pointAt(e.clientX, e.clientY);
+      if (p) {
+        this.setPivot(p);
+        this.callbacks.onPivotSet?.();
+      }
+      return;
+    }
     const item = this.pickAt(e.clientX, e.clientY);
     if (item) this.callbacks.onPick(item);
   };
@@ -866,9 +1078,13 @@ export class CadScene {
     this.renderQueued = true;
     requestAnimationFrame(() => {
       this.renderQueued = false;
-      this.renderer.render(this.scene, this.camera);
-      this.renderGizmo();
+      this.render();
     });
+  }
+
+  private render(): void {
+    this.renderer.render(this.scene, this.camera);
+    this.renderGizmo();
   }
 }
 

@@ -70,6 +70,27 @@ export function effectiveColor(data: CadData, overrides: CadColorOverrides, s: C
   return overrides.faces.get(s.id) ?? (part !== undefined ? overrides.parts.get(part) : undefined) ?? info?.color ?? null;
 }
 
+/** 「同じ部品・レイヤー」でまとめて選ぶときの、要素が属する部品（DXF ではレイヤー）。無ければ null。 */
+export function partOf(data: CadData, s: CadSelection): number | null {
+  if (s.kind === 'part') return s.id;
+  const part = itemsOf(data, s.kind)[s.id]?.part;
+  return typeof part === 'number' ? part : null;
+}
+
+/**
+ * 「同じ色」でまとめて選ぶときの要素の色（小文字の #rrggbb）。面・部品は今の色、エッジ・頂点は
+ * 自身の色が無いので属する部品（レイヤー）の色。色が無ければ null。
+ */
+export function attributeColor(data: CadData, overrides: CadColorOverrides, s: CadSelection): string | null {
+  let color: string | null;
+  if (s.kind === 'face' || s.kind === 'part') color = effectiveColor(data, overrides, s);
+  else {
+    const part = partOf(data, s);
+    color = part === null ? null : effectiveColor(data, overrides, { kind: 'part', id: part });
+  }
+  return color ? color.toLowerCase() : null;
+}
+
 export function hexToRgb(hex: string): [number, number, number] | null {
   const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
   return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : null;
@@ -108,6 +129,8 @@ export interface CadViewerProps {
   data?: CadData;
   /** 「保存」ボタンで app.py の action_callback "cad_viewer_save" に渡す ID。 */
   save_id?: string;
+  /** 指示付きで確定したときに撮る画面の長辺（ピクセル、[cad_viewer].screenshot_long_side_pixels）。0 以下・無しなら撮らない。 */
+  screenshot_long_side?: number;
 }
 
 export const CAD_DATA_FORMAT = 'locohane-cad-viewer/1';

@@ -1018,6 +1018,11 @@
   height: 100%;
 }
 
+/* 「回転中心」でクリックする点を待っている間。 */
+.cad-viewer-canvas.cad-viewer-pivot-picking {
+  cursor: crosshair;
+}
+
 .cad-viewer-overlay {
   position: absolute;
   inset: 0;
