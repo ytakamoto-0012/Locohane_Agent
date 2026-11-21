@@ -8,7 +8,9 @@ Locohane Agent is an **AI agent that runs entirely on your company server or you
 Just talk to it in the browser chat, and the AI plans and carries out tasks such as reading and creating
 Excel, Word, PowerPoint and PDF files, checking images, and processing many files in a folder at once.
 Companies can also use it as a PoC (proof of concept) before adopting a full AI platform, to try out how
-an AI agent works for them and what it brings, without sending internal data outside. It has these features that help with a PoC:
+an AI agent works for them and what it brings, without sending internal data outside. If you are considering
+a way of working where you hand tasks to AI, such as Copilot Cowork in Microsoft 365 Copilot or Claude Cowork,
+you can also try that idea out on your own work with it first. It has these features that help with a PoC:
 
 - **Admin dashboard**: change the AI endpoints and settings, start and stop instances for each department, and check the running
   status, conversations and logs in the browser, so administrators can follow how the trial is going
