@@ -18,20 +18,30 @@ import numpy as np
 import cadquery as cq
 from OCP.BRep import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
+from OCP.BRepBndLib import BRepBndLib
+from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
+from OCP.Bnd import Bnd_Box
 from OCP.GCPnts import GCPnts_TangentialDeflection
 from OCP.GeomAbs import GeomAbs_CurveType, GeomAbs_SurfaceType
+from OCP.GProp import GProp_GProps
 from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED, TopAbs_VERTEX
 from OCP.TopExp import TopExp
 from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS, TopoDS_Shape
-from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape, TopTools_IndexedMapOfShape
+from OCP.TopTools import TopTools_IndexedMapOfShape
 
 from .features import model_digest, recognize_features
 from .mesh_data import TooManyTrianglesError, build_viewer_data, hex_color, rnd, vec
 
 # セレクタ候補を計算する上限（面・エッジ・頂点それぞれの数）。超えたら候補を付けない（時間がかかるため）。
 SELECTOR_HINT_MAX_ENTITIES = 2000
+# 読み込んだ CAD ファイルで B-rep の正しさの検査（BRepCheck_Analyzer）をする面の数の上限。超えたら省く
+# （部品の多いアセンブリでは 1 万面あたり 10 秒ほどかかる。検査は CadQuery のコードで作った形の確認が主な目的なので、
+# コードの形は面の数によらず検査する）。
+BREP_CHECK_MAX_FILE_FACES = 5000
+# 三角形に分ける前に正確な外接箱を求める面の数の上限（超えたら頂点の外接箱で分ける細かさを決める。shapes_to_viewer_data）。
+EXACT_BBOX_MAX_FACES = 2000
 # ">Z[k]" のような何番目かのセレクタを試す段数の上限（軸ごと）。
 _NTH_SELECTOR_LEVELS = 12
 
@@ -311,17 +321,66 @@ def _index_map(shape: TopoDS_Shape, kind) -> TopTools_IndexedMapOfShape:
     return m
 
 
-def _ancestors(shape: TopoDS_Shape, kind, parent_kind) -> TopTools_IndexedDataMapOfShapeListOfShape:
-    m = TopTools_IndexedDataMapOfShapeListOfShape()
-    TopExp.MapShapesAndAncestors_s(shape, kind, parent_kind, m)
-    return m
+def _adjacency(
+    parent_map: TopTools_IndexedMapOfShape, kind, child_map: TopTools_IndexedMapOfShape, seam_of: bool = False
+) -> tuple[list[list[int]], list[bool]]:
+    """子（エッジ・頂点）ごとの、それを含む親（面・エッジ）の ID の一覧（昇順）。
+
+    親ごとに子の小さな索引を作って逆に引く。``TopExp.MapShapesAndAncestors_s`` の結果の形のリストを Python で回すと
+    1 件ごとに遅く（部品の多い STEP で数十秒かかった）、こちらは同じ結果を数十分の一の時間で出す。
+    seam_of=True（親が面）のときは、その面の継ぎ目（円筒・球を閉じるため同じ面に 2 回属するエッジ）かも返す。
+    """
+    children: list[list[int]] = [[] for _ in range(child_map.Extent())]
+    seam = [False] * child_map.Extent()
+    for pi in range(1, parent_map.Extent() + 1):
+        parent = parent_map.FindKey(pi)
+        face = TopoDS.Face_s(parent) if seam_of else None
+        sub = _index_map(parent, kind)
+        for j in range(1, sub.Extent() + 1):
+            child = sub.FindKey(j)
+            ci = child_map.FindIndex(child) - 1
+            if ci < 0:
+                continue
+            children[ci].append(pi - 1)
+            if face is not None and BRep_Tool.IsClosed_s(TopoDS.Edge_s(child), face):
+                seam[ci] = True
+    return children, seam
 
 
-def _ancestor_ids(anc: TopTools_IndexedDataMapOfShapeListOfShape, item: TopoDS_Shape, parent_map: TopTools_IndexedMapOfShape) -> list[int]:
-    if not anc.Contains(item):
-        return []
-    ids = {parent_map.FindIndex(s) - 1 for s in anc.FindFromKey(item)}
-    return sorted(i for i in ids if i >= 0)
+def _diag(shape: TopoDS_Shape, *, exact: bool) -> float:
+    """外接箱の対角の長さ。
+
+    exact=True: 正確な外接箱（BRepBndLib.AddOptimal）。三角形に分けた後なら三角形を使うのですぐ終わる。
+    exact=False: 頂点の点の外接箱（速い）。ふつうの形は角が頂点なので正確な値とほぼ同じになる。曲面が頂点の外へ大きく
+    張り出す形（球・トーラス・継ぎ目だけの円筒など）で頂点の箱が形の定義からの粗い箱の半分に満たないときは、粗い箱を使う。
+    """
+    if exact:
+        box = Bnd_Box()
+        BRepBndLib.AddOptimal_s(shape, box)
+        return _box_diag(box)
+    points = Bnd_Box()
+    vertices = _index_map(shape, TopAbs_VERTEX)
+    for i in range(1, vertices.Extent() + 1):
+        points.Add(BRep_Tool.Pnt_s(TopoDS.Vertex_s(vertices.FindKey(i))))
+    rough = Bnd_Box()
+    BRepBndLib.Add_s(shape, rough, False)
+    by_points, by_geometry = _box_diag(points, 0.0), _box_diag(rough)
+    return by_points if by_points >= by_geometry * 0.5 else by_geometry
+
+
+def _box_diag(box: Bnd_Box, empty: float = 1.0) -> float:
+    if box.IsVoid():
+        return empty
+    x0, y0, z0, x1, y1, z1 = box.Get()
+    return math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2) or empty
+
+
+def _surface_props(f: TopoDS_Shape) -> tuple[float, tuple[float, float, float]]:
+    """面の (面積, 重心)。CadQuery の Face.Area() と Face.Center() は同じ積分を別々にするので、1 回で両方を取る。"""
+    props = GProp_GProps()
+    BRepGProp.SurfaceProperties_s(f, props)
+    c = props.CentreOfMass()
+    return props.Mass(), (c.X(), c.Y(), c.Z())
 
 
 def _pnt(p) -> list[float]:
@@ -356,14 +415,16 @@ _CURVE_NAMES = {
 }
 
 
-def _face_info(face_id: int, f: TopoDS_Shape) -> dict[str, Any]:
+def _face_info(face_id: int, f: TopoDS_Shape) -> tuple[dict[str, Any], float]:
+    """面の情報と、丸める前の面積（形全体の表面積の合計に使う）。"""
     face = cq.Face(TopoDS.Face_s(f))
     adaptor = BRepAdaptor_Surface(face.wrapped)
     stype = adaptor.GetType()
     info: dict[str, Any] = {"id": face_id, "kind": "face", "geomType": _SURFACE_NAMES.get(stype, "OTHER")}
-    info["area"] = rnd(face.Area())
-    center = face.Center()
-    info["center"] = vec(center.toTuple())
+    area, center_xyz = _surface_props(face.wrapped)
+    info["area"] = rnd(area)
+    center = cq.Vector(*center_xyz)
+    info["center"] = vec(center_xyz)
     try:
         info["normal" if stype == GeomAbs_SurfaceType.GeomAbs_Plane else "normalAtCenter"] = vec(face.normalAt(center).toTuple())
     except Exception:  # noqa: BLE001 - 退化した面は法線を出さない
@@ -398,7 +459,7 @@ def _face_info(face_id: int, f: TopoDS_Shape) -> dict[str, Any]:
         )
     bb = face.BoundingBox()
     info["bbox"] = {"min": vec((bb.xmin, bb.ymin, bb.zmin)), "max": vec((bb.xmax, bb.ymax, bb.zmax)), "size": vec((bb.xlen, bb.ylen, bb.zlen))}
-    return info
+    return info, area
 
 
 def _cylinder_concave(face: TopoDS_Shape, adaptor: BRepAdaptor_Surface, cyl) -> bool | None:
@@ -531,8 +592,9 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
     if n_faces + n_edges + n_vertices == 0:
         raise CadLoadError("The shape is empty (no faces, edges or vertices).")
 
-    bb = compound.BoundingBox()
-    diag = math.sqrt(bb.xlen**2 + bb.ylen**2 + bb.zlen**2) or 1.0
+    # 三角形に分ける細かさの目安にする大きさ。分ける前の正確な外接箱（AddOptimal）は形全体の積分になり、
+    # 部品の多いアセンブリでは十数秒かかるので、面が多いときは頂点から求める（_diag の exact=False）。
+    diag = _diag(root, exact=n_faces <= EXACT_BBOX_MAX_FACES)
     ang = math.radians(options.angular_deflection_deg)
     lin = diag * options.linear_deflection_ratio
 
@@ -590,8 +652,8 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
             node_offset += len(nodes)
             tri_offset += len(tris)
 
-    edge_face_anc = _ancestors(root, TopAbs_EDGE, TopAbs_FACE)
-    vertex_edge_anc = _ancestors(root, TopAbs_VERTEX, TopAbs_EDGE)
+    edge_faces, edge_seam = _adjacency(face_map, TopAbs_EDGE, edge_map, seam_of=True)
+    vertex_edges, _ = _adjacency(edge_map, TopAbs_VERTEX, vertex_map)
 
     seg_points: list[np.ndarray] = []
     edge_ranges: list[list[int]] = []
@@ -608,13 +670,13 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
         if nseg:
             seg_points.append(segs)
         info = _edge_info(i - 1, e)
-        adj = _ancestor_ids(edge_face_anc, e, face_map)
+        adj = edge_faces[i - 1]
         info["faces"] = adj
         for f in adj:
             face_edges[f].add(i - 1)
         if not adj:
             info["free"] = True
-        elif len(adj) == 1 and edge_face_anc.Contains(e) and edge_face_anc.FindFromKey(e).Size() >= 2:
+        elif len(adj) == 1 and edge_seam[i - 1]:
             # 同じ面に 2 回属するエッジ（円筒・球の継ぎ目）。形の角ではなく、面を閉じるための線。
             info["seam"] = True
         if edge_part[i - 1] >= 0 and with_parts:
@@ -622,8 +684,10 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
         edges.append(info)
 
     faces: list[dict] = []
+    surface_area = 0.0
     for i in range(1, n_faces + 1):
-        info = _face_info(i - 1, face_map.FindKey(i))
+        info, area = _face_info(i - 1, face_map.FindKey(i))
+        surface_area += area
         info["edges"] = sorted(face_edges[i - 1])
         if face_color[i - 1] is not None:
             info["color"] = hex_color(face_color[i - 1])
@@ -637,7 +701,7 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
         v = vertex_map.FindKey(i)
         p = BRep_Tool.Pnt_s(TopoDS.Vertex_s(v))
         vertex_points.append(_xyz(p))
-        adj = _ancestor_ids(vertex_edge_anc, v, edge_map)
+        adj = vertex_edges[i - 1]
         info = {"id": i - 1, "kind": "vertex", "point": vec(_xyz(p)), "edges": adj}
         if not adj:
             info["free"] = True
@@ -649,7 +713,8 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
         for kind, items in (("face", faces), ("edge", edges), ("vertex", vertices)):
             for idx, sels in _selector_hints(compound, kind, len(items)).items():
                 items[idx]["selectors"] = sels
-    features = recognize_features(faces, edges, diag)
+    # 穴・ボスの判定の許容差には、三角形に分けた後の正確な大きさを使う（三角形があるのですぐ求まる）。
+    features = recognize_features(faces, edges, _diag(root, exact=True))
 
     data = build_viewer_data(
         source=source,
@@ -668,7 +733,13 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
     if with_parts:
         data["parts"] = [_part_info(pi, part, face_part, edge_part) for pi, part in enumerate(parts)]
         data["stats"]["parts"] = len(parts)
-    data["check"] = check_shape(compound, edges, n_parts=len(parts))
+    data["check"] = check_shape(
+        compound,
+        edges,
+        n_parts=len(parts),
+        surface_area=surface_area,
+        validate=source.get("kind") != "file" or n_faces <= BREP_CHECK_MAX_FILE_FACES,
+    )
     data["features"] = features
     data["modelDigest"] = model_digest(faces, edges, vertices)
     if source.get("format") == "STEP" and source.get("path") and parts and parts[0].label is not None:
@@ -678,11 +749,15 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
     return data
 
 
-def check_shape(compound: cq.Shape, edges: list[dict], n_parts: int = 1) -> dict[str, Any]:
+def check_shape(
+    compound: cq.Shape, edges: list[dict], n_parts: int = 1, *, surface_area: float | None = None, validate: bool = True
+) -> dict[str, Any]:
     """形の検査（ソリッドの数・正しい B-rep か・閉じているか・体積・表面積）と、気づいた点。
 
     CadQuery の union が部品の一部を落としても valid のまま、のように「形が違うのに成功する」ことがあるため、
     数値を LLM へ必ず返す（絵より先に数値で確かめさせる）。
+    surface_area: 面ごとに求めた面積の合計（あれば形全体をもう一度積分しない）。
+    validate=False: B-rep の正しさの検査を省く（面の多い CAD ファイル。valid は None、validSkipped に理由）。
     """
     from OCP.BRepCheck import BRepCheck_Analyzer
     from OCP.TopAbs import TopAbs_SHELL, TopAbs_SOLID
@@ -691,10 +766,14 @@ def check_shape(compound: cq.Shape, edges: list[dict], n_parts: int = 1) -> dict
     solids = _index_map(root, TopAbs_SOLID).Extent()
     shells = _index_map(root, TopAbs_SHELL).Extent()
     out: dict[str, Any] = {"solids": solids, "shells": shells}
-    try:
-        out["valid"] = bool(BRepCheck_Analyzer(root).IsValid())
-    except Exception:  # noqa: BLE001
+    if not validate:
         out["valid"] = None
+        out["validSkipped"] = f"not checked: the file has more than {BREP_CHECK_MAX_FILE_FACES} faces (the check takes long on large models)"
+    else:
+        try:
+            out["valid"] = bool(BRepCheck_Analyzer(root).IsValid())
+        except Exception:  # noqa: BLE001
+            out["valid"] = None
     # 面 1 つにしか属さないエッジ（継ぎ目・単独の線を除く）。ソリッドなら 0 のはず。
     open_edges = sum(
         1 for e in edges if len(e.get("faces") or []) == 1 and not e.get("seam") and not e.get("free") and e.get("geomType") != "DEGENERATED"
@@ -706,7 +785,7 @@ def check_shape(compound: cq.Shape, edges: list[dict], n_parts: int = 1) -> dict
         except Exception:  # noqa: BLE001
             pass
     try:
-        out["surfaceArea"] = rnd(compound.Area(), 4)
+        out["surfaceArea"] = rnd(compound.Area() if surface_area is None else surface_area, 4)
     except Exception:  # noqa: BLE001
         pass
     warnings: list[str] = []

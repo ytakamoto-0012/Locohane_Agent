@@ -1518,6 +1518,13 @@ DESCRIPTIONS: dict[str, str] = {
         'Schema of the STEP file written by the viewer\'s "Save": auto (the same as the original STEP; AP242 when the original is not STEP), AP203, AP214 or AP242.\n'
         'PMI (dimensions, geometric tolerances, datums) can only be written in AP242. Use AP214 only when the receiving CAD is old and cannot read AP242.'
     ),
+    'cad_viewer.cache_dir': (
+        'Folder for the cache of viewer data made from CAD files. When the same file (same path, size and modification time) is opened again with the same settings, this is used instead of reading the shape again (skipping a conversion that takes over a minute for a large STEP). Updating the file makes it again.\n'
+        'It can be made again, so it is not included in the data backup.'
+    ),
+    'cad_viewer.cache_max_mb': (
+        'Upper limit of the total size of that cache (MB). When it is exceeded, the least recently used entries are deleted. 0 or less disables the cache.'
+    ),
     'plan.allow_badge_unlock': (
         'Behavior when clicking the Plan Mode / Edit Automatically badge shown near the send button.\n'
         'true : can switch both ways (including Plan Mode -> Edit Automatically).\n'

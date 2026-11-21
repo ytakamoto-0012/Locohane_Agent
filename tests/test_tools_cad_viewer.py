@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -44,6 +46,8 @@ class _Viewer:
         self.shown: list[dict] = []
         self.echoed: list[str] = []
         self.removed = 0
+        # 出してから消した一時的なメッセージ（「準備しています」）。
+        self.notices: list[str] = []
         # 表示中に呼ぶ処理（「保存」ボタンの代わり）。props を受け取る。
         self.on_show = None
         self.on_show_result = None
@@ -83,6 +87,11 @@ class _FakeMessage:
     async def send(self):
         _viewer.echoed.append(self.content)
         return self
+
+    async def remove(self):
+        # 「準備しています」の一時的なメッセージは、ビューアを出す前に消す。
+        _viewer.echoed.remove(self.content)
+        _viewer.notices.append(self.content)
 
 
 @pytest.fixture
@@ -193,6 +202,50 @@ async def test_stl_selection_is_validated_and_returned_with_geometry(env, tmp_pa
     assert "1" in _viewer.echoed[0]
     # ビューア（数 MB になりうるデータを持つ要素）は答えを受け取ったら消す。
     assert _viewer.removed == 1
+    # 形を読んでいる間は「準備しています」と出し、ビューアを出す前に消す。
+    assert len(_viewer.notices) == 1
+
+
+@pytest.mark.asyncio
+async def test_same_file_is_shown_again_from_the_cache(env, tmp_path, monkeypatch) -> None:
+    _viewer.response = {"submitted": True, "selected": []}
+    stl = _cube_stl(tmp_path)
+    await _call(file_path=str(stl))
+    cache_dir = tools._state._DEFAULT_WORKDIR.parent / "cad_cache"
+    assert len(list(cache_dir.glob("*.json"))) == 1
+
+    real_run = cad_viewer._run
+
+    # 2 回目は形を作り直さない（サブプロセスを動かさない）。会話の作業フォルダには別のファイルとして写す。
+    async def _no_run(cmd, workdir):
+        raise AssertionError("run_cad should not run on a cache hit")
+
+    monkeypatch.setattr(cad_viewer, "_run", _no_run)
+    out = json.loads(await _call(file_path=str(stl)))
+    assert _viewer.shown[1]["data"]["stats"]["faces"] == 6
+    assert Path(out["viewer_data"]).parent != cache_dir
+    assert len(list(tools._state._DEFAULT_WORKDIR.glob("_tmp_*/cad_view_*.json"))) == 2
+
+    # ファイルが変われば作り直す。
+    st = stl.stat()
+    os.utime(stl, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    ran: list[str] = []
+
+    async def _count_run(cmd, workdir):
+        ran.append(cmd[1])
+        return await real_run(cmd, workdir)
+
+    monkeypatch.setattr(cad_viewer, "_run", _count_run)
+    await _call(file_path=str(stl))
+    assert len(ran) == 1
+
+
+@pytest.mark.asyncio
+async def test_cache_is_not_used_when_disabled(env, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cad_viewer, "_cache_settings", lambda: (tmp_path / "cad_cache", 0))
+    _viewer.response = {"submitted": True, "selected": []}
+    await _call(file_path=str(_cube_stl(tmp_path)))
+    assert not (tmp_path / "cad_cache").exists()
 
 
 @pytest.mark.asyncio

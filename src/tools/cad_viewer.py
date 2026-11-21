@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -34,6 +35,7 @@ from ..cad.features import summarize_features
 from ..cad.step_summary import summarize_step
 from ..cad.mesh_data import FORMAT as VIEWER_FORMAT
 from ..cad.mesh_data import apply_view_edits, write_viewer_json
+from ..cad import viewer_cache
 from ..i18n import t
 from ..images import image_ref, to_data_url
 from . import _state
@@ -221,10 +223,16 @@ async def _show_cad_viewer(
         previous = _resolve_compare_with(compare_with.strip())
         if previous.startswith("Error:"):
             return previous
-    if code.strip():
-        made = await _viewer_data_from_code(code, previous)
-    else:
-        made = await _viewer_data_from_file(file_path, previous)
+    # 大きな CAD ファイルは形を読んでビューア用データにするまで 1 分以上かかることがあるので、その間は準備中と出しておく
+    # （ビューアが出るまで何も表示されず、止まったように見えないように）。
+    notice = await _show_preparing_notice()
+    try:
+        if code.strip():
+            made = await _viewer_data_from_code(code, previous)
+        else:
+            made = await _viewer_data_from_file(file_path, previous)
+    finally:
+        await _remove_notice(notice)
     if isinstance(made, str):
         return made
     data, data_path, notes = made
@@ -447,6 +455,24 @@ async def save_viewer_edits(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "path": str(out), "token": target.saved_token, "color_changes": len(colors)}
 
 
+async def _show_preparing_notice() -> Any:
+    """「3D データを準備しています」の一時的なメッセージを出す（出せなければ None）。ビューアを出す前に _remove_notice で消す。"""
+    try:
+        return await cl.Message(content=t("notice.cad_viewer_preparing"), type="system_message").send()
+    except Exception:  # noqa: BLE001 - 出せなくてもビューアは出せる
+        logger.debug("show_cad_viewer: could not show the preparing notice", exc_info=True)
+        return None
+
+
+async def _remove_notice(notice: Any) -> None:
+    if notice is None:
+        return
+    try:
+        await notice.remove()
+    except Exception:  # noqa: BLE001 - 消せなくても残るのは案内の文だけ
+        logger.debug("show_cad_viewer: could not remove the preparing notice", exc_info=True)
+
+
 async def _offer_download(path: Path) -> None:
     """保存したファイルのダウンロードボタンをチャットに出す（LLM が provide_download を呼ぶのを待たない）。
 
@@ -516,11 +542,41 @@ async def _viewer_data_from_file(file_path: str, compare_with: str = "") -> tupl
 
     workdir = _resolve_exec_workdir()
     out = _new_data_path(workdir)
-    cmd = [_state._SCRIPT_PYTHON, str(_RUN_CAD), "--file", str(path), "--out", str(out), "--options", json.dumps(_options(compare_with))]
+    options = _options(compare_with)
+    cache_dir, cache_bytes = _cache_settings()
+    key = viewer_cache.cache_key(path, options) if cache_bytes > 0 else None
+    cached = viewer_cache.lookup(cache_dir, key) if key else None
+    if cached is not None:
+        # 前に同じファイルを同じ設定で作ったビューア用データを写して使う（会話ごとに別のファイルにして、
+        # 色・表示の変更の自動保存がキャッシュや他の会話のデータを書き換えないようにする）。
+        try:
+            await asyncio.to_thread(shutil.copyfile, cached, out)
+            made = _load_data(out)
+            if not isinstance(made, str):
+                logger.info("show_cad_viewer: used the cached viewer data for %s", path.name)
+                return made
+        except OSError:
+            logger.warning("show_cad_viewer: could not use the cached viewer data %s", cached, exc_info=True)
+        out.unlink(missing_ok=True)
+    cmd = [_state._SCRIPT_PYTHON, str(_RUN_CAD), "--file", str(path), "--out", str(out), "--options", json.dumps(options)]
     failed = await _run(cmd, workdir)
     if failed:
         return failed
-    return _load_data(out)
+    made = _load_data(out)
+    if key and not isinstance(made, str):
+        await asyncio.to_thread(viewer_cache.store, cache_dir, key, out, cache_bytes)
+    return made
+
+
+def _cache_settings() -> tuple[Path, int]:
+    """ビューア用データのキャッシュの置き場と上限（バイト。0 以下なら使わない）。"""
+    configured = _setting("cad_viewer_cache_dir", None)
+    if configured:
+        cache_dir = Path(configured)
+    else:
+        # 設定が無いとき（テスト等）は default_workdir の親（既定の common_data_dir）の下。
+        cache_dir = _state._DEFAULT_WORKDIR.parent / "cad_cache"
+    return cache_dir, int(_setting("cad_viewer_cache_max_mb", 2048)) * 1024 * 1024
 
 
 async def _viewer_data_from_code(code: str, compare_with: str = "") -> tuple[dict, Path, list[str]] | str:

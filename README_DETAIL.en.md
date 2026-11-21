@@ -601,6 +601,7 @@ and WAL cannot be used). Use "Data backup" (in the settings dashboard section) t
 | `data/<instance name>/evals_temp/` | Temporary folders used while evaluations run (the Skill Lab loop, single trials and tryouts, `evals/run_all.py`): working folders of cases, isolated memory / path memory / plan details / draft skill locations, copies of skills and cases, backups of AI fixes. `[skill_lab] temp_dir` of the instance being evaluated. The OS temporary folder is not used | Normally removed automatically when done. Leftovers of forced exits are removed automatically once `[skill_lab] temp_retention_hours` (default 24 hours) have passed since their last update (at the start of an evaluation, when the main app starts and every `temp_cleanup_interval_hours`, and by the skill tuning worker at the same interval) | Delete the folder contents while no evaluation is running |
 | `data/mcp_publish/` | Copies of the skills (without secret files) that the MCP server (`mcp_server/`) distributes as Resources (`skills_*/` and `skills_*.lock` per server). Environment variable `LOCOHANE_MCP_SKILLS_PUBLISH_DIR`. The OS temporary folder is not used | Removed when the server exits. Anything left by a forced exit is removed the next time a server starts | Delete the folder contents while no MCP server is running |
 | `data/<instance name>/script_guard_temp/` | The write guard (`sitecustomize.py`) placed only while `run_script`/`run_script_background` runs. `[scripts] guard_temp_dir`. The OS temporary folder is not used | Removed when the script ends. Anything left by a forced exit is removed when the instance starts (only those older than the longer of `[scripts]` `timeout` and `background_max_runtime_seconds` plus 10 minutes) | Delete the folder contents while neither the instance nor an evaluation is running |
+| `data/<instance name>/cad_cache/` | Cache of viewer data (JSON) the 3D viewer (`show_cad_viewer`) made from CAD files. `[cad_viewer] cache_dir`. Not included in the data backup | Any time (made again the next time the file is opened) | When the total exceeds `[cad_viewer] cache_max_mb` (default 2048), the least recently used entries are deleted automatically. Half-written temporary files (`.tmp_*`) older than 1 hour are deleted when the app starts. To delete by hand, delete the folder's contents |
 | `data/temp/_tmp_<creation time>_<short ID>/` | Intermediate output of `execute_python_code`/`run_script`, and the destination of `write_scratch_note`/`write_thread_note`. Files uploaded in the chat (`uploads/<send time>/`; here even if a working folder is specified). Only for the session itself (see `[default_workdir]`). The creation time at the start of the folder name (`YYMMDDHHMMSS`) is for sorting in creation order in a file manager. The short ID is the first 10 hex digits of the SHA-1 of the thread_id (thread_id is not used as is, to avoid exceeding the 260-character path length limit; folders in the old form `_tmp_<creation time>_<thread_id>` are also used as is when resuming) | When no longer needed after the session ends | Delete the folder contents (also deleted automatically by `[default_workdir] retention_days`/`cleanup_interval_hours`) |
 | `data/elements/<thread_id>/` | Where attachments (`provide_download`, `analyze_image` with `show_in_chat=True`, etc.) and images embedded in answer text are persisted. The actual files are copied here so they can be shown after resuming a thread or restarting the process (see `[elements]`, `src/thread_store.py`) | When attachments are no longer needed | Delete the folder contents |
 | `instances/_assistant_index/` | Cache of embeddings of paragraphs of config.ini, README_DETAIL.md and the API reference, used for search by the admin tool's "Ask AI" (one file per embedding endpoint/model; not under `data/`) | Any time (rebuilt on the next question; the first time takes tens of seconds) | Delete the folder |
@@ -1890,10 +1891,19 @@ and does not stop at the top or bottom; in exchange, the up direction is not kep
   Nothing is captured when the instruction is empty or the setting is 0 or less.
   When the field is left empty, the return value has `next_step` instead, telling the LLM that unless the earlier request said what to do with the
   selection, it should not read the selection file or call any tool or sub-agent, and should just report the selection briefly and wait.
+- **Undo / Redo**: undoes or redoes changes to the selection, colors, hidden parts, per-kind display and attribute edits one at a time (buttons and
+  Ctrl+Z / Ctrl+Y, Ctrl+Shift+Z; the keys work only while the pointer is over the viewer or the focus is inside it, and inside text fields the browser's
+  own undo is used). Typing in an attribute field within 1 second counts as one change. The view (rotation, zoom) is not undone. Up to 200 steps are kept
+  in browser memory as references to each state (the shape data is not copied), so it is small, and it is gone when the viewer closes.
 - **Fit all**: keeps the current direction and fits the whole visible model (hidden parts excluded) in the view. The rotation center returns to its center.
 - **Rotation center**: after pressing it, the point you click on a face / edge / vertex becomes the rotation center (once; press it again to stop).
-  The view moves in parallel, without turning, so that the point is in the middle of the view, and a red dot marks it (ArcballControls always looks at
-  the rotation center). "Fit all" and the view buttons return it to the model center.
+  The view moves in parallel, without turning, so that the point is in the middle of the view, and a red dot marks it. The point stays the rotation
+  center when you pan with the right button or zoom with the wheel (ArcballControls moves its internal gizmo, the rotation center, together with the
+  camera in these operations, so it is put back on the chosen point after each one: `CadScene.restoreFixedPivot`). "Fit all" and the view buttons
+  return it to the model center.
+- **Colors**: selected elements are orange (`#ff7a00`; the selection tags and the part tree use the same color), and the element under the pointer is light blue.
+- **Phones (width 768px or less)**: to leave room for the 3D view, the viewer uses the screen height, the buttons are smaller and wrap onto several rows,
+  and the side panel starts closed ("Panel" opens it) and appears below the 3D view. Rotate, pan and zoom with one- and two-finger touch.
 - **Origin axes**: draws XYZ axes (X red, Y green, Z blue, labeled) at the origin (0, 0, 0) of the space (shown by default; the button shows / hides them).
   They are half the model size long and drawn on top so that the shape does not hide them. The small axes at the bottom left show only the direction; these show where the origin is.
 - **Save (💾)**: exports the 3D model with the changed colors and hidden parts applied to `<original file name>_edited_<date time>.<ext>` in the
@@ -1920,6 +1930,20 @@ So for B-rep shapes the tool returns numbers before pictures.
 - **Shape check** (`model.check`, `check_shape` in `src/cad/export_mesh.py`): numbers of solids and shells, whether the B-rep is valid
   (`BRepCheck_Analyzer`), edges that belong to only one face (`openEdges`; 0 for a closed solid; degenerated edges and seams are not counted),
   volume, surface area, and warnings (invalid B-rep, a solid that is not closed, several solids in a single part = a union did not fuse them, etc.).
+  The validity check is skipped for loaded CAD files with more than 5000 faces (`BREP_CHECK_MAX_FILE_FACES`), returning `valid: null` and
+  `validSkipped` (the reason), because it takes about 10 seconds per 10,000 faces. Shapes made by CadQuery code are always checked.
+- **Load time of large files**: the conversion runs in a subprocess (`src/cad/run_cad.py`); meanwhile the chat shows "Preparing the 3D viewer data…",
+  which is removed before the viewer appears. A STEP with 190 parts and 17,000 faces (65 MB) takes about 70 seconds (about 30 of them reading the STEP
+  in OCCT's Transfer). The slow steps use fast methods: edge/vertex adjacency (reverse lookup from small per-face/per-edge maps, `_adjacency`), face area
+  and centroid (one integration for both), the size that sets the tessellation density (vertex bounding box above 2000 faces, `_diag`), the surface area
+  (sum of the faces) and matching PMI targets (the contents of the referenced shape are listed once). Reloading the page during the conversion can
+  keep the viewer from reaching the new page.
+- **Cache** (`src/cad/viewer_cache.py`): viewer data made from a CAD file is kept in `[cad_viewer] cache_dir` (default `${common_data_dir}/cad_cache`),
+  and opening the same file with the same settings again uses it without reading the shape again (it is copied to the conversation's `_tmp_` folder
+  first, so the auto-save never changes the cache). The key is the file's absolute path, size and modification time, the tessellation settings, the
+  same information for the `compare_with` file, and a hash of the conversion code (`src/cad/*.py`); if any of them changes, the data is made again.
+  When the total exceeds `cache_max_mb` (default 2048), the least recently used entries are deleted (0 or less disables the cache). Shapes made by
+  CadQuery code are not cached.
 - **Holes and bosses** (`model.features`, `src/cad/features.py`): inward cylinders (`concave` on the face info) are holes and outward ones are bosses;
   faces on the same axis with the same radius that share edges are grouped (only full cylinders, so fillets are not counted). A hole is blind when the
   face beyond its end circle fits inside the circle (a bottom or a drill point), otherwise through. The summary groups them by type, diameter, depth and
@@ -1958,7 +1982,7 @@ then ask the user.
   and Japanese names in STEP files written by CadQuery (double UTF-8) are repaired.
 
 The viewer's side panel shows the STEP AP and edition, originating system and warnings, the PMI list (click to select the faces etc. a dimension or
-tolerance is on), and the attributes and material of the product of the selected part (or the only product). Attributes can be edited, added and deleted,
+tolerance is on and zoom to them in the current direction, with the rotation center there), and the attributes and material of the product of the selected part (or the only product). Attributes can be edited, added and deleted,
 and are returned on confirm, close and save (`attribute_change_count` in the result, `attribute_changes` (`{product, name, from, to}`) in the selection
 file, and in the viewer data saved automatically).
 
@@ -1971,7 +1995,7 @@ PMI can only be written in AP242; when writing AP203 / AP214, or when OCCT canno
 the file is written without PMI and `notes` says so (the original file keeps its PMI). Saving from other sources (IGES, BREP, CadQuery code) follows the
 same schema setting.
 
-**Settings**: `[cad_viewer]` (`enabled`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`, `screenshot_enabled`, `screenshot_long_side_pixels`, `step_write_schema`) and
+**Settings**: `[cad_viewer]` (`enabled`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`, `screenshot_enabled`, `screenshot_long_side_pixels`, `step_write_schema`, `cache_dir`, `cache_max_mb`) and
 `[user_response_timeouts] show_cad_viewer_seconds` (default 0 = no limit). It is registered in `[main_agent_tool_guard] allow_entries` so the main agent can call it directly.
 It is not given to sub-agents (it shows something on the screen).
 
@@ -2128,6 +2152,8 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[cad_viewer]` | `screenshot_enabled` | Whether to capture the viewer screen and show it to the LLM when confirming with an instruction (default `true`; `false` for a model that cannot read images or when the numbers are enough) | `CAD_VIEWER_SCREENSHOT_ENABLED` |
 | `[cad_viewer]` | `screenshot_long_side_pixels` | Long side (pixels) of the viewer screenshot captured and shown to the LLM when confirming with an instruction (default 512; 0 or less captures nothing) | `CAD_VIEWER_SCREENSHOT_LONG_SIDE_PIXELS` |
 | `[cad_viewer]` | `step_write_schema` | Schema of the STEP file written by "Save": `auto` (the same as the original STEP, AP242 when the original is not STEP; default), `AP203`, `AP214` or `AP242`. PMI can only be written in AP242 | `CAD_VIEWER_STEP_WRITE_SCHEMA` |
+| `[cad_viewer]` | `cache_dir` | Folder for the cache of viewer data made from CAD files (default `${common_data_dir}/cad_cache`). The same file with the same settings is shown without reading the shape again | `CAD_VIEWER_CACHE_DIR` |
+| `[cad_viewer]` | `cache_max_mb` | Upper limit of the cache's total size (MB, default 2048). Least recently used entries are deleted beyond it. 0 or less disables it | `CAD_VIEWER_CACHE_MAX_MB` |
 | `[plan]` | `allow_badge_unlock` | Whether to allow switching the Plan Mode badge both ways | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | Whether to reset `plan_approved` unconditionally back to Plan Mode when `create_plan` is called again in the approved (Edit Automatically) state. If `false`, only the steps are replaced while keeping the approval | `PLAN_RESET_APPROVAL_ON_RECREATE` |
 | `[plan]` | `reset_approval_on_new_message` | Whether to reset `plan_approved` unconditionally back to Plan Mode on every new user message. If `false`, the approval is kept across messages (after `thinking_loop_guard` reaches its retry limit, re-approval is not needed even when the user sends a message to continue) | `PLAN_RESET_APPROVAL_ON_NEW_MESSAGE` |
@@ -2385,6 +2411,9 @@ on the left of the screen, and choosing one resumes it together with LangGraph's
   The same ID is passed when resuming, so the conversation state on the LangGraph side is carried over automatically.
   `@cl.on_chat_resume` is a lightweight version of `on_chat_start` and does not resend the welcome message etc.
   (past messages are replayed automatically on resume).
+- **While loading**: until `resume_thread` arrives for the opened conversation (`?thread=<id>`), the message area shows
+  "Loading the conversation…" instead of "No messages yet" (`useResumingThread` in `frontend/src/components/MessageThread.tsx`:
+  loading lasts until `@chainlit/react-client` sets `currentThreadId` on resume_thread or `resumeThreadError` on failure, at most 60 seconds).
 - **Enabling resume in anonymous mode**: Chainlit's own `resume_thread()`
   (`chainlit/socket.py`) is designed to return early unconditionally when `session.user` is `None`,
   so in anonymous mode thread resume does not fire.

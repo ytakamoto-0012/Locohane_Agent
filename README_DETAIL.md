@@ -606,6 +606,7 @@ Locohane/
 | `data/<インスタンス名>/evals_temp/` | 評価（スキル研究室のループ・1回試行・トライアウト、`evals/run_all.py`）が実行中に使う一時フォルダ（ケースの作業フォルダ・隔離したメモリー／パスメモリー／計画の詳細／ドラフトスキルの置き場・スキルとケースの写し・AI 修正のバックアップ）。評価対象インスタンスの `[skill_lab] temp_dir`。OS の一時フォルダは使わない | 通常は終わると自動で消える。強制終了で残ったものは、最後の更新から `[skill_lab] temp_retention_hours`（既定24時間）を過ぎると自動で消える（評価の開始時・本体の起動時と `temp_cleanup_interval_hours` ごと・スキル調整ワーカーの同じ間隔ごと） | 評価が動いていないときにフォルダ内を削除 |
 | `data/mcp_publish/` | MCP サーバー（`mcp_server/`）が Resources として配布する、機密ファイルを除いたスキル一式のコピー（サーバーごとに `skills_*/` と `skills_*.lock`）。環境変数 `LOCOHANE_MCP_SKILLS_PUBLISH_DIR`。OS の一時フォルダは使わない | サーバーの終了時に消える。強制終了で残ったものは次にサーバーが起動したときに消える | MCP サーバーが動いていないときにフォルダ内を削除 |
 | `data/<インスタンス名>/script_guard_temp/` | `run_script`/`run_script_background` の実行中だけ置く書き込みガード（`sitecustomize.py`）。`[scripts] guard_temp_dir`。OS の一時フォルダは使わない | スクリプトが終わると消える。強制終了で残ったものは本体の起動時に消える（`[scripts]` の `timeout` と `background_max_runtime_seconds` の長い方＋10分を過ぎたもの） | 本体・評価が動いていないときにフォルダ内を削除 |
+| `data/<インスタンス名>/cad_cache/` | 3D ビューア（`show_cad_viewer`）が CAD ファイルから作ったビューア用データ（JSON）のキャッシュ。`[cad_viewer] cache_dir`。データのバックアップには入れない | いつでも（次に開くときに作り直す） | 合計が `[cad_viewer] cache_max_mb`（既定 2048）を超えると使った時刻の古いものから自動で消える。書きかけの一時ファイル（`.tmp_*`）は 1 時間を過ぎると本体の起動時に消える。手で消すならフォルダ内を削除 |
 | `data/temp/_tmp_<作成時刻>_<短縮ID>/` | `execute_python_code`/`run_script` の中間生成物・`write_scratch_note`/`write_thread_note` の書き出し先。チャットでアップロードしたファイル（`uploads/<送信日時>/`。作業フォルダを指定していてもここ）。自セッション専用（`[default_workdir]` 参照）。フォルダ名先頭の作成時刻（`YYMMDDHHMMSS`）はファイラー上で作成順に並べるためのもの。短縮IDは thread_id の SHA-1 先頭10桁（パス長上限 260文字を超えにくくするため、thread_id をそのまま使わない。旧形式 `_tmp_<作成時刻>_<thread_id>` のフォルダも再開時にそのまま使われる） | セッション終了後、不要になったとき | フォルダ内を削除（`[default_workdir] retention_days`/`cleanup_interval_hours` により自動削除もされる） |
 | `data/elements/<thread_id>/` | 添付ファイル（`provide_download`/`analyze_image`の`show_in_chat=True`等）・回答本文への画像埋め込みの永続化先。スレッド再開・プロセス再起動後も表示できるようここへ実体をコピー保存する（`[elements]`参照、`src/thread_store.py`） | 添付ファイルが不要になったとき | フォルダ内を削除 |
 | `instances/_assistant_index/` | 管理ツールの「AIに相談」が検索に使う、config.ini・README_DETAIL.md・API リファレンスの段落の埋め込みのキャッシュ（埋め込みの接続先・モデルごとに1ファイル。`data/` 配下ではない） | いつでも（次の相談で作り直す。初回は数十秒かかる） | フォルダを削除 |
@@ -1930,9 +1931,17 @@ three.js はビューアを開いたときだけ読み込む（`frontend/src/com
   画像は `analyze_image` と同じ経路（ツール結果の直後の画像付きメッセージ）で LLM へ見せる。指示が空のとき・0 以下の設定のときは撮らない。
   指示欄が空のまま確定したときは、代わりに `next_step` が入り、「元の依頼に選択の使い道が書かれていなければ、選択結果ファイルを読まず・
   ツールもサブエージェントも呼ばず、選んだ内容を短く報告して次の依頼を待つ」よう LLM へ指示する。
+- **元に戻す・やり直す**: 選択・変えた色・隠した部品・種類ごとの表示・属性の編集を 1 操作ずつ戻す／やり直す（ボタンと Ctrl+Z / Ctrl+Y・Ctrl+Shift+Z。
+  キーはポインタがビューアの上にあるか、ビューアの中にフォーカスがあるときだけ効き、文字の入力欄の中ではブラウザの元に戻すに任せる）。
+  属性の入力欄を続けて打った変更は 1 秒以内なら 1 回にまとめる。視点（回転・拡大）は戻さない。履歴は最大 200 件で、ブラウザのメモリーに
+  各時点の状態への参照を持つだけ（形のデータは写さない）なので小さく、ビューアを閉じると消える。
 - **全体表示**: 今の向きのまま、見えているモデル全体（隠した部品を除く）が画面に収まるように寄せる。回転の中心もその中心に戻す。
 - **回転中心**: 押した後にクリックした面・エッジ・頂点の上の点を回転の中心にする（1 回だけ。もう一度押すとやめる）。向きは変えずに平行移動して
-  その点を画面の中央に寄せ、赤い点で示す（ArcballControls は常に回転の中心を見るため）。「全体表示」・視点のボタンでモデルの中心に戻る。
+  その点を画面の中央に寄せ、赤い点で示す。右ドラッグの移動・ホイールの拡大縮小をしても中心はその点のまま残る（ArcballControls はこれらの操作で
+  内部のギズモ＝回転の中心もカメラと一緒に動かすので、操作が終わるたびに指定した点へ戻す。`CadScene.restoreFixedPivot`）。「全体表示」・視点のボタンでモデルの中心に戻る。
+- **色**: 選んだ要素はオレンジ（`#ff7a00`。選択中のタグ・部品ツリーも同じ色）、マウスを乗せた要素は水色で示す。
+- **スマホ（幅 768px 以下）**: 3D 表示を大きく取るため、ビューアを画面の高さまで使い、ボタンは小さくして折り返して並べ、左のパネルは
+  最初は閉じて（「パネル」で開ける）3D 表示の下に出す。回転・移動・拡大縮小は 1 本指・2 本指のタッチ操作で行う。
 - **原点の軸**: 空間の原点 (0, 0, 0) に XYZ 軸（X 赤・Y 緑・Z 青、ラベル付き）を描く（既定で表示。ボタンで表示／非表示）。長さはモデルの大きさの半分で、
   形に隠れないよう手前に重ねる。左下の小さな軸は向きだけを示すもので、こちらは原点の位置を示す。
 - **保存（💾）**: 変えた色・隠した部品を反映した 3D モデルを、作業フォルダ（書き込めなければこのスレッドの `_tmp_` フォルダ）の
@@ -1955,6 +1964,18 @@ three.js はビューアを開いたときだけ読み込む（`frontend/src/com
 - **形の検査**（`model.check`、`src/cad/export_mesh.py` の `check_shape`）: ソリッド・シェルの数、正しい B-rep か（`BRepCheck_Analyzer`）、
   面 1 つにしか属さないエッジの数（`openEdges`。閉じたソリッドなら 0。退化したエッジ・継ぎ目は数えない）、体積・表面積、気づいた点（`warnings`。
   正しくない B-rep、閉じていないソリッド、部品が 1 つなのにソリッドが複数＝ union でつながっていない、等）。
+  正しい B-rep かの検査は、読み込んだ CAD ファイルの面が 5000（`BREP_CHECK_MAX_FILE_FACES`）を超えると省き、`valid: null` と
+  `validSkipped`（理由）を返す（1 万面あたり 10 秒ほどかかるため。CadQuery のコードで作った形は面の数によらず検査する）。
+- **大きなファイルの読み込み時間**: 変換はサブプロセス（`src/cad/run_cad.py`）で行い、その間チャットに「3D ビューアのデータを準備しています…」を出して、
+  ビューアを出す前に消す。部品 190・面 1.7 万の STEP（65MB）で約 70 秒（うち STEP の読み込み〔OCCT の Transfer〕が約 30 秒）。
+  時間のかかる処理は、エッジ・頂点の隣接（面・エッジごとの小さな索引から逆に引く。`_adjacency`）、面の面積と重心（1 回の積分で両方）、
+  分割の細かさの目安にする大きさ（面が 2000 を超えると頂点の外接箱。`_diag`）、表面積（面ごとの合計）、PMI の対象の照合（指す形の中身の一覧を 1 回だけ作る）を
+  速い方法にしてある。変換中に画面を再読み込みすると、出てきたビューアが新しい画面に届かないことがある。
+- **キャッシュ**（`src/cad/viewer_cache.py`）: CAD ファイルから作ったビューア用データを `[cad_viewer] cache_dir`（既定 `${common_data_dir}/cad_cache`）に
+  取っておき、同じファイルを同じ設定でもう一度開くときは形を読み直さずに使う（会話の `_tmp_` フォルダへ写してから使うので、自動保存が
+  キャッシュを書き換えることはない）。キーはファイルの絶対パス・サイズ・更新時刻、三角形化の設定、`compare_with` のファイルの同じ情報、
+  変換のコード（`src/cad/*.py`）の中身のハッシュで、どれかが変われば作り直す。合計が `cache_max_mb`（既定 2048）を超えたら使った時刻の
+  古いものから消す（0 以下でキャッシュを使わない）。CadQuery コードから作る形はキャッシュしない。
 - **穴・ボス**（`model.features`、`src/cad/features.py`）: 円柱面の内向き・外向き（面の情報の `concave`）から、内向きの円柱を穴、外向きをボスとし、
   同じ軸・同じ半径でエッジを共有する面を 1 つにまとめる（1 周を覆うものだけ。フィレットは数えない）。穴の端の円の先の面がその円に収まれば
   （底面・ドリルの先）止まり穴、両端とも開いていれば通し穴。要約は種類・直径・深さ・通しかどうかでまとめた件数（12 グループまで）で、
@@ -1990,7 +2011,7 @@ three.js はビューアを開いたときだけ読み込む（`frontend/src/com
 - **文字**: `\X2\`・`\X4\`・`\X\`・`\S\` の符号を解く（日本語の名前・属性）。ASCII 以外を UTF-8 のまま書いたファイルも読む。
   CadQuery が書いた STEP の日本語名（二重の UTF-8）は直して読む。
 
-ビューアの左のパネルには、STEP の AP と版・作成システム・気づいた点、PMI の一覧（クリックでその寸法・公差が指す面等を選ぶ）、
+ビューアの左のパネルには、STEP の AP と版・作成システム・気づいた点、PMI の一覧（クリックでその寸法・公差が指す面等を選び、今の向きのままそこへ拡大する。回転の中心もそこにする）、
 選んだ部品の製品（部品が 1 つならその製品）の属性と材料を出す。属性は名前・値を書き換え・追加・削除でき、確定・閉じる・保存で返す
 （戻り値に `attribute_change_count`、選択結果ファイルに `attribute_changes`〔`{product, name, from, to}`〕、自動で保存するビューア用データにも反映）。
 
@@ -2001,7 +2022,7 @@ ASCII 以外の文字は `\X2\` で書き、本文を ASCII だけにする。�
 PMI は AP242 でだけ書け、AP203・AP214 で書くときや、OCCT が PMI を書けなかったとき（NIST の CTC-01 等、実際の CAD が書いた PMI の一部）は、
 PMI を除いて書きその旨を `notes` で伝える（元のファイルの PMI はそのまま）。STEP 以外（IGES・BREP・CadQuery コード）の保存も同じスキーマの設定に従う。
 
-**設定**: `[cad_viewer]`（`enabled`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`・`screenshot_enabled`・`screenshot_long_side_pixels`・`step_write_schema`）と
+**設定**: `[cad_viewer]`（`enabled`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`・`screenshot_enabled`・`screenshot_long_side_pixels`・`step_write_schema`・`cache_dir`・`cache_max_mb`）と
 `[user_response_timeouts] show_cad_viewer_seconds`（既定 0 = 無期限）。メインエージェントから直接呼べるよう `[main_agent_tool_guard] allow_entries` に登録済み。
 サブエージェントには渡さない（画面に出すツールのため）。
 
@@ -2156,6 +2177,8 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[cad_viewer]` | `screenshot_enabled` | 指示付きで確定したときにビューアの画面を撮って LLM へ見せるか（既定 `true`。画像を読めないモデル・数値だけで足りるときは `false`） | `CAD_VIEWER_SCREENSHOT_ENABLED` |
 | `[cad_viewer]` | `screenshot_long_side_pixels` | 指示付きで確定したときに撮って LLM へ見せるビューアの画面の長辺（ピクセル、既定 512。0 以下で撮らない） | `CAD_VIEWER_SCREENSHOT_LONG_SIDE_PIXELS` |
 | `[cad_viewer]` | `step_write_schema` | 「保存」で書く STEP のスキーマ。`auto`（元の STEP と同じ、元が STEP でなければ AP242・既定）・`AP203`・`AP214`・`AP242`。PMI は AP242 でだけ書ける | `CAD_VIEWER_STEP_WRITE_SCHEMA` |
+| `[cad_viewer]` | `cache_dir` | CAD ファイルから作ったビューア用データのキャッシュの置き場（既定 `${common_data_dir}/cad_cache`）。同じファイル・同じ設定なら形を読み直さずに使う | `CAD_VIEWER_CACHE_DIR` |
+| `[cad_viewer]` | `cache_max_mb` | そのキャッシュの合計の上限（MB、既定 2048）。超えたら使った時刻の古いものから消す。0 以下で使わない | `CAD_VIEWER_CACHE_MAX_MB` |
 | `[plan]` | `allow_badge_unlock` | Plan Mode バッジの双方向切り替えを許可するか | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | 承認済み（Edit Automatically）状態で`create_plan`を再度呼んだ際、`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態を維持したままstepsだけ差し替える | `PLAN_RESET_APPROVAL_ON_RECREATE` |
 | `[plan]` | `reset_approval_on_new_message` | 新しいユーザーメッセージを受け取るたびに`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態をメッセージをまたいで維持する（`thinking_loop_guard`のリトライ上限到達後、ユーザーが続行メッセージを送っても再承認が不要になる） | `PLAN_RESET_APPROVAL_ON_NEW_MESSAGE` |
@@ -2417,6 +2440,9 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
   再開時は同じIDが渡されるため、LangGraph側の会話状態が自動的に引き継がれる。
   `@cl.on_chat_resume` は `on_chat_start` の軽量版で、ウェルカムメッセージ等は
   再送しない（過去のメッセージは resume 時に自動再生されるため）。
+- **読み込み中の表示**: 開いた会話（`?thread=<id>`）の `resume_thread` が届くまでは、会話欄に「まだメッセージはありません」ではなく
+  「会話を読み込んでいます…」を出す（`frontend/src/components/MessageThread.tsx` の `useResumingThread`。
+  `@chainlit/react-client` が resume_thread で `currentThreadId`、失敗で `resumeThreadError` を入れるまでを読み込み中とし、60 秒で打ち切る）。
 - **匿名モードでの再開有効化**: Chainlit本体の `resume_thread()`
   （`chainlit/socket.py`）は `session.user` が `None` だと無条件で
   早期returnする設計のため、匿名モードのままではスレッド再開が発火しない。

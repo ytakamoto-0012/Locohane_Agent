@@ -1,10 +1,18 @@
-import { memo, useContext } from 'react';
+import { memo, useContext, useEffect, useState } from 'react';
 import { useRecoilValue } from 'recoil';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
-import { ChainlitContext, elementState, sessionIdState, type IStep } from '@chainlit/react-client';
+import {
+  ChainlitContext,
+  currentThreadIdState,
+  elementState,
+  resumeThreadErrorState,
+  sessionIdState,
+  threadIdToResumeState,
+  type IStep
+} from '@chainlit/react-client';
 import type { IMessageElement } from '@chainlit/react-client';
 import { useI18n } from '../i18n';
 import { FileLink } from './FileLink';
@@ -138,6 +146,29 @@ function TypingIndicator({ runningSteps }: { runningSteps: IStep[] }) {
   );
 }
 
+// 再開の応答（resume_thread）が来ないまま待ち続けないための上限。過ぎたら「まだメッセージはありません」に戻す。
+const RESUME_WAIT_MS = 60_000;
+
+/**
+ * 会話一覧から開いた会話（?thread=<id>）を読み込んでいる最中か。@chainlit/react-client は resume_thread を
+ * 受け取ると currentThreadId を入れ、失敗すると resumeThreadError を入れるので、どちらも無い間を読み込み中とする
+ * （読み込み中に「まだメッセージはありません」と出さないため）。
+ */
+function useResumingThread(): boolean {
+  const idToResume = useRecoilValue(threadIdToResumeState);
+  const currentThreadId = useRecoilValue(currentThreadIdState);
+  const resumeError = useRecoilValue(resumeThreadErrorState);
+  const waiting = !!idToResume && !currentThreadId && !resumeError;
+  const [timedOut, setTimedOut] = useState(false);
+  useEffect(() => {
+    setTimedOut(false);
+    if (!waiting) return;
+    const timer = window.setTimeout(() => setTimedOut(true), RESUME_WAIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [waiting, idToResume]);
+  return waiting && !timedOut;
+}
+
 /** 前の会話の読み足しの状態（MessagePane）。loading: 読み込み中 / done: これより前は無い / null: 何も出さない。 */
 export type OlderStatus = 'loading' | 'done' | 'error' | null;
 
@@ -153,8 +184,9 @@ export function MessageThread({
   olderStatus?: OlderStatus;
 }) {
   const { t } = useI18n();
+  const resuming = useResumingThread();
   if (messages.length === 0 && !showTyping) {
-    return <div className="message-thread-empty">{t('messages.empty')}</div>;
+    return <div className="message-thread-empty">{t(resuming ? 'messages.resuming' : 'messages.empty')}</div>;
   }
 
   return (

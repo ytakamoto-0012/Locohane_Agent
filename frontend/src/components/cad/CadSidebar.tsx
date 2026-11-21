@@ -43,7 +43,7 @@ interface Props {
   /** STEP の属性の編集（製品名 → 編集後の一覧）。 */
   attributeEdits: CadAttributeEdits;
   onAttributeEdits: (edits: CadAttributeEdits) => void;
-  /** PMI のクリックで、それが指す要素を選ぶ。 */
+  /** PMI のクリックで、それが指す要素を選び、そこへ寄せる。 */
   onSelectItems: (items: CadSelection[]) => void;
 }
 

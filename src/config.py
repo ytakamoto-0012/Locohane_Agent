@@ -1149,6 +1149,10 @@ class Config:
             （ピクセル。[cad_viewer].screenshot_long_side_pixels）。PNG に保存して指示と一緒に LLM へ見せる。0 以下で撮らない。
         cad_viewer_step_write_schema: ビューアの「保存」で書く STEP のスキーマ（[cad_viewer].step_write_schema）。
             auto（元の STEP と同じ、元が STEP でなければ AP242）・AP203・AP214・AP242。PMI（GD&T）は AP242 でだけ書ける。
+        cad_viewer_cache_dir: CAD ファイルから作ったビューア用データのキャッシュの置き場（[cad_viewer].cache_dir。
+            既定 ${common_data_dir}/cad_cache。src/cad/viewer_cache.py）。
+        cad_viewer_cache_max_mb: そのキャッシュの合計の上限（MB。[cad_viewer].cache_max_mb）。超えたら使った時刻の古いものから消す。
+            0 以下でキャッシュを使わない。
         show_cad_viewer_timeout_seconds: 3D ビューアで利用者が選択を確定するのを待つ秒数
             （[user_response_timeouts].show_cad_viewer_seconds）。0 以下は無期限待ち。
     """
@@ -1666,6 +1670,8 @@ class Config:
     cad_viewer_screenshot_enabled: bool = True
     cad_viewer_screenshot_long_side_pixels: int = 512
     cad_viewer_step_write_schema: str = "auto"
+    cad_viewer_cache_dir: Path | None = None
+    cad_viewer_cache_max_mb: int = 2048
     show_cad_viewer_timeout_seconds: int = 0
 
 
@@ -4681,6 +4687,15 @@ def load_config(
             os.getenv("CAD_VIEWER_SCREENSHOT_LONG_SIDE_PIXELS", cad_viewer.get("screenshot_long_side_pixels", 512))
         ),
         cad_viewer_step_write_schema=_cad_step_schema(os.getenv("CAD_VIEWER_STEP_WRITE_SCHEMA", cad_viewer.get("step_write_schema", "auto"))),
+        cad_viewer_cache_dir=_resolve(
+            PROJECT_ROOT,
+            _sub_common_data_dir(
+                os.getenv("CAD_VIEWER_CACHE_DIR", cad_viewer.get("cache_dir", "${common_data_dir}/cad_cache")),
+                common_data_dir,
+                resolved_instance_name,
+            ),
+        ),
+        cad_viewer_cache_max_mb=int(os.getenv("CAD_VIEWER_CACHE_MAX_MB", cad_viewer.get("cache_max_mb", 2048))),
         show_cad_viewer_timeout_seconds=int(os.getenv("SHOW_CAD_VIEWER_TIMEOUT_SECONDS", timeouts.get("show_cad_viewer_seconds", 0))),
     )
 

@@ -209,6 +209,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "Continuing with the results collected so far.",
     },
     "notice.generated_files": {"ja": "生成ファイル: {names}", "en": "Generated files: {names}"},
+    "notice.cad_viewer_preparing": {
+        "ja": "3D ビューアのデータを準備しています…（大きな CAD ファイルは 1 分以上かかることがあります。この間は画面を再読み込みしないでください）",
+        "en": "Preparing the 3D viewer data… (large CAD files can take a minute or more; please do not reload the page meanwhile)",
+    },
     "notice.plan_denied": {
         "ja": "実行計画が却下されたため、処理を終了しました。ご指示をお待ちしています。",
         "en": "The plan was rejected, so processing has stopped. Waiting for your instructions.",

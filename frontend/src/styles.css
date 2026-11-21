@@ -709,6 +709,9 @@
 /* 画面が低くても下のボタン列（キャンセル・保存・確定）が画面外に出ないよう、高さに上限を付け、
    足りない分は 3D 表示の部分（.cad-viewer-body）を縮める。 */
 .cad-viewer-bar {
+  /* 選んだ要素の色（CadViewerBar.tsx の SELECTED_COLOR と同じ値） */
+  --cad-selected: #ff7a00;
+  --cad-selected-soft: rgba(255, 122, 0, 0.16);
   max-width: 960px;
   max-height: calc(100vh - 120px);
   gap: 8px;
@@ -747,15 +750,20 @@
 .cad-viewer-toolbar {
   display: flex;
   flex-wrap: wrap;
-  justify-content: space-between;
   gap: 6px;
 }
 
+.cad-viewer-history,
 .cad-viewer-modes,
 .cad-viewer-views {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+
+/* 元に戻す・選択は左、視点の操作は右に寄せる。 */
+.cad-viewer-views {
+  margin-left: auto;
 }
 
 .cad-viewer-chip {
@@ -1017,7 +1025,7 @@
 }
 
 .cad-tree-row.selected .cad-tree-name {
-  color: var(--accent);
+  color: var(--cad-selected);
   font-weight: 600;
 }
 
@@ -1120,8 +1128,8 @@
   gap: 4px;
   padding: 2px 4px 2px 9px;
   border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
+  background: var(--cad-selected-soft);
+  color: var(--cad-selected);
 }
 
 .cad-viewer-tag button {
@@ -2566,6 +2574,61 @@
     margin-right: 10px;
     width: auto;
     padding: 12px;
+  }
+
+  /* 3D ビューア: 共通の高さ上限（60vh）では 3D 表示がほぼ残らないため、画面の高さまで使う。
+     ボタンは全部が見えて押せるよう折り返して並べ（横スクロールだと続きがあることに気づけない）、
+     その分ボタンを小さくする。サイドバーは 3D 表示の下に置く。 */
+  .cad-viewer-bar {
+    max-height: calc(100dvh - 80px);
+  }
+
+  .cad-viewer-toolbar {
+    gap: 4px;
+  }
+
+  .cad-viewer-history,
+  .cad-viewer-modes,
+  .cad-viewer-views {
+    gap: 3px;
+  }
+
+  .cad-viewer-chip {
+    padding: 3px 8px;
+    white-space: nowrap;
+  }
+
+  .cad-viewer-view {
+    padding: 3px 6px;
+  }
+
+  .cad-viewer-body {
+    flex-direction: column;
+    height: 55dvh;
+  }
+
+  .cad-viewer-bar > .cad-viewer-body {
+    min-height: 240px;
+  }
+
+  .cad-viewer-host {
+    order: -1;
+    flex: 1 1 auto;
+    min-height: 200px;
+  }
+
+  .cad-sidebar {
+    width: auto;
+    max-height: 40%;
+  }
+
+  .cad-viewer-bar.cad-viewer-expanded {
+    inset: 0;
+    border-radius: 0;
+  }
+
+  .cad-viewer-message {
+    font-size: 16px;
   }
 
   .composer {

@@ -69,6 +69,9 @@ class _ShapeIndex:
         shape = self.shape_tool.GetShape_s(label)
         if shape.IsNull():
             return out
+        # 面の集まり（シェル・コンパウンド）を指すこともあるので、指す形の中の面・エッジの一覧も使う。
+        # 一覧は部品ごとに作り直さず 1 回だけ作る（部品の多い STEP では、作り直しで十秒ほどかかった）。
+        subs: dict[Any, list[TopoDS_Shape] | None] = {}
         for pi, entry in enumerate(self.maps):
             if entry is None:
                 continue
@@ -77,11 +80,13 @@ class _ShapeIndex:
                 continue
             for kind, key in ((TopAbs_FACE, "faces"), (TopAbs_EDGE, "edges")):
                 dmap, ids = entry[kind]
-                self._collect(shape, kind, dmap, ids, out[key])
+                self._collect(shape, kind, dmap, ids, out[key], subs)
         return {k: sorted(set(v)) for k, v in out.items() if v}
 
     @staticmethod
-    def _collect(shape: TopoDS_Shape, kind, dmap: TopTools_IndexedMapOfShape, ids: list[int], into: list[int]) -> None:
+    def _collect(
+        shape: TopoDS_Shape, kind, dmap: TopTools_IndexedMapOfShape, ids: list[int], into: list[int], subs: dict[Any, list[TopoDS_Shape] | None]
+    ) -> None:
         from .export_mesh import _index_map
 
         idx = dmap.FindIndex(shape)
@@ -89,10 +94,15 @@ class _ShapeIndex:
             if ids[idx - 1] >= 0:
                 into.append(ids[idx - 1])
             return
-        # 面の集まり（シェル・コンパウンド）を指すこともある。
-        sub = _index_map(shape, kind)
-        for j in range(1, sub.Extent() + 1):
-            k = dmap.FindIndex(sub.FindKey(j))
+        if kind not in subs:
+            sub = _index_map(shape, kind)
+            # 形そのものが面（エッジ）なら、中の一覧は自分だけ。上の FindIndex で見つからなかったので調べることは無い。
+            subs[kind] = None if sub.Extent() == 1 and sub.FindKey(1).IsSame(shape) else [sub.FindKey(j) for j in range(1, sub.Extent() + 1)]
+        items = subs[kind]
+        if not items:
+            return
+        for item in items:
+            k = dmap.FindIndex(item)
             if k > 0 and ids[k - 1] >= 0:
                 into.append(ids[k - 1])
 

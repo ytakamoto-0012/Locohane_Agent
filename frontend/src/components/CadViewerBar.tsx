@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import { useRecoilValue } from 'recoil';
 import { ChainlitContext, sessionIdState, useChatData, type IAction } from '@chainlit/react-client';
 import { useI18n } from '../i18n';
@@ -44,26 +44,26 @@ export interface CadColorChanges {
   parts: Record<string, string>;
 }
 
-/** 画面のテーマ（ライト / ダーク、アクセント色）から 3D 表示の色を決める。 */
-function sceneColors(el: HTMLElement): CadSceneColors {
-  const style = getComputedStyle(el);
+/** 画面のテーマ（ライト / ダーク）から 3D 表示の色を決める。 */
+function sceneColors(): CadSceneColors {
   const dark = document.documentElement.dataset.theme === 'dark';
-  const accent = toHex(style.getPropertyValue('--accent').trim()) ?? '#6d5ef8';
   return {
     background: dark ? '#17171a' : '#f7f7f9',
     face: dark ? '#8d93a0' : '#b9bfcb',
     edge: dark ? '#e4e4ea' : '#2b2c31',
     vertex: dark ? '#f0f0f4' : '#1f2023',
-    hover: '#f5a524',
-    selected: accent
+    // 選択はオレンジで目立たせ、ホバーはそれと見分けられる水色にする。
+    hover: '#1fb6d4',
+    selected: SELECTED_COLOR
   };
 }
 
-function toHex(value: string): string | null {
-  if (/^#[0-9a-f]{6}$/i.test(value)) return value;
-  const m = value.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
-  if (!m) return null;
-  return '#' + [m[1], m[2], m[3]].map((v) => Number(v).toString(16).padStart(2, '0')).join('');
+/** 選んだ要素の色（3D 表示・選択中タグ・部品ツリーで共通。styles.css の --cad-selected と同じ値）。 */
+const SELECTED_COLOR = '#ff7a00';
+
+/** スマホなど幅の狭い画面か（styles.css の @media (max-width: 768px) と同じ境目）。 */
+function isNarrowScreen(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia?.('(max-width: 768px)').matches === true;
 }
 
 function fmt(n: unknown): string {
@@ -163,7 +163,72 @@ function initialHiddenParts(data: CadData): Set<number> {
   return new Set((data.parts ?? []).filter((p) => p.layer && (p.layer.off || p.layer.frozen)).map((p) => p.id));
 }
 
-type SaveState = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved'; path: string } | { kind: 'error'; message: string };
+/** 元に戻す・やり直すの対象（選択・変えた色・隠した部品・種類ごとの表示・属性の編集）。カメラの向きは含めない。 */
+interface EditSnapshot {
+  selection: CadSelection[];
+  colors: CadColorOverrides;
+  hiddenParts: Set<number>;
+  kindVisible: { face: boolean; edge: boolean; vertex: boolean };
+  attributeEdits: CadAttributeEdits;
+}
+
+// 覚えておく変更の数の上限（古いものから捨てる）。
+const HISTORY_LIMIT = 200;
+// 属性の入力欄を続けて打った変更は、この時間（ミリ秒）内なら 1 回の変更にまとめる（1 文字ずつ戻らないように）。
+const HISTORY_MERGE_MS = 1000;
+
+function changedKeys(a: EditSnapshot, b: EditSnapshot): string {
+  return (Object.keys(a) as (keyof EditSnapshot)[]).filter((k) => a[k] !== b[k]).join(',');
+}
+
+/**
+ * 編集の履歴。state が変わるたびに変わる前の状態を積み、undo / redo で apply に渡して戻す。
+ * 各 state は変更のたびに新しいオブジェクトになる（React の state の作法）ので、参照の違いで変更を見分ける。
+ */
+function useEditHistory(state: EditSnapshot, apply: (s: EditSnapshot) => void) {
+  const past = useRef<EditSnapshot[]>([]);
+  const future = useRef<EditSnapshot[]>([]);
+  const last = useRef<EditSnapshot>(state);
+  const lastChange = useRef({ keys: '', at: 0 });
+  const applyRef = useRef(apply);
+  applyRef.current = apply;
+  const [, setVersion] = useState(0);
+  const { selection, colors, hiddenParts, kindVisible, attributeEdits } = state;
+
+  useEffect(() => {
+    const cur: EditSnapshot = { selection, colors, hiddenParts, kindVisible, attributeEdits };
+    const keys = changedKeys(cur, last.current);
+    // 変更なし、または undo / redo で戻した状態そのもの（last を先に書き換えてある）。
+    if (!keys) return;
+    const now = Date.now();
+    const merge = keys === 'attributeEdits' && lastChange.current.keys === keys && now - lastChange.current.at < HISTORY_MERGE_MS;
+    if (!merge) {
+      past.current.push(last.current);
+      if (past.current.length > HISTORY_LIMIT) past.current.shift();
+    }
+    future.current = [];
+    last.current = cur;
+    lastChange.current = { keys, at: now };
+    setVersion((v) => v + 1);
+  }, [selection, colors, hiddenParts, kindVisible, attributeEdits]);
+
+  const step = useCallback((from: MutableRefObject<EditSnapshot[]>, to: MutableRefObject<EditSnapshot[]>) => {
+    const target = from.current.pop();
+    if (!target) return;
+    to.current.push(last.current);
+    last.current = target;
+    lastChange.current = { keys: '', at: 0 };
+    applyRef.current(target);
+    setVersion((v) => v + 1);
+  }, []);
+  const undo = useCallback(() => step(past, future), [step]);
+  const redo = useCallback(() => step(future, past), [step]);
+  const canUndo = past.current.length > 0;
+  const canRedo = future.current.length > 0;
+  return useMemo(() => ({ undo, redo, canUndo, canRedo }), [undo, redo, canUndo, canRedo]);
+}
+
+type SaveState ={ kind: 'idle' } | { kind: 'saving' } | { kind: 'saved'; path: string } | { kind: 'error'; message: string };
 
 function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onSubmit, onCancel }: PanelProps) {
   const { t } = useI18n();
@@ -185,7 +250,8 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   // 空間の原点 (0, 0, 0) の XYZ 軸の表示。
   const [originAxes, setOriginAxes] = useState(true);
   const hasParts = (data.parts?.length ?? 0) > 0;
-  const [sidebarOpen, setSidebarOpen] = useState(hasParts || !!data.step);
+  // 狭い画面ではサイドバーが 3D 表示の場所を取るため、最初は閉じておく（ボタンで開ける）。
+  const [sidebarOpen, setSidebarOpen] = useState((hasParts || !!data.step) && !isNarrowScreen());
   // STEP の属性の編集（製品名 → 編集後の一覧）。
   const [attributeEdits, setAttributeEdits] = useState<CadAttributeEdits>({});
   // 前の版からの変化の重ね表示（compare_with で比べたときだけ）。
@@ -194,6 +260,38 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   const [kindVisible, setKindVisible] = useState({ face: true, edge: true, vertex: true, ...data.viewState?.visible });
   const [hiddenParts, setHiddenParts] = useState<Set<number>>(() => initialHiddenParts(data));
   const [colors, setColors] = useState<CadColorOverrides>({ faces: new Map(), parts: new Map() });
+  const history = useEditHistory(
+    { selection, colors, hiddenParts, kindVisible, attributeEdits },
+    (s) => {
+      setSelection(s.selection);
+      setColors(s.colors);
+      setHiddenParts(s.hiddenParts);
+      setKindVisible(s.kindVisible);
+      setAttributeEdits(s.attributeEdits);
+    }
+  );
+  const barRef = useRef<HTMLDivElement>(null);
+  // Ctrl+Z / Ctrl+Y（Ctrl+Shift+Z）: ポインタがビューアの上にあるか、ビューアの中にフォーカスがあるときだけ
+  // （チャットの入力欄など、ほかの場所の元に戻すを横取りしない）。文字の入力欄の中ではブラウザに任せる。
+  const pointerInside = useRef(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const key = e.key.toLowerCase();
+      const isUndo = key === 'z' && !e.shiftKey;
+      const isRedo = key === 'y' || (key === 'z' && e.shiftKey);
+      if (!isUndo && !isRedo) return;
+      const bar = barRef.current;
+      const target = e.target as HTMLElement | null;
+      if (!bar || !(pointerInside.current || (target && bar.contains(target)))) return;
+      if (target && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
+      e.preventDefault();
+      if (isUndo) history.undo();
+      else history.redo();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [history]);
 
   const label = useCallback(
     (s: CadSelection) => {
@@ -226,7 +324,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
           host,
           data,
           { onHover: setHover, onPick: toggle, onBoxPick: boxPick, onPivotSet: () => setPivotPicking(false) },
-          sceneColors(host)
+          sceneColors()
         );
         sceneRef.current.setMode(kinds[0]);
         setStatus('ready');
@@ -276,7 +374,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   // テーマ（ライト / ダーク・アクセント色）の切り替えに追従する。
   useEffect(() => {
     const observer = new MutationObserver(() => {
-      if (hostRef.current) sceneRef.current?.applyTheme(sceneColors(hostRef.current));
+      sceneRef.current?.applyTheme(sceneColors());
     });
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'style', 'class'] });
     return () => observer.disconnect();
@@ -389,9 +487,22 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
     .join(' × ')}${data.units !== 'unknown' ? ' ' + data.units : ''}`;
 
   return (
-    <div className={`ask-form-bar cad-viewer-bar${expanded ? ' cad-viewer-expanded' : ''}`}>
+    <div
+      ref={barRef}
+      className={`ask-form-bar cad-viewer-bar${expanded ? ' cad-viewer-expanded' : ''}`}
+      onPointerEnter={() => (pointerInside.current = true)}
+      onPointerLeave={() => (pointerInside.current = false)}
+    >
       {question && <div className="ask-form-question">{question}</div>}
       <div className="cad-viewer-toolbar">
+        <div className="cad-viewer-history">
+          <button type="button" className="cad-viewer-chip" title={t('cad.undoTitle')} aria-label={t('cad.undo')} disabled={!history.canUndo} onClick={history.undo}>
+            ↶ {t('cad.undo')}
+          </button>
+          <button type="button" className="cad-viewer-chip" title={t('cad.redoTitle')} aria-label={t('cad.redo')} disabled={!history.canRedo} onClick={history.redo}>
+            ↷ {t('cad.redo')}
+          </button>
+        </div>
         <div className="cad-viewer-modes" role="radiogroup" aria-label={t('cad.selectKind')}>
           {kinds.map((k) => (
             <button
@@ -525,7 +636,11 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
             onHoverPart={(id) => sceneRef.current?.setExternalHover(id === null ? null : { kind: 'part', id })}
             attributeEdits={attributeEdits}
             onAttributeEdits={setAttributeEdits}
-            onSelectItems={(items) => boxPick(items.filter((s) => kinds.includes(s.kind)), false)}
+            onSelectItems={(items) => {
+              // PMI のクリック: 指す要素を選び、そこへ寄せる（選べない種類の要素も、寄せる範囲には含める）。
+              boxPick(items.filter((s) => kinds.includes(s.kind)), false);
+              sceneRef.current?.fitItems(items);
+            }}
           />
         )}
         <div className="cad-viewer-host" ref={hostRef}>

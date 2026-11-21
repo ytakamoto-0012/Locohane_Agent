@@ -65,6 +65,8 @@ const CLICK_MOVE_PIXELS = 4;
 const HIGHLIGHT_LINE_WIDTH = 3.5;
 // 視点を合わせるとき、形がちょうど画面に収まる距離に掛ける余白。
 const FIT_MARGIN = 1.12;
+// 要素へ寄せるとき（fitItems）の拡大の上限の目安（全体表示の 1/ITEM_FIT_MIN_RATIO 倍まで寄れる）。
+const ITEM_FIT_MIN_RATIO = 0.002;
 // 平行投影のカメラを回転の中心から離す距離（モデルの半径の倍数）。見え方には影響せず、奥行きの切れ目にだけ効く。
 const CAMERA_DISTANCE = 10;
 
@@ -135,6 +137,8 @@ export class CadScene {
   private pivotPicking = false;
   // 指定した回転の中心の印（形の中心に戻したら隠す）。
   private pivotMarker: THREE.Points | null = null;
+  // 「回転中心」で指定した点。全体表示・視点の切り替えまで、移動や拡大縮小をしても回転の中心として残す。
+  private fixedPivot: THREE.Vector3 | null = null;
   // 空間の原点 (0, 0, 0) に描く XYZ 軸（X 赤・Y 緑・Z 青、ラベル付き）。
   private originAxes: THREE.Group | null = null;
   private originAxesLine: LineSegments2 | null = null;
@@ -193,6 +197,9 @@ export class CadScene {
     this.controls.unsetMouseAction('WHEEL', 'SHIFT');
     this.controls.unsetMouseAction(1, 'SHIFT');
     this.controls.addEventListener('change', () => this.requestRender());
+    // ArcballControls は右ドラッグの移動・カーソル位置への拡大縮小で、カメラと一緒に回転の中心（内部のギズモ）も
+    // 動かす。指定した回転中心があれば、操作が終わるたびにその点へ戻す（戻さないと移動で中心が外れる）。
+    this.controls.addEventListener('end', () => this.restoreFixedPivot());
     this.resize();
     this.setView('iso');
 
@@ -391,9 +398,10 @@ export class CadScene {
     const size = Math.round(Math.min(96, this.container.clientWidth / 4, this.container.clientHeight / 3));
     if (size < 32) return;
     // 本体のカメラと同じ向きで、原点を見る。
-    const dir = new THREE.Vector3().subVectors(this.camera.position, this.pivot()).normalize();
+    // 回転中心は画面の中央とは限らないので、向きはカメラの姿勢から求める。
+    const dir = new THREE.Vector3(0, 0, 1).applyQuaternion(this.camera.quaternion);
     this.gizmoCamera.position.copy(dir).multiplyScalar(4);
-    this.gizmoCamera.up.copy(this.camera.up);
+    this.gizmoCamera.up.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
     this.gizmoCamera.lookAt(0, 0, 0);
     this.renderer.autoClear = false;
     this.renderer.clearDepth();
@@ -489,9 +497,56 @@ export class CadScene {
   fitAll(): void {
     // ArcballControls は回転でカメラの up を書き換えないので、今の画面の上の向きを姿勢から求める。
     this.camera.up.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
-    const dir = new THREE.Vector3().subVectors(this.camera.position, this.pivot()).normalize();
+    // 回転中心は画面の中央とは限らないので、向きはカメラの姿勢から求める（画面の奥からカメラへの向き）。
+    const dir = new THREE.Vector3(0, 0, 1).applyQuaternion(this.camera.quaternion);
     const box = this.visibleBox();
     this.fitAlong(dir, box.min, box.max);
+  }
+
+  /**
+   * items（面・エッジ・頂点・部品）が画面いっぱいに収まるよう、今の向きのまま寄せる（PMI のクリック等）。
+   * 回転の中心もその中心にする。範囲が求まらなければ何もせず false。
+   */
+  fitItems(items: CadSelection[]): boolean {
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+    const add = (arr: ArrayLike<number> | null, v: number) => {
+      if (!arr || v * 3 + 2 >= arr.length) return;
+      for (let k = 0; k < 3; k++) {
+        const x = arr[v * 3 + k];
+        if (x < min[k]) min[k] = x;
+        if (x > max[k]) max[k] = x;
+      }
+    };
+    for (const s of items) {
+      if (s.kind === 'face') {
+        // 面の頂点は連続して並ぶ（buildMesh の faceVertexRanges）。
+        const [lo, hi] = this.faceVertexRanges[s.id] ?? [0, 0];
+        for (let v = lo; v < hi; v++) add(this.meshPositions, v);
+      } else if (s.kind === 'edge') {
+        const [start, n] = this.data.edges.ranges[s.id] ?? [0, 0];
+        for (let v = start * 2; v < (start + n) * 2; v++) add(this.edgePositions, v);
+      } else if (s.kind === 'vertex') {
+        add(this.vertexPositions, s.id);
+      } else {
+        const bb = this.data.parts?.[s.id]?.bbox as { min: number[]; max: number[] } | undefined;
+        if (bb) for (const p of [bb.min, bb.max]) add(p, 0);
+      }
+    }
+    if (min[0] === Infinity) return false;
+    // 点・直線だけだと箱が潰れて寄りすぎるので、モデルの大きさの 2% を最小の大きさにする。
+    const least = this.radius * 0.02;
+    for (let k = 0; k < 3; k++) {
+      const grow = (least - (max[k] - min[k])) / 2;
+      if (grow > 0) {
+        min[k] -= grow;
+        max[k] += grow;
+      }
+    }
+    this.camera.up.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
+    const dir = new THREE.Vector3(0, 0, 1).applyQuaternion(this.camera.quaternion);
+    this.fitAlong(dir, min, max, ITEM_FIT_MIN_RATIO);
+    return true;
   }
 
   /** 見えている部品のバウンディングボックス（部品が無い・全部見えているならモデル全体）。 */
@@ -513,14 +568,15 @@ export class CadScene {
   }
 
   /** dir の向き（中心からカメラへ）から、min〜max の箱がちょうど収まる位置にカメラを置き、回転の中心を箱の中心にする。 */
-  private fitAlong(dir: THREE.Vector3, min: number[], max: number[]): void {
+  private fitAlong(dir: THREE.Vector3, min: number[], max: number[], minRatio = 0.1): void {
     const center = new THREE.Vector3(...min).add(new THREE.Vector3(...max)).multiplyScalar(0.5);
     this.camera.position.copy(center).addScaledVector(dir, this.radius * CAMERA_DISTANCE);
-    this.camera.zoom = this.fitZoom(dir, min, max, center);
+    this.camera.zoom = this.fitZoom(dir, min, max, center, minRatio);
     this.camera.updateProjectionMatrix();
     this.arcball().target.copy(center);
     // ArcballControls は操作の起点となるカメラの状態・回転の中心を内部に持つので、カメラを動かしたら読み直させる。
     this.controls.setCamera(this.camera);
+    this.fixedPivot = null;
     if (this.pivotMarker) this.pivotMarker.visible = false;
     this.requestRender();
   }
@@ -533,11 +589,15 @@ export class CadScene {
 
   /** p を回転の中心にする。向きは変えずに平行移動して、p を画面の中央に寄せる（ArcballControls は常に中心を見るため）。 */
   private setPivot(p: THREE.Vector3): void {
-    const delta = new THREE.Vector3().subVectors(p, this.pivot());
-    this.camera.position.add(delta);
+    // 今の回転中心までの奥行きを保ったまま、p が画面の中央に来る位置へカメラを平行移動する
+    // （移動の後は回転中心が画面の中央からずれていることがあるので、奥行き方向の距離で求める）。
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    const depth = new THREE.Vector3().subVectors(this.pivot(), this.camera.position).dot(forward);
+    this.camera.position.copy(p).addScaledVector(forward, -depth);
     this.camera.up.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
     this.arcball().target.copy(p);
     this.controls.setCamera(this.camera);
+    this.fixedPivot = p.clone();
     if (this.pivotMarker) {
       const attr = this.pivotMarker.geometry.getAttribute('position') as THREE.BufferAttribute;
       attr.setXYZ(0, p.x, p.y, p.z);
@@ -556,13 +616,25 @@ export class CadScene {
     return c._gizmos?.position ?? c.target;
   }
 
-  /** @types/three に無い ArcballControls のプロパティ（target は公開、_gizmos は内部）。 */
-  private arcball(): ArcballControls & { target: THREE.Vector3; _gizmos?: THREE.Object3D } {
-    return this.controls as ArcballControls & { target: THREE.Vector3; _gizmos?: THREE.Object3D };
+  /**
+   * 指定した回転中心へ内部のギズモを戻す（カメラは動かさない）。ArcballControls の回転はギズモの位置を中心に
+   * カメラを回すので、中心が画面の中央から外れていても、その点を中心に回る（その点は画面上で止まって見える）。
+   */
+  private restoreFixedPivot(): void {
+    const c = this.arcball();
+    if (!this.fixedPivot || !c._gizmos || c._gizmos.position.equals(this.fixedPivot)) return;
+    c._gizmos.position.copy(this.fixedPivot);
+    c._gizmos.updateMatrix();
+    c._gizmoMatrixState?.copy(c._gizmos.matrix);
+  }
+
+  /** @types/three に無い ArcballControls のプロパティ（target は公開、_gizmos・_gizmoMatrixState は内部）。 */
+  private arcball(): ArcballControls & { target: THREE.Vector3; _gizmos?: THREE.Object3D; _gizmoMatrixState?: THREE.Matrix4 } {
+    return this.controls as ArcballControls & { target: THREE.Vector3; _gizmos?: THREE.Object3D; _gizmoMatrixState?: THREE.Matrix4 };
   }
 
   /** dir の向きから center を見たとき、min〜max の箱の 8 つの角が画面に収まる camera.zoom。 */
-  private fitZoom(dir: THREE.Vector3, min: number[], max: number[], center: THREE.Vector3): number {
+  private fitZoom(dir: THREE.Vector3, min: number[], max: number[], center: THREE.Vector3, minRatio: number): number {
     const halfV = this.camera.top;
     const halfH = this.camera.right;
     // カメラの右・上の向き（lookAt と同じ作り方）。
@@ -580,7 +652,8 @@ export class CadScene {
           const p = new THREE.Vector3(x, y, z).sub(center);
           ratio = Math.max(ratio, Math.abs(p.dot(right)) / halfH, Math.abs(p.dot(up)) / halfV);
         }
-    return 1 / (Math.max(ratio, 0.1) * FIT_MARGIN);
+    // minRatio は寄りすぎの上限（全体表示は 10 倍まで。PMI 等の要素へ寄せるときはモデルに比べて小さな穴にも寄れるようにする）。
+    return 1 / (Math.max(ratio, minRatio) * FIT_MARGIN);
   }
 
   /**

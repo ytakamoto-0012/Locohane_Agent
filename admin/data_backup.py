@@ -216,9 +216,15 @@ def collect_sources(
             warnings.append(_t("インスタンス {0} の設定を読めないため、そのデータはバックアップしていません: {1}", name, exc))
             continue
         # 評価の一時フォルダ（[skill_lab].temp_dir）・スクリプトの書き込みガードの置き場（[scripts].guard_temp_dir）は
-        # 実行中だけ使う物なので、設定に関係なく入れない。
+        # 実行中だけ使う物、3D ビューア用データのキャッシュ（[cad_viewer].cache_dir）は作り直せる物なので、設定に関係なく入れない。
         excludes: list[Path] = [
-            p for p in (getattr(cfg, "skill_lab_temp_dir", None), getattr(cfg, "script_guard_temp_dir", None)) if p
+            p
+            for p in (
+                getattr(cfg, "skill_lab_temp_dir", None),
+                getattr(cfg, "script_guard_temp_dir", None),
+                getattr(cfg, "cad_viewer_cache_dir", None),
+            )
+            if p
         ]
         if settings.exclude_workdir:
             excludes.append(cfg.default_workdir)

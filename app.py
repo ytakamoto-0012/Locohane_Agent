@@ -2398,6 +2398,15 @@ async def _setup() -> None:
         older_than_seconds=max(_config.script_timeout, _config.script_background_max_runtime_seconds) + 600,
     )
 
+    # 3D ビューア用データのキャッシュ（[cad_viewer].cache_dir）: 書き込みの途中で止まった一時ファイルと、上限を超えた分を消す。
+    if _config.cad_viewer_cache_dir is not None:
+        from src.cad import viewer_cache as _cad_viewer_cache
+
+        try:
+            _cad_viewer_cache.prune(_config.cad_viewer_cache_dir, _config.cad_viewer_cache_max_mb * 1024 * 1024)
+        except OSError:
+            logging.getLogger(__name__).warning("Could not clean up the 3D viewer cache %s", _config.cad_viewer_cache_dir, exc_info=True)
+
     # P0-3: httpcore の cancel scope breakage 検知フィルタを登録する。
     # _setup() は一度だけ呼ばれるため、ここで登録すれば十分（冪等処理あり）。
     _register_cancel_scope_watcher()
