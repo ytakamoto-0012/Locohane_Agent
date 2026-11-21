@@ -17,6 +17,7 @@ import {
   decodeUint32,
   decodeUint8,
   overrideOf,
+  selectionKey,
   type BoxMode,
   type CadColorOverrides,
   type CadData,
@@ -130,7 +131,9 @@ export class CadScene {
   private baseFaceColors: Float32Array | null = null;
 
   private mode: CadKind = 'face';
-  private selection: CadSelection[] = [];
+  // 今の選択を引くための集合（"種類:ID"）と、選んだ部品の ID。setSelection で作り直す。
+  private selectedKeys: Set<string> = new Set();
+  private selectedParts: Set<number> = new Set();
   private hover: CadSelection | null = null;
   // サイドバー（部品のツリー）でマウスを乗せている要素。
   private externalHover: CadSelection | null = null;
@@ -534,7 +537,8 @@ export class CadScene {
   }
 
   setSelection(selection: CadSelection[]): void {
-    this.selection = selection;
+    this.selectedKeys = new Set(selection.map((s) => selectionKey(s.kind, s.id)));
+    this.selectedParts = new Set(selection.filter((s) => s.kind === 'part').map((s) => s.id));
     this.refreshColors();
   }
 
@@ -866,8 +870,18 @@ export class CadScene {
   private stateOf(kind: CadKind, id: number): 'hover' | 'selected' | null {
     const hit = (s: CadSelection | null) => !!s && this.covers(s, kind, id);
     if (hit(this.hover) || hit(this.externalHover)) return 'hover';
-    if (this.selection.some((s) => this.covers(s, kind, id))) return 'selected';
+    // 選択は集合で引く（refreshColors は全要素について呼ぶので、選択の配列を探すと「要素数 × 選択数」になり、
+    // 全選択した大きなモデルではホバーのたびに固まっていた）。
+    if (this.selectedKeys.has(selectionKey(kind, id))) return 'selected';
+    if (kind !== 'part' && this.selectedParts.size) {
+      const part = this.itemsOfKind(kind)?.[id]?.part;
+      if (typeof part === 'number' && this.selectedParts.has(part)) return 'selected';
+    }
     return null;
+  }
+
+  private itemsOfKind(kind: CadKind): ReadonlyArray<{ part?: number | null }> | null {
+    return kind === 'face' ? this.data.faces : kind === 'edge' ? this.data.edgeList : kind === 'vertex' ? this.data.vertexList : null;
   }
 
   /** 選択 s が要素 (kind, id) を含むか（部品は、その部品の面・エッジを含む）。 */

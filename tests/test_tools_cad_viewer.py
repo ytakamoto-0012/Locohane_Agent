@@ -751,3 +751,190 @@ async def test_attribute_edits_are_validated_and_reported(env, tmp_path) -> None
     edited = json.loads(open(out["viewer_data"], encoding="utf-8").read())
     assert edited["step"]["products"][0]["attributes"] == [{"name": "品番", "value": "PN-2"}, {"name": "表面処理", "value": "黒染め"}]
     assert "属性の変更 2 件" in _viewer.echoed[-1] or "2 attribute change(s)" in _viewer.echoed[-1]
+
+
+@pytest.mark.asyncio
+async def test_other_sessions_tmp_files_cannot_be_opened(env, tmp_path) -> None:
+    """他のセッションの `_tmp_` の中のファイルは、Read と同じく file_path・compare_with に渡せない。"""
+    other = tools._state._DEFAULT_WORKDIR / "_tmp_000000000000_other"
+    other.mkdir()
+    stl = _cube_stl(other)
+    out = await _call(file_path=str(stl))
+    assert out.startswith("Error:") and "another session" in out
+    out = await _call(file_path=str(_cube_stl(tmp_path)), compare_with=str(stl))
+    assert out.startswith("Error: compare_with:") and "another session" in out
+    assert _viewer.shown == []
+
+
+@pytest.mark.asyncio
+async def test_viewer_data_pointing_at_another_sessions_file_is_refused(env, tmp_path) -> None:
+    # ビューア用データの source.path（保存・比較で読み直す元の形）が他のセッションのファイルなら開かない。
+    other = tools._state._DEFAULT_WORKDIR / "_tmp_000000000000_other"
+    other.mkdir()
+    await _call(file_path=str(_cube_stl(tmp_path)))
+    data = _viewer.shown[0]["data"]
+    data["source"]["path"] = str(_cube_stl(other))
+    forged = tmp_path / "forged.json"
+    forged.write_text(json.dumps(data), encoding="utf-8")
+    out = await _call(file_path=str(forged))
+    assert out.startswith("Error: the model file of this viewer data cannot be used") and "another session" in out
+    assert len(_viewer.shown) == 1
+
+
+@pytest.mark.asyncio
+async def test_relative_file_path_is_resolved_in_the_work_folder(env, tmp_path) -> None:
+    # 相対パスは Read と同じく、ツールバーで選んだ作業フォルダからのパス（セッションの `_tmp_` ではない）。
+    work = tmp_path / "work"
+    work.mkdir()
+    _cube_stl(work)
+    env.set("work_dir", str(work))
+    out = json.loads(await _call(file_path="cube.stl"))
+    assert out["model"]["source"] == str(work / "cube.stl")
+
+
+def test_large_selection_is_deduplicated_quickly() -> None:
+    import time as _time
+
+    data = {"faces": [{}] * 200_000}
+    selected = [{"kind": "face", "id": i % 100_000} for i in range(200_000)] + [{"kind": "face", "id": 200_000}, {"kind": "edge", "id": 0}]
+    start = _time.perf_counter()
+    picked = cad_viewer._valid_selection(data, ["face", "edge"], selected)
+    assert _time.perf_counter() - start < 2
+    assert len(picked) == 100_000 and picked[:2] == [("face", 0), ("face", 1)]
+
+
+def test_attribute_type_must_be_a_plain_name() -> None:
+    from src.cad import step_p21
+
+    bad_type = "x');#9=(length_measure"
+    data = {"step": {"products": [{"name": "P", "attributes": []}]}}
+    rows = [{"name": "L", "value": 1.5, "type": "length_measure"}, {"name": "X", "value": 1, "type": bad_type}]
+    out = cad_viewer._valid_attributes(data, {"P": rows})["P"]
+    assert out == [{"name": "L", "value": 1.5, "type": "length_measure"}, {"name": "X", "value": 1}]
+    # 書き出し側でも、型名に使えない文字を含む型はそのまま書かない。
+    assert step_p21._value_text(1.5, bad_type) == ("VALUE_REPRESENTATION_ITEM", "REAL(1.5)")
+    assert step_p21._value_text(1.5, "length_measure") == ("VALUE_REPRESENTATION_ITEM", "LENGTH_MEASURE(1.5)")
+
+
+@pytest.mark.asyncio
+async def test_failed_save_leaves_no_partial_file(env, tmp_path, monkeypatch) -> None:
+    pytest.importorskip("cadquery")
+    real_replace = cad_viewer.os.replace
+
+    def locked(src, dst):
+        if ".writing" in str(src):
+            raise PermissionError("the file is open in another program")
+        return real_replace(src, dst)
+
+    async def press_save(props):
+        monkeypatch.setattr(cad_viewer.os, "replace", locked)
+        try:
+            return await cad_viewer.save_viewer_edits({"save_id": props["save_id"], "colors": {"faces": {"0": "#ff0000"}}})
+        finally:
+            monkeypatch.setattr(cad_viewer.os, "replace", real_replace)
+
+    _viewer.on_show = press_save
+    await _call(file_path=str(_cube_stl(tmp_path)))
+    res = _viewer.on_show_result
+    assert not res["ok"] and "open in another program" in res["error"]
+    assert not list(tools._state._DEFAULT_WORKDIR.rglob(".*.writing*"))
+
+
+@pytest.mark.asyncio
+async def test_confirm_waits_for_a_running_save(env, tmp_path, monkeypatch) -> None:
+    """「保存」の書き出し中に確定しても、書き出しの終わりを待って、書き出したことを LLM へ伝える。"""
+    import asyncio as _asyncio
+
+    pytest.importorskip("cadquery")
+    started = _asyncio.Event()
+    real_run = cad_viewer._run
+
+    async def slow_run(cmd, workdir):
+        if "--export" in cmd:  # 「保存」の書き出しだけを遅くする（ビューア用データを作るときも _run を通る）
+            started.set()
+            await _asyncio.sleep(0.3)
+        return await real_run(cmd, workdir)
+
+    monkeypatch.setattr(cad_viewer, "_run", slow_run)
+    saves: list = []
+
+    async def press_save_then_confirm(props):
+        payload = {"save_id": props["save_id"], "colors": {"faces": {"0": "#ff0000"}}}
+        saves.append(_asyncio.ensure_future(cad_viewer.save_viewer_edits(payload)))
+        await started.wait()
+        # 書き出し中の 2 回目の保存は断る（同じファイルへ同時に書かない）。
+        return await cad_viewer.save_viewer_edits({"save_id": props["save_id"]})
+
+    _viewer.on_show = press_save_then_confirm
+    out = json.loads(await _call(file_path=str(_cube_stl(tmp_path))))
+    assert _viewer.on_show_result == {"ok": False, "error": "The model is still being saved. Wait until it finishes."}
+    assert saves[0].done() and saves[0].result()["ok"]
+    assert any("exported the 3D model" in n for n in out["notes"])
+
+
+async def _save_step(src, colors):
+    """src の STEP をビューアで開き、colors(data) の色を当てて「保存」し、(結果, 書き出した STEP のビューア用データ) を返す。"""
+    from src.cad.export_mesh import Options, cad_file_to_viewer_data
+
+    async def press_save(props):
+        return await cad_viewer.save_viewer_edits({"save_id": props["save_id"], "colors": colors(props["data"])})
+
+    _viewer.on_show = press_save
+    await _call(file_path=str(src))
+    res = _viewer.on_show_result
+    assert res["ok"], res
+    return res, cad_file_to_viewer_data(res["path"], "STEP", Options())
+
+
+@pytest.mark.asyncio
+async def test_part_color_change_also_recolors_faces_with_their_own_color(env, tmp_path) -> None:
+    cq = pytest.importorskip("cadquery")
+    assy = cq.Assembly(name="asm")
+    assy.add(cq.Workplane().box(10, 10, 10), name="a", color=cq.Color(1, 0, 0, 1))
+    assy.add(cq.Workplane().box(10, 10, 10), name="b", loc=cq.Location((20, 0, 0)), color=cq.Color(0, 0, 1, 1))
+    src = tmp_path / "asm.step"
+    assy.export(str(src))
+    # 1 回目: 部品 a の面に個別の色を付けて保存する。
+    res, first = await _save_step(src, lambda d: {"faces": {str(d["parts"][0]["faces"][0]): "#00ff00"}, "parts": {}})
+    face = first["parts"][0]["faces"][0]
+    assert first["faces"][face]["color"] == "#00ff00"
+    # 2 回目: その STEP で部品 a の色だけを変える。ビューアでは面もすべて新しい色なので、書き出しも合わせる。
+    _res, second = await _save_step(res["path"], lambda d: {"faces": {}, "parts": {"0": "#ffff00"}})
+    assert {second["faces"][f]["color"] for f in second["parts"][0]["faces"]} == {"#ffff00"}
+    # 3 回目: 面の色を外す（to null）と、面の個別の色は消えて部品の色になる。
+    _res, third = await _save_step(res["path"], lambda d: {"faces": {str(face): None}, "parts": {}})
+    assert third["faces"][face]["color"] == "#ff0000"
+
+
+@pytest.mark.asyncio
+async def test_color_of_one_copy_of_a_shared_part_survives_reopening(env, tmp_path) -> None:
+    cq = pytest.importorskip("cadquery")
+    box = cq.Workplane().box(5, 5, 5)
+    assy = cq.Assembly(name="asm")
+    assy.add(box, name="b1", color=cq.Color(0.5, 0.5, 0.5, 1))
+    assy.add(box, name="b2", loc=cq.Location((10, 0, 0)), color=cq.Color(0.5, 0.5, 0.5, 1))
+    src = tmp_path / "shared.step"
+    assy.export(str(src))
+    _res, out = await _save_step(src, lambda d: {"faces": {}, "parts": {"1": "#ff0000"}})
+    assert [p.get("color") for p in out["parts"]] == ["#808080", "#ff0000"]
+
+
+@pytest.mark.asyncio
+async def test_save_keeps_the_attributes_of_assembly_products(env, tmp_path) -> None:
+    cq = pytest.importorskip("cadquery")
+    from src.cad import step_p21
+
+    assy = cq.Assembly(name="asm")
+    assy.add(cq.Workplane().box(10, 10, 10), name="a", color=cq.Color(1, 0, 0, 1))
+    assy.add(cq.Workplane().box(10, 10, 10), name="b", loc=cq.Location((20, 0, 0)))
+    src = tmp_path / "asm.step"
+    assy.export(str(src))
+    text, enc = step_p21.read_text(src)
+    text, n = step_p21.add_attributes(text, {"asm": [{"name": "Project", "value": "P-1"}], "b": [{"name": "PN", "value": "B-1"}]})
+    assert n == 2
+    src.write_bytes(text.encode(enc))
+    res, _out = await _save_step(src, lambda d: {"faces": {}, "parts": {"0": "#00ff00"}})
+    saved, _enc = step_p21.read_text(Path(res["path"]))
+    attrs = {p["name"]: p.get("attributes") for p in step_p21.read_products(saved)}
+    assert attrs["asm"] == [{"name": "Project", "value": "P-1"}]
+    assert attrs["b"] == [{"name": "PN", "value": "B-1"}]

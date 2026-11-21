@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -41,7 +41,8 @@ from ..images import image_ref, to_data_url
 from . import _state
 from ._ask_echo import ASK_TIMEOUT_MESSAGE, _echo_ask_answer
 from ._ask_relay_helper import _ask_with_cross_session_relay
-from ._path_memory_helpers import _register_path_memory, _resolve_path_memory_token
+from ._path_memory_helpers import _register_path_memory
+from ._safe_path import _resolve_file_tools_path
 from ._proc_tree import run_with_timeout
 from ._python_fs_guard import _exec_guard_roots, _python_fs_guard_preamble, _register_exec_output_files
 from ._state import _resolve_ask_timeout
@@ -115,21 +116,67 @@ def _options(compare_with: str = "") -> dict[str, Any]:
 _COMPARABLE_FORMATS = ("STEP", "IGES", "BREP", "BIN", "VIEWER_JSON")
 
 
-def _resolve_compare_with(value: str) -> str:
+def _resolve_input_path(raw: str) -> tuple[Path | None, str]:
+    """file_path・compare_with（絶対パス・作業ディレクトリからの相対パス・@N）を絶対パスにする。
+
+    Read/Glob と同じ _resolve_file_tools_path を通す（相対パスは作業ディレクトリ基準、他のセッションの
+    `_tmp_` フォルダ・読めない他のユーザーのドラフトは拒否）。使えなければ (None, エラー文。先頭の "Error: " は無し)。
+    """
+    path, err = _resolve_file_tools_path(raw)
+    if err or path is None:
+        return None, (err or "the path could not be resolved").removeprefix("Error: ")
+    return path, ""
+
+
+def _source_path_error(data: dict) -> str:
+    """ビューア用データが元の形として指すファイル（保存・比較で読み直す）が、このセッションから読めないものなら理由。
+
+    ビューア用データは LLM がコードで書けるので、中の source.path を他のセッションの `_tmp_` 等へ
+    向けて、そのファイルを読ませることができないようにする。
+    """
+    source = data.get("source") or {}
+    for key in ("path", "brep"):
+        src = source.get(key) if isinstance(source, dict) else None
+        if not src or not isinstance(src, str):
+            continue
+        _path, err = _resolve_input_path(src)
+        if err:
+            return f"the model file of this viewer data cannot be used: {err}"
+    return ""
+
+
+def _read_viewer_json(path: Path) -> dict | str:
+    """ビューア用データを読む（大きいとき数秒かかるので、スレッドで呼ぶ）。読めなければ "Error: ..."。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return f"Error: could not read the viewer data {path}: {e}"
+    if not isinstance(data, dict) or data.get("format") != VIEWER_FORMAT:
+        return f"Error: {path} is not viewer data made by show_cad_viewer. Pass a CAD file ({supported_extensions_text()})."
+    return data
+
+
+async def _resolve_compare_with(value: str) -> str:
     """compare_with（絶対パスか @N）を絶対パスにする。使えなければ "Error: ..." を返す。"""
-    resolved, err = _resolve_path_memory_token(value)
-    if err:
+    path, err = _resolve_input_path(value)
+    if path is None:
         return f"Error: compare_with: {err}"
-    path = Path(resolved)
-    if not path.is_absolute():
-        path = _resolve_exec_workdir() / path
     if not path.is_file():
         return f"Error: compare_with: the file does not exist: {path}"
-    if format_of(path) not in _COMPARABLE_FORMATS:
+    fmt = format_of(path)
+    if fmt not in _COMPARABLE_FORMATS:
         return (
             f"Error: compare_with must be a STEP/IGES/BREP/BIN file or viewer_data of one (got {path.suffix!r}; "
             "STL and DXF cannot be compared)."
         )
+    if fmt == "VIEWER_JSON":
+        # 比べるときはビューア用データが指す元の形のファイルを読み直すので、それもこのセッションから読めるか確かめる。
+        data = await asyncio.to_thread(_read_viewer_json, path)
+        if isinstance(data, str):
+            return data.replace("Error: ", "Error: compare_with: ", 1)
+        bad = _source_path_error(data)
+        if bad:
+            return f"Error: compare_with: {bad}"
     return str(path)
 
 
@@ -253,7 +300,7 @@ async def _show_cad_viewer(
 
     previous = ""
     if (compare_with or "").strip():
-        previous = _resolve_compare_with(compare_with.strip())
+        previous = await _resolve_compare_with(compare_with.strip())
         if previous.startswith("Error:"):
             return previous
     # 大きな CAD ファイルは形を読んでビューア用データにするまで 1 分以上かかることがあるので、その間は準備中と出しておく
@@ -281,6 +328,11 @@ async def _show_cad_viewer(
         answer = await _ask_selection(question, data, kinds, save_id)
     finally:
         target = _SAVE_TARGETS.pop(save_id, None)
+    if target is not None:
+        # 「保存」の書き出しの途中で確定・閉じたときは、書き終わるのを待つ（待たないと書き出したことを LLM へ伝えられず、
+        # 後からダウンロードボタンだけがチャットに出る）。もう新しい保存は受け付けない（_SAVE_TARGETS から外した）。
+        async with target.lock:
+            pass
     # 閉じた・時間切れでも LLM へ伝える注意（書き出したモデル・自動で保存したビューア用データ）。
     extra: list[str] = []
     if target is not None and target.saved is not None:
@@ -383,6 +435,8 @@ class _SaveTarget:
     thread_id: str
     saved: Path | None = None
     saved_token: str = ""
+    # 書き出しの最中に持つ（同じビューアの保存を 1 つずつにし、確定したときに書き出しの終わりを待つため）。
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 # ビューアに渡した save_id → 保存先。ブラウザから来る save_id はこれに無ければ受け付けない。
@@ -460,31 +514,39 @@ async def save_viewer_edits(payload: dict[str, Any]) -> dict[str, Any]:
     Returns:
         {"ok": True, "path", "token", "color_changes", "notes"} か {"ok": False, "error"}。
     """
-    from ..cad.export_model import output_suffix
-
     save_id = str(payload.get("save_id") or "")
     target = _SAVE_TARGETS.get(save_id)
     if target is None:
         return {"ok": False, "error": "This viewer is no longer waiting for an answer."}
     if (cl.user_session.get("thread_id") or "_no_session") != target.thread_id:
         return {"ok": False, "error": "This viewer belongs to another conversation."}
+    if target.lock.locked():
+        return {"ok": False, "error": "The model is still being saved. Wait until it finishes."}
+    async with target.lock:
+        return await _save_locked(target, payload)
+
+
+async def _save_locked(target: _SaveTarget, payload: dict[str, Any]) -> dict[str, Any]:
+    """save_viewer_edits の本体（target.lock を持って呼ぶ）。"""
+    from ..cad.export_model import output_suffix
+
     data = target.data
     suffix = output_suffix(data)
     if suffix is None:
         return {"ok": False, "error": "This model cannot be exported."}
     colors = _valid_colors(data, payload.get("colors"))
-    edited, _changed = _view_edits(data, payload, colors)
+    # 色を当てたビューア用データを作るのは、大きなモデルでは数秒かかる（JSON の写し・三角形の色の書き換え）。
+    edited, _changed = await asyncio.to_thread(_view_edits, data, payload, colors)
     edited["exportOptions"] = {"step_write_schema": str(_setting("cad_viewer_step_write_schema", "auto"))}
     out = target.saved or _model_path(target, suffix)
     workdir = _resolve_exec_workdir()
     spec = _new_data_path(workdir, prefix="cad_export")
+    tmp_out = out.with_name(f".{out.stem}.writing{out.suffix}")
     try:
         await asyncio.to_thread(_write_atomic, edited, spec)
-        tmp_out = out.with_name(f".{out.stem}.writing{out.suffix}")
         cmd = [_state._SCRIPT_PYTHON, str(_RUN_CAD), "--export", str(spec), "--out", str(tmp_out)]
         failed = await _run(cmd, workdir)
         if failed:
-            tmp_out.unlink(missing_ok=True)
             logger.warning("show_cad_viewer: could not export the model: %s", failed)
             # 画面に出すのはサブプロセスが標準エラーに書いた理由だけにする。
             reason = failed.split("[stderr]\n", 1)[-1].split("\n[stdout]", 1)[0].strip()
@@ -495,6 +557,12 @@ async def save_viewer_edits(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": str(e)}
     finally:
         spec.unlink(missing_ok=True)
+        # 書き出しに失敗した・置き換えられなかった（保存先を別のプログラムが開いている等）ときの書きかけを残さない。
+        # 置き換えた後は tmp_out はもう無い。
+        try:
+            tmp_out.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("show_cad_viewer: could not remove %s", tmp_out, exc_info=True)
     if target.saved is None:
         target.saved = out
         target.saved_token = next(
@@ -564,24 +632,23 @@ def _register_file(path: Path, description: str) -> str:
 
 
 async def _viewer_data_from_file(file_path: str, compare_with: str = "") -> tuple[dict, Path, list[str]] | str:
-    resolved, err = _resolve_path_memory_token(file_path)
-    if err:
+    path, err = _resolve_input_path(file_path)
+    if path is None:
         return f"Error: {err}"
-    path = Path(resolved)
-    if not path.is_absolute():
-        path = _resolve_exec_workdir() / path
     if not path.is_file():
         return f"Error: the file does not exist: {path}"
     fmt = format_of(path)
     if fmt is None:
         return f"Error: unsupported file type {path.suffix!r}. Supported: {supported_extensions_text()}"
     if fmt == "VIEWER_JSON":
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
-            return f"Error: could not read the viewer data {path}: {e}"
-        if not isinstance(data, dict) or data.get("format") != VIEWER_FORMAT:
-            return f"Error: {path} is not viewer data made by show_cad_viewer. Pass a CAD file ({supported_extensions_text()})."
+        # 数十 MB になりうるので、イベントループを止めないようスレッドで読む。
+        data = await asyncio.to_thread(_read_viewer_json, path)
+        if isinstance(data, str):
+            return data
+        bad = _source_path_error(data)
+        if bad:
+            # 「保存」は元の形のファイルを読み直して書き出すので、読めないファイルを指すデータは開かない。
+            return f"Error: {bad}"
         if compare_with:
             # ビューア用データは形を作り直さないので比べられない。元の形のファイルを file_path に渡させる。
             src = (data.get("source") or {}).get("path")
@@ -602,7 +669,7 @@ async def _viewer_data_from_file(file_path: str, compare_with: str = "") -> tupl
         # 色・表示の変更の自動保存がキャッシュや他の会話のデータを書き換えないようにする）。
         try:
             await asyncio.to_thread(shutil.copyfile, cached, out)
-            made = _load_data(out)
+            made = await asyncio.to_thread(_load_data, out)
             if not isinstance(made, str):
                 logger.info("show_cad_viewer: used the cached viewer data for %s", path.name)
                 return made
@@ -613,7 +680,7 @@ async def _viewer_data_from_file(file_path: str, compare_with: str = "") -> tupl
     failed = await _run(cmd, workdir)
     if failed:
         return failed
-    made = _load_data(out)
+    made = await asyncio.to_thread(_load_data, out)
     if key and not isinstance(made, str):
         await asyncio.to_thread(viewer_cache.store, cache_dir, key, out, cache_bytes)
     return made
@@ -676,7 +743,7 @@ async def _viewer_data_from_code(code: str, compare_with: str = "") -> tuple[dic
     note = _register_exec_output_files(workdir, before, cl.user_session.get("thread_id") or "_no_session")
     if failed:
         return failed + (f"\n{note}" if note else "")
-    made = _load_data(out)
+    made = await asyncio.to_thread(_load_data, out)
     if isinstance(made, str):
         return made
     data, data_path, notes = made
@@ -732,14 +799,20 @@ def _available_kinds(data: dict, select: list[str] | None) -> list[str]:
 def _valid_selection(data: dict, kinds: list[str], selected: Any) -> list[tuple[str, int]]:
     """ブラウザから来た選択のうち、正しいものだけを (種類, ID) で返す（重複は除く）。"""
     out: list[tuple[str, int]] = []
+    # 全選択では数十万件になりうるので、重複は集合で見る（リストを探すと件数の 2 乗の時間がかかり、
+    # イベントループ上で呼ぶのでサーバー全体が止まる）。
+    seen: set[tuple[str, int]] = set()
+    counts = {k: len(data.get(_LIST_KEYS[k]) or []) for k in kinds if k in _LIST_KEYS}
     for s in selected if isinstance(selected, list) else []:
         if not isinstance(s, dict):
             continue
         kind, eid = s.get("kind"), s.get("id")
-        if kind not in kinds or not isinstance(eid, int) or isinstance(eid, bool):
+        if kind not in counts or not isinstance(eid, int) or isinstance(eid, bool):
             continue
-        if 0 <= eid < len(data.get(_LIST_KEYS[kind]) or []) and (kind, eid) not in out:
-            out.append((kind, eid))
+        key = (kind, eid)
+        if 0 <= eid < counts[kind] and key not in seen:
+            seen.add(key)
+            out.append(key)
     return out
 
 
@@ -832,6 +905,8 @@ def _valid_colors(data: dict, colors: Any) -> list[dict[str, Any]]:
 _ATTR_MAX_ROWS = 200
 _ATTR_MAX_NAME = 200
 _ATTR_MAX_VALUE = 2000
+# 数の属性の型（length_measure 等。STEP の本文にそのまま書くので英字と _ だけ）。
+_ATTR_TYPE = re.compile(r"[A-Za-z][A-Za-z_]{0,59}")
 
 
 def _valid_attributes(data: dict, raw: Any, keep_unchanged: bool = False) -> dict[str, list[dict[str, Any]]]:
@@ -854,8 +929,8 @@ def _valid_attributes(data: dict, raw: Any, keep_unchanged: bool = False) -> dic
             if isinstance(value, str):
                 value = value[:_ATTR_MAX_VALUE]
             item: dict[str, Any] = {"name": row["name"].strip()[:_ATTR_MAX_NAME], "value": value}
-            if isinstance(row.get("type"), str) and isinstance(value, (int, float)):
-                item["type"] = row["type"][:60]
+            if isinstance(row.get("type"), str) and isinstance(value, (int, float)) and _ATTR_TYPE.fullmatch(row["type"]):
+                item["type"] = row["type"]
             if isinstance(row.get("group"), str) and row["group"]:
                 item["group"] = row["group"][:_ATTR_MAX_NAME]
             clean.append(item)

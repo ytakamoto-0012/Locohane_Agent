@@ -458,7 +458,7 @@ def export_step_xcaf(data: dict[str, Any], parts: list, face_map, out: Path, sch
     from OCP.Quantity import Quantity_Color, Quantity_TOC_sRGB
     from OCP.XCAFDoc import XCAFDoc_ColorType
 
-    from .export_mesh import _index_map
+    from .export_mesh import _index_map, _label_color
 
     doc = parts[0].doc
     st = XCAFDoc_DocumentTool.ShapeTool_s(parts[0].label)
@@ -472,30 +472,46 @@ def export_step_xcaf(data: dict[str, Any], parts: list, face_map, out: Path, sch
         r, g, b = (int(hex_color[k : k + 2], 16) / 255 for k in (1, 3, 5))
         return Quantity_Color(r, g, b, Quantity_TOC_sRGB)
 
-    # ビューアで色を変えた面（元のファイルの面の色は XCAF の文書にもう入っている）。
-    changed_faces = {
-        int(c["id"]): c["to"] for c in (data.get("edits") or {}).get("color_changes") or [] if c.get("kind") == "face" and c.get("to")
+    # ビューアで色を変えた面（to が None は色を外した面。元のファイルの面の色は XCAF の文書にもう入っている）。
+    changed_faces: dict[int, str | None] = {
+        int(c["id"]): (c.get("to") or None) for c in (data.get("edits") or {}).get("color_changes") or [] if c.get("kind") == "face"
     }
+    faces_info = data.get("faces") or []
     shared_defs: set[int] = set()
+    kept_face_colors: set[int] = set()
 
     def uses(part) -> int:
         return sum(1 for q in parts if q.label is not None and q.label.IsEqual(part.label))
+
+    def set_or_unset(lab, hex_color: str | None) -> None:
+        if hex_color:
+            ct.SetColor(lab, color(hex_color), XCAFDoc_ColorType.XCAFDoc_ColorSurf)
+        else:
+            for kind in (XCAFDoc_ColorType.XCAFDoc_ColorSurf, XCAFDoc_ColorType.XCAFDoc_ColorGen):
+                ct.UnSetColor(lab, kind)
+
+    def hex_of(rgb) -> str | None:
+        return "#{:02x}{:02x}{:02x}".format(*rgb) if rgb else None
 
     for pi, part in enumerate(parts):
         info = part_info[pi] if pi < len(part_info) else {}
         if pi in hidden:
             continue
-        pc = info.get("color")
-        before = "#{:02x}{:02x}{:02x}".format(*part.color) if part.color else None
-        if pc and (before or "").lower() != pc.lower():
-            # 読み込みでは定義の色がインスタンスの色より優先される（_load_xcaf）。定義を 1 回しか使わない部品は
+        pc = info.get("color") or None
+        before = hex_of(part.color)
+        part_changed = (before or "").lower() != (pc or "").lower()
+        n_uses = uses(part)
+        if part_changed:
+            # 読み込みではインスタンスの色が定義の色より優先される（_load_xcaf）。定義を 1 回しか使わない部品は
             # 定義にも付け、何回も使う部品はそのインスタンスにだけ付ける（ほかの配置の色を変えないため）。
             targets = [part.instance] if part.instance is not None else []
-            if uses(part) == 1:
+            if n_uses == 1 or part.instance is None:
                 targets.append(part.label)
             for lab in targets:
-                ct.SetColor(lab, color(pc), XCAFDoc_ColorType.XCAFDoc_ColorSurf)
-        # 面の色（部品の色と違う面だけ）。インスタンスが複数ある部品では、定義の面に付くので全部のインスタンスに効く。
+                set_or_unset(lab, pc)
+        # 面の色。ビューアは部品の色を変えるとその部品の面をすべてその色で描くので、元のファイルで面に個別の色が
+        # 付いていた面も合わせる（合わせないと、書き出したファイルではその面だけ前の色のまま残る）。
+        # 何回も使う部品の面の色は定義の面に付く（すべての配置に効く）。
         definition = st.GetShape_s(part.label)
         dmap = _index_map(definition, TopAbs_FACE)
         lmap = _index_map(part.shape, TopAbs_FACE)
@@ -503,16 +519,33 @@ def export_step_xcaf(data: dict[str, Any], parts: list, face_map, out: Path, sch
             fid = face_map.FindIndex(lmap.FindKey(j)) - 1
             if fid < 0 or fid >= n_faces:
                 continue
-            fc = changed_faces.get(fid)
-            if not fc:
+            explicit = fid in changed_faces
+            if not explicit and not part_changed:
                 continue
             sub = TDF_Label()
-            if not st.FindSubShape(part.label, dmap.FindKey(j), sub):
+            found = st.FindSubShape(part.label, dmap.FindKey(j), sub)
+            if explicit:
+                want = changed_faces[fid]
+            else:
+                # 部品の色だけを変えた面: 面に個別の色が付いていれば、ビューアに見えていた色（edited の faces[i].color）にする。
+                if not found or sub.IsNull() or _label_color(ct, sub) is None:
+                    continue
+                if n_uses > 1:
+                    # 定義の面の色を変えると、色を変えていない他の配置の面まで変わるので変えない。
+                    kept_face_colors.add(pi)
+                    continue
+                want = (faces_info[fid].get("color") if fid < len(faces_info) else None) or pc
+            if not found:
+                if not want:
+                    continue  # 色の無い面から色を外すことは無い
                 sub = st.AddSubShape(part.label, dmap.FindKey(j))
-            if not sub.IsNull():
-                ct.SetColor(sub, color(fc), XCAFDoc_ColorType.XCAFDoc_ColorSurf)
-                if uses(part) > 1:
-                    shared_defs.add(pi)
+            if sub.IsNull():
+                continue
+            if want and hex_of(_label_color(ct, sub)) == want.lower():
+                continue
+            set_or_unset(sub, want)
+            if explicit and n_uses > 1:
+                shared_defs.add(pi)
     for pi in sorted(hidden):
         part = parts[pi]
         if part.instance is not None:
@@ -540,8 +573,11 @@ def export_step_xcaf(data: dict[str, Any], parts: list, face_map, out: Path, sch
     finally:
         tmp.unlink(missing_ok=True)
     products = [p for p in (data.get("step") or {}).get("products") or [] if p.get("name")]
-    kept = {parts[pi].product for pi in range(len(parts)) if pi not in hidden}
-    attrs = {p["name"]: step_p21.material_rows(p.get("material") or []) + list(p.get("attributes") or []) for p in products if p["name"] in kept}
+    # 書き出したファイルに残る製品の属性を足す。parts は葉（部品）だけなので、アセンブリの製品も含めるよう、
+    # 隠した部品にしか使われていない製品だけを外す（見つからない製品名は add_attributes が飛ばす）。
+    visible_products = {parts[pi].product for pi in range(len(parts)) if pi not in hidden}
+    dropped = {parts[pi].product for pi in hidden if pi < len(parts)} - visible_products
+    attrs = {p["name"]: step_p21.material_rows(p.get("material") or []) + list(p.get("attributes") or []) for p in products if p["name"] not in dropped}
     text, n_attrs = step_p21.add_attributes(text, attrs)
     text = step_p21.set_header(text, header, "Locohane 3D viewer (Open CASCADE)")
     # ASCII だけの本文にする（OCCT が UTF-8 のまま書いた名前・属性を \X2\ にする）。
@@ -566,5 +602,10 @@ def export_step_xcaf(data: dict[str, Any], parts: list, face_map, out: Path, sch
         notes.append(f"{len(hidden)} hidden part(s) are not in the file.")
     if shared_defs:
         notes.append("Some face colors were set on a part used several times, so they apply to every copy of it.")
+    if kept_face_colors:
+        notes.append(
+            "Some recolored parts are used several times and have faces with their own color; those faces keep their "
+            "original color in the file (changing them would recolor every copy)."
+        )
     return notes
 

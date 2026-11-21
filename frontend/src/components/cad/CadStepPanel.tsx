@@ -4,9 +4,9 @@
  * - PMI: 寸法・幾何公差・データムの一覧。クリックでその PMI が指す面・エッジ・部品を選び、そこへ寄せる
  * - 属性: 選んだ部品の製品（部品が 1 つならその製品）の属性（品番・材質等）の表示と編集。編集は確定・保存で返す
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useI18n } from '../../i18n';
-import { pmiTargets, type CadAttribute, type CadData, type CadPmiItem, type CadSelection } from './cadData';
+import { partOf, pmiTargets, type CadAttribute, type CadData, type CadPmiItem, type CadSelection } from './cadData';
 
 /** 製品名 → 編集後の属性の一覧（編集した製品だけ）。 */
 export type CadAttributeEdits = Record<string, CadAttribute[]>;
@@ -21,6 +21,55 @@ interface Props {
 
 // サイドバーに並べる PMI の数の上限（多いときは先頭だけ）。
 const MAX_PMI_ROWS = 300;
+// 打ち終わった形の数（打っている途中の "1." "-" "1e" 等は含まない）。これに合えばすぐ値にする。
+const COMPLETE_NUMBER = /^-?\d+(\.\d+)?$/;
+
+/**
+ * 数の属性の値の入力欄。打っている途中の文字（"12." や "-"）は欄の中だけに持ち、数として読める形になったら値にする
+ * （打つたびに数へ直すと "12." の点が消えて 12.5 が打てず、空にすると型が外れて文字列になっていた）。
+ * 欄を離れたとき（Enter でも）に、数として読めればその数、空なら元の値に戻し、数でない文字なら型を外して文字列の属性にする。
+ */
+function NumberAttrInput({ row, placeholder, onCommit }: { row: CadAttribute; placeholder: string; onCommit: (next: CadAttribute) => void }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const shown = draft ?? String(row.value);
+  const commit = (text: string) => {
+    setDraft(null);
+    const trimmed = text.trim();
+    if (trimmed === '') return;
+    const num = Number(trimmed);
+    if (Number.isFinite(num)) {
+      if (num !== row.value) onCommit({ ...row, value: num });
+      return;
+    }
+    const { type: _type, ...rest } = row;
+    onCommit({ ...rest, value: text });
+  };
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={shown}
+      placeholder={placeholder}
+      aria-label={placeholder}
+      title={row.type ?? ''}
+      onChange={(e) => {
+        const text = e.target.value;
+        if (COMPLETE_NUMBER.test(text.trim())) {
+          const num = Number(text.trim());
+          if (num !== row.value) onCommit({ ...row, value: num });
+          // 打った文字のまま見せる（"1.50" を 1.5 に書き換えない）。
+          setDraft(String(num) === text ? null : text);
+          return;
+        }
+        setDraft(text);
+      }}
+      onBlur={(e) => commit(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+      }}
+    />
+  );
+}
 
 export function CadStepPanel({ data, selection, attributeEdits, onAttributeEdits, onSelectItems }: Props) {
   const { t } = useI18n();
@@ -33,8 +82,9 @@ export function CadStepPanel({ data, selection, attributeEdits, onAttributeEdits
   // 属性を見せる製品: 選んだ部品の製品。部品を選んでいなければ、製品が 1 つならそれ。
   const productName = useMemo(() => {
     for (const s of selection) {
-      const partId = s.kind === 'part' ? s.id : (s.kind === 'face' ? data.faces[s.id]?.part : data.edgeList[s.id]?.part);
-      const name = typeof partId === 'number' ? data.parts?.[partId]?.product : undefined;
+      // 要素の種類ごとの一覧から部品を引く（頂点の ID をエッジの一覧で引くと、別の部品の製品になる）。
+      const partId = partOf(data, s);
+      const name = partId !== null ? data.parts?.[partId]?.product : undefined;
       if (typeof name === 'string') return name;
     }
     return products.length === 1 ? (products[0].name ?? null) : null;
@@ -129,25 +179,22 @@ export function CadStepPanel({ data, selection, attributeEdits, onAttributeEdits
                       aria-label={t('cad.side.attrName')}
                       onChange={(e) => setRows(rows.map((r, k) => (k === i ? { ...r, name: e.target.value } : r)))}
                     />
-                    <input
-                      type="text"
-                      value={row.value === null || row.value === undefined ? '' : String(row.value)}
-                      placeholder={t('cad.side.attrValue')}
-                      aria-label={t('cad.side.attrValue')}
-                      title={row.type ?? ''}
-                      onChange={(e) =>
-                        setRows(
-                          rows.map((r, k) => {
-                            if (k !== i) return r;
-                            // 数値の属性は数値のまま返す（読めなければ文字列にして型を外す）。
-                            const num = Number(e.target.value);
-                            if (typeof r.value === 'number' && e.target.value.trim() !== '' && Number.isFinite(num)) return { ...r, value: num };
-                            const { type: _type, ...rest } = r;
-                            return { ...rest, value: e.target.value };
-                          })
-                        )
-                      }
-                    />
+                    {typeof row.value === 'number' ? (
+                      <NumberAttrInput
+                        row={row}
+                        placeholder={t('cad.side.attrValue')}
+                        onCommit={(next) => setRows(rows.map((r, k) => (k === i ? next : r)))}
+                      />
+                    ) : (
+                      <input
+                        type="text"
+                        value={row.value === null || row.value === undefined ? '' : String(row.value)}
+                        placeholder={t('cad.side.attrValue')}
+                        aria-label={t('cad.side.attrValue')}
+                        title={row.type ?? ''}
+                        onChange={(e) => setRows(rows.map((r, k) => (k === i ? { ...r, value: e.target.value } : r)))}
+                      />
+                    )}
                     <button type="button" aria-label={t('cad.side.attrDelete')} title={t('cad.side.attrDelete')} onClick={() => setRows(rows.filter((_, k) => k !== i))}>
                       ×
                     </button>

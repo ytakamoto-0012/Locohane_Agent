@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -34,6 +35,18 @@ _SUFFIX = ".json"
 _TMP_PREFIX = ".tmp_"
 # この時間より古い一時ファイルは書き込みの途中で止まったものとみなして消す（秒）。
 _STALE_TMP_SECONDS = 3600
+# キャッシュの項目の名前（cache_key の SHA-256 16 進 64 桁 + .json）。片付け・全消去はこの名前のものだけを消す
+# （cache_dir に他のデータの置き場を指定されても、キャッシュ以外の JSON を消さないため）。
+_ENTRY_NAME = re.compile(r"[0-9a-f]{64}\.json")
+_TMP_NAME = re.compile(r"\.tmp_.*\.json")
+
+
+def _is_entry(p: Path) -> bool:
+    return bool(_ENTRY_NAME.fullmatch(p.name))
+
+
+def _is_tmp(p: Path) -> bool:
+    return bool(_TMP_NAME.fullmatch(p.name))
 
 
 @functools.lru_cache(maxsize=1)
@@ -122,12 +135,12 @@ def prune(cache_dir: Path, max_bytes: int) -> int:
             continue
         if not p.is_file():
             continue
-        if p.name.startswith(_TMP_PREFIX):
+        if _is_tmp(p):
             if now - st.st_mtime > _STALE_TMP_SECONDS:
                 p.unlink(missing_ok=True)
                 removed += 1
             continue
-        if p.suffix == _SUFFIX:
+        if _is_entry(p):
             entries.append((st.st_mtime, st.st_size, p))
     total = sum(size for _, size, _ in entries)
     if max_bytes <= 0:
@@ -150,7 +163,7 @@ def clear(cache_dir: Path) -> int:
         return 0
     removed = 0
     for p in cache_dir.iterdir():
-        if p.is_file() and (p.suffix == _SUFFIX or p.name.startswith(_TMP_PREFIX)):
+        if p.is_file() and (_is_entry(p) or _is_tmp(p)):
             try:
                 p.unlink()
                 removed += 1

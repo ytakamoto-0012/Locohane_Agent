@@ -4690,7 +4690,8 @@ def load_config(
         cad_viewer_cache_dir=_resolve(
             PROJECT_ROOT,
             _sub_common_data_dir(
-                os.getenv("CAD_VIEWER_CACHE_DIR", cad_viewer.get("cache_dir", "${common_data_dir}/cad_cache")),
+                # 空のままだとプロジェクトのフォルダそのものを指してしまうので、空なら既定の置き場にする。
+                (os.getenv("CAD_VIEWER_CACHE_DIR") or cad_viewer.get("cache_dir", "") or "").strip() or "${common_data_dir}/cad_cache",
                 common_data_dir,
                 resolved_instance_name,
             ),

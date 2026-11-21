@@ -64,6 +64,11 @@ export interface CadColorOverrides {
   parts: ReadonlyMap<number, string | null>;
 }
 
+/** 選択を集合で引くときのキー（"種類:ID"）。 */
+export function selectionKey(kind: CadKind, id: number): string {
+  return `${kind}:${id}`;
+}
+
 /** 上書きの値。上書きが無ければ undefined（null は「色なし」の上書き）。 */
 export function overrideOf(map: ReadonlyMap<number, string | null>, id: number | undefined): string | null | undefined {
   return id !== undefined && map.has(id) ? (map.get(id) ?? null) : undefined;

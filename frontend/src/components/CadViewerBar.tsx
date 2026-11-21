@@ -12,6 +12,7 @@ import {
   pmiById,
   rgbText,
   sameSelection,
+  selectionKey,
   type BoxMode,
   type CadColorOverrides,
   type CadData,
@@ -357,9 +358,21 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
     setSelection((cur) => (cur.some((s) => sameSelection(s, item)) ? cur.filter((s) => !sameSelection(s, item)) : [...cur, item]));
   }, []);
   const boxPick = useCallback((items: CadSelection[], remove: boolean) => {
+    // 枠で囲んだ要素・今の選択はどちらも数万件になりうるので、集合で引く（配列どうしを探すと 2 乗の時間がかかる）。
     setSelection((cur) => {
-      if (remove) return cur.filter((s) => !items.some((i) => sameSelection(i, s)));
-      const added = items.filter((i) => !cur.some((s) => sameSelection(s, i)));
+      if (remove) {
+        const drop = new Set(items.map((i) => selectionKey(i.kind, i.id)));
+        const kept = cur.filter((s) => !drop.has(selectionKey(s.kind, s.id)));
+        return kept.length === cur.length ? cur : kept;
+      }
+      const have = new Set(cur.map((s) => selectionKey(s.kind, s.id)));
+      const added: CadSelection[] = [];
+      for (const i of items) {
+        const key = selectionKey(i.kind, i.id);
+        if (have.has(key)) continue;
+        have.add(key);
+        added.push(i);
+      }
       return added.length ? [...cur, ...added] : cur;
     });
   }, []);
@@ -909,7 +922,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
               type="button"
               className="ask-form-cancel"
               title={t('cad.saveTitle')}
-              disabled={saveState.kind === 'saving'}
+              disabled={saveState.kind === 'saving' || !!closing}
               onClick={() => void save()}
             >
               {saveState.kind === 'saving' ? t('cad.saving') : t('cad.save')}

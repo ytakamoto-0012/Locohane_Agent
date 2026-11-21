@@ -173,7 +173,9 @@ def _load_xcaf(path: str, fmt: str) -> list[Part]:
             ref_name = _label_name(ref)
             label = ref
             name = name or ref_name
-            own_color = _label_color(color_tool, ref) or own_color
+            # インスタンス（配置）に付いた色は、定義の色より優先する（同じ部品を何回も使うとき、配置ごとに色を変えられる。
+            # ビューアの「保存」も、何回も使う部品の色はインスタンスに付ける。step_xcaf.export_step_xcaf）。
+            own_color = _label_color(color_tool, instance) or _label_color(color_tool, ref) or inherited
         path_names = [*names, name or f"part{len(parts) + 1}"]
         if shape_tool.IsAssembly_s(label):
             comps = TDF_LabelSequence()

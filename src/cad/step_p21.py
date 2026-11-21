@@ -470,13 +470,17 @@ def read_step_info(path: str | Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+_TYPE_NAME = re.compile(r"[A-Z][A-Z_]*")
+
+
 def _value_text(value: Any, vtype: str | None) -> tuple[str, str]:
     """属性の値 → (実体の型, 引数)。文字列は DESCRIPTIVE、数値は VALUE_REPRESENTATION_ITEM。"""
     if isinstance(value, bool):
         value = "true" if value else "false"
     if isinstance(value, (int, float)) and vtype not in (None, "", "string"):
         kind = vtype.upper() if vtype else ("COUNT_MEASURE" if isinstance(value, int) else "REAL")
-        if kind in ("REAL", "INTEGER") or kind.endswith("_MEASURE"):
+        # 型名はそのまま本文に書くので、英字と _ だけのもの（LENGTH_MEASURE 等）に限る（ほかは型なしの数として書く）。
+        if _TYPE_NAME.fullmatch(kind) and (kind in ("REAL", "INTEGER") or kind.endswith("_MEASURE")):
             num = repr(float(value)) if kind != "INTEGER" and kind != "COUNT_MEASURE" else str(int(value))
             if "." not in num and "e" not in num.lower() and kind not in ("INTEGER", "COUNT_MEASURE"):
                 num += "."
