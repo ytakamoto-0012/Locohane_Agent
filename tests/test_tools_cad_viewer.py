@@ -552,3 +552,74 @@ async def test_cadquery_code_error_is_returned(env) -> None:
     assert out.startswith("Error: making the 3D model failed (exit code 1).")
     assert "RuntimeError: boom" in out
     assert _viewer.shown == []
+
+
+@pytest.mark.asyncio
+async def test_screenshot_can_be_turned_off(env, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(tools._state, "_LLM_CONFIG", SimpleNamespace(cad_viewer_screenshot_enabled=False, bin_path=[]))
+    _viewer.response = {"submitted": True, "selected": [{"kind": "face", "id": 1}], "message": "この面に穴を開けて", "screenshot": _png_data_url()}
+    content, artifact = await _call_with_artifact(file_path=str(_cube_stl(tmp_path)))
+    assert _viewer.shown[0]["screenshot_long_side"] == 0
+    assert artifact is None and "screenshot" not in json.loads(content)
+    assert not list(tools._state._DEFAULT_WORKDIR.glob("_tmp_*/cad_screenshot_*.png"))
+
+
+@pytest.mark.asyncio
+async def test_compare_with_rejects_mesh_files_and_missing_files(env, tmp_path) -> None:
+    stl = str(_cube_stl(tmp_path))
+    assert "STL and DXF cannot be compared" in await _call(file_path=stl, compare_with=stl)
+    assert (await _call(file_path=stl, compare_with=str(tmp_path / "none.step"))).startswith("Error: compare_with: the file does not exist")
+    assert _viewer.shown == []
+
+
+@pytest.mark.asyncio
+async def test_model_check_features_and_diff_are_returned(env, tmp_path) -> None:
+    cq = pytest.importorskip("cadquery")
+    old = tmp_path / "old.step"
+    new = tmp_path / "new.step"
+    plate = cq.Workplane().box(40, 30, 10)
+    cq.exporters.export(plate, str(old))
+    cq.exporters.export(plate.faces(">Z").workplane().hole(6), str(new))
+    _viewer.response = {"submitted": True, "selected": []}
+    out = json.loads(await _call(file_path=str(new), compare_with=str(old)))
+    model = out["model"]
+    assert model["check"]["solids"] == 1 and model["check"]["valid"] is True
+    assert model["features"]["holes"] == 1 and model["features"]["groups"][0]["through"] is True
+    assert len(model["digest"]) == 16
+    assert model["step"]["ap"] in ("AP214", "AP242")
+    diff = out["diff"]
+    assert diff["volume"]["removed"] == pytest.approx(3.14159265 * 9 * 10, rel=1e-3)
+    assert diff["features"]["holes"] == {"before": 0, "after": 1}
+    assert diff["overlay"].startswith("shown in the viewer")
+    # 重ね表示のメッシュはビューアにだけ渡し、LLM への戻り値には入れない。
+    assert "removed" in _viewer.shown[0]["data"]["diff"] and "removed" not in diff
+
+
+@pytest.mark.asyncio
+async def test_attribute_edits_are_validated_and_reported(env, tmp_path) -> None:
+    pytest.importorskip("cadquery")
+    from src.cad import step_p21
+
+    cq = pytest.importorskip("cadquery")
+    src = tmp_path / "plate.step"
+    cq.exporters.export(cq.Workplane().box(10, 10, 2), str(src))
+    text, enc = step_p21.read_text(src)
+    name = step_p21.read_products(text)[0]["name"]
+    text, _n = step_p21.add_attributes(text, {name: [{"name": "品番", "value": "PN-1"}]})
+    src.write_bytes(text.encode(enc))
+    _viewer.response = {
+        "submitted": True,
+        "selected": [],
+        "attributes": {name: [{"name": "品番", "value": "PN-2"}, {"name": "表面処理", "value": "黒染め"}, {"name": "", "value": "x"}], "unknown": [{"name": "a", "value": 1}]},
+    }
+    out = json.loads(await _call(file_path=str(src)))
+    assert out["attribute_change_count"] == 2
+    sel = json.loads(open(out["selection_file"], encoding="utf-8").read())
+    assert sel["attribute_changes"] == [
+        {"product": name, "name": "品番", "from": "PN-1", "to": "PN-2"},
+        {"product": name, "name": "表面処理", "from": None, "to": "黒染め"},
+    ]
+    # 自動で保存したビューア用データには編集後の属性が入る。
+    edited = json.loads(open(out["viewer_data"], encoding="utf-8").read())
+    assert edited["step"]["products"][0]["attributes"] == [{"name": "品番", "value": "PN-2"}, {"name": "表面処理", "value": "黒染め"}]
+    assert "属性の変更 2 件" in _viewer.echoed[-1] or "2 attribute change(s)" in _viewer.echoed[-1]

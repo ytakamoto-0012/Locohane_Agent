@@ -59,6 +59,29 @@ def _options(raw: dict[str, Any]):
     )
 
 
+def _attach_diff(data: dict[str, Any], shape: Any, raw: dict[str, Any]) -> None:
+    """options の compare_with（前の版の CAD ファイルかビューア用データ）があれば、比べた結果を data["diff"] に入れる。
+
+    比べられなくても形の表示はできるので、失敗は data["diff"] = {"error": ...} にして続ける。
+    """
+    prev = raw.get("compare_with")
+    if not prev:
+        return
+    try:
+        from src.cad.compare import CompareError, compare, load_previous
+
+        old, label = load_previous(prev)
+        diff = compare(old, shape, data, _options(raw), int(raw.get("max_triangles", 500_000)))
+        diff["previous"] = label
+    except ImportError as e:
+        diff = {"error": f"cadquery is not installed ({e})"}
+    except CompareError as e:
+        diff = {"error": str(e)}
+    except Exception as e:  # noqa: BLE001 - OCP の C++ 例外は Python の別の型で来る
+        diff = {"error": f"could not compare with the previous version ({type(e).__name__}: {e})"}
+    data["diff"] = diff
+
+
 def _fail(message: str) -> None:
     print(message, file=sys.stderr)
     sys.exit(EXIT_FAILED)
@@ -118,6 +141,7 @@ class CodeCollector:
         except Exception as e:  # noqa: BLE001 - OCP の C++ 例外は Python の別の型で来る
             _fail(f"Error: could not make the viewer data from the shape ({type(e).__name__}: {e})")
             return
+        _attach_diff(data, shape, raw_options)
         _done(data, out_path)
 
 
@@ -169,13 +193,19 @@ def main(argv: list[str] | None = None) -> None:
         _done(data, args.out)
         return
     try:
-        from src.cad.export_mesh import CadLoadError, cad_file_to_viewer_data
+        import cadquery as cq
+
+        from src.cad.export_mesh import CadLoadError, load_cad_file, shapes_to_viewer_data
         from src.cad.mesh_data import TooManyTrianglesError
     except ImportError as e:
         _fail(f"Error: cadquery is not installed ({e}), so {fmt} files cannot be read (STL works without it). Install it with pip install -r requirements.txt.")
         return
     try:
-        data = cad_file_to_viewer_data(path, fmt, _options(raw))
+        parts, units = load_cad_file(path, fmt)
+        data = shapes_to_viewer_data(parts, source={"kind": "file", "format": fmt, "path": str(path)}, units=units, options=_options(raw))
+        if raw.get("compare_with"):
+            shapes = [cq.Shape.cast(p.shape) for p in parts]
+            _attach_diff(data, shapes[0] if len(shapes) == 1 else cq.Compound.makeCompound(shapes), raw)
     except (CadLoadError, TooManyTrianglesError) as e:
         _fail(f"Error: could not read the {fmt} file: {e}")
         return

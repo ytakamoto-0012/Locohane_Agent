@@ -5,6 +5,9 @@
 - STEP / IGES / BREP / BIN / CadQuery コード → STEP（部品の名前・部品の色・面の色。隠した部品は含めない）。
   形は元のファイル（コードのときはビューア用データを作ったときに書いた BREP）から読み直す。面の番号は
   shapes_to_viewer_data と同じ順になるので、ビューア用データの面の色をそのまま当てられる。cadquery が要る。
+  元が STEP なら、読み直した XCAF の文書に変更を当てて書くので、PMI（GD&T）・レイヤー・材料・検証プロパティ・
+  ユーザー定義属性・ヘッダー（作成者・組織・作成システム）も残る（src/cad/step_xcaf.py）。スキーマは
+  ``data["exportOptions"]["step_write_schema"]``（[cad_viewer] step_write_schema。auto は元と同じ、元が STEP でなければ AP242）。
 - DXF → DXF（元のファイルの写しのレイヤーの色を変え、隠したレイヤーを非表示にする。面ごとの色は書けない）。
 - STL → 色付きバイナリ STL（VisCAM / SolidView 方式。面＝平面領域ごとの色）。numpy だけで動く。
 """
@@ -162,6 +165,15 @@ def _export_step(data: dict[str, Any], out: Path) -> list[str]:
     hidden = _hidden_parts(data)
     if part_info and len(part_info) != len(parts):
         raise ExportError("The original file has changed since it was shown (the number of parts differs). Show it again and save.")
+    schema = str((data.get("exportOptions") or {}).get("step_write_schema") or "auto")
+    if (data.get("source") or {}).get("format") == "STEP" and parts and parts[0].label is not None:
+        # 元が STEP なら、読み直した XCAF の文書に変更を当てて書く（PMI・レイヤー・材料・属性・ヘッダーを残す）。
+        from .step_xcaf import export_step_xcaf
+
+        try:
+            return export_step_xcaf(data, parts, face_map, out, schema)
+        except ValueError as e:
+            raise ExportError(str(e)) from e
 
     stem = Path((data.get("source") or {}).get("path") or "model").stem or "model"
     assy = cq.Assembly(name=stem)
@@ -187,8 +199,21 @@ def _export_step(data: dict[str, Any], out: Path) -> list[str]:
         written += 1
     if not written:
         raise ExportError("Every part is hidden, so there is nothing to write.")
-    assy.export(str(out), "STEP")
-    notes = []
+    from cadquery.occ_impl.assembly import toCAF
+
+    from . import step_p21
+    from .step_xcaf import fix_names, write_schema_id, write_xcaf
+
+    schema_id = write_schema_id(schema, None)
+    _top, doc = toCAF(assy, coloredSTEP=True)
+    fix_names(doc)
+    try:
+        write_xcaf(doc, out, schema_id)
+    except ValueError as e:
+        raise ExportError(str(e)) from e
+    text, _enc = step_p21.read_text(out)
+    out.write_bytes(step_p21.escape_non_ascii(text).encode("ascii", "replace"))
+    notes = [f"Written as STEP {({3: 'AP203', 4: 'AP214', 5: 'AP242'})[schema_id]}."]
     if hidden:
         notes.append(f"{len(hidden)} hidden part(s) are not in the file.")
     return notes

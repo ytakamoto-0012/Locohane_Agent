@@ -1506,9 +1506,17 @@ DESCRIPTIONS: dict[str, str] = {
         'Upper limit of the angle (degrees) between normals when grouping the triangles of an STL file into one "face" (planar region).\n'
         'A larger value for a curved STL makes fewer faces, but their information as a "plane" (the normal) becomes rough.'
     ),
+    'cad_viewer.screenshot_enabled': (
+        'Whether to capture the viewer screen when the user types an instruction and presses "Confirm", and show it to the LLM together with the instruction.\n'
+        'Images use many tokens, and the numbers (model.check, diff) are a more reliable check of the shape. Set false for a model that cannot read images, or when the numbers are enough.'
+    ),
     'cad_viewer.screenshot_long_side_pixels': (
         'When the user types an instruction and presses "Confirm", the viewer screen at that moment is captured, saved as PNG and shown to the LLM together with the instruction. This is the long side of that image (pixels).\n'
         'Images use many tokens, so keep it small. Nothing is captured when the instruction is empty. 0 or less captures nothing (do so for a model that cannot read images).'
+    ),
+    'cad_viewer.step_write_schema': (
+        'Schema of the STEP file written by the viewer\'s "Save": auto (the same as the original STEP; AP242 when the original is not STEP), AP203, AP214 or AP242.\n'
+        'PMI (dimensions, geometric tolerances, datums) can only be written in AP242. Use AP214 only when the receiving CAD is old and cannot read AP242.'
     ),
     'plan.allow_badge_unlock': (
         'Behavior when clicking the Plan Mode / Edit Automatically badge shown near the send button.\n'

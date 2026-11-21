@@ -138,6 +138,8 @@ export class CadScene {
   // 空間の原点 (0, 0, 0) に描く XYZ 軸（X 赤・Y 緑・Z 青、ラベル付き）。
   private originAxes: THREE.Group | null = null;
   private originAxesLine: LineSegments2 | null = null;
+  // 前の版からの変化（緑 = 増えた部分、赤 = 削った部分）。選択・当たり判定の対象にはしない。
+  private diffOverlay: THREE.Group | null = null;
 
   constructor(container: HTMLElement, data: CadData, callbacks: CadSceneCallbacks, colors: CadSceneColors) {
     this.container = container;
@@ -174,6 +176,7 @@ export class CadScene {
     this.buildPoints();
     this.buildPivotMarker();
     this.buildOriginAxes();
+    this.buildDiffOverlay();
     this.addAxes();
 
     // ArcballControls: 画面を基準に回す（縦ドラッグは常に画面の横軸まわりの回転になる）。CAD ソフトに近い操作感。
@@ -324,6 +327,45 @@ export class CadScene {
     this.originAxes = group;
     this.originAxesLine = line;
     this.scene.add(group);
+  }
+
+  /**
+   * 前の版からの変化を半透明で重ねる（緑 = 増えた部分、赤 = 削った部分）。削った部分は今の形の中や外にあるので、
+   * 隠れないよう奥行きの判定をせず手前に重ねる。
+   */
+  private buildDiffOverlay(): void {
+    const diff = this.data.diff;
+    if (!diff) return;
+    const group = new THREE.Group();
+    for (const [tris, color] of [
+      [diff.added, '#30a46c'],
+      [diff.removed, '#e5484d']
+    ] as const) {
+      if (!tris) continue;
+      const indices = decodeUint32(tris.indices);
+      if (!indices.length) continue;
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(decodeFloat32(tris.positions), 3));
+      geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+      const material = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.45, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.renderOrder = 2;
+      group.add(mesh);
+    }
+    if (!group.children.length) return;
+    this.diffOverlay = group;
+    this.scene.add(group);
+  }
+
+  /** 前の版からの変化があるか（ビューアは「差分」ボタンを出す）。 */
+  hasDiffOverlay(): boolean {
+    return this.diffOverlay !== null;
+  }
+
+  /** 前の版からの変化の重ね表示を見せる・隠す。 */
+  setDiffVisible(on: boolean): void {
+    if (this.diffOverlay) this.diffOverlay.visible = on;
+    this.requestRender();
   }
 
   /** 原点の XYZ 軸を見せる・隠す。 */

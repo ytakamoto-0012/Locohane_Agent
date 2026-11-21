@@ -1143,8 +1143,12 @@ class Config:
         cad_viewer_angular_deflection_deg: 三角形化の角度の許容差（度。[cad_viewer].angular_deflection_deg）。
         cad_viewer_stl_region_angle_deg: STL の三角形を 1 つの平面領域（面）にまとめる法線の角度差の上限
             （度。[cad_viewer].stl_region_angle_deg）。
+        cad_viewer_screenshot_enabled: 指示付きで確定したときにビューアの画面を撮って LLM へ見せるか
+            （[cad_viewer].screenshot_enabled）。False なら撮らない（数値だけで確かめる・画像を読めないモデル向け）。
         cad_viewer_screenshot_long_side_pixels: 指示付きで確定したときに撮るビューアの画面の長辺
             （ピクセル。[cad_viewer].screenshot_long_side_pixels）。PNG に保存して指示と一緒に LLM へ見せる。0 以下で撮らない。
+        cad_viewer_step_write_schema: ビューアの「保存」で書く STEP のスキーマ（[cad_viewer].step_write_schema）。
+            auto（元の STEP と同じ、元が STEP でなければ AP242）・AP203・AP214・AP242。PMI（GD&T）は AP242 でだけ書ける。
         show_cad_viewer_timeout_seconds: 3D ビューアで利用者が選択を確定するのを待つ秒数
             （[user_response_timeouts].show_cad_viewer_seconds）。0 以下は無期限待ち。
     """
@@ -1659,7 +1663,9 @@ class Config:
     cad_viewer_linear_deflection_ratio: float = 0.001
     cad_viewer_angular_deflection_deg: float = 20.0
     cad_viewer_stl_region_angle_deg: float = 1.0
+    cad_viewer_screenshot_enabled: bool = True
     cad_viewer_screenshot_long_side_pixels: int = 512
+    cad_viewer_step_write_schema: str = "auto"
     show_cad_viewer_timeout_seconds: int = 0
 
 
@@ -1886,6 +1892,17 @@ def _sub_common_data_dir(value: str, common_data_dir: Path, instance_name: str) 
     if "${common_data_dir}" not in value:
         return value
     return value.replace("${common_data_dir}", str(common_data_dir))
+
+
+def _cad_step_schema(value: Any) -> str:
+    """[cad_viewer].step_write_schema を auto / AP203 / AP214 / AP242 のどれかにする（それ以外はエラー）。"""
+    text = str(value or "auto").strip()
+    upper = text.upper()
+    if upper == "AUTO":
+        return "auto"
+    if upper in ("AP203", "AP214", "AP242"):
+        return upper
+    raise ValueError(f"[cad_viewer].step_write_schema must be auto, AP203, AP214 or AP242 (got {text!r})")
 
 
 def _as_bool(value: bool | str) -> bool:
@@ -4659,9 +4676,11 @@ def load_config(
             os.getenv("CAD_VIEWER_STL_REGION_ANGLE_DEG", cad_viewer.get("stl_region_angle_deg", 1)),
             "[cad_viewer].stl_region_angle_deg",
         ),
+        cad_viewer_screenshot_enabled=_as_bool(os.getenv("CAD_VIEWER_SCREENSHOT_ENABLED", cad_viewer.get("screenshot_enabled", True))),
         cad_viewer_screenshot_long_side_pixels=int(
             os.getenv("CAD_VIEWER_SCREENSHOT_LONG_SIDE_PIXELS", cad_viewer.get("screenshot_long_side_pixels", 512))
         ),
+        cad_viewer_step_write_schema=_cad_step_schema(os.getenv("CAD_VIEWER_STEP_WRITE_SCHEMA", cad_viewer.get("step_write_schema", "auto"))),
         show_cad_viewer_timeout_seconds=int(os.getenv("SHOW_CAD_VIEWER_TIMEOUT_SECONDS", timeouts.get("show_cad_viewer_seconds", 0))),
     )
 

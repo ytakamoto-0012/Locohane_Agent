@@ -1856,6 +1856,7 @@ elements are not put in the return value, not even as a list of IDs. Everything 
 (one entry per element under `selected`, color changes under `color_changes`) and registered as an `@N`. The return value is a JSON summary whose size does
 not depend on the selection: the number selected (`selected_count`, and `selected_by_kind` per kind), the number of color changes (`color_change_count`),
 the `@N` of the selection file (`selection_file`; the LLM reads only the fields it needs with `json_query`), and a model summary (`model`).
+Besides format, size and element counts, `model` has the shape check (`check`), the hole / boss summary (`features`), the digest (`digest`) and the STEP summary (`step`) (see below).
 The answer left in the chat (saved in the conversation as the user's message) is also only the counts per kind, such as "Selected 12 Face(s)".
 It also returns an `@N` of the viewer data (`viewer_data`); passing it as `file_path` shows the same shape again at once.
 
@@ -1883,7 +1884,7 @@ and does not stop at the top or bottom; in exchange, the up direction is not kep
   Changed colors are not written to the original CAD file; they reach the LLM as `color_changes` (`{kind, id, from, to}`) in the selection file (the return value has only their count).
 - **Instruction box**: an instruction for the AI typed in the box under the viewer (optional, e.g. "make a 5 mm hole in the selected face") is returned with the
   selection and color changes on "Confirm" (Ctrl+Enter). It comes first in the return value as `user_instruction` and stays in the chat with the selection (up to 4000 characters).
-  With an instruction, the viewer screen at the moment of confirming (selected elements highlighted) is captured as a PNG whose long side is
+  With an instruction (and `[cad_viewer].screenshot_enabled` true), the viewer screen at the moment of confirming (selected elements highlighted) is captured as a PNG whose long side is
   `[cad_viewer].screenshot_long_side_pixels` (default 512), saved to `cad_screenshot_<date time>.png` in this thread's `_tmp_` folder and registered as an `@N`.
   The return value has that `@N` as `screenshot`, and the image is shown to the LLM the same way as `analyze_image` (an image message right after the tool result).
   Nothing is captured when the instruction is empty or the setting is 0 or less.
@@ -1912,11 +1913,72 @@ and does not stop at the top or bottom; in exchange, the up direction is not kep
   `viewer_data` in the return value (after the error message when closed). Colors go into both the faces' `color` and the triangle vertex colors,
   hidden parts into `viewState`, and the list of changes into `edits.color_changes`, so passing it as `file_path` reopens the model as you left it.
 
-**Settings**: `[cad_viewer]` (`enabled`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`, `screenshot_long_side_pixels`) and
+**Checking the shape with numbers**: in earlier AI CAD tools (agentcad, build123d-mcp and a survey comparing them), the most dangerous failure
+was reporting success for a wrong shape, and checking pictures agreed with people less often than exact B-rep checks while costing more tokens.
+So for B-rep shapes the tool returns numbers before pictures.
+
+- **Shape check** (`model.check`, `check_shape` in `src/cad/export_mesh.py`): numbers of solids and shells, whether the B-rep is valid
+  (`BRepCheck_Analyzer`), edges that belong to only one face (`openEdges`; 0 for a closed solid; degenerated edges and seams are not counted),
+  volume, surface area, and warnings (invalid B-rep, a solid that is not closed, several solids in a single part = a union did not fuse them, etc.).
+- **Holes and bosses** (`model.features`, `src/cad/features.py`): inward cylinders (`concave` on the face info) are holes and outward ones are bosses;
+  faces on the same axis with the same radius that share edges are grouped (only full cylinders, so fillets are not counted). A hole is blind when the
+  face beyond its end circle fits inside the circle (a bottom or a drill point), otherwise through. The summary groups them by type, diameter, depth and
+  through/blind (up to 12 groups); each feature (axis, faces) is under `features` in the viewer data and faces have `feature` (e.g. `hole:3`).
+  The viewer shows e.g. "Hole ⌀5 through" when hovering a face.
+- **Digest** (`model.digest`): a 16-character value made from the order and geometry of faces, edges and vertices. Element IDs are positions, so after
+  the shape changes the same ID can point at another element; the LLM is told that IDs are valid only for the shape with this digest.
+
+**Comparing with the previous version** (`compare_with`, `src/cad/compare.py`): give the previous version (STEP, IGES, BREP, BIN, or viewer data of
+one; viewer data of CadQuery code uses the `.brep` kept next to it) and the result has `diff`: common, added (new − old) and removed (old − new)
+volumes by exact B-rep booleans (with a note when common + added != new), holes and bosses added or removed (changed groups only), changes in solid
+count, size and element counts, whether IDs still apply (`ids_unchanged`), and warnings (exactly the same volume = the edit had no effect, the solid
+count changed, the new shape is not a valid B-rep, etc.). The viewer shows added material in green and removed material in red ("Changes" button);
+the triangles of the overlay are not in the result for the LLM. STL and DXF cannot be compared.
+The tool description tells the LLM to (1) ask the user (`ask_user_choice`) instead of guessing a missing size, (2) after changing a model with code,
+compare with the previous version and check `model.check` and `diff` before saying the edit is done, and (3) fix an unintended change at most twice,
+then ask the user.
+
+**STEP attributes and PMI** (`src/cad/step_xcaf.py`, `src/cad/step_p21.py`): for a STEP file the viewer data has `step`, and `model.step` has a summary
+(AP and edition, originating system, PMI counts and up to 20 PMI texts, attribute counts and names, materials, layers, warnings).
+
+- **Header**: AP203 (`CONFIG_CONTROL_DESIGN`), AP203 ed2, AP214 (`AUTOMOTIVE_DESIGN`) or AP242 from `FILE_SCHEMA`, and the AP242 edition
+  (schema version 1 = ed1, 3 = ed2, 4 = ed3); author, organization, originating system etc. from `FILE_NAME`.
+- **Products and attributes**: product id, name and description, and the `PROPERTY_DEFINITION`s on its `PRODUCT_DEFINITION` (the CAx-IF User Defined
+  Attributes way; strings, numbers and numbers with a unit), materials (`material property`) and validation properties (`geometric validation
+  property`; `step.warnings` tells when the volume written in the file differs from the geometry). In an assembly they are copied to the parts
+  (`parts[].product`, `attributes`, `material`). OCCT cannot list user-defined attributes from Python and does not write them, and it takes any string
+  attribute on a product as its material, so these are read from the P21 text directly (standard library only).
+- **PMI**: dimensions (type, value, upper and lower tolerances, tolerance class), geometric tolerances (type, value, material condition, datums) and datums
+  are read with OCCT's XCAF (`SetGDTMode`), and the faces, edges and parts they are on are converted to viewer IDs (`pmi` on the face info, e.g. `dim:0`).
+  Texts look like `⌀10 +0.1/-0.05`. OCCT 7.9 does not convert dimension values (it does convert tolerances) in STEP files whose length unit is inch etc.,
+  so when the ratio between diameter / radius dimensions on cylinders or spheres and the geometry agrees, length dimensions are converted to mm
+  (`step.pmi_units_note`; nothing is converted when no dimension can be checked).
+- **Layers**: layer names and the parts and faces on them.
+- **Text**: `\X2\`, `\X4\`, `\X\` and `\S\` encodings are decoded (Japanese names and attributes). Files that write non-ASCII as raw UTF-8 are also read,
+  and Japanese names in STEP files written by CadQuery (double UTF-8) are repaired.
+
+The viewer's side panel shows the STEP AP and edition, originating system and warnings, the PMI list (click to select the faces etc. a dimension or
+tolerance is on), and the attributes and material of the product of the selected part (or the only product). Attributes can be edited, added and deleted,
+and are returned on confirm, close and save (`attribute_change_count` in the result, `attribute_changes` (`{product, name, from, to}`) in the selection
+file, and in the viewer data saved automatically).
+
+**Saving STEP**: when the original is STEP, the original file is read again into an XCAF document with the same settings, the viewer's colors and hidden
+parts are applied (hidden parts are removed as instances, and definitions no longer used are removed too) and it is written. OCCT writes PMI, layers and
+validation properties; user-defined attributes (as edited), materials and the original header's author, organization, originating system and
+authorization, which OCCT does not write, are added to the P21 text (preprocessor `Locohane 3D viewer (Open CASCADE)`). Non-ASCII characters are written
+as `\X2\`, so the text is ASCII only. The schema is `[cad_viewer] step_write_schema` (`auto` = the same as the original, AP242 when the original is not STEP).
+PMI can only be written in AP242; when writing AP203 / AP214, or when OCCT cannot write the PMI (some PMI written by real CAD systems, such as NIST CTC-01),
+the file is written without PMI and `notes` says so (the original file keeps its PMI). Saving from other sources (IGES, BREP, CadQuery code) follows the
+same schema setting.
+
+**Settings**: `[cad_viewer]` (`enabled`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`, `screenshot_enabled`, `screenshot_long_side_pixels`, `step_write_schema`) and
 `[user_response_timeouts] show_cad_viewer_seconds` (default 0 = no limit). It is registered in `[main_agent_tool_guard] allow_entries` so the main agent can call it directly.
 It is not given to sub-agents (it shows something on the screen).
 
-**Out of scope**: CadQuery's own assembly files (`.xml`, `.xbf`), other mesh formats such as OBJ, glTF, PLY and 3MF, and selecting vertices of STL.
+**Out of scope**: CadQuery's own assembly files (`.xml`, `.xbf`), other mesh formats such as OBJ, glTF, PLY and 3MF, selecting vertices of STL,
+the STEP AP242 XML format (ISO 10303-3001; the JAMA standard attributes are defined in it, and OCCT cannot read it), compressed STEP (`.stpZ`),
+drawing PMI in the viewer (dimension lines, notes) and editing PMI, user-defined attributes on faces (shape aspects), and per-instance face colors in an
+assembly that uses the same part several times (they go on the definition, so they apply to every copy).
 
 ## Automatic tuning loop for prompt assets (evals/)
 
@@ -2063,7 +2125,9 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[cad_viewer]` | `linear_deflection_ratio` | Tolerance when splitting curved surfaces into triangles (ratio to the diagonal length of the shape, default 0.001) | `CAD_VIEWER_LINEAR_DEFLECTION_RATIO` |
 | `[cad_viewer]` | `angular_deflection_deg` | Angular tolerance when splitting curved surfaces into triangles (degrees, default 20) | `CAD_VIEWER_ANGULAR_DEFLECTION_DEG` |
 | `[cad_viewer]` | `stl_region_angle_deg` | Upper limit of the angle between normals when grouping STL triangles into one face (planar region) (degrees, default 1) | `CAD_VIEWER_STL_REGION_ANGLE_DEG` |
+| `[cad_viewer]` | `screenshot_enabled` | Whether to capture the viewer screen and show it to the LLM when confirming with an instruction (default `true`; `false` for a model that cannot read images or when the numbers are enough) | `CAD_VIEWER_SCREENSHOT_ENABLED` |
 | `[cad_viewer]` | `screenshot_long_side_pixels` | Long side (pixels) of the viewer screenshot captured and shown to the LLM when confirming with an instruction (default 512; 0 or less captures nothing) | `CAD_VIEWER_SCREENSHOT_LONG_SIDE_PIXELS` |
+| `[cad_viewer]` | `step_write_schema` | Schema of the STEP file written by "Save": `auto` (the same as the original STEP, AP242 when the original is not STEP; default), `AP203`, `AP214` or `AP242`. PMI can only be written in AP242 | `CAD_VIEWER_STEP_WRITE_SCHEMA` |
 | `[plan]` | `allow_badge_unlock` | Whether to allow switching the Plan Mode badge both ways | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | Whether to reset `plan_approved` unconditionally back to Plan Mode when `create_plan` is called again in the approved (Edit Automatically) state. If `false`, only the steps are replaced while keeping the approval | `PLAN_RESET_APPROVAL_ON_RECREATE` |
 | `[plan]` | `reset_approval_on_new_message` | Whether to reset `plan_approved` unconditionally back to Plan Mode on every new user message. If `false`, the approval is kept across messages (after `thinking_loop_guard` reaches its retry limit, re-approval is not needed even when the user sends a message to continue) | `PLAN_RESET_APPROVAL_ON_NEW_MESSAGE` |

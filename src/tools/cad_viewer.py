@@ -30,6 +30,8 @@ from langchain_core.tools import tool
 
 from ..ask_relay import ask_turn
 from ..cad.formats import format_of, supported_extensions_text
+from ..cad.features import summarize_features
+from ..cad.step_summary import summarize_step
 from ..cad.mesh_data import FORMAT as VIEWER_FORMAT
 from ..cad.mesh_data import apply_view_edits, write_viewer_json
 from ..i18n import t
@@ -64,13 +66,38 @@ def _setting(name: str, default: Any) -> Any:
     return getattr(_state._LLM_CONFIG, name, default) if _state._LLM_CONFIG is not None else default
 
 
-def _options() -> dict[str, Any]:
-    return {
+def _options(compare_with: str = "") -> dict[str, Any]:
+    out: dict[str, Any] = {
         "linear_deflection_ratio": _setting("cad_viewer_linear_deflection_ratio", 0.001),
         "angular_deflection_deg": _setting("cad_viewer_angular_deflection_deg", 20.0),
         "max_triangles": _setting("cad_viewer_max_triangles", 500_000),
         "stl_region_angle_deg": _setting("cad_viewer_stl_region_angle_deg", 1.0),
     }
+    if compare_with:
+        out["compare_with"] = compare_with
+    return out
+
+
+# 比べる前の形に使える形式（B-rep を持つもの。ビューア用データは元の形のファイルを読み直す）。
+_COMPARABLE_FORMATS = ("STEP", "IGES", "BREP", "BIN", "VIEWER_JSON")
+
+
+def _resolve_compare_with(value: str) -> str:
+    """compare_with（絶対パスか @N）を絶対パスにする。使えなければ "Error: ..." を返す。"""
+    resolved, err = _resolve_path_memory_token(value)
+    if err:
+        return f"Error: compare_with: {err}"
+    path = Path(resolved)
+    if not path.is_absolute():
+        path = _resolve_exec_workdir() / path
+    if not path.is_file():
+        return f"Error: compare_with: the file does not exist: {path}"
+    if format_of(path) not in _COMPARABLE_FORMATS:
+        return (
+            f"Error: compare_with must be a STEP/IGES/BREP/BIN file or viewer_data of one (got {path.suffix!r}; "
+            "STL and DXF cannot be compared)."
+        )
+    return str(path)
 
 
 def _tail(text: str) -> str:
@@ -84,6 +111,7 @@ async def show_cad_viewer(
     file_path: str = "",
     code: str = "",
     select: list[SelectKind] | None = None,
+    compare_with: str = "",
 ) -> tuple[str, dict | None]:
     """Show a 3D model in an interactive viewer in the chat, and return the elements the user selects.
 
@@ -114,9 +142,26 @@ async def show_cad_viewer(
       writes are limited to the working directory. Files it writes (e.g. an exported .step) are
       registered as @N.
 
+    compare_with: the previous version of the model (a STEP/IGES/BREP/BIN file, or viewer_data this
+      tool returned, as an absolute path or @N). The result then has "diff": volumes before / after,
+      common, added and removed material (exact B-rep booleans), holes and bosses added or removed,
+      solid counts and size, and warnings. The viewer shows added material in green and removed
+      material in red.
+
     Element IDs are 0-based in CadQuery order: face i is
     `cq.Workplane().add(shape).faces().vals()[i]` (same for edges() / vertices()) for the same shape.
+    They are valid only for the shape whose model.digest they came from: after the shape changes,
+    find elements again by geometry (center, normal, radius) or selectors, not by the old IDs.
     For STL, IDs are mesh regions and have no CadQuery equivalent.
+
+    How to edit a model reliably:
+      1. If a size needed for the change was not given by the user, ask the user (ask_user_choice)
+         instead of guessing it.
+      2. After changing a model with code, call this tool with compare_with set to the previous version
+         and check the numbers in model.check and diff (volume added / removed, holes before / after,
+         warnings) before saying the edit is done. Do not rely on the picture alone.
+      3. If the numbers show an unintended change, fix it at most twice; if it is still wrong, tell the
+         user what is wrong and ask how to proceed.
 
     Args:
         question: What you want the user to select, shown above the viewer
@@ -126,13 +171,17 @@ async def show_cad_viewer(
         select: Which kinds of elements the user may select: any of "face", "edge", "vertex",
             "part". Default: all kinds the model has ("part" only for an assembly with 2 or more
             parts, "vertex" not for STL).
+        compare_with: The previous version of the model to compare with (see above). Leave empty
+            for no comparison.
 
     Returns:
         A short JSON summary whose size does not depend on how many elements were selected:
         selected_count, selected_by_kind, selection_file (@N of a JSON with every selected element
         and its geometry under "selected", and the color changes under "color_changes"; it can be
         very large, so read only the fields you need with json_query), model (format, units, size,
-        element counts), and viewer_data (@N of the viewer data). If the user changed face / part
+        element counts, digest, check = solids / valid / open edges / volume / warnings, and features =
+        holes and bosses grouped by diameter and depth), diff when compare_with was given, and
+        viewer_data (@N of the viewer data). If the user changed face / part
         colors in the viewer, also color_change_count (the original model file itself is not changed).
         If the user typed an instruction in the viewer, it comes first as user_instruction: treat it
         as the user's next request about the selected elements. Then a small screenshot of the viewer
@@ -150,12 +199,12 @@ async def show_cad_viewer(
         ("Error: the user closed the 3D viewer ..."), or there is no answer within the timeout.
     """
     shot: dict[str, Any] = {}
-    text = await _show_cad_viewer(question, file_path, code, select, shot)
+    text = await _show_cad_viewer(question, file_path, code, select, shot, compare_with)
     return text, shot.get("artifact")
 
 
 async def _show_cad_viewer(
-    question: str, file_path: str, code: str, select: list[str] | None, shot: dict[str, Any]
+    question: str, file_path: str, code: str, select: list[str] | None, shot: dict[str, Any], compare_with: str = ""
 ) -> str:
     """show_cad_viewer の本体。指示付きの確定で画面を撮っていれば、LLM へ見せる画像を shot["artifact"] に入れる。"""
     if not _setting("cad_viewer_enabled", True):
@@ -167,10 +216,15 @@ async def _show_cad_viewer(
     if bad:
         return f"Error: unknown kinds in select: {bad}. Use any of {list(_ALL_KINDS)}."
 
+    previous = ""
+    if (compare_with or "").strip():
+        previous = _resolve_compare_with(compare_with.strip())
+        if previous.startswith("Error:"):
+            return previous
     if code.strip():
-        made = await _viewer_data_from_code(code)
+        made = await _viewer_data_from_code(code, previous)
     else:
-        made = await _viewer_data_from_file(file_path)
+        made = await _viewer_data_from_file(file_path, previous)
     if isinstance(made, str):
         return made
     data, data_path, notes = made
@@ -196,7 +250,8 @@ async def _show_cad_viewer(
     if isinstance(answer, str):
         return "\n".join([answer, *extra])
     res, picked, colors, message = answer
-    # 色・表示を変えていれば、変更を反映したビューア用データを自動で保存し、それを viewer_data として返す。
+    attr_changes = _attribute_changes(data, _valid_attributes(data, res.get("attributes")))
+    # 色・表示・属性を変えていれば、変更を反映したビューア用データを自動で保存し、それを viewer_data として返す。
     edited_token = _auto_save_view(data, res, colors)
     if not res.get("submitted", True):
         if edited_token:
@@ -214,7 +269,14 @@ async def _show_cad_viewer(
                 "image_url": to_data_url(saved),
                 "ref": image_ref(saved, screenshot_token if screenshot_token != str(saved) else None),
             }
-    return _format_result(data, picked, data_token, [*notes, *extra], colors, message, screenshot_token)
+    return _format_result(data, picked, data_token, [*notes, *extra], colors, message, screenshot_token, attr_changes)
+
+
+def _screenshot_long_side() -> int:
+    """指示付きで確定したときに撮る画面の長辺。[cad_viewer] screenshot_enabled=false か 0 以下なら 0（撮らない）。"""
+    if not _setting("cad_viewer_screenshot_enabled", True):
+        return 0
+    return max(0, int(_setting("cad_viewer_screenshot_long_side_pixels", 512)))
 
 
 _PNG_DATA_URL_PREFIX = "data:image/png;base64,"
@@ -228,7 +290,7 @@ def _save_screenshot(raw: Any) -> Path | None:
 
     撮っていない・形がおかしい・大きすぎる・書けないときは None（選択と指示はそのまま返す）。
     """
-    if _setting("cad_viewer_screenshot_long_side_pixels", 512) <= 0:
+    if _screenshot_long_side() <= 0:
         return None
     if not isinstance(raw, str) or not raw.startswith(_PNG_DATA_URL_PREFIX):
         return None
@@ -292,6 +354,8 @@ def _view_edits(data: dict, payload: dict[str, Any], colors: list[dict[str, Any]
     visible = {k: bool(vis[k]) for k in ("face", "edge", "vertex") if isinstance(vis, dict) and isinstance(vis.get(k), bool)}
     before_visible = {"face": True, "edge": True, "vertex": True, **((data.get("viewState") or {}).get("visible") or {})}
     changed = bool(colors) or set(hidden_parts) != _initial_hidden(data) or any(before_visible.get(k) != v for k, v in visible.items())
+    attrs = _valid_attributes(data, payload.get("attributes"))
+    changed = changed or bool(attrs)
     edited = apply_view_edits(
         data,
         face_colors={c["id"]: c["to"] for c in colors if c["kind"] == "face"},
@@ -301,6 +365,15 @@ def _view_edits(data: dict, payload: dict[str, Any], colors: list[dict[str, Any]
         color_changes=colors,
         saved_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
+    if attrs:
+        # 製品の属性を置き換え、その製品の部品の情報にも写す（保存・開き直しで編集後の属性になる）。
+        edited["edits"]["attribute_changes"] = _attribute_changes(data, attrs)
+        for prod in (edited.get("step") or {}).get("products") or []:
+            if prod.get("name") in attrs:
+                prod["attributes"] = attrs[prod["name"]]
+        for part in edited.get("parts") or []:
+            if part.get("product") in attrs:
+                part["attributes"] = attrs[part["product"]]
     return edited, changed
 
 
@@ -342,6 +415,7 @@ async def save_viewer_edits(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "This model cannot be exported."}
     colors = _valid_colors(data, payload.get("colors"))
     edited, _changed = _view_edits(data, payload, colors)
+    edited["exportOptions"] = {"step_write_schema": str(_setting("cad_viewer_step_write_schema", "auto"))}
     out = target.saved or _model_path(target, suffix)
     workdir = _resolve_exec_workdir()
     spec = _new_data_path(workdir, prefix="cad_export")
@@ -412,7 +486,7 @@ def _register_file(path: Path, description: str) -> str:
     return next(iter(_register_path_memory([str(path)], description=description)), str(path))
 
 
-async def _viewer_data_from_file(file_path: str) -> tuple[dict, Path, list[str]] | str:
+async def _viewer_data_from_file(file_path: str, compare_with: str = "") -> tuple[dict, Path, list[str]] | str:
     resolved, err = _resolve_path_memory_token(file_path)
     if err:
         return f"Error: {err}"
@@ -431,18 +505,25 @@ async def _viewer_data_from_file(file_path: str) -> tuple[dict, Path, list[str]]
             return f"Error: could not read the viewer data {path}: {e}"
         if not isinstance(data, dict) or data.get("format") != VIEWER_FORMAT:
             return f"Error: {path} is not viewer data made by show_cad_viewer. Pass a CAD file ({supported_extensions_text()})."
+        if compare_with:
+            # ビューア用データは形を作り直さないので比べられない。元の形のファイルを file_path に渡させる。
+            src = (data.get("source") or {}).get("path")
+            hint = f" (file_path={src})" if src else ""
+            return f"Error: compare_with needs the model itself: pass the model file{hint} or the code, not viewer data, as the new version."
+        # 前に比べたときの結果は出し直さない（今回は比べていない）。
+        data.pop("diff", None)
         return data, path, []
 
     workdir = _resolve_exec_workdir()
     out = _new_data_path(workdir)
-    cmd = [_state._SCRIPT_PYTHON, str(_RUN_CAD), "--file", str(path), "--out", str(out), "--options", json.dumps(_options())]
+    cmd = [_state._SCRIPT_PYTHON, str(_RUN_CAD), "--file", str(path), "--out", str(out), "--options", json.dumps(_options(compare_with))]
     failed = await _run(cmd, workdir)
     if failed:
         return failed
     return _load_data(out)
 
 
-async def _viewer_data_from_code(code: str) -> tuple[dict, Path, list[str]] | str:
+async def _viewer_data_from_code(code: str, compare_with: str = "") -> tuple[dict, Path, list[str]] | str:
     if not _state._CODE_EXEC_ENABLED:
         return "Error: running Python code generated by the LLM is disabled in config.ini ([scripts] code_execution_enabled=false). Pass a CAD file as file_path instead."
     if not cl.user_session.get("plan_approved"):
@@ -468,7 +549,7 @@ async def _viewer_data_from_code(code: str) -> tuple[dict, Path, list[str]] | st
             + CODE_PROLOGUE.format(src_root=str(_state._SRC_DIR.parent))
             + code
             + "\n"
-            + CODE_EPILOGUE.format(out_path=str(out), options=_options())
+            + CODE_EPILOGUE.format(out_path=str(out), options=_options(compare_with))
         )
         tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".py", dir=str(workdir), delete=False, encoding="utf-8")
         tmp.write(script)
@@ -579,12 +660,60 @@ def _valid_colors(data: dict, colors: Any) -> list[dict[str, Any]]:
     return out
 
 
+# ビューアから受け取る属性の編集の上限（1 製品の行数・名前と値の文字数）。
+_ATTR_MAX_ROWS = 200
+_ATTR_MAX_NAME = 200
+_ATTR_MAX_VALUE = 2000
+
+
+def _valid_attributes(data: dict, raw: Any) -> dict[str, list[dict[str, Any]]]:
+    """ブラウザから来た STEP の属性の編集（{製品名: [{name, value, type?}]}）のうち、正しいもので、元と違うもの。"""
+    products = {p.get("name"): p for p in (data.get("step") or {}).get("products") or [] if p.get("name")}
+    out: dict[str, list[dict[str, Any]]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for name, rows in raw.items():
+        if name not in products or not isinstance(rows, list):
+            continue
+        clean: list[dict[str, Any]] = []
+        for row in rows[:_ATTR_MAX_ROWS]:
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"].strip():
+                continue
+            value = row.get("value")
+            if isinstance(value, bool) or not isinstance(value, (str, int, float)) and value is not None:
+                continue
+            if isinstance(value, str):
+                value = value[:_ATTR_MAX_VALUE]
+            item: dict[str, Any] = {"name": row["name"].strip()[:_ATTR_MAX_NAME], "value": value}
+            if isinstance(row.get("type"), str) and isinstance(value, (int, float)):
+                item["type"] = row["type"][:60]
+            if isinstance(row.get("group"), str) and row["group"]:
+                item["group"] = row["group"][:_ATTR_MAX_NAME]
+            clean.append(item)
+        if clean != list(products[name].get("attributes") or []):
+            out[name] = clean
+    return out
+
+
+def _attribute_changes(data: dict, edits: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """属性の編集を、名前ごとの {product, name, from, to}（追加は from null、削除は to null）にする。"""
+    products = {p.get("name"): p for p in (data.get("step") or {}).get("products") or []}
+    changes: list[dict[str, Any]] = []
+    for prod, rows in edits.items():
+        before = {a.get("name"): a.get("value") for a in products.get(prod, {}).get("attributes") or []}
+        after = {a["name"]: a.get("value") for a in rows}
+        for key in [*before, *[k for k in after if k not in before]]:
+            if before.get(key, None) != after.get(key, None) or (key in before) != (key in after):
+                changes.append({"product": prod, "name": key, "from": before.get(key), "to": after.get(key) if key in after else None})
+    return changes
+
+
 def _valid_message(message: Any) -> str:
     """ビューアの指示欄の文字列（無ければ空、長すぎれば切る）。"""
     return message.strip()[:_MESSAGE_MAX_CHARS] if isinstance(message, str) else ""
 
 
-def _echo_text(data: dict, picked: list[tuple[str, int]], colors: list[dict[str, Any]], message: str = "") -> str:
+def _echo_text(data: dict, picked: list[tuple[str, int]], colors: list[dict[str, Any]], message: str = "", attr_count: int = 0) -> str:
     """チャットに残す、利用者の答えの短い文。指示は省かずに後ろへ付ける。
 
     この文はユーザー発言として会話に保存され、スレッドを再開すると LLM の文脈にも入るので、選んだ要素は
@@ -596,6 +725,8 @@ def _echo_text(data: dict, picked: list[tuple[str, int]], colors: list[dict[str,
     text = t("cad.selected_summary", items=t("list.separator").join(counts)) if counts else t("ask.none_selected")
     if colors:
         text += f" / {t('cad.color_changes', count=len(colors))}"
+    if attr_count:
+        text += f" / {t('cad.attribute_changes', count=attr_count)}"
     if message:
         text += f"\n\n{message}"
     return text
@@ -617,7 +748,7 @@ async def _ask_selection(
                 "data": data,
                 "save_id": save_id,
                 # 指示付きで確定したときに撮る画面の長辺（0 以下なら撮らない）。
-                "screenshot_long_side": max(0, int(_setting("cad_viewer_screenshot_long_side_pixels", 512))),
+                "screenshot_long_side": _screenshot_long_side(),
             },
         )
         ask_message = cl.AskElementMessage(content=question, element=element, timeout=timeout)
@@ -635,6 +766,7 @@ async def _ask_selection(
                     _valid_selection(data, kinds, res.get("selected")),
                     _valid_colors(data, res.get("colors")),
                     _valid_message(res.get("message")),
+                    len(_attribute_changes(data, _valid_attributes(data, res.get("attributes")))),
                 )
             else:
                 answer = t("ask.cancel")
@@ -657,26 +789,50 @@ async def _ask_selection(
 def _model_summary(data: dict) -> dict[str, Any]:
     src = data.get("source") or {}
     stats = data.get("stats") or {}
-    return {
+    out: dict[str, Any] = {
         "format": src.get("format", "?"),
         "source": src.get("path") or "your CadQuery code",
         "units": data.get("units", "unknown"),
         "size": (data.get("bbox") or {}).get("size", []),
         "counts": {k: v for k, v in stats.items() if k != "triangles"},
     }
+    if data.get("modelDigest"):
+        out["digest"] = data["modelDigest"]
+    if data.get("check"):
+        out["check"] = data["check"]
+    if data.get("features"):
+        out["features"] = summarize_features(data["features"])
+    if data.get("step"):
+        out["step"] = summarize_step(data["step"])
+    return out
+
+
+def _diff_summary(diff: dict) -> dict[str, Any]:
+    """前の版との比較の概要（重ね表示用のメッシュは除く）。"""
+    if diff.get("error"):
+        return {"error": diff["error"]}
+    out = {k: v for k, v in diff.items() if k not in ("added", "removed")}
+    shown = "added" in diff or "removed" in diff
+    out["overlay"] = "shown in the viewer: green = added material, red = removed material" if shown else "none"
+    return out
 
 
 def _id_note(data: dict) -> str:
     if (data.get("source") or {}).get("format") == "STL":
         return "IDs are planar regions of the STL mesh (no CadQuery equivalent); 'meshHints' only tell which region is outermost on an axis."
     return (
-        "IDs are 0-based in CadQuery order (face i = cq.Workplane().add(shape).faces().vals()[i]; same for edges/vertices). "
-        "'selectors' are CadQuery selectors verified to pick exactly that one element."
+        "IDs are 0-based in CadQuery order (face i = cq.Workplane().add(shape).faces().vals()[i]; same for edges/vertices), "
+        "valid only for the shape with this model digest; after the shape changes, find elements again by geometry or selectors. "
+        "'selectors' are CadQuery selectors verified to pick exactly that one element. "
+        "'feature' on a face names the hole or boss it belongs to (details under 'features'); "
+        "'pmi' on a face or edge lists the STEP dimensions / tolerances / datums on it (details under 'pmi')."
     )
 
 
 
-def _write_selection(data: dict, picked: list[tuple[str, int]], data_token: str, colors: list[dict[str, Any]]) -> Path:
+def _write_selection(
+    data: dict, picked: list[tuple[str, int]], data_token: str, colors: list[dict[str, Any]], attr_changes: list[dict[str, Any]] | None = None
+) -> Path:
     """選んだ要素の詳しい情報（ジオメトリ全部）と色の変更を、そのセッションの `_tmp_` フォルダの JSON に書く。"""
     path = _new_data_path(_resolve_exec_workdir(), prefix="cad_selection")
     body = {
@@ -686,6 +842,17 @@ def _write_selection(data: dict, picked: list[tuple[str, int]], data_token: str,
         "selected": [{"kind": kind, "id": eid, **data[_LIST_KEYS[kind]][eid]} for kind, eid in picked],
         "color_changes": colors,
     }
+    if attr_changes:
+        body["attribute_changes"] = attr_changes
+    # 選んだ面が属する穴・ボス（直径・深さ・通しかどうか・軸）。
+    used = {data["faces"][eid].get("feature") for kind, eid in picked if kind == "face"} - {None}
+    if used:
+        body["features"] = [f for f in data.get("features") or [] if f.get("id") in used]
+    # 選んだ面・エッジに付いた STEP の PMI（寸法・幾何公差・データム）。
+    refs = {r for kind, eid in picked if kind in ("face", "edge") for r in data[_LIST_KEYS[kind]][eid].get("pmi") or []}
+    if refs:
+        pmi = (data.get("step") or {}).get("pmi") or {}
+        body["pmi"] = [item for items in pmi.values() for item in items if item.get("id") in refs]
     path.write_text(json.dumps(body, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
 
@@ -698,6 +865,7 @@ def _format_result(
     colors: list[dict[str, Any]] | None = None,
     message: str = "",
     screenshot_token: str = "",
+    attr_changes: list[dict[str, Any]] | None = None,
 ) -> str:
     """LLM へ返す概要（JSON 文字列）。
 
@@ -706,6 +874,7 @@ def _format_result(
     件数とファイルの @N だけにする（要素数によらず大きさが一定）。
     """
     colors = colors or []
+    attr_changes = attr_changes or []
     result: dict[str, Any] = {"status": "confirmed"}
     if message:
         # 利用者がビューアの指示欄に書いた指示。選択（や色の変更）はこの指示の対象。
@@ -735,9 +904,15 @@ def _format_result(
     }
     if colors:
         result["color_change_count"] = len(colors)
-    if picked or colors:
+    if attr_changes:
+        result["attribute_change_count"] = len(attr_changes)
+        result["attribute_note"] = (
+            "The user edited STEP attributes in the viewer (details under 'attribute_changes' in selection_file). "
+            "The original file is not changed; the viewer's Save button writes them to the exported STEP."
+        )
+    if picked or colors or attr_changes:
         try:
-            sel_token = _register_file(_write_selection(data, picked, data_token, colors), "3D viewer selection (show_cad_viewer)")
+            sel_token = _register_file(_write_selection(data, picked, data_token, colors, attr_changes), "3D viewer selection (show_cad_viewer)")
         except OSError as e:
             logger.warning("show_cad_viewer: could not write the selection file", exc_info=True)
             result["selection_file_error"] = f"could not write the selection details: {e}. Ask the user to select again."
@@ -756,6 +931,8 @@ def _format_result(
             "with the colors applied with the viewer's Save button."
         )
     result["model"] = _model_summary(data)
+    if data.get("diff"):
+        result["diff"] = _diff_summary(data["diff"])
     result["viewer_data"] = data_token
     result["viewer_data_note"] = "Pass viewer_data as file_path to show the same model again without rebuilding."
     result["id_note"] = _id_note(data)

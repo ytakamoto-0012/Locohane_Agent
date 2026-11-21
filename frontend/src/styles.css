@@ -918,6 +918,51 @@
   margin-bottom: 4px;
 }
 
+.cad-sidebar-warning {
+  color: #e5484d;
+}
+
+.cad-pmi-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.cad-pmi-list .cad-tree-name {
+  width: 100%;
+  text-align: left;
+}
+
+.cad-attr-table {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cad-attr-row {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.cad-attr-row input {
+  min-width: 0;
+  flex: 1 1 0;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.cad-attr-row button {
+  flex-shrink: 0;
+}
+
+.cad-viewer-legend {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 .cad-color-edit {
   display: flex;
   align-items: center;

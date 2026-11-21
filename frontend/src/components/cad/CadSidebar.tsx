@@ -2,6 +2,7 @@
  * 3D ビューア（CadViewerBar）の左のサイドバー。
  * - 表示: 面・エッジ・頂点の表示／非表示
  * - 色: 選んだ面・部品の色（RGB）の表示と変更
+ * - STEP: AP と版・PMI の一覧・製品の属性の表示と編集（CadStepPanel）
  * - 構成ツリー（STEP/IGES のアセンブリ）／レイヤー（DXF）: 部品ごとの表示／非表示・色・レイヤーの設定。名前のクリックで部品を選ぶ
  * three.js は使わない（CadScene と違い、チャット画面の本体と一緒に読み込まれる）。
  */
@@ -20,6 +21,7 @@ import {
   type CadKind,
   type CadSelection
 } from './cadData';
+import { CadStepPanel, type CadAttributeEdits } from './CadStepPanel';
 
 // 色の無い面（テーマの既定色で描く）を変えるときの、色の入力の初期値。
 const DEFAULT_PICKER_COLOR = '#b9bfcb';
@@ -38,6 +40,11 @@ interface Props {
   onColors: (colors: CadColorOverrides) => void;
   onTogglePart: (id: number) => void;
   onHoverPart: (id: number | null) => void;
+  /** STEP の属性の編集（製品名 → 編集後の一覧）。 */
+  attributeEdits: CadAttributeEdits;
+  onAttributeEdits: (edits: CadAttributeEdits) => void;
+  /** PMI のクリックで、それが指す要素を選ぶ。 */
+  onSelectItems: (items: CadSelection[]) => void;
 }
 
 interface TreeNode {
@@ -110,6 +117,13 @@ export function CadSidebar(props: Props) {
           ))}
       </section>
       <ColorSection {...props} />
+      <CadStepPanel
+        data={data}
+        selection={props.selection}
+        attributeEdits={props.attributeEdits}
+        onAttributeEdits={props.onAttributeEdits}
+        onSelectItems={props.onSelectItems}
+      />
       {tree.length > 0 && (
         <section>
           <h4>

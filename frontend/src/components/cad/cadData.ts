@@ -106,6 +106,61 @@ export function rgbToHex(rgb: [number, number, number]): string {
   return '#' + rgb.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
 }
 
+/** STEP の属性（品番・材質等。src/cad/step_p21.py）。 */
+export interface CadAttribute {
+  name: string;
+  value: string | number | null;
+  type?: string;
+  group?: string;
+}
+
+/** STEP の製品（PRODUCT）。 */
+export interface CadProduct {
+  product_id?: string | null;
+  name?: string | null;
+  description?: string | null;
+  attributes?: CadAttribute[];
+  material?: CadAttribute[];
+}
+
+/** STEP の PMI（寸法・幾何公差・データム。src/cad/step_xcaf.py）。faces などはビューアの ID。 */
+export interface CadPmiItem {
+  id: string;
+  kind: 'dimension' | 'tolerance' | 'datum';
+  text: string;
+  faces?: number[];
+  faces_second?: number[];
+  edges?: number[];
+  edges_second?: number[];
+  parts?: number[];
+  [key: string]: unknown;
+}
+
+export interface CadStepInfo {
+  header?: { ap?: string; edition?: string; originating_system?: string; schema?: string[]; [key: string]: unknown };
+  products?: CadProduct[];
+  pmi?: { dimensions?: CadPmiItem[]; tolerances?: CadPmiItem[]; datums?: CadPmiItem[] };
+  layers?: { name: string; parts?: number[]; faces?: number[] }[];
+  warnings?: string[];
+}
+
+/** 穴・ボス（src/cad/features.py）。 */
+export interface CadFeature {
+  id: string;
+  type: 'hole' | 'boss';
+  diameter: number;
+  depth?: number;
+  length?: number;
+  through?: boolean;
+  faces: number[];
+}
+
+/** 三角形の集まり（位置は float32、番号は uint32 の base64）。 */
+export interface CadTriangles {
+  positions: string;
+  indices: string;
+}
+
 export interface CadData {
   format: string;
   source: { kind: string; format?: string; path?: string };
@@ -119,6 +174,12 @@ export interface CadData {
   vertexList: CadItemInfo[];
   parts?: CadItemInfo[];
   stats: Record<string, number>;
+  /** STEP のヘッダー・製品の属性・PMI・レイヤー（元が STEP のときだけ）。 */
+  step?: CadStepInfo;
+  /** 穴・ボスの一覧（B-rep のときだけ）。 */
+  features?: CadFeature[];
+  /** 前の版との比較（show_cad_viewer の compare_with）。added / removed は増えた・削った部分の三角形。 */
+  diff?: { added?: CadTriangles; removed?: CadTriangles; error?: string; [key: string]: unknown };
   /** 「保存」で書いたデータにある、保存したときの表示（隠した部品・種類ごとの表示）。 */
   viewState?: { hiddenParts?: number[]; visible?: Partial<Record<'face' | 'edge' | 'vertex', boolean>> };
 }
@@ -168,6 +229,24 @@ export function itemsOf(data: CadData, kind: CadKind): CadItemInfo[] {
     case 'part':
       return data.parts ?? [];
   }
+}
+
+/** PMI の ID → 項目。 */
+export function pmiById(data: CadData): Map<string, CadPmiItem> {
+  const out = new Map<string, CadPmiItem>();
+  const pmi = data.step?.pmi;
+  for (const items of [pmi?.dimensions, pmi?.tolerances, pmi?.datums]) for (const item of items ?? []) out.set(item.id, item);
+  return out;
+}
+
+/** PMI が指す要素（面・エッジ・部品）。 */
+export function pmiTargets(item: CadPmiItem): CadSelection[] {
+  const ids = (xs?: number[]) => xs ?? [];
+  return [
+    ...[...ids(item.faces), ...ids(item.faces_second)].map((id) => ({ kind: 'face' as const, id })),
+    ...[...ids(item.edges), ...ids(item.edges_second)].map((id) => ({ kind: 'edge' as const, id })),
+    ...ids(item.parts).map((id) => ({ kind: 'part' as const, id }))
+  ];
 }
 
 export function sameSelection(a: CadSelection, b: CadSelection): boolean {

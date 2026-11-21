@@ -9,6 +9,7 @@ import {
   effectiveColor,
   itemsOf,
   partOf,
+  pmiById,
   rgbText,
   sameSelection,
   type BoxMode,
@@ -21,6 +22,7 @@ import {
 } from './cad/cadData';
 import type { CadScene, CadSceneColors, ViewName } from './cad/CadScene';
 import { CadSidebar } from './cad/CadSidebar';
+import type { CadAttributeEdits } from './cad/CadStepPanel';
 
 const KIND_LABEL: Record<CadKind, MessageKey> = {
   face: 'cad.kind.face',
@@ -68,8 +70,26 @@ function fmt(n: unknown): string {
   return typeof n === 'number' ? String(Math.round(n * 1000) / 1000) : '';
 }
 
+/** 面の属する穴・ボスと、付いた PMI の短い説明（例: 「穴 ⌀5 通し」「⌀10 +0.1/-0.05」）。 */
+function extraInfo(item: CadItemInfo, data: CadData | undefined, t: (k: MessageKey) => string): string[] {
+  if (!data) return [];
+  const out: string[] = [];
+  const feat = typeof item.feature === 'string' ? data.features?.find((f) => f.id === item.feature) : undefined;
+  if (feat) {
+    const kind = feat.type === 'hole' ? t('cad.info.feature') : t('cad.info.boss');
+    const extra = feat.type === 'hole' ? ` ${feat.through ? t('cad.info.through') : `${t('cad.info.blind')} ${fmt(feat.depth)}`}` : '';
+    out.push(`${kind} ⌀${fmt(feat.diameter)}${extra}`);
+  }
+  const ids = Array.isArray(item.pmi) ? (item.pmi as string[]) : [];
+  if (ids.length) {
+    const byId = pmiById(data);
+    out.push(...ids.slice(0, 3).map((id) => byId.get(id)?.text ?? id));
+  }
+  return out;
+}
+
 /** ホバー中・選択中の要素の短い説明（例: 「面 #3 PLANE 面積 600 RGB(200, 0, 0) >Z」）。 */
-function describe(item: CadItemInfo | undefined, label: string, color: string | null, t: (k: MessageKey) => string): string {
+function describe(item: CadItemInfo | undefined, label: string, color: string | null, t: (k: MessageKey) => string, data?: CadData): string {
   if (!item) return label;
   const parts = [label];
   if (item.kind === 'part') parts.push(item.path ?? item.name ?? '');
@@ -82,6 +102,7 @@ function describe(item: CadItemInfo | undefined, label: string, color: string | 
   if (color) parts.push(rgbText(color));
   const sel = item.selectors?.[0] ?? item.meshHints?.[0];
   if (sel) parts.push(sel);
+  parts.push(...extraInfo(item, data, t));
   return parts.filter(Boolean).join('  ');
 }
 
@@ -131,6 +152,8 @@ interface PanelProps {
 interface CadViewState {
   hidden_parts: number[];
   visible: { face: boolean; edge: boolean; vertex: boolean };
+  /** STEP の属性を編集した製品（製品名 → 編集後の一覧）。編集が無ければ入れない。 */
+  attributes?: CadAttributeEdits;
 }
 
 function initialHiddenParts(data: CadData): Set<number> {
@@ -162,7 +185,12 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   // 空間の原点 (0, 0, 0) の XYZ 軸の表示。
   const [originAxes, setOriginAxes] = useState(true);
   const hasParts = (data.parts?.length ?? 0) > 0;
-  const [sidebarOpen, setSidebarOpen] = useState(hasParts);
+  const [sidebarOpen, setSidebarOpen] = useState(hasParts || !!data.step);
+  // STEP の属性の編集（製品名 → 編集後の一覧）。
+  const [attributeEdits, setAttributeEdits] = useState<CadAttributeEdits>({});
+  // 前の版からの変化の重ね表示（compare_with で比べたときだけ）。
+  const hasDiff = !!(data.diff?.added || data.diff?.removed);
+  const [diffVisible, setDiffVisible] = useState(true);
   const [kindVisible, setKindVisible] = useState({ face: true, edge: true, vertex: true, ...data.viewState?.visible });
   const [hiddenParts, setHiddenParts] = useState<Set<number>>(() => initialHiddenParts(data));
   const [colors, setColors] = useState<CadColorOverrides>({ faces: new Map(), parts: new Map() });
@@ -236,11 +264,14 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   useEffect(() => {
     sceneRef.current?.setColorOverrides(colors);
   }, [colors, status]);
+  useEffect(() => {
+    sceneRef.current?.setDiffVisible(diffVisible);
+  }, [diffVisible, status]);
 
   // 保存した後に色・表示を変えたら「保存しました」を消す（保存したファイルは前の内容のまま）。
   useEffect(() => {
     setSaveState((s) => (s.kind === 'saved' ? { kind: 'idle' } : s));
-  }, [colors, hiddenParts, kindVisible]);
+  }, [colors, hiddenParts, kindVisible, attributeEdits]);
 
   // テーマ（ライト / ダーク・アクセント色）の切り替えに追従する。
   useEffect(() => {
@@ -264,7 +295,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   const hoverText = useMemo(() => {
     if (pivotPicking) return t('cad.hintPivot');
     if (!hover) return t(boxMode === 'off' ? 'cad.hint' : 'cad.hintBox');
-    return describe(itemsOf(data, hover.kind)[hover.id], label(hover), effectiveColor(data, colors, hover), t);
+    return describe(itemsOf(data, hover.kind)[hover.id], label(hover), effectiveColor(data, colors, hover), t, data);
   }, [hover, data, label, t, colors, boxMode, pivotPicking]);
 
   const selectAll = () => {
@@ -311,7 +342,11 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
     colors.parts.forEach((hex, id) => (changes.parts[String(id)] = hex));
     return changes;
   };
-  const viewState = (): CadViewState => ({ hidden_parts: [...hiddenParts], visible: kindVisible });
+  const viewState = (): CadViewState => ({
+    hidden_parts: [...hiddenParts],
+    visible: kindVisible,
+    ...(Object.keys(attributeEdits).length ? { attributes: attributeEdits } : {})
+  });
   const submit = () => {
     const text = message.trim();
     // 指示があるときだけ、今の画面（選んだ要素の強調を含む）を低解像度で撮って AI へ一緒に見せる。
@@ -450,6 +485,17 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
           >
             {t('cad.originAxes')}
           </button>
+          {hasDiff && (
+            <button
+              type="button"
+              className={`cad-viewer-chip${diffVisible ? ' active' : ''}`}
+              aria-pressed={diffVisible}
+              title={t('cad.diffTitle')}
+              onClick={() => setDiffVisible((x) => !x)}
+            >
+              {t('cad.diff')}
+            </button>
+          )}
           <button
             type="button"
             className={`cad-viewer-chip${sidebarOpen ? ' active' : ''}`}
@@ -477,6 +523,9 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
             onColors={setColors}
             onTogglePart={(id) => toggle({ kind: 'part', id })}
             onHoverPart={(id) => sceneRef.current?.setExternalHover(id === null ? null : { kind: 'part', id })}
+            attributeEdits={attributeEdits}
+            onAttributeEdits={setAttributeEdits}
+            onSelectItems={(items) => boxPick(items.filter((s) => kinds.includes(s.kind)), false)}
           />
         )}
         <div className="cad-viewer-host" ref={hostRef}>
@@ -486,6 +535,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
       </div>
       <div className="cad-viewer-status">
         <span className="cad-viewer-hover">{hoverText}</span>
+        {hasDiff && diffVisible && <span className="cad-viewer-legend">{t('cad.diffLegend')}</span>}
         <span className="cad-viewer-summary">{summary}</span>
       </div>
       <div className="cad-viewer-selected">
@@ -496,7 +546,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
             <span
               key={`${s.kind}-${s.id}`}
               className="cad-viewer-tag"
-              title={describe(itemsOf(data, s.kind)[s.id], label(s), effectiveColor(data, colors, s), t)}
+              title={describe(itemsOf(data, s.kind)[s.id], label(s), effectiveColor(data, colors, s), t, data)}
             >
               {label(s)}
               <button type="button" aria-label={t('cad.remove')} onClick={() => toggle(s)}>

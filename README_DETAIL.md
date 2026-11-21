@@ -1898,6 +1898,7 @@ ID は CadQuery の `Workplane().add(shape).faces().vals()` の順（0 始まり
 すべてそのセッションの `_tmp_` フォルダの `cad_selection_*.json`（`selected` の下に要素ごと、色の変更は `color_changes`）に書き出して `@N` に登録する。
 戻り値は選んだ要素の数によらず大きさが一定の JSON の概要だけで、選んだ数（`selected_count`・種類別の `selected_by_kind`）、色の変更の数
 （`color_change_count`）、選択結果ファイルの `@N`（`selection_file`。LLM は `json_query` で必要な項目だけ読む）、形の概要（`model`）を返す。
+`model` には形式・大きさ・要素の数のほか、形の検査（`check`）・穴とボスの要約（`features`）・ダイジェスト（`digest`）・STEP の概要（`step`）が入る（下記）。
 チャットに残す答え（ユーザー発言として会話に保存される）も「面 12 件を選択」のような種類ごとの件数だけにする。
 あわせてビューア用データの `@N`（`viewer_data`）を返し、`file_path` に渡せば同じ形をすぐ出し直せる。
 
@@ -1924,7 +1925,7 @@ three.js はビューアを開いたときだけ読み込む（`frontend/src/com
   変えた色は元の CAD ファイルには書かず、選択結果ファイルの `color_changes`（`{kind, id, from, to}`）で LLM へ伝える（戻り値には件数だけ）。
 - **指示欄**: ビューアの下の入力欄に書いた AI への指示（任意。例:「選んだ面に φ5 の穴を開けて」）を、「確定」（Ctrl+Enter）で選択・色の変更と一緒に返す。
   戻り値の先頭に `user_instruction` として入り、チャットにも選択と一緒に残る（4000 文字まで）。
-  指示があるときは、確定した瞬間のビューアの画面（選んだ要素の強調を含む）を長辺 `[cad_viewer].screenshot_long_side_pixels`（既定 512）の
+  指示があるときは（`[cad_viewer].screenshot_enabled` が true のとき）、確定した瞬間のビューアの画面（選んだ要素の強調を含む）を長辺 `[cad_viewer].screenshot_long_side_pixels`（既定 512）の
   PNG に縮めて撮り、このスレッドの `_tmp_` フォルダの `cad_screenshot_<日時>.png` に保存して `@N` に登録する。戻り値の `screenshot` にその `@N` が入り、
   画像は `analyze_image` と同じ経路（ツール結果の直後の画像付きメッセージ）で LLM へ見せる。指示が空のとき・0 以下の設定のときは撮らない。
   指示欄が空のまま確定したときは、代わりに `next_step` が入り、「元の依頼に選択の使い道が書かれていなければ、選択結果ファイルを読まず・
@@ -1948,11 +1949,66 @@ three.js はビューアを開いたときだけ読み込む（`frontend/src/com
   このスレッドの `_tmp_` フォルダの `cad_view_edited_<日時>.json` に自動で書き、戻り値の `viewer_data`（閉じたときはエラー文の後ろ）で LLM へ渡す。
   色は面の `color` と三角形の頂点色の両方、隠した部品は `viewState`、変更の一覧は `edits.color_changes` に入るので、`file_path` に渡すと閉じたときの見た目で開き直せる。
 
-**設定**: `[cad_viewer]`（`enabled`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`・`screenshot_long_side_pixels`）と
+**形を数値で確かめる**: AI CAD の先行事例（agentcad・build123d-mcp 等と、その比較調査）では、「形が違うのに成功と報告する」失敗が最も危険で、
+画像での確認は B-rep の厳密な検査より人の判断と一致しにくく、トークンも多く使うとされた。そこで B-rep の形には、絵より先に数値を返す。
+
+- **形の検査**（`model.check`、`src/cad/export_mesh.py` の `check_shape`）: ソリッド・シェルの数、正しい B-rep か（`BRepCheck_Analyzer`）、
+  面 1 つにしか属さないエッジの数（`openEdges`。閉じたソリッドなら 0。退化したエッジ・継ぎ目は数えない）、体積・表面積、気づいた点（`warnings`。
+  正しくない B-rep、閉じていないソリッド、部品が 1 つなのにソリッドが複数＝ union でつながっていない、等）。
+- **穴・ボス**（`model.features`、`src/cad/features.py`）: 円柱面の内向き・外向き（面の情報の `concave`）から、内向きの円柱を穴、外向きをボスとし、
+  同じ軸・同じ半径でエッジを共有する面を 1 つにまとめる（1 周を覆うものだけ。フィレットは数えない）。穴の端の円の先の面がその円に収まれば
+  （底面・ドリルの先）止まり穴、両端とも開いていれば通し穴。要約は種類・直径・深さ・通しかどうかでまとめた件数（12 グループまで）で、
+  1 つずつの軸・面はビューア用データの `features`、面の情報には属する特徴の ID（`feature`、例 `hole:3`）が入る。ビューアは面にマウスを乗せると
+  「穴 ⌀5 通し」のように出す。座ぐりの大きい方の穴は、深さ＝座ぐりの深さの止まり穴として出る。
+- **ダイジェスト**（`model.digest`）: 面・エッジ・頂点の並びと形の要約から作る 16 桁の値。要素の ID は並び順なので、形が変わると同じ ID が
+  別の要素を指す。LLM には、ID はこのダイジェストの形でだけ有効で、形が変わったら形の情報やセレクタで探し直すよう伝える。
+
+**前の版との比較**（`compare_with`、`src/cad/compare.py`）: 前の版（STEP・IGES・BREP・BIN、またはそれらのビューア用データ。CadQuery コードの
+ビューア用データは隣に残した `.brep`）を渡すと、戻り値に `diff` が入る。閉じたソリッドどうしなら B-rep のブール演算で共通の体積・増えた体積
+（新 − 旧）・削った体積（旧 − 新）を求め（共通 + 増えた分 = 新、が成り立たなければ注意を付ける）、穴・ボスの数の増減（変わったグループだけ）、
+ソリッドの数・大きさ・要素の数の変化、ID がそのまま使えるか（`ids_unchanged`）、気づいた点（体積がまったく同じ＝変更が効いていない、
+ソリッドの数が変わった、新しい形が正しくない B-rep、等）を返す。ビューアでは増えた部分を緑・削った部分を赤の半透明で重ね
+（「差分」ボタンで切り替え）、重ね表示の三角形は LLM への戻り値に入れない。STL・DXF とは比べられない。
+ツールの説明で LLM に、(1) 寸法が足りなければ推測せず `ask_user_choice` で聞く、(2) コードで形を変えたら `compare_with` で前の版と比べ、
+`model.check` と `diff` の数値で確かめてから完了と言う、(3) 意図しない変化は 2 回まで直し、それでもだめなら利用者に相談する、を指示している。
+
+**STEP の属性・PMI**（`src/cad/step_xcaf.py`・`src/cad/step_p21.py`）: STEP ファイルはビューア用データの `step` に次を入れ、`model.step` に概要
+（AP と版・作成システム・PMI の件数と文 20 件まで・属性の件数と名前・材料・レイヤー・気づいた点）を返す。
+
+- **ヘッダー**: `FILE_SCHEMA` から AP203（`CONFIG_CONTROL_DESIGN`）・AP203 第 2 版・AP214（`AUTOMOTIVE_DESIGN`）・AP242 と、AP242 の版
+  （スキーマの番号 1 → 第 1 版、3 → 第 2 版、4 → 第 3 版）。`FILE_NAME` の作成者・組織・作成システム等。
+- **製品と属性**: 製品（`PRODUCT`）の品番・名前・説明と、その `PRODUCT_DEFINITION` に付いた `PROPERTY_DEFINITION`（CAx-IF の User Defined Attributes の
+  書き方。文字列・数値・単位付きの数値）、材料（`material property`）、検証プロパティ（`geometric validation property`。書かれた体積と形の体積が違えば
+  `step.warnings` で知らせる）。アセンブリでは部品の情報（`parts[].product`・`attributes`・`material`）にも写す。
+  OCCT はユーザー定義属性を Python から一覧できず書き出しもせず、材料は製品に付いた文字列の属性を名前によらず材料とみなしてしまうため、
+  これらは OCCT を使わず P21 の本文を直接読む（標準ライブラリだけ）。
+- **PMI**: OCCT の XCAF（`SetGDTMode`）で寸法（種類・値・上下の公差・はめあいの公差域クラス）・幾何公差（種類・値・材料条件・データム）・データムを読み、
+  それが指す面・エッジ・部品をビューアの ID に直す（面の情報の `pmi` に `dim:0` 等）。文は `⌀10 +0.1/-0.05` のように作る。値の無い表示だけの寸法は
+  その旨の文にする。OCCT 7.9 は長さの単位がインチ等の STEP で寸法の値だけを換算しない（公差は換算する）ため、円柱・球を指す直径・半径の寸法と
+  形の大きさの比がそろっていれば、長さの寸法を mm にそろえる（`step.pmi_units_note`。確かめられる寸法が無ければ換算しない）。
+- **レイヤー**: レイヤーの名前と、それに属する部品・面。
+- **文字**: `\X2\`・`\X4\`・`\X\`・`\S\` の符号を解く（日本語の名前・属性）。ASCII 以外を UTF-8 のまま書いたファイルも読む。
+  CadQuery が書いた STEP の日本語名（二重の UTF-8）は直して読む。
+
+ビューアの左のパネルには、STEP の AP と版・作成システム・気づいた点、PMI の一覧（クリックでその寸法・公差が指す面等を選ぶ）、
+選んだ部品の製品（部品が 1 つならその製品）の属性と材料を出す。属性は名前・値を書き換え・追加・削除でき、確定・閉じる・保存で返す
+（戻り値に `attribute_change_count`、選択結果ファイルに `attribute_changes`〔`{product, name, from, to}`〕、自動で保存するビューア用データにも反映）。
+
+**STEP の保存**: 元が STEP なら、元のファイルを同じ設定で読み直した XCAF の文書に、変えた色・隠した部品を当てて書く
+（隠した部品はインスタンスを外し、使われなくなった定義も消す）。OCCT が PMI・レイヤー・検証プロパティを書き、OCCT が書かないユーザー定義属性
+（編集後のもの）・材料と、元のヘッダーの作成者・組織・作成システム・承認は P21 の本文に足す（前処理系は `Locohane 3D viewer (Open CASCADE)`）。
+ASCII 以外の文字は `\X2\` で書き、本文を ASCII だけにする。スキーマは `[cad_viewer] step_write_schema`（`auto` = 元と同じ、元が STEP でなければ AP242）。
+PMI は AP242 でだけ書け、AP203・AP214 で書くときや、OCCT が PMI を書けなかったとき（NIST の CTC-01 等、実際の CAD が書いた PMI の一部）は、
+PMI を除いて書きその旨を `notes` で伝える（元のファイルの PMI はそのまま）。STEP 以外（IGES・BREP・CadQuery コード）の保存も同じスキーマの設定に従う。
+
+**設定**: `[cad_viewer]`（`enabled`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`・`screenshot_enabled`・`screenshot_long_side_pixels`・`step_write_schema`）と
 `[user_response_timeouts] show_cad_viewer_seconds`（既定 0 = 無期限）。メインエージェントから直接呼べるよう `[main_agent_tool_guard] allow_entries` に登録済み。
 サブエージェントには渡さない（画面に出すツールのため）。
 
-**対象外**: CadQuery 独自のアセンブリファイル（`.xml`・`.xbf`）、OBJ・glTF・PLY・3MF 等のほかのメッシュ形式、STL の頂点の選択。
+**対象外**: CadQuery 独自のアセンブリファイル（`.xml`・`.xbf`）、OBJ・glTF・PLY・3MF 等のほかのメッシュ形式、STL の頂点の選択、
+STEP AP242 の XML 形式（ISO 10303-3001。JAMA の標準属性はこの形式で定義されている。OCCT が読めない）、圧縮した STEP（`.stpZ`）、
+PMI の表示（ビューアに寸法線・注記を描くこと）と PMI の編集、面（形状の一部）に付いたユーザー定義属性、同じ部品を何度も使うアセンブリでの
+インスタンスごとの面の色（定義に付くので全部の配置に効く）。
 
 ## プロンプト資産の自動チューニングループ（evals/）
 
@@ -2097,7 +2153,9 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[cad_viewer]` | `linear_deflection_ratio` | 曲面を三角形に分けるときの許容差（形の対角線の長さに対する割合、既定 0.001） | `CAD_VIEWER_LINEAR_DEFLECTION_RATIO` |
 | `[cad_viewer]` | `angular_deflection_deg` | 曲面を三角形に分けるときの角度の許容差（度、既定 20） | `CAD_VIEWER_ANGULAR_DEFLECTION_DEG` |
 | `[cad_viewer]` | `stl_region_angle_deg` | STL の三角形を 1 つの面（平面領域）にまとめる法線の角度差の上限（度、既定 1） | `CAD_VIEWER_STL_REGION_ANGLE_DEG` |
+| `[cad_viewer]` | `screenshot_enabled` | 指示付きで確定したときにビューアの画面を撮って LLM へ見せるか（既定 `true`。画像を読めないモデル・数値だけで足りるときは `false`） | `CAD_VIEWER_SCREENSHOT_ENABLED` |
 | `[cad_viewer]` | `screenshot_long_side_pixels` | 指示付きで確定したときに撮って LLM へ見せるビューアの画面の長辺（ピクセル、既定 512。0 以下で撮らない） | `CAD_VIEWER_SCREENSHOT_LONG_SIDE_PIXELS` |
+| `[cad_viewer]` | `step_write_schema` | 「保存」で書く STEP のスキーマ。`auto`（元の STEP と同じ、元が STEP でなければ AP242・既定）・`AP203`・`AP214`・`AP242`。PMI は AP242 でだけ書ける | `CAD_VIEWER_STEP_WRITE_SCHEMA` |
 | `[plan]` | `allow_badge_unlock` | Plan Mode バッジの双方向切り替えを許可するか | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | 承認済み（Edit Automatically）状態で`create_plan`を再度呼んだ際、`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態を維持したままstepsだけ差し替える | `PLAN_RESET_APPROVAL_ON_RECREATE` |
 | `[plan]` | `reset_approval_on_new_message` | 新しいユーザーメッセージを受け取るたびに`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態をメッセージをまたいで維持する（`thinking_loop_guard`のリトライ上限到達後、ユーザーが続行メッセージを送っても再承認が不要になる） | `PLAN_RESET_APPROVAL_ON_NEW_MESSAGE` |

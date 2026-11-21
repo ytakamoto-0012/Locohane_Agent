@@ -27,6 +27,7 @@ from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS, TopoDS_Shape
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape, TopTools_IndexedMapOfShape
 
+from .features import model_digest, recognize_features
 from .mesh_data import TooManyTrianglesError, build_viewer_data, hex_color, rnd, vec
 
 # セレクタ候補を計算する上限（面・エッジ・頂点それぞれの数）。超えたら候補を付けない（時間がかかるため）。
@@ -48,6 +49,13 @@ class Part:
     # DXF のレイヤーの設定（色・線種・非表示・フリーズ・ロック）。ビューアのサイドバーに出し、
     # 非表示・フリーズのレイヤーは最初から隠す。DXF 以外は None。
     layer: dict[str, Any] | None = None
+    # STEP / IGES（XCAF）の部品だけ: 形の定義のラベル、アセンブリの中のインスタンスのラベル（無ければ None）、
+    # 製品の名前（インスタンスの名前と違うことがある）、配置、ラベルを持つ XCAF の文書（ラベルを使う間は生かしておく）。
+    label: Any = None
+    instance: Any = None
+    product: str = ""
+    loc: Any = None
+    doc: Any = None
 
 
 @dataclass
@@ -55,6 +63,8 @@ class Options:
     linear_deflection_ratio: float = 0.001
     angular_deflection_deg: float = 20.0
     max_triangles: int = 500_000
+    # CadQuery のセレクタの候補を求めるか（比べる前の形のように、選ばせない形では求めない）。
+    selector_hints: bool = True
 
 
 class CadLoadError(ValueError):
@@ -83,9 +93,15 @@ def load_cad_file(path: str | Path, fmt: str) -> tuple[list[Part], str]:
 def _label_name(label) -> str:
     from OCP.TDataStd import TDataStd_Name
 
+    # 属性が無いラベルに FindAttribute を呼ぶと OCP がプロセスごと落ちることがあるので、先に有無を見る。
+    if not label.IsAttribute(TDataStd_Name.GetID_s()):
+        return ""
     attr = TDataStd_Name()
     if label.FindAttribute(TDataStd_Name.GetID_s(), attr):
-        return attr.Get().ToExtString()
+        from .step_p21 import repair_mojibake
+
+        # CadQuery が書いた STEP の日本語名は二重の UTF-8 になっている（step_p21.repair_mojibake）。
+        return repair_mojibake(attr.Get().ToExtString())
     return ""
 
 
@@ -118,6 +134,14 @@ def _load_xcaf(path: str, fmt: str) -> list[Part]:
     reader = Reader()
     reader.SetColorMode(True)
     reader.SetNameMode(True)
+    reader.SetLayerMode(True)
+    if fmt == "STEP":
+        # GD&T（寸法・幾何公差・データム）と検証プロパティ（体積・面積・重心）も読む。
+        # ユーザー定義属性は Python から一覧できず、材料は OCCT が製品に付いた文字列の属性を名前によらず材料と
+        # みなしてしまうので、どちらもここでは読まず src/cad/step_p21.py で P21 から読む（保存時もそちらで書く）。
+        reader.SetGDTMode(True)
+        reader.SetMatMode(False)
+        reader.SetPropsMode(True)
     if reader.ReadFile(path) != IFSelect_RetDone:
         raise CadLoadError(f"Could not read the {fmt} file: {path}")
     if not reader.Transfer(doc):
@@ -130,7 +154,9 @@ def _load_xcaf(path: str, fmt: str) -> list[Part]:
     def walk(label, loc: TopLoc_Location, names: list[str], inherited: tuple[int, int, int] | None) -> None:
         name = _label_name(label)
         own_color = _label_color(color_tool, label) or inherited
+        instance = None
         if shape_tool.IsReference_s(label):
+            instance = label
             ref = TDF_Label()
             shape_tool.GetReferredShape_s(label, ref)
             loc = loc.Multiplied(shape_tool.GetLocation_s(label))
@@ -149,7 +175,10 @@ def _load_xcaf(path: str, fmt: str) -> list[Part]:
         if shape.IsNull():
             return
         located = shape.Moved(loc) if not loc.IsIdentity() else shape
-        part = Part(path_names[-1], "/".join(path_names), located, own_color)
+        part = Part(
+            path_names[-1], "/".join(path_names), located, own_color,
+            label=label, instance=instance, product=_label_name(label) or path_names[-1], loc=loc, doc=doc,
+        )
         # 面（サブシェイプ）単位の色。
         subs = TDF_LabelSequence()
         shape_tool.GetSubShapes_s(label, subs)
@@ -344,6 +373,10 @@ def _face_info(face_id: int, f: TopoDS_Shape) -> dict[str, Any]:
     elif stype == GeomAbs_SurfaceType.GeomAbs_Cylinder:
         cyl = adaptor.Cylinder()
         info.update(radius=rnd(cyl.Radius()), axisOrigin=_pnt(cyl.Location()), axisDirection=_dir(cyl.Axis().Direction()))
+        concave = _cylinder_concave(face.wrapped, adaptor, cyl)
+        if concave is not None:
+            # true = 内向き（穴の内側の面）、false = 外向き（丸棒・ボスの外側の面）。
+            info["concave"] = concave
     elif stype == GeomAbs_SurfaceType.GeomAbs_Cone:
         cone = adaptor.Cone()
         info.update(
@@ -366,6 +399,28 @@ def _face_info(face_id: int, f: TopoDS_Shape) -> dict[str, Any]:
     bb = face.BoundingBox()
     info["bbox"] = {"min": vec((bb.xmin, bb.ymin, bb.zmin)), "max": vec((bb.xmax, bb.ymax, bb.zmax)), "size": vec((bb.xlen, bb.ylen, bb.zlen))}
     return info
+
+
+def _cylinder_concave(face: TopoDS_Shape, adaptor: BRepAdaptor_Surface, cyl) -> bool | None:
+    """円柱面の外向きの法線（面の向きを考える）が軸の方を向いていれば True（穴）、外を向いていれば False。"""
+    from OCP.BRepLProp import BRepLProp_SLProps
+
+    try:
+        u = (adaptor.FirstUParameter() + adaptor.LastUParameter()) / 2
+        v = (adaptor.FirstVParameter() + adaptor.LastVParameter()) / 2
+        props = BRepLProp_SLProps(adaptor, u, v, 1, 1e-9)
+        if not props.IsNormalDefined():
+            return None
+        n = np.array(_xyz(props.Normal()))
+        if face.Orientation() == TopAbs_REVERSED:
+            n = -n
+        p = np.array(_xyz(props.Value()))
+        o = np.array(_xyz(cyl.Location()))
+        d = np.array(_xyz(cyl.Axis().Direction()))
+        radial = (p - o) - d * float((p - o) @ d)
+        return bool(float(n @ radial) < 0)
+    except Exception:  # noqa: BLE001 - 求められなければ付けない
+        return None
 
 
 def _edge_info(edge_id: int, e: TopoDS_Shape) -> dict[str, Any]:
@@ -590,9 +645,11 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
             info["part"] = int(vertex_part[i - 1])
         vertices.append(info)
 
-    for kind, items in (("face", faces), ("edge", edges), ("vertex", vertices)):
-        for idx, sels in _selector_hints(compound, kind, len(items)).items():
-            items[idx]["selectors"] = sels
+    if options.selector_hints:
+        for kind, items in (("face", faces), ("edge", edges), ("vertex", vertices)):
+            for idx, sels in _selector_hints(compound, kind, len(items)).items():
+                items[idx]["selectors"] = sels
+    features = recognize_features(faces, edges, diag)
 
     data = build_viewer_data(
         source=source,
@@ -611,7 +668,65 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
     if with_parts:
         data["parts"] = [_part_info(pi, part, face_part, edge_part) for pi, part in enumerate(parts)]
         data["stats"]["parts"] = len(parts)
+    data["check"] = check_shape(compound, edges, n_parts=len(parts))
+    data["features"] = features
+    data["modelDigest"] = model_digest(faces, edges, vertices)
+    if source.get("format") == "STEP" and source.get("path") and parts and parts[0].label is not None:
+        from .step_xcaf import attach_step_info
+
+        attach_step_info(data, parts, face_map, edge_map, source["path"])
     return data
+
+
+def check_shape(compound: cq.Shape, edges: list[dict], n_parts: int = 1) -> dict[str, Any]:
+    """形の検査（ソリッドの数・正しい B-rep か・閉じているか・体積・表面積）と、気づいた点。
+
+    CadQuery の union が部品の一部を落としても valid のまま、のように「形が違うのに成功する」ことがあるため、
+    数値を LLM へ必ず返す（絵より先に数値で確かめさせる）。
+    """
+    from OCP.BRepCheck import BRepCheck_Analyzer
+    from OCP.TopAbs import TopAbs_SHELL, TopAbs_SOLID
+
+    root = compound.wrapped
+    solids = _index_map(root, TopAbs_SOLID).Extent()
+    shells = _index_map(root, TopAbs_SHELL).Extent()
+    out: dict[str, Any] = {"solids": solids, "shells": shells}
+    try:
+        out["valid"] = bool(BRepCheck_Analyzer(root).IsValid())
+    except Exception:  # noqa: BLE001
+        out["valid"] = None
+    # 面 1 つにしか属さないエッジ（継ぎ目・単独の線を除く）。ソリッドなら 0 のはず。
+    open_edges = sum(
+        1 for e in edges if len(e.get("faces") or []) == 1 and not e.get("seam") and not e.get("free") and e.get("geomType") != "DEGENERATED"
+    )
+    out["openEdges"] = open_edges
+    if solids:
+        try:
+            out["volume"] = rnd(sum(cq.Solid(s).Volume() for s in _solids(root)), 4)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        out["surfaceArea"] = rnd(compound.Area(), 4)
+    except Exception:  # noqa: BLE001
+        pass
+    warnings: list[str] = []
+    if out["valid"] is False:
+        warnings.append("The shape is not a valid B-rep (BRepCheck failed): booleans, fillets and export may give wrong results.")
+    if solids and open_edges:
+        warnings.append(f"{open_edges} edges belong to only one face: the solid is not closed (a face may be missing).")
+    if solids > 1 and n_parts == 1:
+        warnings.append(f"The shape has {solids} separate solids. If it should be one part, a union did not fuse them (check that they touch or overlap).")
+    if warnings:
+        out["warnings"] = warnings
+    return out
+
+
+def _solids(root: TopoDS_Shape) -> Iterable[TopoDS_Shape]:
+    from OCP.TopAbs import TopAbs_SOLID
+
+    m = _index_map(root, TopAbs_SOLID)
+    for i in range(1, m.Extent() + 1):
+        yield TopoDS.Solid_s(m.FindKey(i))
 
 
 def _ids_in(shape: TopoDS_Shape, kind, index_map: TopTools_IndexedMapOfShape) -> Iterable[int]:
