@@ -538,6 +538,54 @@ async def test_save_exports_a_dxf_with_layer_changes(env, tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_measurements_are_validated_and_returned(env, tmp_path) -> None:
+    from src import i18n
+
+    _viewer.response = {
+        "submitted": True,
+        "selected": [],
+        "measurements": [
+            {
+                "type": "distance",
+                "distance": 10.00000004,
+                "delta": [10, 0, 0],
+                "points": [[0, 0, 0], [10, 0, 0]],
+                "items": [{"kind": "face", "id": 0}, {"kind": "face", "id": 999}],
+                "approximate": False,
+                "extra": "x" * 1000,  # 種類ごとに決めた項目以外は捨てる
+            },
+            {"type": "plane_distance", "distance": 10, "direction": [0, 0, 1], "items": [{"kind": "face", "id": 0}, {"kind": "face", "id": 1}]},
+            {"type": "arc3", "radius": 5, "diameter": 10, "center": [1, 2], "points": [[0, 0, 0]] * 3, "approximate": "yes"},
+            {"type": "radius", "radius": "5"},  # 値が数でない
+            {"type": "volume", "value": 1},  # 知らない種類
+            "distance",
+        ],
+    }
+    out = json.loads(await _call(file_path=str(_cube_stl(tmp_path))))
+    ms = out["measurements"]
+    assert [m["type"] for m in ms] == ["distance", "plane_distance", "arc3"]
+    assert ms[0] == {
+        "type": "distance",
+        "distance": 10.0,
+        "delta": [10.0, 0.0, 0.0],
+        "points": [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+        "items": [{"kind": "face", "id": 0}, None],
+        "approximate": False,
+    }
+    # 形の合わない中心・真偽値でない approximate は付けない。
+    assert "center" not in ms[2] and "approximate" not in ms[2] and len(ms[2]["points"]) == 3
+    assert "model units" in out["measurement_note"]
+    assert i18n.t("cad.measurements", count=3) in _viewer.echoed[0]
+
+    # 上限を超えた分は受け取らない。
+    _viewer.response = {"submitted": True, "selected": [], "measurements": [{"type": "plane_angle", "angle_deg": 30}] * 80}
+    out = json.loads(await _call(file_path=str(_cube_stl(tmp_path))))
+    assert len(out["measurements"]) == cad_viewer._MEASUREMENTS_MAX
+    _viewer.response = {"submitted": True, "selected": []}
+    assert "measurements" not in json.loads(await _call(file_path=str(_cube_stl(tmp_path))))
+
+
+@pytest.mark.asyncio
 async def test_echo_lists_counts_not_elements(env, tmp_path) -> None:
     from src import i18n
 

@@ -1867,6 +1867,7 @@ and the resulting viewer data (JSON) is put in the session's `_tmp_` folder. The
 three.js is loaded only when a viewer opens (`frontend/src/components/cad/CadScene.ts`; it is not part of the main chat bundle).
 In the viewer, drag to rotate, right-drag to pan, use the wheel to zoom, click to select / deselect, switch the kind of element with the buttons at the top,
 and use "Expand" to fill the screen (Esc to restore). As with the other question tools, it can be answered on the screen you come back to after switching conversations.
+The viewer element (its props hold the whole viewer data, tens of MB for a large CAD model) is not saved in the conversation history (`chat_threads.sqlite`, `elements/`; `EPHEMERAL_CUSTOM_ELEMENTS` in `src/thread_store.py`; leftovers from earlier versions are removed by `purge_ephemeral_elements` at startup, followed by VACUUM). "Confirm" / "Cancel" show a busy indicator at once and stop further input, and the backend sends the close signal first and then does the auto-save and selection writing in a worker thread.
 Rotation uses three.js `ArcballControls` and, as in CAD software, is relative to the screen (a vertical drag rotates only around the screen's horizontal axis
 and does not stop at the top or bottom; in exchange, the up direction is not kept, and dragging near the edge of the view also rolls around the screen's depth axis). Wheel zoom moves toward the cursor.
 
@@ -1901,6 +1902,20 @@ and does not stop at the top or bottom; in exchange, the up direction is not kep
   center when you pan with the right button or zoom with the wheel (ArcballControls moves its internal gizmo, the rotation center, together with the
   camera in these operations, so it is put back on the chosen point after each one: `CadScene.restoreFixedPivot`). "Fit all" and the view buttons
   return it to the model center.
+- **Measure (📏)**: opens a row of measuring tools; while one is on, clicks measure instead of selecting (math in `frontend/src/components/cad/measure.ts`).
+  - **R / ⌀**: click a cylindrical, spherical, conical (radius at the clicked height) or fillet (torus, the tube radius) face, or a circle / arc edge.
+  - **Point distance**: click 2 points; shows the distance and ΔX / ΔY / ΔZ.
+  - **Plane distance**: click 2 planar faces; shows the distance if they are parallel (along the first face's normal), otherwise the angle between them (0-90°).
+  - **3-point arc**: click 3 points on an arc; shows the radius and diameter of the circle through them (works for STL and DXF arcs, which have no B-rep radius).
+
+  Radii and plane directions come from the B-rep values in the viewer data (`radius`, `axisOrigin`, `axisDirection`, `circleCenter`, `normal`, ...), not the mesh.
+  Points are picked from the nearest vertex, then edge, then face, and snap to the exact point on vertices, straight edges, circle edges, planes,
+  cylinders and spheres (`CadScene.measurePointAt`; a light blue dot shows the point that a click would take). Points on other curves and surfaces lie
+  on the display triangles, so values using them are marked "≈" (approximate). Dimension lines and points are drawn in purple on top of the shape, and
+  the values as numbered labels (also in the screenshot taken when confirming with an instruction). The results are listed below the viewer
+  (× removes one, "Clear measurements" removes all), and Esc drops the points picked so far. On confirm they are returned to the AI as
+  `measurements` (up to 50; per type the values, center, axis, points, the `{kind, id}` of the elements used, and `approximate`), and the chat answer
+  only says "N measurement(s)". Measurements are not part of undo / redo.
 - **Colors**: selected elements are orange (`#ff7a00`; the selection tags and the part tree use the same color), and the element under the pointer is light blue.
 - **Phones (width 768px or less)**: to leave room for the 3D view, the viewer uses the screen height, the buttons are smaller and wrap onto several rows,
   and the side panel starts closed ("Panel" opens it) and appears below the 3D view. Rotate, pan and zoom with one- and two-finger touch.

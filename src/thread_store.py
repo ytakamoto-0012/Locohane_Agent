@@ -154,7 +154,52 @@ async def init_db(db_path: Path) -> aiosqlite.Connection:
         await _backfill_monthly_usage(conn)
     except Exception:  # noqa: BLE001 - 集計用の補完に失敗しても会話機能は止めない
         logger.warning("Failed to backfill the monthly token usage ledger", exc_info=True)
+    try:
+        await purge_ephemeral_elements(conn)
+    except Exception:  # noqa: BLE001 - 後片付けに失敗しても会話機能は止めない
+        logger.warning("Failed to remove leftover temporary elements", exc_info=True)
     return conn
+
+
+# 答えを待つ間だけ画面に出し、会話の履歴には残さないカスタム要素の名前。props に大きなデータを持つ
+# （CadViewer = 3D ビューアはビューア用データ全体で、大きな CAD では 1 件数十 MB）。履歴に残ると、その会話を
+# 開くたび・リロードのたびに全部読み込んでブラウザへ送るので遅くなる。
+EPHEMERAL_CUSTOM_ELEMENTS: frozenset[str] = frozenset({"CadViewer"})
+
+
+def is_ephemeral_element(element: Any) -> bool:
+    """会話の履歴に保存しない要素か（EPHEMERAL_CUSTOM_ELEMENTS のカスタム要素）。"""
+    return getattr(element, "type", None) == "custom" and getattr(element, "name", None) in EPHEMERAL_CUSTOM_ELEMENTS
+
+
+async def purge_ephemeral_elements(conn: aiosqlite.Connection) -> int:
+    """前の版が保存してしまった、履歴に残さない要素（DB の行と実ファイル）を消す。消した数を返す。
+
+    以前は CadViewer の要素も保存し、答えた後の削除（Chainlit が投げっぱなしで保存するのと行き違う、
+    リロードで出し直した分は消されない等）から漏れたものが残っていた。消したものがあれば VACUUM で
+    ファイルを縮める（一度だけ時間がかかる）。
+    """
+    names = sorted(EPHEMERAL_CUSTOM_ELEMENTS)
+    marks = ",".join("?" * len(names))
+    cursor = await conn.execute(
+        "SELECT id, file_path FROM elements WHERE kind = 'chainlit' AND json_extract(data_json, '$.type') = 'custom' "
+        f"AND json_extract(data_json, '$.name') IN ({marks})",
+        names,
+    )
+    rows = await cursor.fetchall()
+    if not rows:
+        return 0
+    await conn.executemany("DELETE FROM elements WHERE id = ?", [(r[0],) for r in rows])
+    await conn.commit()
+    for _, file_path in rows:
+        if file_path:
+            try:
+                Path(file_path).unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to delete the element file: %s", file_path, exc_info=True)
+    await conn.execute("VACUUM")
+    logger.info("Removed %d leftover temporary element(s) (%s) from the thread store", len(rows), ", ".join(names))
+    return len(rows)
 
 
 def usage_month(when: datetime | None = None) -> str:
@@ -874,6 +919,9 @@ class ChatThreadDataLayer(BaseDataLayer):
         """
         for_id = getattr(element, "for_id", None)
         if not for_id:
+            return
+        # 答えを待つ間だけの大きな要素（3D ビューア）は履歴に残さない（is_ephemeral_element）。
+        if is_ephemeral_element(element):
             return
         thread_id = element.thread_id
         if not thread_id:

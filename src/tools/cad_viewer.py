@@ -62,6 +62,34 @@ _OUTPUT_TAIL_CHARS = 3000
 _HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 # ビューアの指示欄から受け取る文字数の上限（超えた分は切る）。
 _MESSAGE_MAX_CHARS = 4000
+# ビューアで測った結果を受け取る数の上限（frontend の CadViewerBar.tsx の MEASUREMENTS_MAX と同じ）。
+# 1 件は数十文字なので、戻り値にそのまま入れても大きさは抑えられる。
+_MEASUREMENTS_MAX = 50
+# ビューアの答えを受け取った後、重い処理の前にイベントループへ譲る時間（閉じる合図をブラウザへ届けるため）。
+_UI_FLUSH_SECONDS = 0.05
+# 計測の種類（frontend/src/components/cad/measure.ts の MeasureResult.type）ごとに受け取る項目。
+# value は必ず要る値。num = 数、vec = 3 次元の点・向き、text = 短い文字列、points = 点の並び、items = 要素の参照の並び、
+# item = 要素の参照 1 つ、flag = 真偽値。
+_MEASURE_FIELDS: dict[str, dict[str, tuple[str, ...]]] = {
+    "radius": {
+        "value": ("radius",),
+        "num": ("radius", "diameter", "major_radius", "semi_angle_deg"),
+        "vec": ("center", "axis"),
+        "text": ("geomType", "radius_at"),
+        "item": ("item",),
+    },
+    "distance": {"value": ("distance",), "num": ("distance",), "vec": ("delta",), "points": ("points",), "items": ("items",), "flag": ("approximate",)},
+    "plane_distance": {"value": ("distance",), "num": ("distance",), "vec": ("direction",), "items": ("items",)},
+    "plane_angle": {"value": ("angle_deg",), "num": ("angle_deg",), "items": ("items",)},
+    "arc3": {
+        "value": ("radius",),
+        "num": ("radius", "diameter"),
+        "vec": ("center", "normal"),
+        "points": ("points",),
+        "items": ("items",),
+        "flag": ("approximate",),
+    },
+}
 
 
 def _setting(name: str, default: Any) -> Any:
@@ -185,6 +213,8 @@ async def show_cad_viewer(
         holes and bosses grouped by diameter and depth), diff when compare_with was given, and
         viewer_data (@N of the viewer data). If the user changed face / part
         colors in the viewer, also color_change_count (the original model file itself is not changed).
+        If the user measured in the viewer (R / diameter, point distance, plane distance or angle,
+        3-point arc), also measurements: one small entry per measurement with its values.
         If the user typed an instruction in the viewer, it comes first as user_instruction: treat it
         as the user's next request about the selected elements. Then a small screenshot of the viewer
         as the user saw it when confirming (selected elements highlighted) is also shown to you as an
@@ -257,6 +287,22 @@ async def _show_cad_viewer(
         )
     if isinstance(answer, str):
         return "\n".join([answer, *extra])
+    # ビューアを閉じる合図（clear_ask・remove_element）は送信の待ち行列に入っただけで、イベントループに戻るまで
+    # ブラウザへ届かない。この後の書き出し（大きな CAD ではビューア用データが数十 MB）を同期で行うと、その間
+    # ビューアが閉じずに固まって見えるので、一度ループに譲ってから重い処理をスレッドで行う。
+    await asyncio.sleep(_UI_FLUSH_SECONDS)
+    return await asyncio.to_thread(_finish_answer, data, answer, data_token, notes, extra, shot)
+
+
+def _finish_answer(
+    data: dict,
+    answer: tuple[dict[str, Any], list[tuple[str, int]], list[dict[str, Any]], str],
+    data_token: str,
+    notes: list[str],
+    extra: list[str],
+    shot: dict[str, Any],
+) -> str:
+    """ビューアの答えを受け取った後の処理（自動保存・画面の保存・選択結果の書き出し）。同期処理なのでスレッドで呼ぶ。"""
     res, picked, colors, message = answer
     attr_changes = _attribute_changes(data, _valid_attributes(data, res.get("attributes")))
     # 色・表示・属性を変えていれば、変更を反映したビューア用データを自動で保存し、それを viewer_data として返す。
@@ -277,7 +323,8 @@ async def _show_cad_viewer(
                 "image_url": to_data_url(saved),
                 "ref": image_ref(saved, screenshot_token if screenshot_token != str(saved) else None),
             }
-    return _format_result(data, picked, data_token, [*notes, *extra], colors, message, screenshot_token, attr_changes)
+    measurements = _valid_measurements(data, res.get("measurements"))
+    return _format_result(data, picked, data_token, [*notes, *extra], colors, message, screenshot_token, attr_changes, measurements)
 
 
 def _screenshot_long_side() -> int:
@@ -769,7 +816,79 @@ def _valid_message(message: Any) -> str:
     return message.strip()[:_MESSAGE_MAX_CHARS] if isinstance(message, str) else ""
 
 
-def _echo_text(data: dict, picked: list[tuple[str, int]], colors: list[dict[str, Any]], message: str = "", attr_count: int = 0) -> str:
+def _measure_number(v: Any) -> float | None:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    f = float(v)
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    r = round(f, 6)
+    return 0.0 if r == 0 else r
+
+
+def _measure_vec(v: Any) -> list[float] | None:
+    if not isinstance(v, list) or len(v) != 3:
+        return None
+    out = [_measure_number(x) for x in v]
+    return None if any(x is None for x in out) else out  # type: ignore[return-value]
+
+
+def _measure_item(data: dict, v: Any) -> dict[str, Any] | None:
+    """計測に使った要素の参照 {kind, id}（モデルに無い要素なら None）。"""
+    if not isinstance(v, dict):
+        return None
+    kind, eid = v.get("kind"), v.get("id")
+    if kind not in _LIST_KEYS or isinstance(eid, bool) or not isinstance(eid, int):
+        return None
+    return {"kind": kind, "id": eid} if 0 <= eid < len(data.get(_LIST_KEYS[kind]) or []) else None
+
+
+def _valid_measurements(data: dict, raw: Any) -> list[dict[str, Any]]:
+    """ビューアで測った結果（R・距離・平面どうし・3 点円弧）。種類ごとに決めた項目だけを、形を確かめて受け取る。"""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for m in raw[:_MEASUREMENTS_MAX]:
+        if not isinstance(m, dict) or m.get("type") not in _MEASURE_FIELDS:
+            continue
+        fields = _MEASURE_FIELDS[m["type"]]
+        item: dict[str, Any] = {"type": m["type"]}
+        for k in fields.get("num", ()):
+            if (n := _measure_number(m.get(k))) is not None:
+                item[k] = n
+        if any(k not in item for k in fields["value"]):
+            continue
+        for k in fields.get("vec", ()):
+            if (vec := _measure_vec(m.get(k))) is not None:
+                item[k] = vec
+        for k in fields.get("text", ()):
+            if isinstance(m.get(k), str) and m[k]:
+                item[k] = m[k][:40]
+        for k in fields.get("points", ()):
+            pts = [_measure_vec(p) for p in m.get(k)] if isinstance(m.get(k), list) else []
+            if pts and len(pts) <= 3 and all(p is not None for p in pts):
+                item[k] = pts
+        for k in fields.get("items", ()):
+            if isinstance(m.get(k), list) and len(m[k]) <= 3:
+                item[k] = [_measure_item(data, s) for s in m[k]]
+        for k in fields.get("item", ()):
+            if (ref := _measure_item(data, m.get(k))) is not None:
+                item[k] = ref
+        for k in fields.get("flag", ()):
+            if isinstance(m.get(k), bool):
+                item[k] = m[k]
+        out.append(item)
+    return out
+
+
+def _echo_text(
+    data: dict,
+    picked: list[tuple[str, int]],
+    colors: list[dict[str, Any]],
+    message: str = "",
+    attr_count: int = 0,
+    measure_count: int = 0,
+) -> str:
     """チャットに残す、利用者の答えの短い文。指示は省かずに後ろへ付ける。
 
     この文はユーザー発言として会話に保存され、スレッドを再開すると LLM の文脈にも入るので、選んだ要素は
@@ -783,6 +902,8 @@ def _echo_text(data: dict, picked: list[tuple[str, int]], colors: list[dict[str,
         text += f" / {t('cad.color_changes', count=len(colors))}"
     if attr_count:
         text += f" / {t('cad.attribute_changes', count=attr_count)}"
+    if measure_count:
+        text += f" / {t('cad.measurements', count=measure_count)}"
     if message:
         text += f"\n\n{message}"
     return text
@@ -823,6 +944,7 @@ async def _ask_selection(
                     _valid_colors(data, res.get("colors")),
                     _valid_message(res.get("message")),
                     len(_attribute_changes(data, _valid_attributes(data, res.get("attributes")))),
+                    len(_valid_measurements(data, res.get("measurements"))),
                 )
             else:
                 answer = t("ask.cancel")
@@ -922,6 +1044,7 @@ def _format_result(
     message: str = "",
     screenshot_token: str = "",
     attr_changes: list[dict[str, Any]] | None = None,
+    measurements: list[dict[str, Any]] | None = None,
 ) -> str:
     """LLM へ返す概要（JSON 文字列）。
 
@@ -952,12 +1075,25 @@ def _format_result(
             "The user confirmed without typing an instruction. If the user's earlier request already said what to do "
             "with the selection (e.g. 'make a hole in the face I pick'), do that. Otherwise do nothing more: do not read "
             "selection_file, do not call json_query or any other tool, and do not dispatch agents. Just reply in one or "
-            "two short sentences with what was selected (selected_by_kind) and wait for the user's next request."
+            "two short sentences with what was selected (selected_by_kind) and the measured values (measurements), if any, "
+            "and wait for the user's next request."
         )
     result |= {
         "selected_count": len(picked),
         "selected_by_kind": {k: n for k in _ALL_KINDS if (n := sum(1 for kind, _ in picked if kind == k))},
     }
+    if measurements:
+        # 利用者がビューアで測った結果（最大 _MEASUREMENTS_MAX 件、1 件は小さいので戻り値に入れる）。
+        result["measurements"] = measurements
+        units = data.get("units", "unknown")
+        result["measurement_note"] = (
+            f"The user measured these in the viewer (lengths in the model units: {units}). "
+            "radius = R of a cylinder / sphere / cone (at the clicked point) / fillet torus face or circle edge; "
+            "distance = between 2 points (delta = x, y, z components); plane_distance / plane_angle = between 2 planar faces; "
+            "arc3 = circle through 3 clicked points. items are the elements the points were on (null = none). "
+            "approximate: true means a point was on the display triangles of a curved surface, so the value can be off "
+            "by the tessellation tolerance. Radii and plane distances come from the exact model geometry."
+        )
     if colors:
         result["color_change_count"] = len(colors)
     if attr_changes:

@@ -21,6 +21,18 @@ import {
   type CadViewerProps
 } from './cad/cadData';
 import type { CadScene, CadSceneColors, ViewName } from './cad/CadScene';
+import {
+  MEASURE_TOOLS,
+  PICKS_NEEDED,
+  fmtNum,
+  isPlane,
+  measure,
+  type CadMeasurement,
+  type MeasureError,
+  type MeasurePick,
+  type MeasureResult,
+  type MeasureTool
+} from './cad/measure';
 import { CadSidebar } from './cad/CadSidebar';
 import type { CadAttributeEdits } from './cad/CadStepPanel';
 
@@ -37,6 +49,18 @@ const BOX_MODES: { id: BoxMode; label: MessageKey; title: MessageKey }[] = [
   { id: 'window', label: 'cad.box.window', title: 'cad.box.windowTitle' },
   { id: 'crossing', label: 'cad.box.crossing', title: 'cad.box.crossingTitle' }
 ];
+
+// 覚えておく計測の数の上限（古いものから消す。src/tools/cad_viewer.py の _MEASUREMENTS_MAX と同じ）。
+const MEASUREMENTS_MAX = 50;
+
+/** 計測の一覧に出す説明（ツールチップ。距離は各軸の成分も）。 */
+function measureTitle(m: CadMeasurement, t: (k: MessageKey) => string): string {
+  const parts = [`${t(`cad.measure.tool.${m.tool}` as MessageKey)}  ${m.draw.label}`];
+  const delta = m.result.delta;
+  if (Array.isArray(delta)) parts.push(['ΔX', 'ΔY', 'ΔZ'].map((k, i) => `${k} ${fmtNum(Number(delta[i]))}`).join('  '));
+  if (m.approximate) parts.push(t('cad.measure.approx'));
+  return parts.join('\n');
+}
 
 /** 確定時に返す、変えた色（キーは ID の文字列）。 */
 export interface CadColorChanges {
@@ -129,8 +153,16 @@ export function CadViewerBar() {
       data={props.data}
       saveId={props.save_id ?? ''}
       screenshotLongSide={props.screenshot_long_side ?? 0}
-      onSubmit={(selected, colors, message, view, screenshot) =>
-        askUser.callback({ submitted: true, selected, colors, message, ...view, ...(screenshot ? { screenshot } : {}) })
+      onSubmit={(selected, colors, message, view, screenshot, measurements) =>
+        askUser.callback({
+          submitted: true,
+          selected,
+          colors,
+          message,
+          ...view,
+          ...(screenshot ? { screenshot } : {}),
+          ...(measurements.length ? { measurements } : {})
+        })
       }
       onCancel={(colors, view) => askUser.callback({ submitted: false, selected: [], colors, ...view })}
     />
@@ -143,8 +175,15 @@ interface PanelProps {
   data: CadData;
   saveId: string;
   screenshotLongSide: number;
-  /** screenshot: 指示があるときだけ撮った今の画面（PNG の data URL）。 */
-  onSubmit: (selected: CadSelection[], colors: CadColorChanges, message: string, view: CadViewState, screenshot: string | null) => void;
+  /** screenshot: 指示があるときだけ撮った今の画面（PNG の data URL）。measurements: ビューアで測った結果。 */
+  onSubmit: (
+    selected: CadSelection[],
+    colors: CadColorChanges,
+    message: string,
+    view: CadViewState,
+    screenshot: string | null,
+    measurements: MeasureResult[]
+  ) => void;
   onCancel: (colors: CadColorChanges, view: CadViewState) => void;
 }
 
@@ -235,6 +274,8 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   const client = useContext(ChainlitContext);
   const sessionId = useRecoilValue(sessionIdState);
   const [saveState, setSaveState] = useState<SaveState>({ kind: 'idle' });
+  // 確定・キャンセルを押した後、backend がビューアを閉じるまでの間（二度押しを防ぎ、処理中と分かるようにする）。
+  const [closing, setClosing] = useState<'submit' | 'cancel' | null>(null);
   // 選択と一緒に AI へ返す指示（「この面に φ5 の穴を開けて」等）。
   const [message, setMessage] = useState('');
   const hostRef = useRef<HTMLDivElement>(null);
@@ -249,6 +290,15 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   const [pivotPicking, setPivotPicking] = useState(false);
   // 空間の原点 (0, 0, 0) の XYZ 軸の表示。
   const [originAxes, setOriginAxes] = useState(true);
+  // 計測: 計測の行を開いているか、今の計測の種類（null なら計測しない = クリックで選択）、途中で拾った点、測った結果。
+  const [measureOpen, setMeasureOpen] = useState(false);
+  const [measureTool, setMeasureTool] = useState<MeasureTool | null>(null);
+  const [pending, setPending] = useState<MeasurePick[]>([]);
+  const [measurements, setMeasurements] = useState<CadMeasurement[]>([]);
+  const [measureError, setMeasureError] = useState<MeasureError | null>(null);
+  // CadScene のコールバックは作ったときのものが残るので、今の状態は ref で読む。
+  const measureRef = useRef({ tool: measureTool, pending });
+  measureRef.current = { tool: measureTool, pending };
   const hasParts = (data.parts?.length ?? 0) > 0;
   // 狭い画面ではサイドバーが 3D 表示の場所を取るため、最初は閉じておく（ボタンで開ける）。
   const [sidebarOpen, setSidebarOpen] = useState((hasParts || !!data.step) && !isNarrowScreen());
@@ -312,6 +362,39 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
     });
   }, []);
 
+  const infoOf = useCallback((s: CadSelection | null) => (s ? itemsOf(data, s.kind)[s.id] : undefined), [data]);
+  // 計測のモードでクリックした点・要素。要る数だけ集まったら測る（平面どうしは平面以外をその場で断る）。
+  const measurePick = useCallback(
+    (pick: MeasurePick) => {
+      const { tool, pending: cur } = measureRef.current;
+      if (!tool) return;
+      setMeasureError(null);
+      if (tool === 'planes' && !isPlane(infoOf(pick.item))) {
+        setMeasureError('notPlane');
+        return;
+      }
+      const picks = [...cur, pick];
+      if (picks.length < PICKS_NEEDED[tool]) {
+        setPending(picks);
+        return;
+      }
+      setPending([]);
+      const out = measure(tool, picks, infoOf);
+      if ('error' in out) setMeasureError(out.error);
+      else setMeasurements((list) => [...list, out.ok].slice(-MEASUREMENTS_MAX));
+    },
+    [infoOf]
+  );
+  const chooseMeasureTool = (tool: MeasureTool | null) => {
+    setMeasureTool(tool);
+    setPending([]);
+    setMeasureError(null);
+    if (tool) {
+      setBoxMode('off');
+      setPivotPicking(false);
+    }
+  };
+
   // three.js は import() で必要になったときだけ読む。
   useEffect(() => {
     const host = hostRef.current;
@@ -323,7 +406,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
         sceneRef.current = new CadScene(
           host,
           data,
-          { onHover: setHover, onPick: toggle, onBoxPick: boxPick, onPivotSet: () => setPivotPicking(false) },
+          { onHover: setHover, onPick: toggle, onBoxPick: boxPick, onPivotSet: () => setPivotPicking(false), onMeasurePick: measurePick },
           sceneColors()
         );
         sceneRef.current.setMode(kinds[0]);
@@ -339,7 +422,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
       sceneRef.current = null;
     };
     // data・kinds は要素ごとに固定（key={element.id} で作り直す）。
-  }, [data, kinds, toggle, boxPick]);
+  }, [data, kinds, toggle, boxPick, measurePick]);
 
   useEffect(() => {
     sceneRef.current?.setMode(mode);
@@ -365,6 +448,27 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   useEffect(() => {
     sceneRef.current?.setDiffVisible(diffVisible);
   }, [diffVisible, status]);
+  useEffect(() => {
+    sceneRef.current?.setMeasureTool(measureTool);
+  }, [measureTool, status]);
+  useEffect(() => {
+    sceneRef.current?.setMeasureOverlay(
+      measurements.map((m) => m.draw),
+      pending.map((p) => p.point)
+    );
+  }, [measurements, pending, status]);
+  // 計測の途中なら Esc で拾った点を捨ててやり直す（ポインタがビューアの上にあるときだけ。拡大表示の Esc より先に効かせる）。
+  useEffect(() => {
+    if (!pending.length && !measureError) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || !pointerInside.current) return;
+      e.stopImmediatePropagation();
+      setPending([]);
+      setMeasureError(null);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [pending, measureError]);
 
   // 保存した後に色・表示を変えたら「保存しました」を消す（保存したファイルは前の内容のまま）。
   useEffect(() => {
@@ -392,9 +496,14 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
 
   const hoverText = useMemo(() => {
     if (pivotPicking) return t('cad.hintPivot');
-    if (!hover) return t(boxMode === 'off' ? 'cad.hint' : 'cad.hintBox');
-    return describe(itemsOf(data, hover.kind)[hover.id], label(hover), effectiveColor(data, colors, hover), t, data);
-  }, [hover, data, label, t, colors, boxMode, pivotPicking]);
+    const item = hover ? describe(itemsOf(data, hover.kind)[hover.id], label(hover), effectiveColor(data, colors, hover), t, data) : '';
+    if (measureTool) {
+      if (measureError) return t(`cad.measure.error.${measureError}` as MessageKey);
+      const hint = t(`cad.measure.hint.${measureTool}` as MessageKey, { n: pending.length + 1 });
+      return item ? `${hint}  ${item}` : hint;
+    }
+    return item || t(boxMode === 'off' ? 'cad.hint' : 'cad.hintBox');
+  }, [hover, data, label, t, colors, boxMode, pivotPicking, measureTool, measureError, pending]);
 
   const selectAll = () => {
     const ids = sceneRef.current?.selectableIds(mode) ?? [];
@@ -445,11 +554,25 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
     visible: kindVisible,
     ...(Object.keys(attributeEdits).length ? { attributes: attributeEdits } : {})
   });
+  const cancel = () => {
+    if (closing) return;
+    setClosing('cancel');
+    onCancel(colorChanges(), viewState());
+  };
   const submit = () => {
+    if (closing) return;
+    setClosing('submit');
     const text = message.trim();
     // 指示があるときだけ、今の画面（選んだ要素の強調を含む）を低解像度で撮って AI へ一緒に見せる。
     const screenshot = text ? (sceneRef.current?.snapshot(screenshotLongSide) ?? null) : null;
-    onSubmit(selection, colorChanges(), text, viewState(), screenshot);
+    onSubmit(
+      selection,
+      colorChanges(),
+      text,
+      viewState(),
+      screenshot,
+      measurements.map((m) => m.result)
+    );
   };
 
   // 変えた色・隠した部品を反映した 3D モデル（STEP / DXF / 色付き STL）を書き出す（app.py の cad_viewer_save）。
@@ -489,7 +612,8 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   return (
     <div
       ref={barRef}
-      className={`ask-form-bar cad-viewer-bar${expanded ? ' cad-viewer-expanded' : ''}`}
+      className={`ask-form-bar cad-viewer-bar${expanded ? ' cad-viewer-expanded' : ''}${closing ? ' cad-viewer-busy' : ''}`}
+      aria-busy={!!closing}
       onPointerEnter={() => (pointerInside.current = true)}
       onPointerLeave={() => (pointerInside.current = false)}
     >
@@ -510,8 +634,11 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
               type="button"
               role="radio"
               aria-checked={mode === k}
-              className={`cad-viewer-chip${mode === k ? ' active' : ''}`}
-              onClick={() => setMode(k)}
+              className={`cad-viewer-chip${mode === k && !measureTool ? ' active' : ''}`}
+              onClick={() => {
+                setMode(k);
+                chooseMeasureTool(null);
+              }}
             >
               {t(KIND_LABEL[k])}
             </button>
@@ -524,8 +651,11 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
               role="radio"
               aria-checked={boxMode === b.id}
               title={t(b.title)}
-              className={`cad-viewer-chip${boxMode === b.id ? ' active' : ''}`}
-              onClick={() => setBoxMode(b.id)}
+              className={`cad-viewer-chip${boxMode === b.id && !measureTool ? ' active' : ''}`}
+              onClick={() => {
+                setBoxMode(b.id);
+                chooseMeasureTool(null);
+              }}
             >
               {t(b.label)}
             </button>
@@ -596,6 +726,19 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
           >
             {t('cad.originAxes')}
           </button>
+          <button
+            type="button"
+            className={`cad-viewer-chip${measureOpen ? ' active' : ''}`}
+            aria-pressed={measureOpen}
+            title={t('cad.measureTitle')}
+            onClick={() => {
+              const open = !measureOpen;
+              setMeasureOpen(open);
+              chooseMeasureTool(open ? (measureTool ?? MEASURE_TOOLS[0]) : null);
+            }}
+          >
+            {t('cad.measure')}
+          </button>
           {hasDiff && (
             <button
               type="button"
@@ -620,6 +763,36 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
           </button>
         </div>
       </div>
+      {measureOpen && (
+        <div className="cad-viewer-measure-bar" role="radiogroup" aria-label={t('cad.measure')}>
+          {MEASURE_TOOLS.map((m) => (
+            <button
+              key={m}
+              type="button"
+              role="radio"
+              aria-checked={measureTool === m}
+              title={t(`cad.measure.tool.${m}Title` as MessageKey)}
+              className={`cad-viewer-chip${measureTool === m ? ' active' : ''}`}
+              onClick={() => chooseMeasureTool(m)}
+            >
+              {t(`cad.measure.tool.${m}` as MessageKey)}
+            </button>
+          ))}
+          <button
+            type="button"
+            className="cad-viewer-chip"
+            title={t('cad.measure.clearTitle')}
+            disabled={!measurements.length && !pending.length}
+            onClick={() => {
+              setMeasurements([]);
+              setPending([]);
+              setMeasureError(null);
+            }}
+          >
+            {t('cad.measure.clear')}
+          </button>
+        </div>
+      )}
       <div className="cad-viewer-body">
         {sidebarOpen && (
           <CadSidebar
@@ -646,6 +819,12 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
         <div className="cad-viewer-host" ref={hostRef}>
           {status === 'loading' && <div className="cad-viewer-overlay">{t('cad.loading')}</div>}
           {status === 'error' && <div className="cad-viewer-overlay">{t('cad.webglError')}</div>}
+          {closing && (
+            <div className="cad-viewer-overlay cad-viewer-closing" role="status">
+              <span className="cad-viewer-spinner" aria-hidden="true" />
+              {t(closing === 'submit' ? 'cad.submitting' : 'cad.closing')}
+            </div>
+          )}
         </div>
       </div>
       <div className="cad-viewer-status">
@@ -653,6 +832,22 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
         {hasDiff && diffVisible && <span className="cad-viewer-legend">{t('cad.diffLegend')}</span>}
         <span className="cad-viewer-summary">{summary}</span>
       </div>
+      {measurements.length > 0 && (
+        <div className="cad-viewer-measures">
+          {measurements.map((m, i) => (
+            <span key={i} className="cad-viewer-measure-tag" title={measureTitle(m, t)}>
+              {`${i + 1}: ${m.tool === 'planes' && m.result.type === 'plane_angle' ? t('cad.measure.angle') : t(`cad.measure.tool.${m.tool}` as MessageKey)} ${m.draw.label}`}
+              <button
+                type="button"
+                aria-label={t('cad.measure.remove')}
+                onClick={() => setMeasurements((list) => list.filter((_, j) => j !== i))}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       <div className="cad-viewer-selected">
         {selection.length === 0 ? (
           <span className="cad-viewer-empty">{t('cad.noneSelected')}</span>
@@ -693,7 +888,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
       />
       <div className="ask-form-actions">
         {/* 左端はキャンセル（ほかの質問ツールと同じ位置）。保存・確定は右にまとめる。 */}
-        <button type="button" className="ask-form-cancel" title={t('cad.cancelTitle')} onClick={() => onCancel(colorChanges(), viewState())}>
+        <button type="button" className="ask-form-cancel" title={t('cad.cancelTitle')} disabled={!!closing} onClick={cancel}>
           {t('cad.close')}
         </button>
         <div className="cad-viewer-actions-right">
@@ -713,8 +908,9 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
               {saveState.kind === 'saving' ? t('cad.saving') : t('cad.save')}
             </button>
           )}
-          <button type="button" className="ask-form-submit" title={t('cad.confirmTitle')} onClick={submit}>
-            {t('cad.confirm', { count: selection.length })}
+          <button type="button" className="ask-form-submit" title={t('cad.confirmTitle')} disabled={!!closing} onClick={submit}>
+            {closing === 'submit' && <span className="cad-viewer-spinner" aria-hidden="true" />}
+            {closing === 'submit' ? t('cad.submitting') : t('cad.confirm', { count: selection.length })}
           </button>
         </div>
       </div>

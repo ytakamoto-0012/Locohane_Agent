@@ -1076,6 +1076,99 @@
   cursor: crosshair;
 }
 
+/* 確定・キャンセルを押した後、閉じるまでの間は操作を受け付けない（処理中の表示だけ出す）。 */
+.cad-viewer-bar.cad-viewer-busy .cad-viewer-toolbar,
+.cad-viewer-bar.cad-viewer-busy .cad-viewer-measure-bar,
+.cad-viewer-bar.cad-viewer-busy .cad-viewer-body,
+.cad-viewer-bar.cad-viewer-busy .cad-viewer-selected,
+.cad-viewer-bar.cad-viewer-busy .cad-viewer-measures,
+.cad-viewer-bar.cad-viewer-busy .cad-viewer-message {
+  pointer-events: none;
+}
+
+.cad-viewer-closing {
+  gap: 10px;
+  z-index: 2;
+  background: color-mix(in srgb, var(--surface, #fff) 70%, transparent);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.cad-viewer-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  vertical-align: -3px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: spin 0.7s linear infinite;
+}
+
+/* 計測の点・要素をクリックで拾う間。 */
+.cad-viewer-canvas.cad-viewer-measuring {
+  cursor: crosshair;
+}
+
+.cad-viewer-measure-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 3D 表示に重ねる計測の値（CadScene が描くたびに位置を合わせる）。 */
+.cad-viewer-measure-labels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.cad-viewer-measure-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.88);
+  color: #8e4ec6;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.cad-viewer-measures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 72px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.cad-viewer-measure-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 9px;
+  border-radius: 999px;
+  background: rgba(142, 78, 198, 0.14);
+  color: #8e4ec6;
+}
+
+.cad-viewer-measure-tag button {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 4px;
+}
+
 .cad-viewer-overlay {
   position: absolute;
   inset: 0;

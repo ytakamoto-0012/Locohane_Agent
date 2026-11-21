@@ -23,6 +23,7 @@ import {
   type CadSelection,
   type CadVisibility
 } from './cadData';
+import { asVec3, onCircle, onSphere, unit, type MeasureDraw, type MeasurePick, type MeasureTool, type Vec3 } from './measure';
 
 export interface CadSceneColors {
   background: string;
@@ -40,7 +41,13 @@ export interface CadSceneCallbacks {
   onBoxPick: (items: CadSelection[], remove: boolean) => void;
   /** 「回転中心」でクリックした点を回転の中心にしたとき（ビューアは指定のモードを終える）。 */
   onPivotSet?: () => void;
+  /** 計測のモード（setMeasureTool）でクリックした点・要素。選択はしない。 */
+  onMeasurePick?: (pick: MeasurePick) => void;
 }
+
+// 計測の線・印の色（選択のオレンジ・ホバーの水色と見分けられる紫）。
+const MEASURE_COLOR = '#8e4ec6';
+const MEASURE_LINE_WIDTH = 2;
 
 /** 視点。'xy+' は XY 平面を +Z 側から見る（X が右・Y が上）。'-' は裏側から見る（上の向きは同じ）。 */
 export type ViewName = 'iso' | 'xy+' | 'yz+' | 'zx+' | 'xy-' | 'yz-' | 'zx-';
@@ -144,6 +151,16 @@ export class CadScene {
   private originAxesLine: LineSegments2 | null = null;
   // 前の版からの変化（緑 = 増えた部分、赤 = 削った部分）。選択・当たり判定の対象にはしない。
   private diffOverlay: THREE.Group | null = null;
+  // 計測のモード（null なら計測しない）。クリックは選択でなく onMeasurePick になる。
+  private measureTool: MeasureTool | null = null;
+  // 計測の線（寸法線・半径・円）と点の印。選択・当たり判定の対象にはしない。
+  private measureLines: LineSegments2 | null = null;
+  private measurePoints: THREE.Points | null = null;
+  // 計測でマウスを乗せている点（クリックすると拾う点）の印。
+  private measureHoverMarker: THREE.Points | null = null;
+  // 計測の値の文字（HTML。画面上で同じ大きさ・くっきり出すため、描くたびに位置を合わせる）。
+  private readonly labelLayer: HTMLDivElement;
+  private measureLabels: { el: HTMLDivElement; at: THREE.Vector3; text: string }[] = [];
 
   constructor(container: HTMLElement, data: CadData, callbacks: CadSceneCallbacks, colors: CadSceneColors) {
     this.container = container;
@@ -159,6 +176,9 @@ export class CadScene {
     this.boxEl.className = 'cad-viewer-box';
     this.boxEl.hidden = true;
     container.appendChild(this.boxEl);
+    this.labelLayer = document.createElement('div');
+    this.labelLayer.className = 'cad-viewer-measure-labels';
+    container.appendChild(this.labelLayer);
 
     const min = new THREE.Vector3(...data.bbox.min);
     const max = new THREE.Vector3(...data.bbox.max);
@@ -181,6 +201,7 @@ export class CadScene {
     this.buildPivotMarker();
     this.buildOriginAxes();
     this.buildDiffOverlay();
+    this.buildMeasureOverlay();
     this.addAxes();
 
     // ArcballControls: 画面を基準に回す（縦ドラッグは常に画面の横軸まわりの回転になる）。CAD ソフトに近い操作感。
@@ -381,6 +402,96 @@ export class CadScene {
     this.requestRender();
   }
 
+  /** 計測の線・点の印・マウスを乗せている点の印を作る（中身は setMeasureOverlay で入れる）。形に隠れないよう手前に重ねる。 */
+  private buildMeasureOverlay(): void {
+    const lineMaterial = new LineMaterial({ linewidth: MEASURE_LINE_WIDTH, color: MEASURE_COLOR, depthTest: false, transparent: true });
+    this.measureLines = new LineSegments2(new LineSegmentsGeometry(), lineMaterial);
+    this.measureLines.renderOrder = 5;
+    this.measureLines.visible = false;
+    this.scene.add(this.measureLines);
+    const points = (size: number, color: string) => {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3), 3));
+      const p = new THREE.Points(geometry, new THREE.PointsMaterial({ size, sizeAttenuation: false, color, depthTest: false, transparent: true }));
+      p.renderOrder = 5;
+      p.visible = false;
+      this.scene.add(p);
+      return p;
+    };
+    this.measurePoints = points(7, MEASURE_COLOR);
+    this.measureHoverMarker = points(10, this.colors.hover);
+  }
+
+  /**
+   * 計測のモードにする（null でやめる）。計測の間は、クリックで選択せずに点・要素を onMeasurePick で返し、
+   * 範囲選択もしない（左ドラッグは回転）。
+   */
+  setMeasureTool(tool: MeasureTool | null): void {
+    this.measureTool = tool;
+    this.renderer.domElement.classList.toggle('cad-viewer-measuring', tool !== null);
+    if (tool !== null) this.setBoxMode('off');
+    this.hover = null;
+    this.setHoverMarker(null);
+    this.refreshColors();
+  }
+
+  /** 計測の結果（draws）と、計測の途中で拾った点（pending）を重ねて描く。文字には 1 から番号を付ける。 */
+  setMeasureOverlay(draws: MeasureDraw[], pending: Vec3[]): void {
+    const segs = draws.flatMap((d) => d.segments);
+    if (this.measureLines) {
+      this.measureLines.geometry.dispose();
+      const g = new LineSegmentsGeometry();
+      if (segs.length) g.setPositions(segs.flat());
+      this.measureLines.geometry = g;
+      this.measureLines.visible = segs.length > 0;
+    }
+    const pts = [...draws.flatMap((d) => d.points), ...pending];
+    if (this.measurePoints) {
+      this.measurePoints.geometry.dispose();
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts.length ? pts.flat() : [0, 0, 0]), 3));
+      this.measurePoints.geometry = g;
+      this.measurePoints.visible = pts.length > 0;
+    }
+    for (const l of this.measureLabels) l.el.remove();
+    this.measureLabels = draws.map((d, i) => {
+      const el = document.createElement('div');
+      el.className = 'cad-viewer-measure-label';
+      const text = `${i + 1}: ${d.label}`;
+      el.textContent = text;
+      this.labelLayer.appendChild(el);
+      return { el, at: new THREE.Vector3(...d.labelAt), text };
+    });
+    this.requestRender();
+  }
+
+  private setHoverMarker(p: Vec3 | null): void {
+    const m = this.measureHoverMarker;
+    if (!m) return;
+    if (p) {
+      const attr = m.geometry.getAttribute('position') as THREE.BufferAttribute;
+      attr.setXYZ(0, p[0], p[1], p[2]);
+      attr.needsUpdate = true;
+      m.geometry.computeBoundingSphere();
+    }
+    if (m.visible !== !!p || p) {
+      m.visible = !!p;
+      this.requestRender();
+    }
+  }
+
+  /** 計測の文字を、各点の今の画面上の位置へ動かす（描くたびに呼ぶ）。 */
+  private placeMeasureLabels(): void {
+    if (!this.measureLabels.length) return;
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    const v = new THREE.Vector3();
+    for (const l of this.measureLabels) {
+      v.copy(l.at).project(this.camera);
+      l.el.style.transform = `translate(${((v.x + 1) / 2) * w}px, ${((1 - v.y) / 2) * h}px) translate(-50%, -50%)`;
+    }
+  }
+
   /** 左下の XYZ 軸（X 赤・Y 緑・Z 青、ラベル付き）を作る。 */
   private addAxes(): void {
     this.gizmoScene.add(new THREE.AxesHelper(1));
@@ -428,6 +539,7 @@ export class CadScene {
 
   applyTheme(colors: CadSceneColors): void {
     this.colors = colors;
+    (this.measureHoverMarker?.material as THREE.PointsMaterial | undefined)?.color.set(colors.hover);
     this.renderer.setClearColor(new THREE.Color(colors.background));
     this.refreshColors();
   }
@@ -673,10 +785,33 @@ export class CadScene {
       if (!ctx) return null;
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+      this.drawMeasureLabels(ctx, canvas.width / Math.max(this.container.clientWidth, 1));
       return canvas.toDataURL('image/png');
     } catch (err) {
       console.warn('Could not capture the 3D viewer', err);
       return null;
+    }
+  }
+
+  /** 計測の文字（HTML で重ねているので WebGL の画面には入らない）を、撮った画面にも描く。k は CSS ピクセルからの倍率。 */
+  private drawMeasureLabels(ctx: CanvasRenderingContext2D, k: number): void {
+    if (!this.measureLabels.length) return;
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    const size = Math.max(9, Math.round(12 * Math.max(k, 0.75)));
+    ctx.font = `600 ${size}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const v = new THREE.Vector3();
+    for (const l of this.measureLabels) {
+      v.copy(l.at).project(this.camera);
+      const x = ((v.x + 1) / 2) * w * k;
+      const y = ((1 - v.y) / 2) * h * k;
+      const tw = ctx.measureText(l.text).width + size * 0.8;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+      ctx.fillRect(x - tw / 2, y - size * 0.75, tw, size * 1.5);
+      ctx.fillStyle = MEASURE_COLOR;
+      ctx.fillText(l.text, x, y);
     }
   }
 
@@ -693,6 +828,7 @@ export class CadScene {
     this.camera.updateProjectionMatrix();
     (this.edgeHighlight?.material as LineMaterial | undefined)?.resolution.set(w, h);
     (this.originAxesLine?.material as LineMaterial | undefined)?.resolution.set(w, h);
+    (this.measureLines?.material as LineMaterial | undefined)?.resolution.set(w, h);
     this.requestRender();
   }
 
@@ -705,6 +841,7 @@ export class CadScene {
     el.removeEventListener('pointermove', this.handlePointerMove);
     el.removeEventListener('pointerleave', this.handlePointerLeave);
     this.boxEl.remove();
+    this.labelLayer.remove();
     const disposeObject = (obj: THREE.Object3D) => {
       const o = obj as THREE.Mesh;
       o.geometry?.dispose();
@@ -924,7 +1061,84 @@ export class CadScene {
     return hits.reduce((a, b) => (b.distance < a.distance ? b : a)).point.clone();
   }
 
-  private pickAt(clientX: number, clientY: number): CadSelection | null {
+  /**
+   * 計測で拾う点。手前にある頂点 → エッジ → 面の順に探し、形の上の正確な点に合わせる（exact）:
+   * 頂点はその位置、直線のエッジは線の上、円のエッジは円の上、平面はクリックした点、円筒面・球面はその面の上。
+   * それ以外の曲線・曲面は表示用の線・三角形の上の点なので exact = false。
+   */
+  private measurePointAt(clientX: number, clientY: number): MeasurePick | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    this.raycaster.setFromCamera(ndc, this.camera);
+    const meshHit =
+      this.mesh && this.visibility.face ? this.raycaster.intersectObject(this.mesh, false).find((h) => h.faceIndex != null) : undefined;
+    const meshDistance = meshHit?.distance ?? Infinity;
+    const scale = this.worldPerPixel();
+    const inFront = (d: number) => d <= meshDistance + this.radius * 0.004;
+    const xyz = (v: THREE.Vector3): Vec3 => [v.x, v.y, v.z];
+
+    if (this.points && this.visibility.vertex && this.vertexPositions) {
+      // 頂点は（頂点モード以外では描いていないが）近くをクリックすれば角に合わせる。
+      this.raycaster.params.Points = { threshold: scale * PICK_PIXELS_POINT };
+      for (const h of this.raycaster.intersectObject(this.points, false)) {
+        if (!inFront(h.distance)) break;
+        if (h.index === undefined || !this.visible('vertex', h.index)) continue;
+        const p = this.vertexPositions;
+        return { point: [p[h.index * 3], p[h.index * 3 + 1], p[h.index * 3 + 2]], item: { kind: 'vertex', id: h.index }, exact: true };
+      }
+    }
+    if (this.lines && this.visibility.edge) {
+      this.raycaster.params.Line = { threshold: scale * PICK_PIXELS_LINE };
+      for (const h of this.raycaster.intersectObject(this.lines, false)) {
+        if (!inFront(h.distance)) break;
+        if (h.index === undefined) continue;
+        const id = rangeIndex(this.edgeSegStarts, Math.floor(h.index / 2));
+        if (!this.visible('edge', id)) continue;
+        const info = this.data.edgeList[id];
+        const p = xyz(h.point);
+        const item: CadSelection = { kind: 'edge', id };
+        if (info?.geomType === 'LINE' || info?.geomType === 'MESH_BOUNDARY') return { point: p, item, exact: true };
+        const c = asVec3(info?.circleCenter);
+        const d = unit(asVec3(info?.axisDirection) ?? [0, 0, 0]);
+        const r = typeof info?.radius === 'number' ? info.radius : null;
+        const snapped = info?.geomType === 'CIRCLE' && c && d && r ? onCircle(p, c, d, r) : null;
+        return snapped ? { point: snapped, item, exact: true } : { point: p, item, exact: false };
+      }
+    }
+    if (meshHit?.faceIndex != null) {
+      const id = rangeIndex(this.faceTriStarts, meshHit.faceIndex);
+      const info = this.data.faces[id];
+      const p = xyz(meshHit.point);
+      const item: CadSelection = { kind: 'face', id };
+      const r = typeof info?.radius === 'number' ? info.radius : null;
+      if (info?.geomType === 'PLANE') return { point: p, item, exact: true };
+      if (info?.geomType === 'CYLINDER' && r) {
+        const o = asVec3(info.axisOrigin);
+        const d = unit(asVec3(info.axisDirection) ?? [0, 0, 0]);
+        const snapped = o && d ? onCircle(p, o, d, r) : null;
+        if (snapped) return { point: snapped, item, exact: true };
+      }
+      if (info?.geomType === 'SPHERE' && r) {
+        const c = asVec3(info.sphereCenter);
+        const snapped = c ? onSphere(p, c, r) : null;
+        if (snapped) return { point: snapped, item, exact: true };
+      }
+      return { point: p, item, exact: false };
+    }
+    return null;
+  }
+
+  /** 計測のモードで、今の位置で拾うもの。R・⌀ はエッジ（無ければ面）、平面どうしは面、それ以外は点。 */
+  private measurePickAt(clientX: number, clientY: number): MeasurePick | null {
+    const tool = this.measureTool;
+    if (tool === 'distance' || tool === 'arc3') return this.measurePointAt(clientX, clientY);
+    const item = (tool === 'radius' ? this.pickAt(clientX, clientY, 'edge') : null) ?? this.pickAt(clientX, clientY, 'face');
+    if (!item) return null;
+    const p = this.pointAt(clientX, clientY);
+    return { point: p ? [p.x, p.y, p.z] : [0, 0, 0], item, exact: true };
+  }
+
+  private pickAt(clientX: number, clientY: number, mode: CadKind = this.mode): CadSelection | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
     this.raycaster.setFromCamera(ndc, this.camera);
@@ -955,16 +1169,16 @@ export class CadScene {
       return null;
     };
 
-    if (this.mode === 'edge') {
+    if (mode === 'edge') {
       const id = edgeAt();
       return id === null ? null : { kind: 'edge', id };
     }
-    if (this.mode === 'vertex') {
+    if (mode === 'vertex') {
       const id = vertexAt();
       return id === null ? null : { kind: 'vertex', id };
     }
     const faceId = meshHit?.faceIndex != null ? rangeIndex(this.faceTriStarts, meshHit.faceIndex) : null;
-    if (this.mode === 'part') {
+    if (mode === 'part') {
       // 面が無い部品（DXF の線だけのレイヤー等）も選べるよう、面に当たらなければエッジ・点で探す。
       let part = faceId !== null ? this.data.faces[faceId]?.part : undefined;
       if (part === undefined) {
@@ -977,7 +1191,7 @@ export class CadScene {
       }
       return part === undefined ? null : { kind: 'part', id: part };
     }
-    return this.mode === 'face' && faceId !== null ? { kind: 'face', id: faceId } : null;
+    return mode === 'face' && faceId !== null ? { kind: 'face', id: faceId } : null;
   }
 
   // ---------------------------------------------------------------------------
@@ -1158,6 +1372,11 @@ export class CadScene {
       }
       return;
     }
+    if (this.measureTool) {
+      const pick = this.measurePickAt(e.clientX, e.clientY);
+      if (pick) this.callbacks.onMeasurePick?.(pick);
+      return;
+    }
     const item = this.pickAt(e.clientX, e.clientY);
     if (item) this.callbacks.onPick(item);
   };
@@ -1173,7 +1392,15 @@ export class CadScene {
     }
     // ドラッグ（回転・移動）中は当たり判定をしない（重いモデルで操作が引っかかるため）。
     if (e.buttons !== 0) return;
-    const item = this.pickAt(e.clientX, e.clientY);
+    let item: CadSelection | null;
+    if (this.measureTool) {
+      // 計測では、拾う要素を浮かせ、点を使う計測は拾う点（角・円の上などに合わせた点）に印を出す。
+      const pick = this.measurePickAt(e.clientX, e.clientY);
+      item = pick?.item ?? null;
+      this.setHoverMarker(pick && (this.measureTool === 'distance' || this.measureTool === 'arc3') ? pick.point : null);
+    } else {
+      item = this.pickAt(e.clientX, e.clientY);
+    }
     const same = item && this.hover ? item.kind === this.hover.kind && item.id === this.hover.id : item === this.hover;
     if (same) return;
     this.hover = item;
@@ -1182,6 +1409,7 @@ export class CadScene {
   };
 
   private readonly handlePointerLeave = () => {
+    this.setHoverMarker(null);
     if (!this.hover) return;
     this.hover = null;
     this.callbacks.onHover(null);
@@ -1200,6 +1428,7 @@ export class CadScene {
   private render(): void {
     this.renderer.render(this.scene, this.camera);
     this.renderGizmo();
+    this.placeMeasureLabels();
   }
 }
 

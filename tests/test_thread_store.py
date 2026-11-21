@@ -272,6 +272,50 @@ async def test_data_layer_create_step_creates_thread_stub_and_no_op_stubs_are_sa
 
 
 @pytest.mark.asyncio
+async def test_cad_viewer_element_is_not_persisted_and_leftovers_are_purged(tmp_path) -> None:
+    """3D ビューア（CadViewer、props にビューア用データ全体＝大きな CAD で数十 MB）を履歴に残さない回帰テスト。
+
+    以前は保存され、答えた後の削除から漏れたものが溜まって、その会話を開く・リロードするのが遅くなった。
+    """
+    from types import SimpleNamespace
+
+    db = tmp_path / "chat_threads.sqlite"
+    elements_dir = tmp_path / "elements"
+    conn = await thread_store.init_db(db)
+    try:
+        dl = thread_store.ChatThreadDataLayer(conn, elements_dir)
+        _activate_fake_session(has_first_interaction=True)
+        await dl.create_step({"id": "s1", "threadId": "th1", "createdAt": "2024-01-01T00:00:00"})
+        viewer = SimpleNamespace(
+            id="v1", type="custom", name="CadViewer", for_id="s1", thread_id="th1", mime="application/json",
+            to_dict=lambda: {"id": "v1", "type": "custom", "name": "CadViewer", "props": {"data": "x" * 1000}},
+        )
+        await dl.create_element(viewer)
+        assert await dl.get_element("th1", "v1") is None
+
+        # 前の版が残した CadViewer の要素（行と実ファイル）は、次の起動（init_db）で消える。ほかの要素は残る。
+        left = elements_dir / "th1" / "v1_CadViewer"
+        left.parent.mkdir(parents=True)
+        left.write_text("{}", encoding="utf-8")
+        for eid, name, path in (("v1", "CadViewer", str(left)), ("f1", "form", None)):
+            await conn.execute(
+                "INSERT INTO elements (id, thread_id, for_id, kind, file_path, mime, created_at, data_json) VALUES (?, 'th1', 's1', 'chainlit', ?, NULL, '', ?)",
+                (eid, path, f'{{"type": "custom", "name": "{name}"}}'),
+            )
+        await conn.commit()
+    finally:
+        await conn.close()
+    conn = await thread_store.init_db(db)
+    try:
+        ids = [r[0] for r in await (await conn.execute("SELECT id FROM elements")).fetchall()]
+        assert ids == ["f1"]
+        assert not left.exists()
+        assert await thread_store.purge_ephemeral_elements(conn) == 0
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_create_step_before_first_user_message_is_not_persisted(tmp_path) -> None:
     """新規タブを開いただけ（ユーザーが1文字も送信していない）状態で on_chat_start が
     送るウェルカムメッセージ等が create_step 経由で即座に永続化されてしまい、
