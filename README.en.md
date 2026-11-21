@@ -13,6 +13,12 @@ an AI agent works for them and what it brings, without sending internal data out
 - **Admin dashboard**: change the AI endpoints and settings, start and stop instances for each department, and check the running
   status, conversations and logs in the browser, so administrators can follow how the trial is going
   ([For administrators: settings dashboard](#for-administrators-settings-dashboard)).
+  Describe a problem in the dashboard's "Ask AI" (e.g. "it is slow when two people use it at once") and the AI tells you which
+  screen and setting to change, so you can start a trial without staff who know how to run an AI platform (the AI only reads
+  the settings; administrators make the changes).
+- **Estimating AI usage costs**: token usage is totaled by month, by instance (department) and by user and shown in charts and
+  tables. Enter your AWS pricing (monthly bill, hourly GPU instances, or per-token pricing such as Bedrock) to see an estimated
+  cost (also in yen). Use it to estimate the cost of a full rollout.
 - **CAD features for design work**: show CAD data such as STEP, IGES, DXF and STL in a 3D viewer in the chat, and click faces or
   parts to point at them when asking the AI. It also handles numeric checks of holes and volumes, differences from the previous
   version, and STEP PMI (dimensions and tolerances) and attributes, so design departments can try it out
@@ -250,6 +256,8 @@ The admin tool started by `admin.bat` lets you do the following in the browser.
 - Change the screen header, welcome message and icon
 - Start, stop and restart Locohane-Agent as **multiple instances** (different models, different departments, etc.) at the same time
 - Check the running status, conversations and logs, and the change history of settings
+- **Usage & cost**: total token usage by month, instance and user, and estimate the cost from the AWS pricing you enter
+  (see [README_DETAIL.en.md "Usage & cost"](README_DETAIL.en.md#usage--cost-monthly-token-usage-and-aws-charges))
 - **Ask AI**: describe a problem with the button at the top right and the AI suggests which screen and setting to change
   (the AI only reads settings; you make the changes. Setting keys in the answer open the settings screen with one click)
 - **Skill Lab**: build user draft skills or new skills and sub-agents together with evaluation cases,
