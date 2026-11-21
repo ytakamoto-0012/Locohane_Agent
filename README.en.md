@@ -7,6 +7,16 @@
 Locohane Agent is an **AI agent that runs entirely on your company server or your own PC**.
 Just talk to it in the browser chat, and the AI plans and carries out tasks such as reading and creating
 Excel, Word, PowerPoint and PDF files, checking images, and processing many files in a folder at once.
+Companies can also use it as a PoC (proof of concept) before adopting a full AI platform, to try out how
+an AI agent works for them and what it brings, without sending internal data outside. It has these features that help with a PoC:
+
+- **Admin dashboard**: change the AI endpoints and settings, start and stop instances for each department, and check the running
+  status, conversations and logs in the browser, so administrators can follow how the trial is going
+  ([For administrators: settings dashboard](#for-administrators-settings-dashboard)).
+- **CAD features for design work**: show CAD data such as STEP, IGES, DXF and STL in a 3D viewer in the chat, and click faces or
+  parts to point at them when asking the AI. It also handles numeric checks of holes and volumes, differences from the previous
+  version, and STEP PMI (dimensions and tolerances) and attributes, so design departments can try it out
+  ([Get the results](#get-the-results)).
 
 - **Fully offline**: The AI model also runs on your own server, so conversations and files are never sent outside.
 - **Shared by a team**: Several people can use one server at the same time (with sign-in).
