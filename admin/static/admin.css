@@ -632,3 +632,10 @@ body.setup-guide-open #main { padding-bottom: 40vh; }
 @media (max-width: 1100px) {
   .view-header .guide-start-btn { position: static; transform: none; margin: 0 auto; }
 }
+/* 「AIに相談」のパネル（右端、幅 420px）を開いている間は、説明のカードをその左へ寄せて入力欄に被らないようにする。 */
+.setup-guide-card.setup-guide-card--left-of-assistant { right: 440px; }
+@media (max-width: 900px) { .setup-guide-card.setup-guide-card--left-of-assistant { right: 12px; bottom: auto; top: 70px; } }
+/* 対象の近くに置いたカード（setup_guide.js の setupGuidePlaceCard が left/top を入れる）。cardClass の右寄せより優先する。 */
+.setup-guide-card.setup-guide-card--anchored { right: auto; bottom: auto; transition: left 0.2s ease, top 0.2s ease; }
+/* ダイアログの横に収まらないときは、カードをダイアログ（.modal-backdrop、z-index 100）の後ろへ回す。 */
+.setup-guide-card.setup-guide-card--behind { z-index: 95; }

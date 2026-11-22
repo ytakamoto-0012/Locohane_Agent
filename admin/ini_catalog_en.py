@@ -1675,6 +1675,13 @@ DESCRIPTIONS: dict[str, str] = {
     'admin.assistant_max_history_messages': (
         "Maximum number of recent conversation messages passed to the AI (the asker's messages and the AI's answers each count as one; 1 or more). The oldest are dropped first. The conversation history exists only in the browser and is not saved on the server. Can be overridden with the environment variable ADMIN_ASSISTANT_MAX_HISTORY_MESSAGES."
     ),
+    'admin.assistant_reasoning_effort': (
+        'The reasoning depth used when "Ask AI" writes its answers (the same values as [llm] reasoning_effort: none / default / minimal / low / medium / high / xhigh / max).\n'
+        'A consultation only gives advice after the related settings and explanations have been found and passed to it, so it does not need deep thinking. With the instance setting (default medium) the thinking takes time\n'
+        'and you wait before the answer appears, so the default is low. The accepted values depend on the model template, and unsupported values cause an error\n'
+        '(e.g. Qwen3.8 accepts only low / medium / high / xhigh). If empty, the [llm] reasoning_effort of the instance whose LLM is used for answers is used as is.\n'
+        'Can be overridden with the environment variable ADMIN_ASSISTANT_REASONING_EFFORT.'
+    ),
     'data_backup.enabled': (
         'Backs up [admin] instances_dir and the [paths] common_data_dir of all instances into a dated zip in dest_dir (runs only while the admin tool is running).\n'
         'Shared by all instances (cannot be overridden per instance). Values saved on the dashboard are kept in <instances_dir>/data_backup.json and take precedence over the values here (these are the defaults).\n'

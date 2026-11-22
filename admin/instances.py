@@ -228,21 +228,21 @@ def stdout_log_path(instances_root: Path, name: str) -> Path:
     return instance_dir(instances_root, name) / "app_stdout.log"
 
 
-def setup_guide_marker_path(instances_root: Path, name: str) -> Path:
-    """初期設定ガイドをまだ終えていない（スキップもしていない）印のファイル。
+def tutorial_marker_path(instances_root: Path, name: str) -> Path:
+    """はじめてのチュートリアルをまだ終えていない（スキップもしていない）印のファイル。
 
     default を初めて作ったとき（instances/ が無い初回起動）と、本体インスタンスを新しく作ったときに置き、
-    ダッシュボードはこれがあるインスタンスで初期設定ガイドを出す。ガイドを終える・スキップすると消す。
+    ダッシュボードはこれがあるインスタンスではじめてのチュートリアルを出す。チュートリアルを終える・スキップすると消す。
     """
-    return instance_dir(instances_root, name) / ".setup_guide_pending"
+    return instance_dir(instances_root, name) / ".tutorial_pending"
 
 
-def is_setup_guide_pending(instances_root: Path, name: str) -> bool:
-    return setup_guide_marker_path(instances_root, name).is_file()
+def is_tutorial_pending(instances_root: Path, name: str) -> bool:
+    return tutorial_marker_path(instances_root, name).is_file()
 
 
-def set_setup_guide_pending(instances_root: Path, name: str, pending: bool) -> None:
-    path = setup_guide_marker_path(instances_root, name)
+def set_tutorial_pending(instances_root: Path, name: str, pending: bool) -> None:
+    path = tutorial_marker_path(instances_root, name)
     if pending:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("", encoding="utf-8")
@@ -295,8 +295,8 @@ def ensure_default_instance(instances_root: Path) -> InstanceMeta:
         autostart=True,
     )
     write_instance(instances_root, meta)
-    # 初回起動（default がまだ無い）なので、ダッシュボードで初期設定ガイドを出す。
-    set_setup_guide_pending(instances_root, DEFAULT_INSTANCE_NAME, True)
+    # 初回起動（default がまだ無い）なので、ダッシュボードではじめてのチュートリアルを出す。
+    set_tutorial_pending(instances_root, DEFAULT_INSTANCE_NAME, True)
     return meta
 
 
@@ -495,9 +495,9 @@ def create_instance(
             kind=kind,
         )
         write_instance(instances_root, meta)
-        # 本体（チャット）なら、作成後にダッシュボードで初期設定ガイドを出す（スキル調整ワーカーは対象の設定を持たない）。
+        # 本体（チャット）なら、作成後にダッシュボードではじめてのチュートリアルを出す（スキル調整ワーカーは対象の設定を持たない）。
         if kind == KIND_APP:
-            set_setup_guide_pending(instances_root, name, True)
+            set_tutorial_pending(instances_root, name, True)
 
         check_conflicts(instances_root, config_ini_path, name=name, app_host=app_host, app_port=app_port, kind=kind)
         if copy_from and copy_extensions:

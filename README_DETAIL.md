@@ -2382,6 +2382,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[admin]` | `assistant_use_embedding` | 相談内容に近いキー・段落を選ぶのに埋め込み（`[vector_db] embedding_url`）を使うか。false なら文字2-gram だけ | `ADMIN_ASSISTANT_USE_EMBEDDING` |
 | `[admin]` | `assistant_embedding_instance` | 埋め込みの接続先を取るインスタンス名。空欄なら自動で探す | `ADMIN_ASSISTANT_EMBEDDING_INSTANCE` |
 | `[admin]` | `assistant_max_history_messages` | AI に渡す直近の会話の最大メッセージ数 | `ADMIN_ASSISTANT_MAX_HISTORY_MESSAGES` |
+| `[admin]` | `assistant_reasoning_effort` | 「AIに相談」の回答で使う推論の深さ（`[llm] reasoning_effort` と同じ値。既定 `low`）。相談は探した設定・説明をもとに助言するだけなので浅く考えて速く答える。空欄なら回答に使う LLM のインスタンスの `[llm] reasoning_effort` のまま。対応外の値はモデルによってはエラーになる | `ADMIN_ASSISTANT_REASONING_EFFORT` |
 | `[admin]` | `instances_dir` | インスタンス別ディレクトリのルート（既定 `../Locohane_Agent-Settings/instances`）。app.bat直接起動時のdefaultインスタンスの`.env`・`config_overrides.json`の読み込み先にも使われる。変更時は既存の中身を手動で移動する | `INSTANCES_DIR` |
 | `[data_backup]` | `enabled`・`dest_dir`・`times`・`weekdays`・`keep`・`exclude_workdir`・`exclude_logs`・`exclude` | データのバックアップ（「データバックアップ」節）の既定値。全インスタンス共通（インスタンス別に上書きできない）。設定ダッシュボードで保存した値（`<instances_dir>/data_backup.json`）が優先する | - |
 | `[ui]` | `default_language` | 表示言語の既定値（`auto`＝ブラウザの言語 / `ja` / `en`）。利用者が画面で言語を選ぶとそちらが優先される。AI も選んだ言語で回答する（「言語切り替え（日本語 / 英語）」節） | `UI_DEFAULT_LANGUAGE` |
@@ -2691,27 +2692,36 @@ admin.bat
 `ADMIN_PORT` で指定する（`config.ini` の `[admin]` セクションより優先。
 変更したい場合は `admin.bat` をテキストエディタで開いてこの2行を書き換える）。
 
-#### 初期設定ガイド
+#### はじめてのチュートリアル
 
 初回起動（`instances/` が無く `default` を作ったとき）と、本体（チャット）のインスタンスを新しく作ったときは、
-ダッシュボードに初期設定ガイドが出る（`admin/static/setup_guide.js`）。右下の説明のカードに沿って「次へ」で進めると、
-ガイドが画面を開き、対象の場所を強調する。config.ini の手順では、その手順の設定だけを絞り込んで表示する。
+ダッシュボードにはじめてのチュートリアルが出る（`admin/static/setup_guide.js`）。説明のカード（強調している場所の近く。下・上・右・左のうち画面に収まって重ならない側に出し、対象の無い手順は画面の中央、
+どこにも収まらないときと幅の狭い画面では右下。ダイアログが開いていて対象がその中に無いときは、ダイアログの横、収まらなければダイアログの後ろ）に沿って「次へ」で進めると、
+チュートリアルが画面を開き、対象の場所を強調する。config.ini の手順では、その手順の設定だけを絞り込んで表示する。
 
-1. config.ini: `[llm] main_url` → `[graph] token_guard_soft_threshold` → 「並列数」プリセットの3つ → `[paths] common_data_dir` →
+1. インスタンス一覧: ようこそ → インスタンスの一覧（インスタンスとは）→ カード（表示名・アドレス・状態）→ カードの稼働状況 → カードのボタン →
+   「＋ インスタンス追加」→ そのインスタンスのカードの「設定」を押す（設定画面が開くと進む）→ config.ini の画面の見方
+2. config.ini: `[llm] main_url` → `[graph] token_guard_soft_threshold` → 「並列数」プリセットの3つ → `[paths] common_data_dir` →
    `[paths] project_locohane_dir` → `[subagent] agent_type_run_script_allowlist` → `[main_agent_tool_guard] allow_entries` →
    `[plan] plan_approval_exempt_scripts` → `[vector_db] enabled` → `backend`・`qdrant_url`・`qdrant_preset` →
    `include_extensions`・`text_extensions`・`image_input_extensions` → `embedding_url` → `embedded_images` →
    `[auth] enabled`・`require_password` → 変更の保存（「変更を確認」→「この内容で保存」。保存していない変更があれば先へ進む前に確かめる）
-2. 「ユーザー」タブ → 「表示設定」タブ → 「ナレッジ」タブ → 上部の「管理者設定」タブ（取り込みの並列数 → 本文の抽出・画像化の子プロセス数 →
+3. 「ユーザー」タブ → 「表示設定」タブ → 「ナレッジ」タブ → 「メモリー」タブ → 上部の「管理者設定」タブ（取り込みの並列数 → 本文の抽出・画像化の子プロセス数 →
    埋め込みのリクエストの並列数 → 取り込み元フォルダの走査の並列数 → 1コレクションの最大ファイル数 → 1ファイルの上限サイズ →
    Office の PDF 書き出しの上限秒数 → 取り込みの一時ファイルの置き場所 → Qdrant への送り直しの回数 → AIに相談の「回答に使う LLM」 →
+   「default」を選ぶ（選ぶと進む）→「接続を確認」を押す（結果が出ると進む）→ ✗ ならつながらないときの見直し点（✓ になると進む）／✓ なら接続できました →
    「関係する設定を探す埋め込み」の順に1項目ずつ強調し、最後に「保存」。保存していない変更があれば先へ進む前に確かめる）
-3. インスタンス一覧に戻り、そのインスタンスのカードの「再起動」（停止中なら「起動」）を押して保存した設定を効かせるよう促し、続けて「開く」を押すよう促す（押すと終わる）
+4. インスタンス一覧に戻り、そのインスタンスのカードの「再起動」（停止中なら「起動」）を押して保存した設定を効かせるよう促す
+5. 「AIに相談」を実際に使う: 右上の「AIに相談」を押す（パネルが開くと進む）→ 相談の対象（このインスタンスを選ぶ）→ 入力欄に例の相談を入れて送信
+   （送るまで「次へ」は押せない）→ 回答を待つ（終わると進む）→ 回答の読み方 → 「会話をクリア」を押す（相談が消えると進む）。回答が得られなかったときは、管理者設定の「回答に使う LLM」の
+   直し方（選び直す → 接続を確認 → 保存 → もう一度送る）を案内し、回答が届くと進む。この間、説明のカードは相談のパネルの左に出す。
+   「AIに相談」が無効な環境では飛ばす
+6. そのインスタンスのカードの「開く」を押すよう促す（押すと終わる）
 
-「スキップする」でいつでも終えられる。終える・スキップすると次からは自動で出さない。インスタンス詳細の見出しの横の
-「初期設定ガイド」で、いつでもやり直せる。出すかどうかは `instances/<インスタンス名>/.setup_guide_pending` の有無で決め
-（`admin/instances.py`。一覧 API の `setup_guide_pending`）、終える・スキップすると `POST /api/instances/{name}/setup-guide/done`
-で消す（変更履歴に `setup_guide_done`）。スキル調整ワーカーには出さない。
+「スキップする」でいつでも終えられる。終える・スキップすると次からは自動で出さない。インスタンス一覧の見出しの行の真ん中の
+「はじめてのチュートリアル」で、いつでもやり直せる（default、無ければ最初の本体インスタンスで案内する）。出すかどうかは `instances/<インスタンス名>/.tutorial_pending` の有無で決め
+（`admin/instances.py`。一覧 API の `tutorial_pending`）、終える・スキップすると `POST /api/instances/{name}/tutorial/done`
+で消す（変更履歴に `tutorial_done`）。スキル調整ワーカーには出さない。
 
 従来通り `app.bat` で `default` インスタンスを単体起動することもできる
 （`instances/default/instance.json` のホスト/ポートに追従する）。ただし
@@ -2788,7 +2798,7 @@ instances/
 │   ├── .env                     # インスタンス専用のログインユーザー等（任意）
 │   ├── settings/                # インスタンス専用の表示設定（任意。下記参照）
 │   ├── backups/                 # 保存・復元前のスナップショット
-│   ├── .setup_guide_pending     # 初期設定ガイドをまだ終えていない印（終える・スキップすると消える）
+│   ├── .tutorial_pending     # はじめてのチュートリアルをまだ終えていない印（終える・スキップすると消える）
 │   └── app_stdout.log           # 本体プロセスの標準出力
 ├── <他のインスタンス名>/
 │   └── ...（同上）
@@ -3086,7 +3096,9 @@ config.ini の説明文やドキュメントは全部で数十万字あり、ロ
   ように、言い回しが違って文字が重ならない相談にも当たる。接続先は `[admin] assistant_embedding_instance` のインスタンスの
   `embedding_url`（空欄なら、回答に使う LLM のインスタンス → 相談対象 → それ以外の名前順で、`embedding_url` が設定されている最初のもの。
   `[vector_db] enabled` が false でも `embedding_url` があれば使う）。文書側の埋め込みは `instances/_assistant_index/` に保存し、
-  変わった段落だけを埋め込み直す（初回だけ全段落の埋め込みに数十秒かかる）。
+  変わった段落だけを埋め込み直す。足りない段落が多いとき（初回・文書を大きく書き換えた後。内蔵の埋め込み（CPU）では全段落で2分ほど）は、
+  相談を待たせずにその相談は文字2-gram だけで答え、埋め込みは裏のスレッドで作る（揃った次の相談から埋め込みで探す。足りない段落が
+  24 以下なら、その場で埋め込む）。管理ツールの起動時にも、日本語・英語の索引の埋め込みを裏で作り始める。
 - **文字2-gram**（埋め込みサーバーが無い・接続できない・`[admin] assistant_use_embedding = false` のとき）: パスメモリーの類似度検索
   （`src/path_memory.py`）と同じく、文字を2文字ずつに分けた出現頻度のコサイン類似度で選ぶ（多くの段落に出る2文字ほど軽くする TF-IDF の重み付き）。
   言い回しが違う相談は漏れやすい。
@@ -3110,7 +3122,7 @@ AI には「キーの一覧は検索で選んだ一部なので、一覧に無�
 利用者のドラフトや、開発者が新しく作るスキル・**サブエージェント**を、AI に不具合を自己修正させて本番運用に耐えるものに
 仕上げ、承認したものをインスタンスへ昇格させる画面（トップの「スキル研究室」タブ。`admin/skill_lab/`・`admin/static/skill_lab.js`）。
 
-見出しの横の「スキル研究室チュートリアル」（`admin/static/skill_lab_tutorial.js`。初期設定ガイドと同じ説明のカードと強調を使う）は、
+見出しの横の「スキル研究室チュートリアル」（`admin/static/skill_lab_tutorial.js`。はじめてのチュートリアルと同じ説明のカードと強調を使う）は、
 どれかのインスタンスに利用者のドラフトがあるときだけ押せる。ドラフトを題材に、スキル調整ワーカー（まだ無ければ、作成のダイアログの
 種類・インスタンス名・表示名・自動起動・複製元・作成 → ワーカーの `[llm] main_url` の設定と保存 → 起動 までを1つずつ。あれば省く）→ 対象インスタンス →
 ドラフトからテーマを作る → テーマの見出し・タブ → 「テーマの設定」の各項目（テーマ名・担当のスキル調整ワーカー・トライアウトの回数・

@@ -19,7 +19,7 @@ async function renderAdminSettings(notice = "") {
   mainEl.innerHTML = "";
   const container = el("section", { class: "admin-settings" });
   mainEl.append(container);
-  // 保存していない変更がある印（初期設定ガイドが、保存せずに先へ進む前に確かめる）。保存すると画面ごと作り直すので消える。
+  // 保存していない変更がある印（はじめてのチュートリアルが、保存せずに先へ進む前に確かめる）。保存すると画面ごと作り直すので消える。
   const markDirty = () => (container.dataset.dirty = "1");
   container.addEventListener("input", markDirty);
   container.addEventListener("change", markDirty);
@@ -42,7 +42,7 @@ async function renderAdminSettings(notice = "") {
     const s = byKey[name];
     inputs[name] = control;
     if (s.source === "env") control.disabled = true;
-    // data-setting: 初期設定ガイド（setup_guide.js）が項目を探して強調する目印。
+    // data-setting: はじめてのチュートリアル（setup_guide.js）が項目を探して強調する目印。
     return el("div", { class: "admin-setting", "data-setting": name }, [
       el("label", {}, [el("span", { class: "admin-setting-label", text: label }), sourceBadge(s), control]),
       el("div", { class: "hint", text: _t(`[{0}] {1}（config.ini の値: {2}）`, s.section, s.key, s.default === "" ? _t("（空）") : s.default) }),
@@ -128,9 +128,11 @@ async function renderAdminSettings(notice = "") {
     return select;
   };
   const llmSelect = instanceSelect("admin.assistant_llm_instance", _t("（相談対象のインスタンス自身の LLM を使う）"));
-  const checkResult = el("div", { class: "hint" });
+  // data-guide: はじめてのチュートリアル（setup_guide.js）が「接続を確認」を案内・結果を確かめる目印。
+  const checkResult = el("div", { class: "hint", "data-guide": "llm-check-result" });
   const checkBtn = el("button", {
     type: "button",
+    "data-guide": "llm-check",
     text: _t("接続を確認"),
     onclick: async () => {
       const target = llmSelect.value;

@@ -331,11 +331,19 @@ async function renderInstances() {
   mainEl.appendChild(clone("tpl-instances"));
   $("#add-instance-btn").addEventListener("click", openCreateInstanceModal);
   await refreshInstanceCards();
+  // はじめてのチュートリアル（setup_guide.js）を、いつでも始められるボタン。default（無ければ最初の本体インスタンス）で案内する。
+  // スキル調整ワーカーにはチャット画面・対象の設定が無いため、本体インスタンスが無ければ出さない。
+  const tutorialBtn = $(".setup-guide-start-btn");
+  const tutorialTarget = instanceCache.find((i) => i.is_default) || instanceCache.find((i) => i.kind !== "skill_lab");
+  if (tutorialBtn && tutorialTarget && typeof startSetupGuide === "function") {
+    tutorialBtn.classList.remove("hidden");
+    tutorialBtn.addEventListener("click", () => startSetupGuide(tutorialTarget.name));
+  }
   // カードの稼働状況だけを定期更新する（カード全体を作り直すと操作中のボタンが消えるため）。
   // 一覧の取得中に別の画面へ移っていたら始めない。
   const cards = $("#instance-cards");
   if (cards) startMonitorPolling(cards, refreshCardActivity);
-  // 初回起動の default・新しく作ったインスタンスなら、初期設定ガイドを出す（setup_guide.js）。
+  // 初回起動の default・新しく作ったインスタンスなら、はじめてのチュートリアルを出す（setup_guide.js）。
   if (cards && typeof maybeStartSetupGuide === "function") maybeStartSetupGuide();
 }
 
@@ -765,8 +773,8 @@ function openCreateInstanceModal() {
       if (skipped.length) {
         alert(_t(`インスタンス {0} を作成しました。複製元の次の設定は引き継いでいません:\n\n{1}`, created.name, skipped.map((s) => `・${s}`).join("\n")));
       }
-      // 本体（チャット）を作ったら、そのインスタンスの初期設定ガイドを始める（setup_guide.js）。
-      if (created.setup_guide_pending && typeof startSetupGuide === "function") startSetupGuide(created.name);
+      // 本体（チャット）を作ったら、そのインスタンスのはじめてのチュートリアルを始める（setup_guide.js）。
+      if (created.tutorial_pending && typeof startSetupGuide === "function") startSetupGuide(created.name);
     } catch (e) {
       modal.querySelector("#create-instance-error").textContent = e.message;
     }
@@ -952,10 +960,6 @@ async function renderInstanceDetail(name, initialView) {
     const hide = isLab ? ["monitor", "threads", "usage", "users", "display", "skill-lab", "knowledge", "memory"].includes(btn.dataset.subview) : false;
     btn.classList.toggle("hidden", hide);
   });
-  // 初期設定ガイド（setup_guide.js）をもう一度始めるボタン。スキル調整ワーカーには対象の設定が無いため出さない。
-  const guideBtn = $(".setup-guide-start-btn");
-  guideBtn.classList.toggle("hidden", isLab || typeof startSetupGuide !== "function");
-  guideBtn.addEventListener("click", () => startSetupGuide(name));
   await selectInstanceSubview(initialView || "config");
 }
 

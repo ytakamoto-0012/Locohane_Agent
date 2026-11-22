@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import threading
 
 from admin import assistant_index as ai
 from admin.ini_catalog import parse
@@ -170,6 +171,35 @@ def test_changed_sources_rebuild_and_embed_only_new_passages(tmp_path):
     result = index.search("新しい説明", max_keys=0, max_docs=1, embedding=_fake_provider(calls))
     assert calls[0] == ("document", ["追加の節\n新しい説明。"])
     assert result.docs[0].title == "追加の節"
+
+
+def test_many_missing_paragraphs_are_embedded_in_background(tmp_path, monkeypatch):
+    """足りない段落が多いときは相談を待たせず2-gram で答え、埋め込みは裏で作る（次の相談から埋め込みで探す）。"""
+    monkeypatch.setattr(ai, "INLINE_EMBED_MAX", 0)
+    index = _index(tmp_path, cache_dir=tmp_path / "cache")
+    calls = []
+    provider = _fake_provider(calls)
+    result = index.search("ファイル容量の上限", max_keys=1, max_docs=0, embedding=provider)
+    assert result.mode == "bigram"
+    # 裏のスレッドが終わるのを待つ
+    for thread in [t for t in threading.enumerate() if t.name.startswith("assistant-embed-")]:
+        thread.join(timeout=10)
+    assert [c[0] for c in calls] == ["document"]
+    calls.clear()
+    result = index.search("ファイル容量の上限", max_keys=1, max_docs=0, embedding=provider)
+    assert result.mode == "embedding"
+    assert result.keys == [("vector_db", "max_file_mb")]
+    assert [c[0] for c in calls] == ["query"]
+
+
+def test_prepare_embeddings_warms_up_without_a_search(tmp_path):
+    index = _index(tmp_path, cache_dir=tmp_path / "cache")
+    calls = []
+    index.prepare_embeddings(_fake_provider(calls))
+    assert [c[0] for c in calls] == ["document"]
+    calls.clear()
+    assert index.search("ファイル容量", max_keys=1, max_docs=0, embedding=_fake_provider(calls)).mode == "embedding"
+    assert [c[0] for c in calls] == ["query"]
 
 
 def test_embedding_failure_falls_back_to_bigram(tmp_path):

@@ -143,10 +143,10 @@ The admin tool (settings dashboard) starts at `http://127.0.0.1:8001`, and Locoh
    to the inference server you started in step 2, save, and restart the instance.
 2. Open `http://127.0.0.1:8000` in a browser to see the chat screen.
 
-On the first start (and when you create a new instance), the admin tool shows a **setup guide**.
-It walks you step by step, with explanations, from the settings such as the AI endpoints, the data location, the vector DB and sign-in,
-through saving and restarting, to opening the chat screen (it also guides you through 1. and 2. above; you can end it with "Skip",
-and run it again at any time with "Setup guide" on the instance's settings screen).
+On the first start (and when you create a new instance), the admin tool shows a **getting started tutorial**.
+It walks you step by step, with explanations, from how to read the instance list, through settings such as the AI endpoints, the data location, the vector DB and sign-in,
+saving and restarting and actually using "Ask AI", to opening the chat screen (it also guides you through 1. and 2. above; you can end it with "Skip",
+and run it again at any time with "Getting started tutorial" on the instance list).
 When there are skills users made in the chat (drafts), **"Skill Lab tutorial"** in the "Skill Lab" tab at the top walks you through
 finishing a draft into a skill usable in production (creating a theme, the theme settings, the skill tuning loop and promotion).
 The chat screen also shows a **tutorial** when a user with no conversations yet opens it for the first time. It explains the input field,

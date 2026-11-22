@@ -239,7 +239,7 @@ class FakeModel:
             raise self.error
 
 
-def _make_client(tmp_path, model, *, enabled=True, llm_instance="", max_history=20, embedding_provider=None, usage_recorder=None):
+def _make_client(tmp_path, model, *, enabled=True, llm_instance="", max_history=20, embedding_provider=None, usage_recorder=None, reasoning_effort="low", built=None):
     guide = tmp_path / "guide.md"
     guide.write_text("# 画面ガイド\n- モニターを見る", encoding="utf-8")
     admin_config = dataclasses.replace(
@@ -248,6 +248,7 @@ def _make_client(tmp_path, model, *, enabled=True, llm_instance="", max_history=
         admin_assistant_llm_instance=llm_instance,
         admin_assistant_max_keys=3,
         admin_assistant_max_history_messages=max_history,
+        admin_assistant_reasoning_effort=reasoning_effort,
     )
     kinds = {"org_a": "app", "lab1": "skill_lab"}
     loaded: list[str] = []
@@ -274,7 +275,7 @@ def _make_client(tmp_path, model, *, enabled=True, llm_instance="", max_history=
             config_loader=config_loader,
             index=_index(tmp_path),
             embedding_provider=embedding_provider or (lambda target, llm: None),
-            model_factory=lambda cfg: model,
+            model_factory=lambda cfg: (built.append(cfg) if built is not None else None) or model,
             guide_path=guide,
             usage_recorder=usage_recorder,
         )
@@ -400,3 +401,14 @@ def test_chat_records_token_usage_even_when_the_stream_fails(tmp_path):
     client, _ = _make_client(tmp_path, FakeModel(["回答"]), usage_recorder=lambda *a: recorded.append(a))
     client.post("/api/assistant/chat", json={"instance": "org_a", "messages": [{"role": "user", "content": "質問"}]})
     assert recorded == []
+
+
+@pytest.mark.parametrize("setting", ["low", ""])
+def test_chat_uses_admin_reasoning_effort(tmp_path, setting):
+    """相談は [admin] assistant_reasoning_effort（既定 low）で答える。空欄なら回答に使うインスタンスの [llm] reasoning_effort のまま。"""
+    built = []
+    client, _ = _make_client(tmp_path, FakeModel(["回答"]), reasoning_effort=setting, built=built)
+    res = client.post("/api/assistant/chat", json={"instance": "org_a", "messages": [{"role": "user", "content": "遅い"}]})
+    assert res.status_code == 200
+    instance_effort = load_config().reasoning_effort
+    assert built[0].reasoning_effort == (setting or instance_effort)

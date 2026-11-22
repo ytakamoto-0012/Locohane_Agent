@@ -1659,6 +1659,8 @@ class Config:
     # 埋め込みの接続先の取得元インスタンス名。空文字列なら自動で探す（admin/server.py）。
     admin_assistant_embedding_instance: str
     admin_assistant_max_history_messages: int
+    # 「AIに相談」の回答で使う推論の深さ（LLM_REASONING_EFFORTS のどれか。空ならインスタンスの [llm] reasoning_effort）
+    admin_assistant_reasoning_effort: str
 
     # --- 3D ビューア（[cad_viewer]、show_cad_viewer ツール） ---
     # 既定値付き（テスト等で Config を直接組み立てる箇所に影響させないため）。
@@ -2098,6 +2100,18 @@ def _as_optional_reasoning_effort(value: str | None) -> str | None:
     if text not in LLM_REASONING_EFFORTS:
         choices = "/".join(sorted(LLM_REASONING_EFFORTS))
         raise ValueError(f"[llm].reasoning_effort must be one of {choices} (current value: {text!r})")
+    return text
+
+
+def _as_reasoning_effort_or_empty(value: object, key: str) -> str:
+    """推論の深さ（LLM_REASONING_EFFORTS のどれか）か空文字を返す。
+
+    Raises:
+        ValueError: どれでもない値の場合。
+    """
+    text = str(value or "").strip()
+    if text and text not in LLM_REASONING_EFFORTS:
+        raise ValueError(f"{key} must be empty or one of {', '.join(sorted(LLM_REASONING_EFFORTS))}: {text!r}")
     return text
 
 
@@ -4667,6 +4681,10 @@ def load_config(
         admin_assistant_max_history_messages=_positive_int(
             os.getenv("ADMIN_ASSISTANT_MAX_HISTORY_MESSAGES", admin.get("assistant_max_history_messages", 20)),
             "[admin].assistant_max_history_messages",
+        ),
+        admin_assistant_reasoning_effort=_as_reasoning_effort_or_empty(
+            os.getenv("ADMIN_ASSISTANT_REASONING_EFFORT", admin.get("assistant_reasoning_effort", "low")),
+            "[admin].assistant_reasoning_effort",
         ),
         cad_viewer_enabled=_as_bool(os.getenv("CAD_VIEWER_ENABLED", cad_viewer.get("enabled", True))),
         cad_viewer_max_triangles=int(os.getenv("CAD_VIEWER_MAX_TRIANGLES", cad_viewer.get("max_triangles", 500_000))),

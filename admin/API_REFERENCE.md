@@ -129,19 +129,19 @@ $C $BASE/api/instances
 各要素の主なフィールド: `name`, `display_name`, `app_host`, `app_port`,
 `autostart`, `headless`, `watch`, `state`（`running`/`stopped`/`external`/`crashed`）,
 `pid`, `url`, `is_default`, `kind`（`app`＝Locohane 本体／`skill_lab`＝スキル研究室）,
-`setup_guide_pending`（初期設定ガイドをまだ終えていない＝初回起動の `default`・新しく作った本体。下記「初期設定ガイドを終える」）。
+`tutorial_pending`（はじめてのチュートリアルをまだ終えていない＝初回起動の `default`・新しく作った本体。下記「はじめてのチュートリアルを終える」）。
 
-### 初期設定ガイドを終える
+### はじめてのチュートリアルを終える
 
-`setup_guide_pending` を `false` にする（ダッシュボードが次からガイドを自動で出さなくなる）。`result` は
-`finished`（最後まで進んだ）か `skipped`（スキップした）で、変更履歴（`setup_guide_done`）に残すだけ。
+`tutorial_pending` を `false` にする（ダッシュボードが次からガイドを自動で出さなくなる）。`result` は
+`finished`（最後まで進んだ）か `skipped`（スキップした）で、変更履歴（`tutorial_done`）に残すだけ。
 
 ```bash
-$C -X POST $BASE/api/instances/default/setup-guide/done -H "$H" -H "$J" -d '{"result":"skipped"}'
+$C -X POST $BASE/api/instances/default/tutorial/done -H "$H" -H "$J" -d '{"result":"skipped"}'
 ```
 
 ```bat
-%C% -X POST %BASE%/api/instances/default/setup-guide/done -H %H% -H %J% -d "{\"result\":\"skipped\"}"
+%C% -X POST %BASE%/api/instances/default/tutorial/done -H %H% -H %J% -d "{\"result\":\"skipped\"}"
 ```
 
 ### 作成

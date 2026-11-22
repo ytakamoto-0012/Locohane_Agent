@@ -34,7 +34,7 @@ from fastapi.responses import StreamingResponse
 from markdown_it import MarkdownIt
 from pydantic import BaseModel, Field
 
-from src.config import Config
+from src.config import Config, with_reasoning_effort
 
 from . import audit
 from .assistant_index import AssistantIndex, EmbeddingProvider, Passage
@@ -430,7 +430,10 @@ def build_router(
             answer: list[str] = []
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
             try:
-                model = await _build_model(config_loader(llm_instance))
+                # 相談では、インスタンスの推論の深さではなく [admin] assistant_reasoning_effort（既定 low）で答える
+                # （深く考えると、回答が出るまで待たされるため）。空欄ならインスタンスの設定のまま。
+                llm_config = with_reasoning_effort(config_loader(llm_instance), admin_config.admin_assistant_reasoning_effort)
+                model = await _build_model(llm_config)
                 async for chunk in _usage_tracked(model.astream(lc_messages), usage):
                     text = think.feed(_chunk_text(chunk))
                     if text:

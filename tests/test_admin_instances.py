@@ -59,20 +59,20 @@ def test_ensure_default_instance_creates_once(root):
     assert meta2.display_name == "changed"
 
 
-def test_setup_guide_pending_on_first_default_and_new_app_instance(root):
-    """初回起動（default を作った）と新しい本体インスタンスでは初期設定ガイドを出す印を置く。"""
+def test_tutorial_pending_on_first_default_and_new_app_instance(root):
+    """初回起動（default を作った）と新しい本体インスタンスでははじめてのチュートリアルを出す印を置く。"""
     inst.ensure_default_instance(root)
-    assert inst.is_setup_guide_pending(root, "default")
-    inst.set_setup_guide_pending(root, "default", False)
+    assert inst.is_tutorial_pending(root, "default")
+    inst.set_tutorial_pending(root, "default", False)
     # 既に default がある起動では印を置き直さない。
     inst.ensure_default_instance(root)
-    assert not inst.is_setup_guide_pending(root, "default")
+    assert not inst.is_tutorial_pending(root, "default")
 
     inst.create_instance(root, CONFIG_INI_PATH, name="app2")
-    assert inst.is_setup_guide_pending(root, "app2")
+    assert inst.is_tutorial_pending(root, "app2")
     # スキル調整ワーカーは対象の設定を持たないため出さない。
     inst.create_instance(root, CONFIG_INI_PATH, name="lab2", kind=inst.KIND_SKILL_LAB)
-    assert not inst.is_setup_guide_pending(root, "lab2")
+    assert not inst.is_tutorial_pending(root, "lab2")
 
 
 def test_list_instance_names_empty_when_missing(root):

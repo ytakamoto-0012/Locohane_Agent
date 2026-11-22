@@ -19,6 +19,7 @@ import os
 import secrets as _secrets
 import sqlite3
 import sys
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -116,6 +117,8 @@ async def _lifespan(_app: FastAPI):
     skill_lab_sources.prefetch_main_agent_tool_names()
     # スキル研究室のタブの「研究対象」に使うサブエージェントのツール名も同じく先に求める。
     skill_lab_sources.prefetch_subagent_tool_names()
+    # 「AIに相談」の最初の相談で段落の埋め込みを待たせないよう、裏で作り始める（_warm_up_assistant_index）。
+    threading.Thread(target=_warm_up_assistant_index, name="assistant-warm-up", daemon=True).start()
     yield
     _data_backup_router.backup_scheduler.stop()
     _knowledge_router.ingest_scheduler.stop()
@@ -257,8 +260,8 @@ def _instance_summary(name: str) -> dict[str, Any]:
         "url": f"{_URL_SCHEME}://127.0.0.1:{meta.app_port}",
         "is_default": name == inst.DEFAULT_INSTANCE_NAME,
         "kind": meta.kind,
-        # 初期設定ガイドをまだ終えていない（初回起動の default・新しく作った本体）。ダッシュボードがガイドを出す。
-        "setup_guide_pending": inst.is_setup_guide_pending(INSTANCES_ROOT, name),
+        # はじめてのチュートリアルをまだ終えていない（初回起動の default・新しく作った本体）。ダッシュボードがチュートリアルを出す。
+        "tutorial_pending": inst.is_tutorial_pending(INSTANCES_ROOT, name),
     }
 
 
@@ -320,23 +323,23 @@ def create_instance(
     return {**_instance_summary(meta.name), "skipped_settings": skipped}
 
 
-class SetupGuideBody(BaseModel):
+class TutorialBody(BaseModel):
     # finished（最後まで進んだ）/ skipped（スキップした）。変更履歴に残すだけで、どちらも印を消す。
     result: str = "finished"
 
 
-@app.post("/api/instances/{name}/setup-guide/done")
-def finish_setup_guide(
+@app.post("/api/instances/{name}/tutorial/done")
+def finish_tutorial(
     name: str,
-    body: SetupGuideBody,
+    body: TutorialBody,
     request: Request,
     user: str = Depends(require_login),
     _csrf: None = Depends(require_csrf),
 ):
-    """初期設定ガイドを終えた・スキップした印として、.setup_guide_pending を消す（次からは自動で出さない）。"""
+    """はじめてのチュートリアルを終えた・スキップした印として、.tutorial_pending を消す（次からは自動で出さない）。"""
     _require_instance(name)
-    was_pending = inst.is_setup_guide_pending(INSTANCES_ROOT, name)
-    inst.set_setup_guide_pending(INSTANCES_ROOT, name, False)
+    was_pending = inst.is_tutorial_pending(INSTANCES_ROOT, name)
+    inst.set_tutorial_pending(INSTANCES_ROOT, name, False)
     if was_pending:
         audit.append(
             AUDIT_LOG_PATH,
@@ -344,7 +347,7 @@ def finish_setup_guide(
                 "instance": name,
                 "actor": user,
                 "remote_addr": _client_ip(request),
-                "action": "setup_guide_done",
+                "action": "tutorial_done",
                 "result": "skipped" if body.result == "skipped" else "finished",
             },
         )
@@ -1770,6 +1773,30 @@ def _assistant_embedding(target: str, llm_instance: str):
         if provider is not None:
             return provider
     return None
+
+
+def _warm_up_assistant_index() -> None:
+    """管理ツールの起動時に、「AIに相談」の索引の段落の埋め込みを裏で用意する。
+
+    内蔵の埋め込み（CPU）で全段落を埋め込むと数分かかり、以前は最初の相談がその間 LLM に届かずに止まって見えた。
+    相談は埋め込みが揃うまで2-gram で答える（admin/assistant_index.py）が、検索の質を早く上げるため先に作る。
+    日本語の索引から作り、続けて英語の索引を作る（変わっていない段落は保存済みの分を使うので、2回目以降の起動は速い）。
+    """
+    if not _cfg.admin_assistant_enabled:
+        return
+    try:
+        fixed = admin_settings_api.current_admin_config(CONFIG_INI_PATH).admin_assistant_llm_instance
+        provider = _assistant_embedding(inst.DEFAULT_INSTANCE_NAME, fixed or inst.DEFAULT_INSTANCE_NAME)
+    except Exception as exc:  # noqa: BLE001 - 準備できなくても相談は2-gram で答える
+        logger.warning("Admin assistant: could not prepare the embeddings at startup: %s", exc)
+        return
+    if provider is None:
+        return
+    for lang in ("ja", "en"):
+        try:
+            _assistant_index[lang].prepare_embeddings(provider)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Admin assistant: could not prepare the %s embeddings at startup: %s", lang, exc)
 
 
 app.include_router(

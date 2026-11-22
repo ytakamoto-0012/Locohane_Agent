@@ -16,7 +16,9 @@ config.ini の全キーと、README_DETAIL.md・admin/API_REFERENCE.md の段落
 （困りごと→正解キーの評価で、2-gram だけより埋め込みの方が大きく良く、2-gram を少し足すとさらに安定した。）
 
 文書側の埋め込みは cache_dir に「段落の本文の SHA-1 → ベクター」で保存し、変わった段落だけを埋め込み直す
-（接続先・モデル・prefix が変わればファイルごと別になる）。
+（接続先・モデル・prefix が変わればファイルごと別になる）。足りない段落が多いとき（初回・文書を大きく書き換えた後）は、
+相談を待たせずに2-gram だけで答え、埋め込みは裏のスレッドで作る（INLINE_EMBED_MAX）。管理ツールの起動時にも裏で作り始める
+（prepare_embeddings。admin/server.py）。
 """
 
 from __future__ import annotations
@@ -45,6 +47,10 @@ logger = logging.getLogger(__name__)
 BIGRAM_WEIGHT_WITH_EMBEDDING = 0.2
 # 文書の1段落の最大文字数（これより長い節は段落の区切りで分ける）。
 MAX_CHUNK_CHARS = 1200
+# 段落の埋め込みが足りないとき、相談の中でその場で埋め込んでよい段落の数。これより多い（初回・文書を大きく
+# 書き換えた後）なら、相談は待たせずに2-gram だけで答え、埋め込みは裏のスレッドで作る（内蔵の埋め込み（CPU）で
+# 全段落（約600）を埋め込むと2分ほどかかり、その間「AIに相談」が LLM に届く前に止まって見えていたため）。
+INLINE_EMBED_MAX = 24
 
 # README_DETAIL.md のうち、管理の相談には関係しない節（見出しの完全一致。配下の小見出しも除く）。
 # 「設定リファレンス」の表は行ごとに config.ini のキーの索引へ取り込むため、節としては入れない。
@@ -334,6 +340,9 @@ class AssistantIndex:
         self._bigram: _BigramIndex | None = None
         # cache_id → 段落ごとの正規化済みベクター（self._passages と同じ順）
         self._embedded: dict[str, list[list[float]]] = {}
+        # 裏のスレッドで段落を埋め込み中の cache_id（同じものを二重に始めない）
+        self._building: set[str] = set()
+        self._building_lock = threading.Lock()
 
     # --- 構築 ---
 
@@ -382,9 +391,8 @@ class AssistantIndex:
         suffix = "" if self._language == "ja" else f"_{self._language}"
         return self._cache_dir / f"embeddings_{_sha1(cache_id)[:16]}{suffix}.json"
 
-    def _passage_embeddings(self, provider: EmbeddingProvider) -> list[list[float]]:
-        if provider.cache_id in self._embedded:
-            return self._embedded[provider.cache_id]
+    def _load_cached(self, provider: EmbeddingProvider) -> tuple[list[str], dict[str, list[float]], list[tuple[str, str]]]:
+        """今の段落のハッシュ・保存済みのベクター・まだ埋め込んでいない段落（ハッシュ, 本文）を返す（self._lock の中で呼ぶ）。"""
         cache_path = self._cache_path(provider.cache_id)
         cached: dict[str, list[float]] = {}
         if cache_path is not None:
@@ -395,18 +403,84 @@ class AssistantIndex:
         texts = [f"{p.title}\n{p.text}" for p in self._passages]
         hashes = [_sha1(t) for t in texts]
         missing = sorted({h: t for h, t in zip(hashes, texts) if h not in cached}.items())
+        return hashes, cached, missing
+
+    def _store(self, provider: EmbeddingProvider, hashes: list[str], cached: dict[str, list[float]], wrote_new: bool) -> list[list[float]]:
+        """埋め込みを保存し、検索に使う行列を覚える（self._lock の中で呼ぶ）。"""
+        cache_path = self._cache_path(provider.cache_id)
+        if wrote_new and cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            # 今の索引に無い段落の分は捨てる（文書を書き換えるたびにファイルが膨らまないように）。
+            live = set(hashes)
+            cache_path.write_text(json.dumps({h: v for h, v in cached.items() if h in live}), encoding="utf-8")
+        matrix = [_normalized(cached[h]) for h in hashes]
+        self._embedded[provider.cache_id] = matrix
+        return matrix
+
+    def prepare_embeddings(self, provider: EmbeddingProvider) -> None:
+        """全段落の埋め込みを用意する（足りない段落が多いと時間がかかるため、裏のスレッドから呼ぶ）。
+
+        埋め込みの計算中は索引の鍵を持たない（その間の相談は2-gram で答えられるように）。計算中に元の文書が
+        変わったら、結果は捨てずに保存だけし（変わっていない段落の分は次に使える）、行列は次の相談で作り直す。
+        """
+        with self._lock:
+            self._ensure_built()
+            if provider.cache_id in self._embedded:
+                return
+            signature = self._signature
+            hashes, cached, missing = self._load_cached(provider)
+        if missing:
+            logger.info("Admin assistant: embedding %d paragraphs in the background (%s).", len(missing), provider.label)
+            vectors = provider.embed([t for _, t in missing], "document")
+            cached.update({h: v for (h, _), v in zip(missing, vectors)})
+            logger.info("Admin assistant: finished embedding %d paragraphs (%s).", len(missing), provider.label)
+        with self._lock:
+            if self._signature != signature:
+                # 計算中に文書が変わった: 計算できた分だけ保存しておく（次の相談で足りない分を確かめ直す）
+                cache_path = self._cache_path(provider.cache_id)
+                if missing and cache_path is not None:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_text(json.dumps(cached), encoding="utf-8")
+                return
+            self._store(provider, hashes, cached, bool(missing))
+
+    def start_background_embedding(self, provider: EmbeddingProvider) -> bool:
+        """裏のスレッドで prepare_embeddings を始める（同じ埋め込みを作り中なら何もしない）。始めたら True。"""
+        with self._building_lock:
+            if provider.cache_id in self._building:
+                return False
+            self._building.add(provider.cache_id)
+
+        def run() -> None:
+            try:
+                self.prepare_embeddings(provider)
+            except Exception as exc:  # noqa: BLE001 - 作れなくても相談は2-gram で答える
+                logger.warning("Admin assistant: could not embed the paragraphs in the background (%s): %s", provider.label, exc)
+            finally:
+                with self._building_lock:
+                    self._building.discard(provider.cache_id)
+
+        threading.Thread(target=run, name=f"assistant-embed-{self._language}", daemon=True).start()
+        return True
+
+    def _passage_embeddings(self, provider: EmbeddingProvider) -> list[list[float]] | None:
+        """検索に使う段落の埋め込み（self._lock の中で呼ぶ）。足りない段落が多ければ裏で作り始めて None を返す。"""
+        if provider.cache_id in self._embedded:
+            return self._embedded[provider.cache_id]
+        hashes, cached, missing = self._load_cached(provider)
+        if len(missing) > INLINE_EMBED_MAX:
+            if self.start_background_embedding(provider):
+                logger.info(
+                    "Admin assistant: %d paragraphs are not embedded yet; answering with character 2-grams while embedding them in the background (%s).",
+                    len(missing),
+                    provider.label,
+                )
+            return None
         if missing:
             logger.info("Admin assistant: embedding %d paragraphs (%s).", len(missing), provider.label)
             vectors = provider.embed([t for _, t in missing], "document")
             cached.update({h: v for (h, _), v in zip(missing, vectors)})
-            if cache_path is not None:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                # 今の索引に無い段落の分は捨てる（文書を書き換えるたびにファイルが膨らまないように）。
-                live = set(hashes)
-                cache_path.write_text(json.dumps({h: v for h, v in cached.items() if h in live}), encoding="utf-8")
-        matrix = [_normalized(cached[h]) for h in hashes]
-        self._embedded[provider.cache_id] = matrix
-        return matrix
+        return self._store(provider, hashes, cached, bool(missing))
 
     # --- 検索 ---
 
@@ -421,7 +495,7 @@ class AssistantIndex:
     ) -> SearchResult:
         """相談内容に近いキー（最大 max_keys 件）と文書の段落（最大 max_docs 件）を近い順に返す。
 
-        埋め込みに失敗した場合は2-gram だけで検索する（mode="bigram"）。
+        埋め込みに失敗した場合・段落の埋め込みを裏で作っている間は2-gram だけで検索する（mode="bigram"）。
         """
         with self._lock:
             self._ensure_built()
@@ -432,9 +506,10 @@ class AssistantIndex:
             if embedding is not None and passages:
                 try:
                     matrix = self._passage_embeddings(embedding)
-                    q = _normalized(embedding.embed([query], "query")[0])
-                    scores = [_dot(q, v) + BIGRAM_WEIGHT_WITH_EMBEDDING * s for v, s in zip(matrix, scores)]
-                    mode = "embedding"
+                    if matrix is not None:
+                        q = _normalized(embedding.embed([query], "query")[0])
+                        scores = [_dot(q, v) + BIGRAM_WEIGHT_WITH_EMBEDDING * s for v, s in zip(matrix, scores)]
+                        mode = "embedding"
                 except Exception as exc:  # noqa: BLE001 - 埋め込みが使えなくても2-gram で答える
                     logger.warning("Admin assistant: embeddings unavailable, searching with character 2-grams only (%s): %s", embedding.label, exc)
         order = sorted(range(len(passages)), key=lambda i: -scores[i])
