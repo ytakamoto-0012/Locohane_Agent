@@ -89,6 +89,22 @@ def test_p21_attributes_can_be_added_and_read_back() -> None:
     assert text.isascii()  # ASCII 以外は \X2\ で書く
 
 
+def test_p21_real_numbers_are_written_in_the_valid_form() -> None:
+    """ISO 10303-21 の REAL は小数点が必須（Python の repr の 1e-05 をそのまま書くと厳格な読み取りが拒否する）。"""
+    text, n = step_p21.add_attributes(_P21, {"部品A": [{"name": "tol", "value": 0.00001}, {"name": "big", "value": 1e20}]})
+    assert n == 2
+    assert "REAL(1.E-05)" in text and "REAL(1.E+20)" in text
+    [prod] = step_p21.read_products(text)
+    values = {a["name"]: a["value"] for a in prod["attributes"]}
+    assert values["tol"] == 1e-05 and values["big"] == 1e20
+
+
+def test_p21_truncated_hex_escape_is_kept_literally() -> None:
+    """文字列の末尾で 1 桁だけ切れた \\X\\ は文字として残す（1 桁のまま制御文字として読んでいた）。"""
+    assert step_p21.decode_string("name\\X\\E") == "name\\X\\E"
+    assert step_p21.decode_string("x\\X\\E9y") == "xéy"
+
+
 def test_p21_header_keeps_the_original_author_and_system() -> None:
     written = _P21.replace("('user_a'),('org_a'),'pre 1','\\X2\\30C630B930C8\\X0\\ CAD'", "('Author'),('Open CASCADE'),'occt','Open CASCADE 7.9'")
     out = step_p21.set_header(written, step_p21.read_header(_P21), "Locohane")

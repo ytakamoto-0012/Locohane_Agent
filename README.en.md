@@ -12,6 +12,12 @@ an AI agent works for them and what it brings, without sending internal data out
 a way of working where you hand tasks to AI, such as Copilot Cowork in Microsoft 365 Copilot or Claude Cowork,
 you can also try that idea out on your own work with it first. It has these features that help with a PoC:
 
+- **Skill development for your own work**: staff turn their usual procedure into a draft skill (a written work procedure)
+  just by talking it through in the chat. A developer then uses the admin tool's "Skill Lab" to build evaluation cases for it,
+  let the AI fix its problems, and publish it as an official skill for that department once it passes repeated evaluations.
+  This lets the PoC find out which tasks the AI can take over by building skills for real work in your company. The skills follow
+  the [Agent Skills standard](https://agentskills.io/specification), so you can take them to the AI platform you adopt later
+  ([Create your own skills](#create-your-own-skills)).
 - **Admin dashboard**: change the AI endpoints and settings, start and stop instances for each department, and check the running
   status, conversations and logs in the browser, so administrators can follow how the trial is going
   ([For administrators: settings dashboard](#for-administrators-settings-dashboard)).

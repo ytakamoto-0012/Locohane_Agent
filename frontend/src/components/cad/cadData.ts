@@ -87,6 +87,21 @@ export function effectiveColor(data: CadData, overrides: CadColorOverrides, s: C
   return o !== undefined ? o : (info?.color ?? null);
 }
 
+/**
+ * 部品の色をファイルの色へ戻した上書きを外す。残すとビューアはその部品の面をすべてその色で描くが、
+ * backend（cad_viewer._valid_colors）は元と同じ色の変更を捨てるので、面ごとに色の付いた部品では
+ * 画面と保存したファイルの色が食い違う。外すと面は元の色に戻り、画面と保存が一致する。
+ */
+export function dropUnchangedPartColors(data: CadData, overrides: CadColorOverrides): CadColorOverrides {
+  const unchanged = [...overrides.parts].filter(
+    ([id, hex]) => (data.parts?.[id]?.color ?? '').toLowerCase() === (hex ?? '').toLowerCase()
+  );
+  if (!unchanged.length) return overrides;
+  const parts = new Map(overrides.parts);
+  for (const [id] of unchanged) parts.delete(id);
+  return { faces: overrides.faces, parts };
+}
+
 /** 「同じ部品・レイヤー」でまとめて選ぶときの、要素が属する部品（DXF ではレイヤー）。無ければ null。 */
 export function partOf(data: CadData, s: CadSelection): number | null {
   if (s.kind === 'part') return s.id;

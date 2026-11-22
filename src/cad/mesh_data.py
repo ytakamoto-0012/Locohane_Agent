@@ -287,8 +287,31 @@ def apply_view_edits(
     out["viewState"] = {"hiddenParts": sorted({int(p) for p in hidden_parts}), "visible": dict(visible or {})}
     if history:
         out["viewState"]["history"] = history
-    out["edits"] = {"saved_at": saved_at, "color_changes": list(color_changes)}
+    previous = (data.get("edits") or {}).get("color_changes") or []
+    out["edits"] = {"saved_at": saved_at, "color_changes": merge_color_changes(previous, color_changes)}
     return out
+
+
+def merge_color_changes(previous: Sequence[dict[str, Any]], current: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """前回までに保存した色の変更（開き直したビューア用データの edits.color_changes）に、今回の変更を重ねる。
+
+    同じ面・部品は、最初の from（元のファイルの色）と最後の to を残し、元の色に戻ったものは外す。開き直した
+    データを書き出すとき、前の回に変えた色も変更として扱われるように（step_xcaf.export_step_xcaf 等は
+    edits.color_changes を見て色を付ける）。
+    """
+    merged: dict[tuple[str, int], dict[str, Any]] = {}
+    for c in [*previous, *current]:
+        if not isinstance(c, dict) or c.get("kind") not in ("face", "part"):
+            continue
+        try:
+            key = (str(c["kind"]), int(c["id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if key in merged:
+            merged[key] = {**merged[key], "to": c.get("to")}
+        else:
+            merged[key] = dict(c)
+    return [c for c in merged.values() if (c.get("from") or "").lower() != (c.get("to") or "").lower()]
 
 
 def write_viewer_json(data: dict[str, Any], out_path: str | Path) -> None:

@@ -51,13 +51,13 @@ class MemoryRanksReloader:
             if stamp == self._stamp:
                 return False
             self._stamp = stamp
-            # load_config() は規則をまるごと登録し直すため、先に今の規則を取っておき、ランクだけを差し替えて戻す
-            # （公開範囲の種類等は起動時の値のまま。それらは再起動で効く設定のため）。
+            # 公開範囲の種類等は再起動で効く設定なので、今の規則のままにし、ランクだけを差し替える。
+            # load_config() が規則を登録し直すと、その間のほかのセッションが新しい規則を一瞬見てしまうため、
+            # 登録しない（register_memory_policy=False）で読んだものを使い、今の規則へランクだけ入れて戻す。
             current = memory.policy_for(self._memory_dir)
             try:
-                cfg = load_config()
+                cfg = load_config(register_memory_policy=False)
             except Exception as exc:  # noqa: BLE001 - 読めなければ前のランクのまま
-                memory.set_policy(self._memory_dir, current)
                 logger.warning("Could not reload the user ranks after config_overrides.json changed; keeping the previous ranks: %s", exc)
                 return False
             ranks = (dict(cfg.memory_user_ranks), cfg.memory_default_rank)

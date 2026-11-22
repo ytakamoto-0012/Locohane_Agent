@@ -1794,7 +1794,8 @@ def _warm_up_assistant_index() -> None:
         return
     for lang in ("ja", "en"):
         try:
-            _assistant_index[lang].prepare_embeddings(provider)
+            # 相談が先に来て裏で作り始めていれば、そちらに任せる（同じ段落を2本同時に埋め込まない）。
+            _assistant_index[lang].prepare_embeddings_once(provider)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Admin assistant: could not prepare the %s embeddings at startup: %s", lang, exc)
 

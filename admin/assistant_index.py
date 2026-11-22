@@ -444,12 +444,35 @@ class AssistantIndex:
                 return
             self._store(provider, hashes, cached, bool(missing))
 
-    def start_background_embedding(self, provider: EmbeddingProvider) -> bool:
-        """裏のスレッドで prepare_embeddings を始める（同じ埋め込みを作り中なら何もしない）。始めたら True。"""
+    def _claim_building(self, provider: EmbeddingProvider) -> bool:
+        """この埋め込みを作る役を取る。ほかで作り中なら False（同じ段落を2本同時に埋め込まないため）。"""
         with self._building_lock:
             if provider.cache_id in self._building:
                 return False
             self._building.add(provider.cache_id)
+            return True
+
+    def _release_building(self, provider: EmbeddingProvider) -> None:
+        with self._building_lock:
+            self._building.discard(provider.cache_id)
+
+    def prepare_embeddings_once(self, provider: EmbeddingProvider) -> bool:
+        """今のスレッドで prepare_embeddings を行う（管理ツール起動時の準備用）。ほかで作り中なら何もせず False。
+
+        作っている間は「作り中」に数えるので、その間に来た相談が裏で同じ埋め込みを始めることはない。
+        """
+        if not self._claim_building(provider):
+            return False
+        try:
+            self.prepare_embeddings(provider)
+        finally:
+            self._release_building(provider)
+        return True
+
+    def start_background_embedding(self, provider: EmbeddingProvider) -> bool:
+        """裏のスレッドで prepare_embeddings を始める（同じ埋め込みを作り中なら何もしない）。始めたら True。"""
+        if not self._claim_building(provider):
+            return False
 
         def run() -> None:
             try:
@@ -457,8 +480,7 @@ class AssistantIndex:
             except Exception as exc:  # noqa: BLE001 - 作れなくても相談は2-gram で答える
                 logger.warning("Admin assistant: could not embed the paragraphs in the background (%s): %s", provider.label, exc)
             finally:
-                with self._building_lock:
-                    self._building.discard(provider.cache_id)
+                self._release_building(provider)
 
         threading.Thread(target=run, name=f"assistant-embed-{self._language}", daemon=True).start()
         return True

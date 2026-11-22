@@ -150,13 +150,17 @@ export function measureRadius(info: CadItemInfo | undefined, pick: MeasurePick):
     axis = unit(asVec3(info.axisDirection) ?? [0, 0, 0]);
   }
   if (r === null || r <= 0 || !center) return { error: 'noRadius' };
+  // 円錐の半径は、クリックした点の高さの半径なので、点が表示用の三角形の上なら概算（B-rep の半径は頂点の 0 から
+  // 離れているため、他の面と違って点の位置が値を決める。CadScene.measurePointAt が形の上の点に合わせられないのは
+  // approximate として示す）。
+  const approximate = g === 'CONE' && !pick.exact;
   // 半径の線の外側の端（円・円筒の上の点。クリックした点が三角形の上でも形の上に寄せる）。
   const rim = (axis && (g === 'CYLINDER' || g === 'CIRCLE') ? onCircle(p, center, axis, r) : null) ?? p;
-  const label = `R${fmtNum(r)}  ⌀${fmtNum(r * 2)}`;
+  const label = `${approximate ? '≈' : ''}R${fmtNum(r)}  ⌀${fmtNum(r * 2)}`;
   return {
     ok: {
       tool: 'radius',
-      approximate: false,
+      approximate,
       draw: { segments: [center, rim], points: [center], labelAt: rim, label },
       result: {
         type: 'radius',

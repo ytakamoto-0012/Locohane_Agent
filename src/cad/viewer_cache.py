@@ -64,6 +64,40 @@ def _file_sig(path: Path) -> dict[str, Any]:
     return {"path": os.path.normcase(str(path.resolve())), "size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
 
+def _compare_sig(compare: str) -> list[dict[str, Any]]:
+    """比べる前のファイルの目印（サイズ・更新時刻）。
+
+    比べる前がビューア用データ（.json）のときは、JSON そのものではなく、その JSON が指すモデルファイルの
+    形を比べる（src/cad/compare.py の load_previous）ので、参照先（source.brep・source.path。参照の連鎖）も
+    目印に足す。参照先をその場で直したとき、古い比較結果を返さないため。
+    """
+    sigs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    p = Path(compare)
+    for _ in range(10):
+        key = os.path.normcase(str(p.resolve()))
+        if key in seen:
+            break
+        seen.add(key)
+        sigs.append(_file_sig(p))  # 先頭のファイルが読めなければ OSError（cache_key が None を返す）
+        if p.suffix.lower() != ".json":
+            break
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            break
+        src = data.get("source") if isinstance(data, dict) else None
+        if not isinstance(src, dict):
+            break
+        ref = src.get("brep") or src.get("path")
+        if not ref:
+            break
+        p = Path(ref)
+        if not p.is_file():
+            break
+    return sigs
+
+
 def cache_key(path: Path, options: dict[str, Any]) -> str | None:
     """path を options でビューア用データにした結果のキー。ファイルを読めなければ None（キャッシュを使わない）。
 
@@ -74,7 +108,7 @@ def cache_key(path: Path, options: dict[str, Any]) -> str | None:
         compare = opts.pop("compare_with", "")
         payload = {
             "file": _file_sig(path),
-            "compare_with": _file_sig(Path(compare)) if compare else None,
+            "compare_with": _compare_sig(compare) if compare else None,
             "options": opts,
             "converter": converter_digest(),
         }
@@ -122,7 +156,11 @@ def store(cache_dir: Path, key: str, src: Path, max_bytes: int) -> None:
 
 
 def prune(cache_dir: Path, max_bytes: int) -> int:
-    """古い一時ファイルを消し、合計が max_bytes 以下になるまで使った時刻の古いものから消す。消した数を返す。"""
+    """古い一時ファイルを消し、合計が max_bytes 以下になるまで使った時刻の古いものから消す。消した数を返す。
+
+    max_bytes が 0 以下（キャッシュオフ）のときは、項目をすべて消す（溜まった分を置いておいても、ディスクの
+    空きを取り戻せないので）。
+    """
     if not cache_dir.is_dir():
         return 0
     removed = 0
@@ -144,6 +182,13 @@ def prune(cache_dir: Path, max_bytes: int) -> int:
             entries.append((st.st_mtime, st.st_size, p))
     total = sum(size for _, size, _ in entries)
     if max_bytes <= 0:
+        # 上限 0（キャッシュオフ）は、すでに溜まっている分も消す（ディスクの空きを取り戻すため）。
+        for _, _, p in entries:
+            try:
+                p.unlink()
+            except OSError:
+                continue
+            removed += 1
         return removed
     for _, size, p in sorted(entries):
         if total <= max_bytes:

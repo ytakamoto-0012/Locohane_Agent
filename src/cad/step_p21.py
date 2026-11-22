@@ -73,7 +73,7 @@ def decode_string(raw: str) -> str:
                 # UTF-16 のサロゲートの組を 1 文字にする。
                 i = end + 4
                 continue
-            if raw.startswith("\\X\\", i) and i + 4 < n + 1:
+            if raw.startswith("\\X\\", i) and i + 5 <= n:
                 try:
                     out.append(chr(int(raw[i + 3 : i + 5], 16)))
                     i += 5
@@ -473,6 +473,20 @@ def read_step_info(path: str | Path) -> dict[str, Any]:
 _TYPE_NAME = re.compile(r"[A-Z][A-Z_]*")
 
 
+def _p21_real(value: float) -> str:
+    """ISO 10303-21 の REAL として正しい形にする（小数点が必須。指数は 1.E-05 のように E 前に小数点）。
+
+    Python の repr は 1e-05 のように出すので、厳格な STEP 読み取りが拒否する。
+    """
+    num = repr(float(value))
+    if "e" in num.lower():
+        mant, exp = num.split("e") if "e" in num else num.split("E")
+        if "." not in mant:
+            mant += "."
+        return f"{mant.upper()}E{exp.upper()}"
+    return num if "." in num else num + "."
+
+
 def _value_text(value: Any, vtype: str | None) -> tuple[str, str]:
     """属性の値 → (実体の型, 引数)。文字列は DESCRIPTIVE、数値は VALUE_REPRESENTATION_ITEM。"""
     if isinstance(value, bool):
@@ -481,15 +495,15 @@ def _value_text(value: Any, vtype: str | None) -> tuple[str, str]:
         kind = vtype.upper() if vtype else ("COUNT_MEASURE" if isinstance(value, int) else "REAL")
         # 型名はそのまま本文に書くので、英字と _ だけのもの（LENGTH_MEASURE 等）に限る（ほかは型なしの数として書く）。
         if _TYPE_NAME.fullmatch(kind) and (kind in ("REAL", "INTEGER") or kind.endswith("_MEASURE")):
-            num = repr(float(value)) if kind != "INTEGER" and kind != "COUNT_MEASURE" else str(int(value))
-            if "." not in num and "e" not in num.lower() and kind not in ("INTEGER", "COUNT_MEASURE"):
-                num += "."
+            if kind in ("INTEGER", "COUNT_MEASURE"):
+                num = str(int(value))
+            else:
+                num = _p21_real(value)
             return "VALUE_REPRESENTATION_ITEM", f"{kind}({num})"
     if isinstance(value, (int, float)):
-        num = str(int(value)) if isinstance(value, int) else repr(float(value))
         if isinstance(value, int):
-            return "VALUE_REPRESENTATION_ITEM", f"COUNT_MEASURE({num})"
-        return "VALUE_REPRESENTATION_ITEM", f"REAL({num})"
+            return "VALUE_REPRESENTATION_ITEM", f"COUNT_MEASURE({int(value)})"
+        return "VALUE_REPRESENTATION_ITEM", f"REAL({_p21_real(value)})"
     return "DESCRIPTIVE_REPRESENTATION_ITEM", encode_string("" if value is None else str(value))
 
 

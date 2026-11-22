@@ -197,7 +197,8 @@ export function ChatTutorial({
   loading,
   hasAnswer,
   answerStarted,
-  hasStarters
+  hasStarters,
+  messageCount
 }: {
   /** この会話で1回でも送信したか */
   hasSentMessage: boolean;
@@ -209,6 +210,8 @@ export function ChatTutorial({
   answerStarted: boolean;
   /** 定型文のボタンが出ているか */
   hasStarters: boolean;
+  /** 今の会話のメッセージ数（教程中の送信を、教程が始まる前の会話と区別するため） */
+  messageCount: number;
 }) {
   const { t } = useI18n();
   const { config } = useConfig();
@@ -240,6 +243,12 @@ export function ChatTutorial({
   // 手順の番号がずれ、「AI が考えています」等の手順を飛ばしてしまう。
   const hasStartersRef = useRef(hasStarters);
   hasStartersRef.current = hasStarters;
+  // 「送ってみる」手順は、チュートリアルを始める前からある会話のメッセージで飛ばさない（表示設定から既存の会話で
+  // 始めると、hasSentMessage は最初から true なので、例の指示が入る前に次へ進んでいた）。手順に入ったときの
+  // メッセージ数を控え、その後に増えたかで送ったことを見る。
+  const latestCountRef = useRef(messageCount);
+  latestCountRef.current = messageCount;
+  const tryBaseRef = useRef<number | null>(null);
   const [withStarters, setWithStarters] = useState(false);
   // 会話の一覧の操作の手順は、会話履歴の保存が有効なときだけ（無効なら会話の一覧が無い）
   const withThreads = Boolean(config?.dataPersistence);
@@ -250,6 +259,7 @@ export function ChatTutorial({
   const step = open ? steps[Math.min(index, steps.length - 1)] : undefined;
 
   const start = useCallback(() => {
+    tryBaseRef.current = null;
     setWithStarters(hasStartersRef.current);
     setIndex(0);
     setCollapsed(false);
@@ -328,23 +338,30 @@ export function ChatTutorial({
       .catch(() => {});
   }, [sessionId, config, currentThreadId, hasSentMessage, user?.identifier, start]);
 
-  // 送ってみる手順: 入力欄に例の指示を入れる。送ったら次（回答待ち）へ進む。
+  // 送ってみる手順: 入ったときに入力欄へ例の指示を入れ、そのときのメッセージ数を控える。
+  // 入る前からある会話のメッセージ（表示設定から既存の会話で始めたとき）では進めない。
   useEffect(() => {
     if (!step?.tryIt) return;
-    if (hasSentMessage) {
-      setIndex((i) => i + 1);
-      return;
-    }
+    tryBaseRef.current = latestCountRef.current;
     window.dispatchEvent(new CustomEvent(FILL_COMPOSER_EVENT, { detail: t('tutorial.tryPrompt') }));
     // 手順に入ったときだけ入れる（入れた文章を利用者が書き換えても上書きしない）
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step?.tryIt, hasSentMessage]);
+  }, [step]);
 
-  // 回答待ちの手順: 回答が出始めたら、すぐ「回答が届きました」の手順へ進む。
+  // 送ったら（手順に入った後にメッセージが増えたら）次（回答待ち）へ進む。
+  useEffect(() => {
+    if (!step?.tryIt || tryBaseRef.current === null) return;
+    if (messageCount > tryBaseRef.current) setIndex((i) => i + 1);
+  }, [step?.tryIt, messageCount]);
+
+  // 回答待ちの手順: 送った後の回答が出始めたら、すぐ「回答が届きました」の手順へ進む
+  // （送ったメッセージと回答で 2 件増える。前からある回答では進めない）。
   useEffect(() => {
     if (!step?.waitAnswer || !answerStarted) return;
+    const base = tryBaseRef.current;
+    if (base !== null && messageCount < base + 2) return;
     setIndex((i) => i + 1);
-  }, [step?.waitAnswer, answerStarted]);
+  }, [step?.waitAnswer, answerStarted, messageCount]);
 
   // 「回答が届きました」の手順: 回答を書き終えて生成が止まったら（承認待ち等で一瞬止まるのと見分けるため少し待って）、
   // 「次へ」を押せるようにする。

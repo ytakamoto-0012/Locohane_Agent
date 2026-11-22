@@ -202,6 +202,27 @@ def test_prepare_embeddings_warms_up_without_a_search(tmp_path):
     assert [c[0] for c in calls] == ["query"]
 
 
+def test_warm_up_and_a_request_do_not_embed_the_same_paragraphs_twice(tmp_path):
+    """起動時の準備（server.py の _warm_up_assistant_index）と相談が、同じ段落を二重に埋め込まない。
+
+    準備が「作り中」のフラグ（_building）を持つので、その間に来た相談は 2-gram で答えて、同じ埋め込みを
+    裏で始めない。以前は準備がフラグを持たず、両方が全段落を埋めて CPU 負荷が 2 倍になった。
+    """
+    index = _index(tmp_path, cache_dir=tmp_path / "cache")
+    calls = []
+    provider = _fake_provider(calls)
+    # 準備スレッドが埋め込みを始める（作り中の間、フラグを持つ）
+    assert index._claim_building(provider) is True
+    # 作り中に別のスレッド（相談）が始めようとしても、二重に作らない
+    assert index.start_background_embedding(provider) is False
+    assert index.prepare_embeddings_once(provider) is False
+    assert calls == []
+    # 準備スレッド自身は作り切る
+    index._release_building(provider)
+    assert index.prepare_embeddings_once(provider) is True
+    assert calls and calls[0][0] == "document"
+
+
 def test_embedding_failure_falls_back_to_bigram(tmp_path):
     index = _index(tmp_path)
     result = index.search("スレッドの保持日数を変えたい", max_keys=1, max_docs=0, embedding=_fake_provider([], fail=True))

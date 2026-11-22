@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 
 from src.cad import viewer_cache
+from src.cad.mesh_data import FORMAT as VIEWER_FORMAT
 
 
 def _key(name: str) -> str:
@@ -41,6 +43,28 @@ def test_key_includes_the_compared_file(tmp_path) -> None:
     assert viewer_cache.cache_key(tmp_path / "none.step", {}) is None
 
 
+def test_key_follows_the_model_file_a_viewer_json_points_to(tmp_path) -> None:
+    """比べる前がビューア用データ（JSON）のとき、比べる形は JSON が指すモデルファイルなので、
+    参照先を直したらキーも変わる（古い比較結果を返さないため）。"""
+    f = _src(tmp_path, "new.step")
+    old = _src(tmp_path, "old.step")
+    view = tmp_path / "old_view.json"
+    view.write_text(json.dumps({"format": VIEWER_FORMAT, "source": {"path": str(old)}}), encoding="utf-8")
+    key = viewer_cache.cache_key(f, {"compare_with": str(view)})
+    assert key != viewer_cache.cache_key(f, {})
+    # JSON 自身は同じまま、参照先だけを直すとキーが変わる
+    old.write_bytes(b"z" * 300)
+    assert key != viewer_cache.cache_key(f, {"compare_with": str(view)})
+    # 参照の連鎖（JSON → JSON → モデル）も追う
+    view2 = tmp_path / "old_view2.json"
+    view2.write_text(json.dumps({"format": VIEWER_FORMAT, "source": {"path": str(view)}}), encoding="utf-8")
+    key2 = viewer_cache.cache_key(f, {"compare_with": str(view2)})
+    assert key2 != key
+    st = old.stat()
+    os.utime(old, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))  # 同じ秒・同じサイズの書き込みを見落とさない
+    assert key2 != viewer_cache.cache_key(f, {"compare_with": str(view2)})
+
+
 def test_store_lookup_and_prune_oldest_first(tmp_path) -> None:
     cache = tmp_path / "cache"
     for i, name in enumerate(("a", "b", "c")):
@@ -72,8 +96,12 @@ def test_prune_removes_stale_temp_files_and_clear_removes_all(tmp_path) -> None:
     fresh.write_text("{}")
     old = time.time() - 7200
     os.utime(stale, (old, old))
+    # 上限 0（キャッシュオフ）でも、溜まった項目は消す（app.py 起動時の片付けでディスクの空きが戻る）。
+    viewer_cache.store(cache, _key("e1"), _src(tmp_path, "e1"), 1000)
+    viewer_cache.store(cache, _key("e2"), _src(tmp_path, "e2"), 1000)
     viewer_cache.prune(cache, 0)
     assert not stale.exists() and fresh.exists()
+    assert viewer_cache.lookup(cache, _key("e1")) is None and viewer_cache.lookup(cache, _key("e2")) is None
     viewer_cache.store(cache, _key("k"), _src(tmp_path), 1000)
     assert viewer_cache.clear(cache) == 2
     assert not list(cache.iterdir())

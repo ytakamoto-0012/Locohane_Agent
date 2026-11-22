@@ -3363,6 +3363,7 @@ def load_config(
     config_path: Path | None = None,
     overrides_path: Path | None = None,
     instance_name: str | None = None,
+    register_memory_policy: bool = True,
 ) -> Config:
     """config.ini を読み、config_overrides.json・環境変数で上書きした Config を返す。
 
@@ -4749,7 +4750,10 @@ def load_config(
     cfg.skill_draft_dir.mkdir(parents=True, exist_ok=True)
     memory.ensure_dirs(cfg.memory_dir)
     # メモリーの公開範囲の規則を memory_dir ごとに登録する（ツール・索引・設定ダッシュボードの編集が同じ規則を使う）。
-    memory.set_policy(cfg.memory_dir, memory_policy(cfg))
+    # register_memory_policy=False の呼び出し（src/live_settings.py の再読み込み）は登録しない：その間は
+    # ほかのセッションが、再起動で効くはずの規則を一瞬見てしまうため。
+    if register_memory_policy:
+        memory.set_policy(cfg.memory_dir, memory_policy(cfg))
 
     return cfg
 

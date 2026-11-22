@@ -1523,7 +1523,7 @@ DESCRIPTIONS: dict[str, str] = {
         'It can be made again, so it is not included in the data backup.'
     ),
     'cad_viewer.cache_max_mb': (
-        'Upper limit of the total size of that cache (MB). When it is exceeded, the least recently used entries are deleted. 0 or less disables the cache.'
+        'Upper limit of the total size of that cache (MB). When it is exceeded, the least recently used entries are deleted. 0 or less disables the cache (the cached data is deleted when the app starts).'
     ),
     'plan.allow_badge_unlock': (
         'Behavior when clicking the Plan Mode / Edit Automatically badge shown near the send button.\n'

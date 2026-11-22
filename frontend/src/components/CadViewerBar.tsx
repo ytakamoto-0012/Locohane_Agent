@@ -6,6 +6,7 @@ import type { MessageKey } from '../i18n/messages';
 import {
   CAD_DATA_FORMAT,
   attributeColor,
+  dropUnchangedPartColors,
   effectiveColor,
   itemsOf,
   partOf,
@@ -269,7 +270,7 @@ function useEditHistory(state: EditSnapshot, apply: (s: EditSnapshot) => void, i
   return useMemo(() => ({ undo, redo, canUndo, canRedo, entries }), [undo, redo, canUndo, canRedo, entries]);
 }
 
-type SaveState ={ kind: 'idle' } | { kind: 'saving' } | { kind: 'saved'; path: string } | { kind: 'error'; message: string };
+type SaveState ={ kind: 'idle' } | { kind: 'saving' } | { kind: 'saved'; path: string; notes: string[] } | { kind: 'error'; message: string };
 
 function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onSubmit, onCancel }: PanelProps) {
   const { t } = useI18n();
@@ -612,7 +613,13 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
     try {
       const res = await client.callAction(action, sessionId);
       const r = res?.response;
-      if (r?.ok) setSaveState({ kind: 'saved', path: String(r.path ?? '') });
+      if (r?.ok)
+        setSaveState({
+          kind: 'saved',
+          path: String(r.path ?? ''),
+          // 書き出しの注意書き（PMI を書けなかった・DXF では面の色を書けない等）。黙って欠けたファイルにしないよう出す。
+          notes: Array.isArray(r.notes) ? r.notes.map((n: unknown) => String(n)).filter(Boolean) : []
+        });
       else setSaveState({ kind: 'error', message: String(r?.error ?? t('cad.saveFailed')) });
     } catch (err) {
       setSaveState({ kind: 'error', message: err instanceof Error ? err.message : t('cad.saveFailed') });
@@ -620,7 +627,9 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   };
   const saveText =
     saveState.kind === 'saved'
-      ? t('cad.saved', { path: saveState.path })
+      ? saveState.notes.length
+        ? t('cad.savedWithNotes', { path: saveState.path, notes: saveState.notes.join(' / ') })
+        : t('cad.saved', { path: saveState.path })
       : saveState.kind === 'error'
         ? `${t('cad.saveFailed')} ${saveState.message}`
         : '';
@@ -824,7 +833,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
             hiddenParts={hiddenParts}
             onHiddenParts={setHiddenParts}
             colors={colors}
-            onColors={setColors}
+            onColors={(c) => setColors(dropUnchangedPartColors(data, c))}
             onTogglePart={(id) => toggle({ kind: 'part', id })}
             onHoverPart={(id) => sceneRef.current?.setExternalHover(id === null ? null : { kind: 'part', id })}
             attributeEdits={attributeEdits}
@@ -913,7 +922,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
         </button>
         <div className="cad-viewer-actions-right">
           {saveText && (
-            <span className={`cad-viewer-save-status${saveState.kind === 'error' ? ' error' : ''}`} title={saveText}>
+            <span className={`cad-viewer-save-status${saveState.kind === 'error' || (saveState.kind === 'saved' && saveState.notes.length) ? ' error' : ''}`} title={saveText}>
               {saveText}
             </span>
           )}

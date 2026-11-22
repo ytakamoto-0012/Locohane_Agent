@@ -557,6 +557,7 @@ function App() {
         hasAnswer={lastMain?.type === 'assistant_message' && !lastMain.streaming}
         answerStarted={lastMain?.type === 'assistant_message'}
         hasStarters={!hasSentMessage && starterPrompts.length > 0}
+        messageCount={mainMessages.length}
       />
     </div>
   );

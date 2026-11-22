@@ -606,7 +606,7 @@ Locohane/
 | `data/<インスタンス名>/evals_temp/` | 評価（スキル研究室のループ・1回試行・トライアウト、`evals/run_all.py`）が実行中に使う一時フォルダ（ケースの作業フォルダ・隔離したメモリー／パスメモリー／計画の詳細／ドラフトスキルの置き場・スキルとケースの写し・AI 修正のバックアップ）。評価対象インスタンスの `[skill_lab] temp_dir`。OS の一時フォルダは使わない | 通常は終わると自動で消える。強制終了で残ったものは、最後の更新から `[skill_lab] temp_retention_hours`（既定24時間）を過ぎると自動で消える（評価の開始時・本体の起動時と `temp_cleanup_interval_hours` ごと・スキル調整ワーカーの同じ間隔ごと） | 評価が動いていないときにフォルダ内を削除 |
 | `data/mcp_publish/` | MCP サーバー（`mcp_server/`）が Resources として配布する、機密ファイルを除いたスキル一式のコピー（サーバーごとに `skills_*/` と `skills_*.lock`）。環境変数 `LOCOHANE_MCP_SKILLS_PUBLISH_DIR`。OS の一時フォルダは使わない | サーバーの終了時に消える。強制終了で残ったものは次にサーバーが起動したときに消える | MCP サーバーが動いていないときにフォルダ内を削除 |
 | `data/<インスタンス名>/script_guard_temp/` | `run_script`/`run_script_background` の実行中だけ置く書き込みガード（`sitecustomize.py`）。`[scripts] guard_temp_dir`。OS の一時フォルダは使わない | スクリプトが終わると消える。強制終了で残ったものは本体の起動時に消える（`[scripts]` の `timeout` と `background_max_runtime_seconds` の長い方＋10分を過ぎたもの） | 本体・評価が動いていないときにフォルダ内を削除 |
-| `data/<インスタンス名>/cad_cache/` | 3D ビューア（`show_cad_viewer`）が CAD ファイルから作ったビューア用データ（JSON）のキャッシュ。`[cad_viewer] cache_dir`。データのバックアップには入れない | いつでも（次に開くときに作り直す） | 合計が `[cad_viewer] cache_max_mb`（既定 2048）を超えると使った時刻の古いものから自動で消える。書きかけの一時ファイル（`.tmp_*`）は 1 時間を過ぎると本体の起動時に消える。手で消すならフォルダ内を削除 |
+| `data/<インスタンス名>/cad_cache/` | 3D ビューア（`show_cad_viewer`）が CAD ファイルから作ったビューア用データ（JSON）のキャッシュ。`[cad_viewer] cache_dir`。データのバックアップには入れない | いつでも（次に開くときに作り直す） | 合計が `[cad_viewer] cache_max_mb`（既定 2048）を超えると使った時刻の古いものから自動で消える（0 以下にすると本体の起動時に全部消える）。書きかけの一時ファイル（`.tmp_*`）は 1 時間を過ぎると本体の起動時に消える。手で消すならフォルダ内を削除 |
 | `data/temp/_tmp_<作成時刻>_<短縮ID>/` | `execute_python_code`/`run_script` の中間生成物・`write_scratch_note`/`write_thread_note` の書き出し先。チャットでアップロードしたファイル（`uploads/<送信日時>/`。作業フォルダを指定していてもここ）。自セッション専用（`[default_workdir]` 参照）。フォルダ名先頭の作成時刻（`YYMMDDHHMMSS`）はファイラー上で作成順に並べるためのもの。短縮IDは thread_id の SHA-1 先頭10桁（パス長上限 260文字を超えにくくするため、thread_id をそのまま使わない。旧形式 `_tmp_<作成時刻>_<thread_id>` のフォルダも再開時にそのまま使われる） | セッション終了後、不要になったとき | フォルダ内を削除（`[default_workdir] retention_days`/`cleanup_interval_hours` により自動削除もされる） |
 | `data/elements/<thread_id>/` | 添付ファイル（`provide_download`/`analyze_image`の`show_in_chat=True`等）・回答本文への画像埋め込みの永続化先。スレッド再開・プロセス再起動後も表示できるようここへ実体をコピー保存する（`[elements]`参照、`src/thread_store.py`） | 添付ファイルが不要になったとき | フォルダ内を削除 |
 | `instances/_assistant_index/` | 管理ツールの「AIに相談」が検索に使う、config.ini・README_DETAIL.md・API リファレンスの段落の埋め込みのキャッシュ（埋め込みの接続先・モデルごとに1ファイル。`data/` 配下ではない） | いつでも（次の相談で作り直す。初回は数十秒かかる） | フォルダを削除 |
@@ -1996,9 +1996,9 @@ three.js はビューアを開いたときだけ読み込む（`frontend/src/com
   速い方法にしてある。変換中に画面を再読み込みすると、出てきたビューアが新しい画面に届かないことがある。
 - **キャッシュ**（`src/cad/viewer_cache.py`）: CAD ファイルから作ったビューア用データを `[cad_viewer] cache_dir`（既定 `${common_data_dir}/cad_cache`）に
   取っておき、同じファイルを同じ設定でもう一度開くときは形を読み直さずに使う（会話の `_tmp_` フォルダへ写してから使うので、自動保存が
-  キャッシュを書き換えることはない）。キーはファイルの絶対パス・サイズ・更新時刻、三角形化の設定、`compare_with` のファイルの同じ情報、
-  変換のコード（`src/cad/*.py`）の中身のハッシュで、どれかが変われば作り直す。合計が `cache_max_mb`（既定 2048）を超えたら使った時刻の
-  古いものから消す（0 以下でキャッシュを使わない）。CadQuery コードから作る形はキャッシュしない。
+  キャッシュを書き換えることはない）。キーはファイルの絶対パス・サイズ・更新時刻、三角形化の設定、`compare_with` のファイルの同じ情報
+  （ビューア用データなら、それが指すモデルファイルの情報も）、変換のコード（`src/cad/*.py`）の中身のハッシュで、どれかが変われば作り直す。
+  合計が `cache_max_mb`（既定 2048）を超えたら使った時刻の古いものから消す（0 以下でキャッシュを使わず、溜まっていた分は本体の起動時に消す）。CadQuery コードから作る形はキャッシュしない。
 - **穴・ボス**（`model.features`、`src/cad/features.py`）: 円柱面の内向き・外向き（面の情報の `concave`）から、内向きの円柱を穴、外向きをボスとし、
   同じ軸・同じ半径でエッジを共有する面を 1 つにまとめる（1 周を覆うものだけ。フィレットは数えない）。穴の端の円の先の面がその円に収まれば
   （底面・ドリルの先）止まり穴、両端とも開いていれば通し穴。要約は種類・直径・深さ・通しかどうかでまとめた件数（12 グループまで）で、
@@ -2201,7 +2201,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[cad_viewer]` | `screenshot_long_side_pixels` | 指示付きで確定したときに撮って LLM へ見せるビューアの画面の長辺（ピクセル、既定 512。0 以下で撮らない） | `CAD_VIEWER_SCREENSHOT_LONG_SIDE_PIXELS` |
 | `[cad_viewer]` | `step_write_schema` | 「保存」で書く STEP のスキーマ。`auto`（元の STEP と同じ、元が STEP でなければ AP242・既定）・`AP203`・`AP214`・`AP242`。PMI は AP242 でだけ書ける | `CAD_VIEWER_STEP_WRITE_SCHEMA` |
 | `[cad_viewer]` | `cache_dir` | CAD ファイルから作ったビューア用データのキャッシュの置き場（既定 `${common_data_dir}/cad_cache`）。同じファイル・同じ設定なら形を読み直さずに使う | `CAD_VIEWER_CACHE_DIR` |
-| `[cad_viewer]` | `cache_max_mb` | そのキャッシュの合計の上限（MB、既定 2048）。超えたら使った時刻の古いものから消す。0 以下で使わない | `CAD_VIEWER_CACHE_MAX_MB` |
+| `[cad_viewer]` | `cache_max_mb` | そのキャッシュの合計の上限（MB、既定 2048）。超えたら使った時刻の古いものから消す。0 以下で使わない（溜まっていた分は本体の起動時に消す） | `CAD_VIEWER_CACHE_MAX_MB` |
 | `[plan]` | `allow_badge_unlock` | Plan Mode バッジの双方向切り替えを許可するか | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | 承認済み（Edit Automatically）状態で`create_plan`を再度呼んだ際、`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態を維持したままstepsだけ差し替える | `PLAN_RESET_APPROVAL_ON_RECREATE` |
 | `[plan]` | `reset_approval_on_new_message` | 新しいユーザーメッセージを受け取るたびに`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態をメッセージをまたいで維持する（`thinking_loop_guard`のリトライ上限到達後、ユーザーが続行メッセージを送っても再承認が不要になる） | `PLAN_RESET_APPROVAL_ON_NEW_MESSAGE` |

@@ -849,11 +849,11 @@ async def test_confirm_waits_for_a_running_save(env, tmp_path, monkeypatch) -> N
     started = _asyncio.Event()
     real_run = cad_viewer._run
 
-    async def slow_run(cmd, workdir):
+    async def slow_run(cmd, workdir, stdout_sink=None):
         if "--export" in cmd:  # 「保存」の書き出しだけを遅くする（ビューア用データを作るときも _run を通る）
             started.set()
             await _asyncio.sleep(0.3)
-        return await real_run(cmd, workdir)
+        return await real_run(cmd, workdir, stdout_sink)
 
     monkeypatch.setattr(cad_viewer, "_run", slow_run)
     saves: list = []
@@ -870,6 +870,101 @@ async def test_confirm_waits_for_a_running_save(env, tmp_path, monkeypatch) -> N
     assert _viewer.on_show_result == {"ok": False, "error": "The model is still being saved. Wait until it finishes."}
     assert saves[0].done() and saves[0].result()["ok"]
     assert any("exported the 3D model" in n for n in out["notes"])
+
+
+@pytest.mark.asyncio
+async def test_save_returns_the_export_notes(env, tmp_path, monkeypatch) -> None:
+    """書き出しの注意書き（PMI が書けなかった・DXF は面の色を書けない等）を黙って消さず、
+    保存結果の notes と LLM への答えの両方に入れる。"""
+    from src.cad.run_cad import OK_MARKER
+
+    note = "PMI (GD&T) could not be written, so the file has no PMI"
+
+    real_run = cad_viewer._run
+
+    async def fake_run(cmd, workdir, stdout_sink=None):
+        if "--export" not in cmd:  # ビューア用データを作るサブプロセスは本物で行う
+            return await real_run(cmd, workdir, stdout_sink)
+        out_path = Path(cmd[cmd.index("--out") + 1])
+        out_path.write_bytes(b"fake export")
+        if stdout_sink is not None:
+            stdout_sink.append(f'{OK_MARKER} {json.dumps({"notes": [note]})}\n')
+        return None
+
+    async def press_save(props):
+        # 注意書きの無い書き出しと有る書き出しの両方を、ビューアが生きている間に（on_show の中で）確かめる。
+        # LLM へ伝えるのは最後の保存の注意書きなので、注意書きのある保存を後にする。
+        monkeypatch.setattr(cad_viewer, "_run", quiet_run)
+        quiet = await cad_viewer.save_viewer_edits({"save_id": props["save_id"], "colors": {}})
+        monkeypatch.setattr(cad_viewer, "_run", fake_run)
+        noted = await cad_viewer.save_viewer_edits({"save_id": props["save_id"], "colors": {"faces": {"0": "#ff0000"}}})
+        return noted, quiet
+
+    async def quiet_run(cmd, workdir, stdout_sink=None):
+        if "--export" not in cmd:
+            return await real_run(cmd, workdir, stdout_sink)
+        Path(cmd[cmd.index("--out") + 1]).write_bytes(b"fake export")
+        return None
+
+    _viewer.on_show = press_save
+    out = json.loads(await _call(file_path=str(_cube_stl(tmp_path))))
+    first, second = _viewer.on_show_result
+    assert first["ok"] and first["notes"] == [note]
+    # LLM への答え（extra）にも注意書きが入る
+    assert any(note in n for n in out["notes"])
+    # 注意書きが無い書き出しは notes が空
+    assert second["ok"] and second["notes"] == []
+
+
+def test_two_viewers_saving_the_same_file_get_different_paths(tmp_path) -> None:
+    """同じモデルを別のビューア（同じ秒）で保存しても上書きし合わない。同じビューアは同じファイルを上書きする。"""
+    data = {"source": {"path": str(tmp_path / "part.step")}}
+    t1 = cad_viewer._SaveTarget(data=data, out_dir=tmp_path, thread_id="t1")
+    t2 = cad_viewer._SaveTarget(data=data, out_dir=tmp_path, thread_id="t2")
+    p1 = cad_viewer._model_path(t1, ".step")
+    assert cad_viewer._model_path(t2, ".step") != p1
+    # 同じビューアの 2 回目の保存は target.saved（1 回目の路径）を使う
+    t1.saved = p1
+    assert (t1.saved or cad_viewer._model_path(t1, ".step")) == p1
+
+
+def test_malformed_viewer_data_returns_an_error_not_a_crash() -> None:
+    """LLM が書いたり手で編集したりしたビューア用データで例外をもらさない（Error: 文字列で返す）。"""
+    data = {"format": "VIEWER_JSON", "viewState": {"hiddenParts": ["a"]}, "faces": [], "parts": [], "mesh": {}}
+    assert cad_viewer._initial_hidden(data) == set()  # 数ではない項目は捨てる
+    out = cad_viewer._finish_answer(data, (None, [], [], ""), "tok", [], [], {})  # res が壊れている
+    assert out.startswith("Error:")
+
+
+def test_part_recolored_back_keeps_face_overrides() -> None:
+    """部品の色を変えた後、その部品の面の色（元と同じ色）を維持する変更は捨てる（部品の色で上塗りされる）。"""
+    data = {
+        "parts": [{"id": 0, "color": "#ff0000"}],
+        "faces": [{"id": 0, "part": 0, "color": "#00ff00"}],
+    }
+    # 面は元と同じ色の上書きだが、部品を変えている（#ff0000 → #0000ff）ので残す
+    colors = {"faces": {"0": "#00ff00"}, "parts": {"0": "#0000ff"}}
+    out = cad_viewer._valid_colors(data, colors)
+    assert out == [
+        {"kind": "face", "id": 0, "from": "#00ff00", "to": "#00ff00"},
+        {"kind": "part", "id": 0, "from": "#ff0000", "to": "#0000ff"},
+    ]
+    # 部品を変えていないときは、面が元と同じ色の上書きは捨てる（frontend の dropUnchangedPartColors と同じ）
+    assert cad_viewer._valid_colors(data, {"faces": {"0": "#00ff00"}, "parts": {"0": "#ff0000"}}) == []
+
+
+def test_reopened_viewer_data_keeps_earlier_color_changes() -> None:
+    """開き直したビューア用データを書き出すとき、前の回に変えた色も変更として残す（edits.color_changes）。"""
+    from src.cad.mesh_data import apply_view_edits, merge_color_changes
+
+    previous = [{"kind": "face", "id": 0, "from": None, "to": "#ff0000"}]
+    data = {"format": "VIEWER_JSON", "faces": [{"id": 0, "color": "#ff0000"}], "parts": [{"id": 0, "color": None}], "mesh": {}, "edits": {"color_changes": previous}}
+    # 今回変更が無い保存でも、前の回の変更は残る（書き出しが色を付けるため）
+    assert apply_view_edits(data, face_colors={}, part_colors={}, color_changes=[])["edits"]["color_changes"] == previous
+    # 同じ面・部品の変更は最初の from と最後の to を残し、元の色に戻ったものは外す
+    assert merge_color_changes(previous, [{"kind": "face", "id": 0, "from": "#ff0000", "to": None}]) == []
+    merged = merge_color_changes(previous, [{"kind": "face", "id": 0, "from": "#ff0000", "to": "#0000ff"}])
+    assert merged == [{"kind": "face", "id": 0, "from": None, "to": "#0000ff"}]
 
 
 async def _save_step(src, colors):

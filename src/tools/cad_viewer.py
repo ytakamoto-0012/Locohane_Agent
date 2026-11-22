@@ -340,6 +340,8 @@ async def _show_cad_viewer(
             f"The user exported the 3D model with the viewer's colors and hidden parts applied to {target.saved_token} "
             "(its download button is already in the chat; no need for provide_download)."
         )
+        if target.notes:
+            extra.append("Notes on the exported file (tell the user if they matter): " + " / ".join(target.notes))
     if isinstance(answer, str):
         return "\n".join([answer, *extra])
     # ビューアを閉じる合図（clear_ask・remove_element）は送信の待ち行列に入っただけで、イベントループに戻るまで
@@ -350,6 +352,22 @@ async def _show_cad_viewer(
 
 
 def _finish_answer(
+    data: dict,
+    answer: tuple[dict[str, Any], list[tuple[str, int]], list[dict[str, Any]], str],
+    data_token: str,
+    notes: list[str],
+    extra: list[str],
+    shot: dict[str, Any],
+) -> str:
+    """答え後の処理。壊れたビューア用データ（LLM が書いた JSON 等）でも Error: 文字列を返す（例外をもらさない）。"""
+    try:
+        return _finish_answer_body(data, answer, data_token, notes, extra, shot)
+    except Exception as e:  # noqa: BLE001 - LLM が書いた・手で編集した JSON で落とさない（Error: 文字列で返す）
+        logger.warning("show_cad_viewer: could not process the viewer's answer", exc_info=True)
+        return f"Error: could not process the viewer's answer ({type(e).__name__}: {e}). The selection was lost."
+
+
+def _finish_answer_body(
     data: dict,
     answer: tuple[dict[str, Any], list[tuple[str, int]], list[dict[str, Any]], str],
     data_token: str,
@@ -435,6 +453,8 @@ class _SaveTarget:
     thread_id: str
     saved: Path | None = None
     saved_token: str = ""
+    # 最後に保存したときの書き出しの注意書き（確定したときに LLM にも伝える）。
+    notes: list[str] = field(default_factory=list)
     # 書き出しの最中に持つ（同じビューアの保存を 1 つずつにし、確定したときに書き出しの終わりを待つため）。
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -446,14 +466,22 @@ _SAVE_TARGETS: dict[str, _SaveTarget] = {}
 def _model_path(target: _SaveTarget, suffix: str) -> Path:
     src = target.data.get("source") or {}
     stem = Path(src["path"]).stem if src.get("path") else "cadquery"
-    return target.out_dir / f"{stem}_edited_{time.strftime('%Y%m%d_%H%M%S')}{suffix}"
+    # 同じ秒に別のビューアが同じモデルを保存しても上書きし合わないよう、短い乱数を付ける。
+    return target.out_dir / f"{stem}_edited_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}{suffix}"
 
 
 def _initial_hidden(data: dict) -> set[int]:
     """ビューアを開いたときに隠れている部品（CadViewerBar.tsx の initialHiddenParts と同じ）。"""
     view = data.get("viewState") or {}
-    if view.get("hiddenParts") is not None:
-        return {int(p) for p in view["hiddenParts"]}
+    if view.get("hiddenParts") is not None and isinstance(view["hiddenParts"], list):
+        # LLM が書いたり手で編集したりした JSON で数ではない項目があっても、例外にしない（壊れた項目は捨てる）
+        out: set[int] = set()
+        for p in view["hiddenParts"]:
+            try:
+                out.add(int(p))
+            except (TypeError, ValueError):
+                continue
+        return out
     return {int(p["id"]) for p in data.get("parts") or [] if (p.get("layer") or {}).get("off") or (p.get("layer") or {}).get("frozen")}
 
 
@@ -536,7 +564,11 @@ async def _save_locked(target: _SaveTarget, payload: dict[str, Any]) -> dict[str
         return {"ok": False, "error": "This model cannot be exported."}
     colors = _valid_colors(data, payload.get("colors"))
     # 色を当てたビューア用データを作るのは、大きなモデルでは数秒かかる（JSON の写し・三角形の色の書き換え）。
-    edited, _changed = await asyncio.to_thread(_view_edits, data, payload, colors)
+    try:
+        edited, _changed = await asyncio.to_thread(_view_edits, data, payload, colors)
+    except Exception as e:  # noqa: BLE001 - 壊れたビューア用データ（LLM が書いた JSON 等）で落とさない
+        logger.warning("show_cad_viewer: could not apply the viewer edits", exc_info=True)
+        return {"ok": False, "error": f"could not apply the viewer's edits: {e}"}
     edited["exportOptions"] = {"step_write_schema": str(_setting("cad_viewer_step_write_schema", "auto"))}
     out = target.saved or _model_path(target, suffix)
     workdir = _resolve_exec_workdir()
@@ -545,7 +577,8 @@ async def _save_locked(target: _SaveTarget, payload: dict[str, Any]) -> dict[str
     try:
         await asyncio.to_thread(_write_atomic, edited, spec)
         cmd = [_state._SCRIPT_PYTHON, str(_RUN_CAD), "--export", str(spec), "--out", str(tmp_out)]
-        failed = await _run(cmd, workdir)
+        stdout: list[str] = []
+        failed = await _run(cmd, workdir, stdout_sink=stdout)
         if failed:
             logger.warning("show_cad_viewer: could not export the model: %s", failed)
             # 画面に出すのはサブプロセスが標準エラーに書いた理由だけにする。
@@ -569,9 +602,26 @@ async def _save_locked(target: _SaveTarget, payload: dict[str, Any]) -> dict[str
             iter(_register_path_memory([str(out)], description="3D model exported from the 3D viewer (show_cad_viewer)", thread_id=target.thread_id)),
             str(out),
         )
-    logger.info("show_cad_viewer: exported the model (%d color changes) to %s", len(colors), out)
+    notes = _export_notes(stdout[0] if stdout else "")
+    target.notes = notes
+    logger.info("show_cad_viewer: exported the model (%d color changes) to %s; notes: %s", len(colors), out, notes)
     await _offer_download(out)
-    return {"ok": True, "path": str(out), "token": target.saved_token, "color_changes": len(colors)}
+    return {"ok": True, "path": str(out), "token": target.saved_token, "color_changes": len(colors), "notes": notes}
+
+
+def _export_notes(stdout: str) -> list[str]:
+    """書き出しのサブプロセス（run_cad.py --export）が最後の行に出した ``CAD_VIEWER_OK {"notes": [...]}`` の注意書き。"""
+    from ..cad.run_cad import OK_MARKER
+
+    for line in reversed(stdout.splitlines()):
+        if not line.startswith(OK_MARKER):
+            continue
+        try:
+            notes = json.loads(line[len(OK_MARKER) :].strip()).get("notes")
+        except (ValueError, AttributeError):
+            return []
+        return [str(n) for n in notes if n] if isinstance(notes, list) else []
+    return []
 
 
 async def _show_preparing_notice() -> Any:
@@ -756,8 +806,11 @@ def _new_data_path(workdir: Path, prefix: str = "cad_view") -> Path:
     return workdir / f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.json"
 
 
-async def _run(cmd: list[str], workdir: Path) -> str | None:
-    """サブプロセスを動かす。失敗したら LLM へ返すエラー文、成功したら None。"""
+async def _run(cmd: list[str], workdir: Path, stdout_sink: list[str] | None = None) -> str | None:
+    """サブプロセスを動かす。失敗したら LLM へ返すエラー文、成功したら None。
+
+    stdout_sink を渡すと、成功したときの標準出力をそこへ足す（書き出しの注意書きを読むため）。
+    """
     env = _subprocess_env()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     logger.info("show_cad_viewer: running %s", cmd[1])
@@ -768,6 +821,8 @@ async def _run(cmd: list[str], workdir: Path) -> str | None:
     except OSError as e:
         return f"Error: could not start making the 3D model: {e}"
     if proc.returncode == 0:
+        if stdout_sink is not None:
+            stdout_sink.append(proc.stdout or "")
         return None
     parts = [f"Error: making the 3D model failed (exit code {proc.returncode})."]
     if proc.stderr and proc.stderr.strip():
@@ -883,6 +938,19 @@ def _valid_colors(data: dict, colors: Any) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     if not isinstance(colors, dict):
         return out
+    # 色を変えた部品。その部品の面で元と同じ色の上書きは捨てない（ビューアは面の上書きを部品の色より優先して
+    # 描くので、捨てると保存した面が部品の色になり、画面と食い違う）。
+    part_list = data.get("parts") or []
+    raw_parts = colors.get("parts") if isinstance(colors.get("parts"), dict) else {}
+    recolored_parts: set[int] = set()
+    for sid, hex_color in raw_parts.items():
+        try:
+            pid = int(sid)
+        except (TypeError, ValueError):
+            continue
+        valid = hex_color is None or (isinstance(hex_color, str) and _HEX_COLOR.fullmatch(hex_color))
+        if valid and 0 <= pid < len(part_list) and (part_list[pid].get("color") or "").lower() != (hex_color or "").lower():
+            recolored_parts.add(pid)
     for key, kind in (("faces", "face"), ("parts", "part")):
         items = data.get(_LIST_KEYS[kind]) or []
         changes = colors.get(key)
@@ -895,7 +963,9 @@ def _valid_colors(data: dict, colors: Any) -> list[dict[str, Any]]:
                 continue
             before = items[eid].get("color")
             if (before or "").lower() == (hex_color or "").lower():
-                continue
+                part = items[eid].get("part") if kind == "face" else None
+                if not (isinstance(part, int) and part in recolored_parts):
+                    continue
             out.append({"kind": kind, "id": eid, "from": before, "to": hex_color.lower() if hex_color else None})
     out.sort(key=lambda c: (c["kind"], c["id"]))
     return out
@@ -1233,7 +1303,8 @@ def _format_result(
             "distance = between 2 points (delta = x, y, z components); plane_distance / plane_angle = between 2 planar faces; "
             "arc3 = circle through 3 clicked points. items are the elements the points were on (null = none). "
             "approximate: true means a point was on the display triangles of a curved surface, so the value can be off "
-            "by the tessellation tolerance. Radii and plane distances come from the exact model geometry."
+            "by the tessellation tolerance (this includes a cone radius taken at a clicked point). The other radii and "
+            "plane distances come from the exact model geometry."
         )
     if colors:
         result["color_change_count"] = len(colors)

@@ -103,6 +103,25 @@ def test_memory_ranks_reload_without_restart(isolated_instance):
     assert after.checks == before.checks
 
 
+def test_load_config_can_read_without_reregistering_the_policy(isolated_instance):
+    """register_memory_policy=False の読み直しは規則を登録し直さない（再起動で効く設定を、再読み込みの間に
+    ほかのセッションが見てしまわないため）。"""
+    overrides = isolated_instance
+    cfg = load_config(config_path=CONFIG_INI_PATH)
+    before = memory.policy_for(cfg.memory_dir)
+    current = cfg.memory_type_visibility.get("feedback", "private")
+    flipped = "shared" if current == "private" else "private"
+    overrides.write_text(json.dumps({"memory": {"feedback_visibility": flipped}}), encoding="utf-8")
+
+    cfg2 = load_config(config_path=CONFIG_INI_PATH, register_memory_policy=False)
+    assert cfg2.memory_type_visibility.get("feedback") == flipped  # 値は読めている
+    assert memory.policy_for(cfg.memory_dir) == before  # 登録は変わらない
+
+    # 登録する通常呼び出しは規則を変える（呼び出し方の違いを確かめる）
+    load_config(config_path=CONFIG_INI_PATH)
+    assert memory.policy_for(cfg.memory_dir).type_visibility.get("feedback") == flipped
+
+
 def test_memory_ranks_keep_previous_when_overrides_are_broken(isolated_instance):
     overrides = isolated_instance
     cfg = load_config(config_path=CONFIG_INI_PATH)
