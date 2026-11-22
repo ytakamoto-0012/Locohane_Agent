@@ -654,7 +654,7 @@ const I18N_EN = {
   "（正式なスキル・サブエージェントを選ぶ）": "(choose an official skill or sub-agent)",
   "スキル {0}（{1}）": "Skill {0} ({1})",
   "サブエージェント {0}（{1}）": "Sub-agent {0} ({1})",
-  "スキル（AI に覚えさせる仕事の手順）": "Skill (work procedures the AI learns)",
+  "スキル（AI 用の手順書）": "Skill (procedure document for the AI)",
   "サブエージェント（仕事をまるごと任せる別の AI 担当者）": "Sub-agent (a separate AI worker that takes over a whole job)",
   "例: estimate-check（小文字の英数字・-・_）": "e.g. estimate-check (lowercase letters, digits, - and _)",
   "例: 見積書の PDF を読んで、金額の計算ミスと記入漏れを一覧にする": "e.g. Read a quote PDF and list calculation mistakes and missing entries",

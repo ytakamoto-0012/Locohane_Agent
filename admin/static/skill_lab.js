@@ -1003,7 +1003,7 @@ function targetAddForms(state) {
     ...src.agents.map((a) => el("option", { value: `agents:${a.name}`, text: _t(`サブエージェント {0}（{1}）`, a.name, originText(a.origin)) })),
   ]);
   const newType = el("select", {}, [
-    el("option", { value: "skills", text: _t("スキル（AI に覚えさせる仕事の手順）") }),
+    el("option", { value: "skills", text: _t("スキル（AI 用の手順書）") }),
     el("option", { value: "agents", text: _t("サブエージェント（仕事をまるごと任せる別の AI 担当者）") }),
   ]);
   const newName = el("input", { type: "text", placeholder: _t("例: estimate-check（小文字の英数字・-・_）") });
