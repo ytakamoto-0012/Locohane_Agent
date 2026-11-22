@@ -2416,7 +2416,7 @@ or thinking) are recorded in text files without using a database.
 ## Tutorial (chat screen)
 
 When a user with no conversations yet opens the chat screen for the first time, a tutorial appears (`frontend/src/components/ChatTutorial.tsx`).
-The explanation card is shown near the highlighted place (below, above, right or left, whichever side fits on the screen without covering it). The first step with no target (welcome) is shown in the center of the screen; steps with no side that fits, and mobile width, show it at the bottom right (the bottom edge on mobile).
+The explanation card is shown near the highlighted place (below, above, right or left, whichever side fits on the screen without covering it). The first step with no target (welcome) is shown in the center of the screen; steps with no side that fits show it at the bottom right. At mobile width (768px or less), the card becomes a full-width band docked to the edge opposite the highlighted place (top or bottom), with its height fitted to the free space (the text scrolls inside the card; for large targets such as the whole conversation area it is docked to the top). Places inside a drawer, such as the conversation list and the run details, are shown on mobile by highlighting the button that opens them, with explanations reworded for mobile.
 Going on with "Next" following the explanation card, it highlights and explains, in order: welcome → input field → attachments → working folder → reasoning depth →
 starter buttons (only if there are any) → run details → display settings. Then it puts an example instruction in the input field; when the user presses "Send",
 it moves on automatically to "The AI is thinking", when the answer arrives it explains how to correct answers (a hello world). Then the user actually operates the conversation list:
@@ -2658,7 +2658,7 @@ To change them, open `admin.bat` in a text editor and rewrite these 2 lines).
 
 On the first start (when `instances/` does not exist and `default` is created) and when you create a new app (chat) instance,
 the dashboard shows a getting started tutorial (`admin/static/setup_guide.js`). As you go on with "Next" following the explanation card (shown near the highlighted place: below, above, right or left, whichever fits on the screen
-without covering it; in the center for steps with no target; at the bottom right when nothing fits or on a narrow screen; beside an open dialog whose contents are not the target, or behind it if it does not fit), the tutorial opens the screens and highlights the places to look at. In the config.ini steps, only the settings of
+without covering it; in the center for steps with no target; at the bottom right when nothing fits; on a narrow screen (900px or less), a full-width band docked to the top or bottom edge opposite the target, with the target scrolled toward the top; beside an open dialog whose contents are not the target, or behind it if it does not fit), the tutorial opens the screens and highlights the places to look at. In the config.ini steps, only the settings of
 that step are shown.
 
 1. Instance list: welcome → the instance list (what an instance is) → the card (display name, address, state) → card status → card buttons →

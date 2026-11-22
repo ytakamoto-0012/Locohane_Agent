@@ -2832,12 +2832,24 @@
   font-weight: 600;
   cursor: pointer;
 }
-@media (max-width: 640px) {
-  .chat-tutorial-card { right: 16px; bottom: 16px; width: auto; left: 16px; max-height: 55vh; }
-}
 /* 対象の近くに置いたカード（ChatTutorial.tsx の placeCard が left/top を入れる） */
 .chat-tutorial-card--anchored {
   right: auto;
   bottom: auto;
   transition: left 0.2s ease, top 0.2s ease;
 }
+/* スマホ幅: 画面の上端か下端に寄せた帯（ChatTutorial.tsx の dockCard が top/bottom・max-height を入れる）。
+   画面を広く取らないよう、余白と文字を詰める。 */
+.chat-tutorial-card--docked {
+  left: 8px;
+  right: 8px;
+  width: auto;
+  max-width: none;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+.chat-tutorial-card--docked .chat-tutorial-head { padding: 6px 12px; font-size: 12px; }
+.chat-tutorial-card--docked .chat-tutorial-body { flex: 1 1 auto; min-height: 0; padding: 2px 12px; font-size: 13px; line-height: 1.55; }
+.chat-tutorial-card--docked .chat-tutorial-body h4 { margin: 6px 0 4px; font-size: 14px; }
+.chat-tutorial-card--docked .chat-tutorial-body p { margin: 0 0 6px; }
+.chat-tutorial-card--docked .chat-tutorial-actions { padding: 6px 12px; }
+.chat-tutorial-card--docked .chat-tutorial-actions button { padding: 6px 12px; }

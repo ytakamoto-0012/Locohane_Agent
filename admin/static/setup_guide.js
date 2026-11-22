@@ -625,6 +625,20 @@ function startGuide(opts) {
   setupGuide.timer = setInterval(setupGuideRefreshHighlight, SETUP_GUIDE_POLL_MS);
   setupGuide.onResize = () => setupGuideRefreshHighlight();
   window.addEventListener("resize", setupGuide.onResize);
+  // スクロール・キーボードの出し入れ（visualViewport）でも、カードをすぐ置き直す（次の見直しを待たない）。
+  setupGuide.onMove = () => {
+    const guide = setupGuide;
+    if (!guide || guide.moveFrame) return;
+    guide.moveFrame = requestAnimationFrame(() => {
+      guide.moveFrame = 0;
+      if (setupGuide === guide) setupGuidePlaceCard(guide.card, guide.anchor || null);
+    });
+  };
+  window.addEventListener("scroll", setupGuide.onMove, true);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", setupGuide.onMove);
+    window.visualViewport.addEventListener("scroll", setupGuide.onMove);
+  }
   setupGuideGo(0);
 }
 
@@ -642,6 +656,7 @@ async function setupGuideGo(index, dir = 1) {
   guide.index = Math.max(0, Math.min(index, guide.steps.length - 1));
   guide.scrolled = false;
   guide.advancing = false;
+  guide.anchor = null;
   setupGuideClearHighlight();
   if (guide.clickHandler) {
     document.removeEventListener("click", guide.clickHandler, true);
@@ -696,7 +711,7 @@ function setupGuideRenderCard() {
   for (const b of [skipBtn, backBtn, nextBtn]) b.setAttribute("data-no-busy", "");
   const actions = el("div", { class: "setup-guide-actions" }, [skipBtn, backBtn, nextBtn]);
 
-  const kept = ["setup-guide-card--anchored", "setup-guide-card--behind"].filter((c) => guide.card.classList.contains(c));
+  const kept = ["setup-guide-card--anchored", "setup-guide-card--behind", "setup-guide-card--docked"].filter((c) => guide.card.classList.contains(c));
   guide.card.className = ["setup-guide-card", step.cardClass, ...kept].filter(Boolean).join(" ");
   guide.card.classList.toggle("collapsed", guide.collapsed);
   guide.card.replaceChildren(head, body, actions);
@@ -724,6 +739,7 @@ function setupGuideRefreshHighlight() {
   // 何の設定か分からなくなるため、先頭が見えるようにスクロールする（カードは横に収まらないので右下に出て、
   // 画面の上の見出し・説明には被らない）。
   const tall = anchor ? anchor.getBoundingClientRect().height > window.innerHeight * SETUP_GUIDE_TALL_RATIO : false;
+  guide.anchor = anchor;
   setupGuidePlaceCard(guide.card, anchor);
   const same = found.length === guide.targets.length && found.every((t, i) => t === guide.targets[i]);
   if (same) return;
@@ -732,14 +748,63 @@ function setupGuideRefreshHighlight() {
   guide.targets = found;
   if (anchor && !guide.scrolled) {
     guide.scrolled = true;
-    anchor.scrollIntoView({ block: tall ? "start" : "center", behavior: "smooth" });
+    // 狭い画面では、カードを下端の帯にするので、対象は上の方へ寄せる（真ん中だと帯に隠れる）。
+    anchor.style.scrollMarginTop = setupGuideNarrow() ? `${GUIDE_VIEWPORT_MARGIN}px` : "";
+    anchor.scrollIntoView({ block: tall || setupGuideNarrow() ? "start" : "center", behavior: "smooth" });
   }
 }
 
-// 説明のカードと対象の間・画面の端との間（px）。この幅以下の画面では、カードは右下の既定の位置のまま。
+// 説明のカードと対象の間・画面の端との間（px）。この幅以下の画面では、カードを上端か下端の帯にする（setupGuideDockCard）。
 const GUIDE_CARD_GAP = 14;
 const GUIDE_VIEWPORT_MARGIN = 12;
 const GUIDE_NARROW_MAX_WIDTH = 900;
+// 帯の高さの下限（これより狭くしか空いていなければ、対象に重ねてでもこの高さは取る）と、画面の高さに対する上限。
+const GUIDE_DOCK_MIN_HEIGHT = 140;
+const GUIDE_DOCK_MAX_RATIO = 0.45;
+// 上下の空きがほぼ同じとき、行ったり来たりしないよう、今の側を選び続ける幅（px）。
+const GUIDE_DOCK_HYSTERESIS = 40;
+
+function setupGuideNarrow() {
+  return window.innerWidth <= GUIDE_NARROW_MAX_WIDTH;
+}
+
+/**
+ * 狭い画面（スマホ）: カードを左右いっぱいの帯にし、対象と反対側の端（対象より上が広ければ上端、下が広ければ下端）に寄せる。
+ * 高さは空いている側に収まるまで縮め、本文はカードの中でスクロールする。対象は画面の上の方へスクロールする
+ * （setupGuideRefreshHighlight）ので、ふつうは下端になる。対象が大きくてどちらにも収まらなければ下端に寄せる
+ * （対象の先頭＝見出し・説明は上に見える）。ダイアログを避けたいのに収まらなければ、ダイアログの後ろへ回す。
+ */
+function setupGuideDockCard(card, target, avoidModal) {
+  const vv = window.visualViewport;
+  const vh = vv ? vv.height : window.innerHeight;
+  const offset = vv ? vv.offsetTop : 0;
+  const cap = Math.round(vh * GUIDE_DOCK_MAX_RATIO);
+  let atTop = false;
+  let space = cap;
+  const r = target ? target.getBoundingClientRect() : null;
+  if (r && (r.width > 0 || r.height > 0)) {
+    const above = r.top - offset - GUIDE_CARD_GAP - GUIDE_VIEWPORT_MARGIN;
+    const below = offset + vh - r.bottom - GUIDE_CARD_GAP - GUIDE_VIEWPORT_MARGIN;
+    const wasTop = card.dataset.dock === "top";
+    if (Math.max(above, below) >= GUIDE_DOCK_MIN_HEIGHT) {
+      atTop = wasTop ? above + GUIDE_DOCK_HYSTERESIS >= below : above > below + GUIDE_DOCK_HYSTERESIS;
+      space = atTop ? above : below;
+      if (space < GUIDE_DOCK_MIN_HEIGHT) {
+        atTop = !atTop;
+        space = atTop ? above : below;
+      }
+    } else if (avoidModal) {
+      card.classList.add("setup-guide-card--behind");
+    }
+  }
+  card.classList.remove("setup-guide-card--anchored");
+  card.classList.add("setup-guide-card--docked");
+  card.dataset.dock = atTop ? "top" : "bottom";
+  card.style.left = "";
+  card.style.maxHeight = `${Math.round(Math.max(GUIDE_DOCK_MIN_HEIGHT, Math.min(space, cap)))}px`;
+  card.style.top = atTop ? `${Math.round(offset + GUIDE_VIEWPORT_MARGIN)}px` : "auto";
+  card.style.bottom = atTop ? "auto" : `${Math.round(Math.max(0, window.innerHeight - offset - vh) + GUIDE_VIEWPORT_MARGIN)}px`;
+}
 
 /**
  * 説明のカードを対象の近くへ置く。対象の下・上・右・左のうち、カードが画面に収まって対象と重ならない側を、
@@ -753,6 +818,11 @@ function setupGuidePlaceCard(card, target) {
   const avoidModal = Boolean(modal) && !(target && modal.contains(target));
   if (avoidModal) target = modal;
   card.classList.remove("setup-guide-card--behind");
+  if (setupGuideNarrow()) return setupGuideDockCard(card, target, avoidModal);
+  card.classList.remove("setup-guide-card--docked");
+  delete card.dataset.dock;
+  card.style.maxHeight = "";
+  card.style.bottom = "";
   const reset = () => {
     card.classList.remove("setup-guide-card--anchored");
     card.style.left = "";
@@ -761,7 +831,6 @@ function setupGuidePlaceCard(card, target) {
   };
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  if (vw <= GUIDE_NARROW_MAX_WIDTH) return reset();
   const w = card.offsetWidth;
   const h = card.offsetHeight;
   const clamp = (v, min, max) => Math.max(min, Math.min(v, Math.max(min, max)));
@@ -791,6 +860,14 @@ function closeSetupGuide() {
   if (!guide) return;
   clearInterval(guide.timer);
   if (guide.onResize) window.removeEventListener("resize", guide.onResize);
+  if (guide.onMove) {
+    window.removeEventListener("scroll", guide.onMove, true);
+    if (window.visualViewport) {
+      window.visualViewport.removeEventListener("resize", guide.onMove);
+      window.visualViewport.removeEventListener("scroll", guide.onMove);
+    }
+  }
+  if (guide.moveFrame) cancelAnimationFrame(guide.moveFrame);
   if (guide.clickHandler) document.removeEventListener("click", guide.clickHandler, true);
   setupGuideClearHighlight();
   guide.card.remove();

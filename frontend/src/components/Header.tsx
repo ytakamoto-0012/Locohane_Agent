@@ -58,7 +58,12 @@ export function Header({
     <header className="app-header">
       <div className="app-header-brand" title={version ? `Locohane v${version}` : undefined}>
         {mobile && onOpenThreads ? (
-          <button type="button" className="header-icon-button" title={t('header.openThreads')} onClick={onOpenThreads}>
+          <button
+            type="button"
+            className="header-icon-button header-threads-button"
+            title={t('header.openThreads')}
+            onClick={onOpenThreads}
+          >
             <Icon name="menu" size={16} />
           </button>
         ) : null}
@@ -79,7 +84,12 @@ export function Header({
         </button>
         <ThemePicker />
         {mobile ? (
-          <button type="button" className="header-icon-button" title={t('header.openDetails')} onClick={onOpenDetails}>
+          <button
+            type="button"
+            className="header-icon-button header-details-button"
+            title={t('header.openDetails')}
+            onClick={onOpenDetails}
+          >
             <Icon name="panel-right" size={16} />
           </button>
         ) : null}

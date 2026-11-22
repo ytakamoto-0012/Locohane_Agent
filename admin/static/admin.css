@@ -639,3 +639,13 @@ body.setup-guide-open #main { padding-bottom: 40vh; }
 .setup-guide-card.setup-guide-card--anchored { right: auto; bottom: auto; transition: left 0.2s ease, top 0.2s ease; }
 /* ダイアログの横に収まらないときは、カードをダイアログ（.modal-backdrop、z-index 100）の後ろへ回す。 */
 .setup-guide-card.setup-guide-card--behind { z-index: 95; }
+/* 狭い画面（スマホ）: 画面の上端か下端に寄せた帯（setup_guide.js の setupGuideDockCard が top/bottom・max-height を入れる）。
+   cardClass の寄せ（AIに相談の左等）より優先し、画面を広く取らないよう余白と文字を詰める。 */
+.setup-guide-card.setup-guide-card--docked { left: 8px; right: 8px; width: auto; max-width: none; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6); }
+.setup-guide-card--docked .setup-guide-head { padding: 6px 12px; font-size: 12px; }
+.setup-guide-card--docked .setup-guide-body { flex: 1 1 auto; min-height: 0; padding: 2px 12px; line-height: 1.55; }
+.setup-guide-card--docked .setup-guide-body h4 { margin: 6px 0 4px; }
+.setup-guide-card--docked .setup-guide-body p { margin: 0 0 6px; }
+.setup-guide-card--docked .setup-guide-actions { padding: 6px 12px; }
+/* 下端の帯に「変更を確認」「保存」・下の方の設定が隠れないよう、余白を足す（帯の高さの上限 45vh 分）。 */
+@media (max-width: 900px) { body.setup-guide-open #main { padding-bottom: 50vh; } }
