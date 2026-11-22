@@ -209,6 +209,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "Continuing with the results collected so far.",
     },
     "notice.generated_files": {"ja": "生成ファイル: {names}", "en": "Generated files: {names}"},
+    "notice.signin_revoked": {
+        "ja": "このログインはもう使えません（ユーザーが削除されたか、パスワードが変わりました）。画面を再読み込みして、ログインし直してください。",
+        "en": "This sign-in can no longer be used (the user was removed or the password changed). Reload the page and sign in again.",
+    },
     "notice.cad_viewer_preparing": {
         "ja": "3D ビューアのデータを準備しています…（大きな CAD ファイルは 1 分以上かかることがあります。この間は画面を再読み込みしないでください）",
         "en": "Preparing the 3D viewer data… (large CAD files can take a minute or more; please do not reload the page meanwhile)",

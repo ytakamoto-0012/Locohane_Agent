@@ -101,7 +101,7 @@ from src.cleanup import cleanup_old_dirs, cleanup_old_files, cleanup_old_files_i
 from src.cleanup import run_cleanup_dirs_loop as cleanup_run_cleanup_dirs_loop
 from src.cleanup import run_cleanup_files_in_subdirs_loop as cleanup_run_cleanup_files_in_subdirs_loop
 from src.cleanup import run_cleanup_loop as cleanup_run_cleanup_loop
-from src.auth_users import AuthUsersSource
+from src.auth_users import AuthUsersSource, token_issued_at
 from src.live_settings import MemoryRanksReloader
 from src.config import (
     load_config,
@@ -684,6 +684,59 @@ if _config.auth_enabled:
         ):
             return None
         return cl.User(identifier=username)
+
+
+def _signin_revoked(identifier: str | None, token: str | None) -> bool:
+    """ログイン済みのユーザーが、ダッシュボードで削除された・パスワードを変えられた後の古いログインなら True。
+
+    ログインのときだけ確かめると、削除したユーザーのブラウザが JWT の期限まで使い続けられるため、
+    チャットの開始・再開・送信と独自の HTTP ルートでも確かめる（src/auth_users.py の session_allowed）。
+    [auth] enabled=false（匿名）なら常に False。
+    """
+    if not _config.auth_enabled or identifier is None:
+        return False
+    return not _auth_users.session_allowed(identifier, token_issued_at(token))
+
+
+async def _reject_revoked_session() -> bool:
+    """WebSocket のセッションが使えなくなったログインなら、案内を出して True（呼び出し元は何もせずに戻る）。"""
+    if not _config.auth_enabled:
+        return False
+    session = cl.context.session
+    user = getattr(session, "user", None)
+    if not _signin_revoked(getattr(user, "identifier", None), getattr(session, "token", None)):
+        return False
+    logging.getLogger(__name__).info("Rejected a session whose sign-in is no longer valid (user=%s)", getattr(user, "identifier", None))
+    await cl.Message(content=i18n.t("notice.signin_revoked"), type="system_message").send()
+    return True
+
+
+def _patch_chainlit_authenticate_user() -> None:
+    """Chainlit の JWT の確認（chainlit.auth.authenticate_user）に、削除・パスワード変更の確認を足す。
+
+    Chainlit の HTTP ルート（/user・/project/* 等）・このアプリの /locohane/* ルート・WebSocket の接続は、
+    どれも chainlit.auth.get_current_user から同じモジュールの authenticate_user を呼ぶ（呼ぶときに名前で引く）。
+    ここを包めば、使えなくなったログインはどの経路でも 401 になり、画面を再読み込みするとログイン画面に戻る。
+    """
+    import chainlit.auth as cl_auth
+    from fastapi import HTTPException
+
+    original = cl_auth.authenticate_user
+    if getattr(original, "_locohane_checks_revoked", False):
+        return
+
+    async def authenticate_user(token: str):
+        user = await original(token)
+        if user is not None and _signin_revoked(getattr(user, "identifier", None), token):
+            raise HTTPException(status_code=401, detail="Sign in again")
+        return user
+
+    authenticate_user._locohane_checks_revoked = True  # type: ignore[attr-defined]
+    cl_auth.authenticate_user = authenticate_user
+
+
+if _config.auth_enabled:
+    _patch_chainlit_authenticate_user()
 
 
 if _config.thread_store_enabled:
@@ -5705,6 +5758,10 @@ async def on_message(message: cl.Message) -> None:
     try/finally で必ず記録・中継設定を元に戻すため、正常終了・例外・
     停止ボタンによる CancelledError のいずれの経路でも取りこぼさない。
     """
+    # 開いたままの画面のログインが、ダッシュボードでのユーザーの削除・パスワードの変更で使えなくなっていれば実行しない
+    # （新しい接続は _patch_chainlit_authenticate_user が拒む。接続済みのセッションはここで止める）。
+    if await _reject_revoked_session():
+        return
     # ユーザーのランクが設定ダッシュボードで変わっていれば読み直す（config_overrides.json が変わったときだけ読む）。
     try:
         await asyncio.to_thread(_memory_ranks.refresh)

@@ -2427,7 +2427,7 @@ the closing explanation on a new conversation (center of the screen). "New chat"
 The steps waiting for the send, for the answer and for a click move on automatically when the message is sent, the answer starts to appear or the item is pressed; meanwhile "Next" and "Back" cannot be pressed
 (the button shows “Press "Send" to go on” etc.). When the answer starts to appear, it switches to "The answer has arrived", where "Next" cannot be pressed until the answer is finished (the button shows "Available when the answer is done"). The card of the send step is placed above the whole input field so it does not hide the example instruction.
 It does not cover the screen, so you can operate it while reading. The tutorial texts do not contain the app name (the display settings may set it to your company's AI name).
-The first heading uses the first line of header.md in the display settings (the same as the screen heading) as "Welcome to …"; if it cannot be read or is longer than 30 characters, it is just "Welcome".
+The first heading has no name either; it is just "Welcome".
 
 - **When it appears automatically**: `[thread_store] enabled = true` (it checks with `GET /locohane/threads` that there are no conversations; if disabled, it does not appear automatically),
   the user has 0 conversations, a new chat is open, and the user has not finished it yet.
@@ -2814,6 +2814,9 @@ passwords and values containing spaces or `#` are saved as they are.
 Adding or deleting users and changing passwords takes effect from the next sign-in without restarting the instance. On every sign-in
 the app checks the modification times of the instance `.env` and the project root `.env`, and reloads `AUTH_USERS` if they changed
 (same priority as at startup; if it cannot be read because of a typo, the previous list is kept and a WARNING is logged; `src/auth_users.py`).
+This also applies to screens already signed in: a deleted user, or a sign-in made before the password changed, is refused at the next
+message, page reload or API call and has to sign in again (the issue time of the sign-in JWT is compared with the time the password
+changed; only changes made after the app started are known).
 Deleting a signed-in user does not end that browser's sign-in (JWT) before it expires. Regenerating the JWT signing key (`CHAINLIT_AUTH_SECRET`) takes effect after a restart.
 
 While no instance-only users are set, the UI shows them as inheriting `AUTH_USERS` of `.env` at the project root.

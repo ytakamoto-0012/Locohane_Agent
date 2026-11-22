@@ -50,7 +50,7 @@ def export_model(data: dict[str, Any], out_path: str | Path) -> list[str]:
 
 
 def _hidden_parts(data: dict[str, Any]) -> set[int]:
-    return {int(p) for p in ((data.get("viewState") or {}).get("hiddenParts") or [])}
+    return {p for p in ((data.get("viewState") or {}).get("hiddenParts") or []) if isinstance(p, int) and not isinstance(p, bool)}
 
 
 def _rgb(hex_color: str) -> tuple[int, int, int]:
@@ -104,7 +104,10 @@ def _export_dxf(data: dict[str, Any], out: Path) -> list[str]:
         raise ExportError(f"The original DXF file is not found: {src}")
     doc = ezdxf.readfile(str(src))
     hidden = _hidden_parts(data)
-    for part in data.get("parts") or []:
+    notes: list[str] = []
+    for index, part in enumerate(data.get("parts") or []):
+        if not isinstance(part, dict):
+            continue
         name = part.get("name")
         if not name or not doc.layers.has_entry(name):
             continue
@@ -113,7 +116,13 @@ def _export_dxf(data: dict[str, Any], out: Path) -> list[str]:
         color = part.get("color")
         if color and (before or "").lower() != color.lower():
             layer.rgb = _rgb(color)
-        if int(part["id"]) in hidden:
+        elif not color and before:
+            # 色を外した（「色なし」に戻した）レイヤーは、元の色を残さず既定の色（ACI 7）にする。
+            layer.dxf.discard("true_color")
+            layer.color = 7
+            notes.append(f"Layer {name!r} had its color removed, so it was set to the default color (ACI 7).")
+        pid = part.get("id")
+        if (pid if isinstance(pid, int) and not isinstance(pid, bool) else index) in hidden:
             layer.off()
         else:
             layer.on()
@@ -121,8 +130,8 @@ def _export_dxf(data: dict[str, Any], out: Path) -> list[str]:
     doc.saveas(str(out))
     changes = (data.get("edits") or {}).get("color_changes") or []
     if any(c.get("kind") == "face" for c in changes):
-        return ["DXF has no per-face colors, so only layer colors were written (face color changes are not in the file)."]
-    return []
+        notes.append("DXF has no per-face colors, so only layer colors were written (face color changes are not in the file).")
+    return notes
 
 
 # ---------------------------------------------------------------------------

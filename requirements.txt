@@ -23,6 +23,7 @@ fastmcp==3.4.10                        # 非公式サードパーティ製ラッ
 
 # --- UI ---
 chainlit==2.12.0
+PyJWT==2.13.0                         # src/auth_users.py: ログイン（JWT）の発行時刻を読む。chainlitの推移的依存として導入済みだが、直接importするため明記
 
 # --- 設定ダッシュボード（管理ツール、admin/ パッケージ、admin.bat） ---
 # 3つともchainlitの推移的依存として環境には既に導入済みだが、admin/server.py

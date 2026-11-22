@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
+import time
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -49,6 +51,8 @@ class AuthUsersSource:
         self._users = dict(initial)
         self._stamp = (_mtime(instance_env), _mtime(project_env))
         self._lock = threading.Lock()
+        # ユーザー名 → 起動後にパスワードが変わった（追加された）時刻。これより前に発行したログインは使えない。
+        self._changed_at: dict[str, float] = {}
 
     def _raw_value(self) -> str | None:
         if self._instance_env.is_file():
@@ -76,6 +80,45 @@ class AuthUsersSource:
                 return self._users
             if users != self._users:
                 logger.info("Reloaded sign-in users (AUTH_USERS) from .env: %d user(s)", len(users))
+                # パスワードを変えた・削除してから入れ直したユーザーは、その前に発行したログイン（JWT）を使えなくする。
+                now = time.time()
+                for name, password in users.items():
+                    if self._users.get(name) != password:
+                        self._changed_at[name] = now
             self._users = users
             self._stamp = stamp
             return self._users
+
+    def session_allowed(self, identifier: str, issued_at: float | None) -> bool:
+        """ログイン済みのセッション（ユーザー名・JWT の発行時刻 iat）を今も使ってよいか。
+
+        ダッシュボードで削除したユーザーと、パスワードを変えた後に発行し直していないログインは使えない
+        （ログインのときだけ確かめていたので、削除してもログイン中のブラウザは JWT が切れるまで使えていた）。
+        iat は秒の整数（PyJWT が切り捨てる）なので、変えた時刻も秒に切り捨てて比べる（変えた直後の
+        同じ秒のログインを拒まない）。起動前の変更は分からないので、起動時の一覧にいれば通す。
+        """
+        users = self.get()
+        if identifier not in users:
+            return False
+        with self._lock:
+            changed = self._changed_at.get(identifier)
+        if changed is None:
+            return True
+        return issued_at is not None and issued_at >= int(changed)
+
+
+def token_issued_at(token: str | None) -> float | None:
+    """Chainlit の JWT（CHAINLIT_AUTH_SECRET で署名）の発行時刻 iat。読めなければ None。"""
+    if not token:
+        return None
+    secret = os.environ.get("CHAINLIT_AUTH_SECRET")
+    if not secret:
+        return None
+    try:
+        import jwt
+
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
+    except Exception:  # noqa: BLE001 - 壊れた・期限切れのトークンは発行時刻なし（変更があれば拒む）
+        return None
+    iat = payload.get("iat")
+    return float(iat) if isinstance(iat, (int, float)) else None

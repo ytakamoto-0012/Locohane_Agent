@@ -112,6 +112,9 @@ def _options(compare_with: str = "") -> dict[str, Any]:
     return out
 
 
+# ビューア用データがほかのビューア用データを指す連鎖をたどる上限（src/cad/compare.py の LOAD_CHAIN_MAX と同じ）。
+_SOURCE_CHAIN_MAX = 10
+
 # 比べる前の形に使える形式（B-rep を持つもの。ビューア用データは元の形のファイルを読み直す）。
 _COMPARABLE_FORMATS = ("STEP", "IGES", "BREP", "BIN", "VIEWER_JSON")
 
@@ -132,17 +135,37 @@ def _source_path_error(data: dict) -> str:
     """ビューア用データが元の形として指すファイル（保存・比較で読み直す）が、このセッションから読めないものなら理由。
 
     ビューア用データは LLM がコードで書けるので、中の source.path を他のセッションの `_tmp_` 等へ
-    向けて、そのファイルを読ませることができないようにする。
+    向けて、そのファイルを読ませることができないようにする。比べるとき（src/cad/compare.py の load_previous）は
+    参照先がまたビューア用データなら、その先もたどるので、連鎖の先のファイルもすべて確かめる。
+    参照先の JSON を読むので、大きいときはスレッドで呼ぶ。
     """
-    source = data.get("source") or {}
-    for key in ("path", "brep"):
-        src = source.get(key) if isinstance(source, dict) else None
-        if not src or not isinstance(src, str):
-            continue
-        _path, err = _resolve_input_path(src)
-        if err:
-            return f"the model file of this viewer data cannot be used: {err}"
-    return ""
+    seen: set[str] = set()
+    for _ in range(_SOURCE_CHAIN_MAX):
+        source = data.get("source") or {}
+        if not isinstance(source, dict):
+            return ""
+        next_json: Path | None = None
+        for key in ("path", "brep"):
+            src = source.get(key)
+            if not src or not isinstance(src, str):
+                continue
+            path, err = _resolve_input_path(src)
+            if err or path is None:
+                return f"the model file of this viewer data cannot be used: {err}"
+            if key == "path" and format_of(path) == "VIEWER_JSON" and path.is_file():
+                next_json = path
+        if next_json is None:
+            return ""
+        marker = os.path.normcase(str(next_json.resolve()))
+        if marker in seen:
+            return "the viewer data refers back to itself"
+        seen.add(marker)
+        nxt = _read_viewer_json(next_json)
+        if isinstance(nxt, str):
+            # 読めない参照先は比べるときにも使われない（load_previous がエラーにする）
+            return ""
+        data = nxt
+    return f"the viewer data refers to other viewer data more than {_SOURCE_CHAIN_MAX} times"
 
 
 def _read_viewer_json(path: Path) -> dict | str:
@@ -174,7 +197,7 @@ async def _resolve_compare_with(value: str) -> str:
         data = await asyncio.to_thread(_read_viewer_json, path)
         if isinstance(data, str):
             return data.replace("Error: ", "Error: compare_with: ", 1)
-        bad = _source_path_error(data)
+        bad = await asyncio.to_thread(_source_path_error, data)
         if bad:
             return f"Error: compare_with: {bad}"
     return str(path)
@@ -482,7 +505,22 @@ def _initial_hidden(data: dict) -> set[int]:
             except (TypeError, ValueError):
                 continue
         return out
-    return {int(p["id"]) for p in data.get("parts") or [] if (p.get("layer") or {}).get("off") or (p.get("layer") or {}).get("frozen")}
+    # 部品の id は parts の並び順と同じ（export_mesh._part_info）。手で書いた JSON で id が無い・数でなくても
+    # 例外にしない（並び順で補う）。
+    out = set()
+    for i, p in enumerate(data.get("parts") or []):
+        if not isinstance(p, dict):
+            continue
+        layer = p.get("layer") or {}
+        if isinstance(layer, dict) and (layer.get("off") or layer.get("frozen")):
+            out.add(_part_id(p, i))
+    return out
+
+
+def _part_id(part: dict, index: int) -> int:
+    """部品の id（無い・数でなければ並び順）。"""
+    pid = part.get("id")
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) else index
 
 
 def _view_edits(data: dict, payload: dict[str, Any], colors: list[dict[str, Any]]) -> tuple[dict, bool]:
@@ -695,7 +733,7 @@ async def _viewer_data_from_file(file_path: str, compare_with: str = "") -> tupl
         data = await asyncio.to_thread(_read_viewer_json, path)
         if isinstance(data, str):
             return data
-        bad = _source_path_error(data)
+        bad = await asyncio.to_thread(_source_path_error, data)
         if bad:
             # 「保存」は元の形のファイルを読み直して書き出すので、読めないファイルを指すデータは開かない。
             return f"Error: {bad}"

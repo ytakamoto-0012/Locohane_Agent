@@ -30,8 +30,6 @@ const POLL_MS = 600;
 // 回答が届いた（生成が止まった）と判断するまで待つ時間。承認待ち等の前後で loading が一瞬 false になるため。
 const ANSWER_SETTLE_MS = 1500;
 const TARGET_CLASS = 'chat-tutorial-target';
-// 「〇〇へようこそ」に入れる名前の長さの上限。header.md の1行目がこれより長い（名前ではなく文章）なら名前を入れない。
-const APP_NAME_MAX_CHARS = 30;
 
 // 「新規チャット」・会話の一覧のクリックはページを読み込み直すため、続きの手順を sessionStorage（このタブだけ）に残して、
 // 読み込み直した後にそこから再開する。
@@ -298,22 +296,6 @@ export function ChatTutorial({
   const isMobile = useIsMobile();
   const autoCheckedRef = useRef(false);
   const cardRef = useRef<HTMLDivElement>(null);
-  // 最初の手順の見出し「〇〇へようこそ」の名前。画面の見出しと同じ表示設定の header.md の1行目
-  // （社内の AI の名前にしていることがあるため、アプリの名前は書かない）。取れない・長すぎるなら「ようこそ」だけにする。
-  const [appName, setAppName] = useState<string | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    fetch(`${BACKEND_URL}/public/settings/header.md`)
-      .then((res) => (res.ok ? res.text() : Promise.reject()))
-      .then((text) => {
-        const firstLine = text
-          .split('\n')
-          .map((line) => line.replace(/^#+\s*/, '').trim())
-          .find((line) => line.length > 0);
-        setAppName(firstLine && firstLine.length <= APP_NAME_MAX_CHARS ? firstLine : null);
-      })
-      .catch(() => setAppName(null));
-  }, [open]);
   // 定型文の手順を出すかは、始めた時点で決める。送信すると定型文のボタンが消えるため、その場で数え直すと
   // 手順の番号がずれ、「AI が考えています」等の手順を飛ばしてしまう。
   const hasStartersRef = useRef(hasStarters);
@@ -553,11 +535,7 @@ export function ChatTutorial({
         <>
           <div className="chat-tutorial-body">
             <h4>
-              {step.title === 'tutorial.welcomeTitle'
-                ? appName
-                  ? t('tutorial.welcomeTitle', { name: appName })
-                  : t('tutorial.welcomeTitlePlain')
-                : t(step.title)}
+              {t(step.title)}
             </h4>
             {t((isMobile && step.mobileBody) || step.body)
               .split('\n')

@@ -288,3 +288,27 @@ def test_languages_keep_separate_embedding_caches(tmp_path):
     en.search("x", max_keys=1, max_docs=1, embedding=_fake_provider([]))
     files = sorted(p.name for p in cache.glob("embeddings_*.json"))
     assert len(files) == 2 and files[1].endswith("_en.json")
+
+
+def test_embeddings_saved_after_a_mid_run_change_drop_stale_paragraphs(tmp_path):
+    """埋め込みの計算中に文書が変わったときの保存でも、どの索引にも無い段落の分は捨てる（ファイルが膨らまないように）。"""
+    cache = tmp_path / "cache"
+    index = _index(tmp_path, cache_dir=cache)
+    provider_id = "fake"
+    cache.mkdir()
+    cache_file = index._cache_path(provider_id)
+    cache_file.write_text(json.dumps({"stale-paragraph": [0.5, 0.5]}), encoding="utf-8")
+    api = tmp_path / "API_REFERENCE.md"
+
+    def embed(texts, kind):
+        # 計算中に文書を書き換え、ほかの相談が索引を作り直す
+        api.write_text("# API\n\n## 別の節\n\n書き換えた。\n", encoding="utf-8")
+        stat = api.stat()
+        os.utime(api, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000))
+        index.search("x", max_keys=0, max_docs=1)
+        return [[0.0, 1.0] for _ in texts]
+
+    index.prepare_embeddings(ai.EmbeddingProvider(embed=embed, cache_id=provider_id, label="fake"))
+    saved = json.loads(cache_file.read_text(encoding="utf-8"))
+    assert "stale-paragraph" not in saved
+    assert saved  # 計算できた分は残す

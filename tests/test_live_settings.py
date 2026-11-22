@@ -131,3 +131,66 @@ def test_memory_ranks_keep_previous_when_overrides_are_broken(isolated_instance)
     _touch_later(overrides)
     assert reloader.refresh() is False
     assert memory.policy_for(cfg.memory_dir) == before
+
+
+def test_memory_ranks_retry_after_a_failed_reload(isolated_instance, monkeypatch):
+    """読み直しに失敗したら、ファイルの更新日時が同じでも次の refresh() でもう一度読む
+    （以前は更新日時を先に控えていたので、失敗した変更は二度と読み直されなかった）。"""
+    import src.live_settings as live_settings
+
+    overrides = isolated_instance
+    cfg = load_config(config_path=CONFIG_INI_PATH)
+    reloader = MemoryRanksReloader(cfg, overrides)
+    overrides.write_text(json.dumps({"memory": {"user_ranks": json.dumps({"boss": 7})}}), encoding="utf-8")
+    _touch_later(overrides)
+
+    real_load = live_settings.load_config
+
+    def broken(**_kwargs):
+        raise ValueError("broken for the test")
+
+    monkeypatch.setattr(live_settings, "load_config", broken)
+    assert reloader.refresh() is False
+    monkeypatch.setattr(live_settings, "load_config", real_load)
+    # ファイルは変えていない（更新日時も同じ）が、読み直す
+    assert reloader.refresh() is True
+    assert memory.policy_for(cfg.memory_dir).rank_of("boss") == 7
+
+
+def test_overrides_path_is_resolved_like_load_config(monkeypatch):
+    """CONFIG_OVERRIDES_PATH の相対パスは、load_config と同じくプロジェクトのルート基準にする
+    （起動したフォルダ基準だと、見張るファイルが load_config の読むものと食い違う）。"""
+    from src.live_settings import current_overrides_path
+
+    monkeypatch.setenv("CONFIG_OVERRIDES_PATH", "instances/x/config_overrides.json")
+    monkeypatch.chdir(PROJECT_ROOT / "tests")
+    assert current_overrides_path() == (PROJECT_ROOT / "instances" / "x" / "config_overrides.json").resolve()
+
+
+def test_session_allowed_after_deletion_and_password_change(tmp_path):
+    """削除したユーザーと、パスワードを変える前のログイン（JWT の iat が古い）は使えない。"""
+    instance_env = tmp_path / "instance.env"
+    _write_users(instance_env, [["alice", "pw1"], ["bob", "pw2"]])
+    source = AuthUsersSource(instance_env, tmp_path / "project.env", None, {"alice": "pw1", "bob": "pw2"})
+    old_iat = time.time() - 60
+    # 起動時からいるユーザーは、起動前のログインでも通す
+    assert source.session_allowed("alice", old_iat) is True
+    assert source.session_allowed("carol", old_iat) is False
+
+    _write_users(instance_env, [["alice", "pw-new"]])
+    assert source.session_allowed("bob", time.time()) is False  # 削除された
+    assert source.session_allowed("alice", old_iat) is False  # パスワードを変える前のログイン
+    assert source.session_allowed("alice", None) is False
+    assert source.session_allowed("alice", float(int(time.time()))) is True  # 変えた後のログイン（iat は秒の整数）
+
+
+def test_token_issued_at_reads_the_chainlit_jwt(monkeypatch):
+    import jwt
+
+    from src.auth_users import token_issued_at
+
+    monkeypatch.setenv("CHAINLIT_AUTH_SECRET", "test-secret-0123456789abcdef0123456789")
+    token = jwt.encode({"identifier": "alice", "iat": 1_700_000_000, "exp": int(time.time()) + 600}, "test-secret-0123456789abcdef0123456789", algorithm="HS256")
+    assert token_issued_at(token) == 1_700_000_000
+    assert token_issued_at(jwt.encode({"iat": 1}, "other-secret-0123456789abcdef0123456789", algorithm="HS256")) is None
+    assert token_issued_at(None) is None

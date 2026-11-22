@@ -436,11 +436,13 @@ class AssistantIndex:
             logger.info("Admin assistant: finished embedding %d paragraphs (%s).", len(missing), provider.label)
         with self._lock:
             if self._signature != signature:
-                # 計算中に文書が変わった: 計算できた分だけ保存しておく（次の相談で足りない分を確かめ直す）
+                # 計算中に文書が変わった: 計算できた分だけ保存しておく（次の相談で足りない分を確かめ直す）。
+                # 今の索引（作り直された段落）にも、計算を始めたときの段落にも無い分は捨てる（ファイルが膨らまないように）。
                 cache_path = self._cache_path(provider.cache_id)
                 if missing and cache_path is not None:
+                    live = set(hashes) | {_sha1(f"{p.title}\n{p.text}") for p in self._passages}
                     cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    cache_path.write_text(json.dumps(cached), encoding="utf-8")
+                    cache_path.write_text(json.dumps({h: v for h, v in cached.items() if h in live}), encoding="utf-8")
                 return
             self._store(provider, hashes, cached, bool(missing))
 

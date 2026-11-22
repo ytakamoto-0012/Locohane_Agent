@@ -16,15 +16,14 @@ import threading
 from pathlib import Path
 
 from src import memory
-from src.config import Config, default_overrides_path, load_config
+from src.config import PROJECT_ROOT, Config, _resolve, default_overrides_path, load_config
 
 logger = logging.getLogger(__name__)
 
 
 def current_overrides_path() -> Path:
-    """本体が読む config_overrides.json（load_config() と同じ決め方）。"""
-    raw = os.getenv("CONFIG_OVERRIDES_PATH")
-    return Path(raw) if raw else default_overrides_path()
+    """本体が読む config_overrides.json（load_config() と同じ決め方。相対パスはプロジェクトのルート基準）。"""
+    return _resolve(PROJECT_ROOT, os.getenv("CONFIG_OVERRIDES_PATH") or str(default_overrides_path()))
 
 
 def _mtime(path: Path) -> float | None:
@@ -41,6 +40,7 @@ class MemoryRanksReloader:
         self._memory_dir = config.memory_dir
         self._path = overrides_path or current_overrides_path()
         self._stamp = _mtime(self._path)
+        self._failed_stamp: float | None = None
         self._ranks = (dict(config.memory_user_ranks), config.memory_default_rank)
         self._lock = threading.Lock()
 
@@ -50,7 +50,6 @@ class MemoryRanksReloader:
         with self._lock:
             if stamp == self._stamp:
                 return False
-            self._stamp = stamp
             # 公開範囲の種類等は再起動で効く設定なので、今の規則のままにし、ランクだけを差し替える。
             # load_config() が規則を登録し直すと、その間のほかのセッションが新しい規則を一瞬見てしまうため、
             # 登録しない（register_memory_policy=False）で読んだものを使い、今の規則へランクだけ入れて戻す。
@@ -58,8 +57,14 @@ class MemoryRanksReloader:
             try:
                 cfg = load_config(register_memory_policy=False)
             except Exception as exc:  # noqa: BLE001 - 読めなければ前のランクのまま
-                logger.warning("Could not reload the user ranks after config_overrides.json changed; keeping the previous ranks: %s", exc)
+                # 更新日時は控えない（次のメッセージでもう一度読み直す。書きかけを読んだだけのこともあるため）。
+                # 直らないままでもログが毎回の送信で溢れないよう、警告は同じ更新日時につき 1 回にする。
+                log = logger.debug if stamp == self._failed_stamp else logger.warning
+                self._failed_stamp = stamp
+                log("Could not reload the user ranks after config_overrides.json changed; keeping the previous ranks: %s", exc)
                 return False
+            # 読めたときだけ控える
+            self._stamp = stamp
             ranks = (dict(cfg.memory_user_ranks), cfg.memory_default_rank)
             memory.set_policy(self._memory_dir, dataclasses.replace(current, ranks=ranks[0], default_rank=ranks[1]))
             if ranks == self._ranks:

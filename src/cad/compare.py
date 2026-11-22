@@ -28,14 +28,22 @@ from .mesh_data import b64, rnd
 _VOLUME_NOISE_RATIO = 1e-7
 
 
+LOAD_CHAIN_MAX = 10
+
+
 class CompareError(ValueError):
     """比べる前の形が読めない・比べられない形式。"""
 
 
-def load_previous(path: str | Path) -> tuple[cq.Shape, str]:
-    """比べる前の形（CAD ファイルか、show_cad_viewer のビューア用データ）を読む。戻り値は (形, 説明)。"""
+def load_previous(path: str | Path, _depth: int = 0) -> tuple[cq.Shape, str]:
+    """比べる前の形（CAD ファイルか、show_cad_viewer のビューア用データ）を読む。戻り値は (形, 説明)。
+
+    ビューア用データがほかのビューア用データを指すときはたどる（LOAD_CHAIN_MAX 回まで。自分を指す循環で止まらなくしない）。
+    """
     from .export_mesh import load_cad_file
 
+    if _depth >= LOAD_CHAIN_MAX:
+        raise CompareError(f"the viewer data refers to other viewer data more than {LOAD_CHAIN_MAX} times")
     path = Path(path)
     fmt = format_of(path)
     if fmt == "VIEWER_JSON":
@@ -45,11 +53,13 @@ def load_previous(path: str | Path) -> tuple[cq.Shape, str]:
             raise CompareError(f"could not read the viewer data {path}: {e}") from e
         if not isinstance(data, dict) or data.get("format") != VIEWER_FORMAT:
             raise CompareError(f"{path} is not viewer data made by show_cad_viewer")
-        src = data.get("source") or {}
+        src = data.get("source")
+        if not isinstance(src, dict):
+            src = {}
         if src.get("brep") and Path(src["brep"]).is_file():
             return cq.importers.importBrep(src["brep"]).val(), "previous CadQuery result"
         if src.get("path") and Path(src["path"]).is_file():
-            return load_previous(src["path"])
+            return load_previous(src["path"], _depth + 1)
         raise CompareError("the viewer data does not point to a model file that still exists")
     if fmt in (None, "STL", "DXF"):
         raise CompareError(f"cannot compare with {path.suffix or path.name!r}: give a STEP/IGES/BREP/BIN file or viewer data of one")

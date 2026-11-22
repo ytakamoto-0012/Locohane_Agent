@@ -782,6 +782,40 @@ async def test_viewer_data_pointing_at_another_sessions_file_is_refused(env, tmp
 
 
 @pytest.mark.asyncio
+async def test_compare_with_chain_to_another_sessions_file_is_refused(env, tmp_path) -> None:
+    """compare_with のビューア用データがさらに別のビューア用データを指すとき（比べるときは連鎖をたどる）、
+    連鎖の先にある他のセッションのファイルも拒む（1 段目しか確かめていなかった）。"""
+    from src.cad.mesh_data import FORMAT as VIEWER_FORMAT
+
+    other = tools._state._DEFAULT_WORKDIR / "_tmp_000000000000_other"
+    other.mkdir()
+    hidden = other / "secret.brep"
+    hidden.write_text("not really a brep", encoding="utf-8")
+    inner = tmp_path / "inner.json"
+    inner.write_text(json.dumps({"format": VIEWER_FORMAT, "source": {"brep": str(hidden)}}), encoding="utf-8")
+    outer = tmp_path / "outer.json"
+    outer.write_text(json.dumps({"format": VIEWER_FORMAT, "source": {"path": str(inner)}}), encoding="utf-8")
+    out = await cad_viewer._resolve_compare_with(str(outer))
+    assert out.startswith("Error: compare_with: the model file of this viewer data cannot be used") and "another session" in out
+
+    # 自分を指す循環でも止まる
+    loop = tmp_path / "loop.json"
+    loop.write_text(json.dumps({"format": VIEWER_FORMAT, "source": {"path": str(loop)}}), encoding="utf-8")
+    out = await cad_viewer._resolve_compare_with(str(loop))
+    assert out.startswith("Error: compare_with:") and "refers back to itself" in out
+
+
+def test_load_previous_stops_on_a_reference_loop(tmp_path) -> None:
+    from src.cad.compare import CompareError, load_previous
+    from src.cad.mesh_data import FORMAT as VIEWER_FORMAT
+
+    loop = tmp_path / "loop.json"
+    loop.write_text(json.dumps({"format": VIEWER_FORMAT, "source": {"path": str(loop)}}), encoding="utf-8")
+    with pytest.raises(CompareError, match="more than"):
+        load_previous(loop)
+
+
+@pytest.mark.asyncio
 async def test_relative_file_path_is_resolved_in_the_work_folder(env, tmp_path) -> None:
     # 相対パスは Read と同じく、ツールバーで選んだ作業フォルダからのパス（セッションの `_tmp_` ではない）。
     work = tmp_path / "work"
@@ -934,6 +968,9 @@ def test_malformed_viewer_data_returns_an_error_not_a_crash() -> None:
     assert cad_viewer._initial_hidden(data) == set()  # 数ではない項目は捨てる
     out = cad_viewer._finish_answer(data, (None, [], [], ""), "tok", [], [], {})  # res が壊れている
     assert out.startswith("Error:")
+    # 部品に id が無くても例外にしない（並び順で補う）
+    no_ids = {"parts": [{"name": "A", "layer": {"off": True}}, {"name": "B"}, "junk", {"id": 7, "layer": {"frozen": True}}]}
+    assert cad_viewer._initial_hidden(no_ids) == {0, 7}
 
 
 def test_part_recolored_back_keeps_face_overrides() -> None:
@@ -1033,3 +1070,26 @@ async def test_save_keeps_the_attributes_of_assembly_products(env, tmp_path) -> 
     attrs = {p["name"]: p.get("attributes") for p in step_p21.read_products(saved)}
     assert attrs["asm"] == [{"name": "Project", "value": "P-1"}]
     assert attrs["b"] == [{"name": "PN", "value": "B-1"}]
+
+
+def test_dxf_export_resets_a_removed_layer_color(tmp_path) -> None:
+    """レイヤーの色を「色なし」に戻して保存したら、元の色を残さず既定の色（ACI 7）にする。id の無い部品でも落ちない。"""
+    ezdxf = pytest.importorskip("ezdxf")
+    from src.cad.export_model import _export_dxf
+
+    doc = ezdxf.new()
+    doc.layers.add("RED", color=1)
+    doc.modelspace().add_line((0, 0), (10, 0), dxfattribs={"layer": "RED"})
+    src = tmp_path / "plan.dxf"
+    doc.saveas(src)
+    data = {
+        "source": {"kind": "file", "format": "DXF", "path": str(src)},
+        "parts": [{"name": "RED", "color": None, "layer": {"color": "#ff0000", "aci": 1}}],
+        "viewState": {"hiddenParts": [0]},
+    }
+    out = tmp_path / "out.dxf"
+    notes = _export_dxf(data, out)
+    layer = ezdxf.readfile(out).layers.get("RED")
+    assert abs(layer.color) == 7 and layer.rgb is None
+    assert layer.is_off()
+    assert any("RED" in n for n in notes)
