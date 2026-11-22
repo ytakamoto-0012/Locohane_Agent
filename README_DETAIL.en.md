@@ -2415,7 +2415,7 @@ or thinking) are recorded in text files without using a database.
 
 ## Tutorial (chat screen)
 
-When a user with no conversations yet opens the chat screen for the first time, a tutorial appears (`frontend/src/components/ChatTutorial.tsx`).
+When a user opens the chat screen for the first time (including, once, users who already have conversations from versions before the tutorial), a tutorial appears (`frontend/src/components/ChatTutorial.tsx`).
 The explanation card is shown near the highlighted place (below, above, right or left, whichever side fits on the screen without covering it). The first step with no target (welcome) is shown in the center of the screen; steps with no side that fits show it at the bottom right. At mobile width (768px or less), the card becomes a full-width band docked to the edge opposite the highlighted place (top or bottom), with its height fitted to the free space (the text scrolls inside the card; for large targets such as the whole conversation area it is docked to the top). Places inside a drawer, such as the conversation list and the run details, are shown on mobile by highlighting the button that opens them, with explanations reworded for mobile.
 Going on with "Next" following the explanation card, it highlights and explains, in order: welcome → input field → attachments → working folder → reasoning depth →
 starter buttons (only if there are any) → run details → display settings. Then it puts an example instruction in the input field; when the user presses "Send",
@@ -2429,10 +2429,10 @@ The steps waiting for the send, for the answer and for a click move on automatic
 It does not cover the screen, so you can operate it while reading. The tutorial texts do not contain the app name (the display settings may set it to your company's AI name).
 The first heading has no name either; it is just "Welcome".
 
-- **When it appears automatically**: `[thread_store] enabled = true` (it checks with `GET /locohane/threads` that there are no conversations; if disabled, it does not appear automatically),
-  the user has 0 conversations, a new chat is open, and the user has not finished it yet.
+- **When it appears automatically**: a new chat is open (no conversation in the URL), nothing has been sent on this screen yet, and the user has not finished it yet.
+  The number of conversations is not checked (users who already have conversations see it once too). It also appears with `[thread_store] enabled = false` (without the conversation list steps).
 - Finishing with "Done" or "Skip" leaves a per-user marker in the browser's localStorage (`la-chat-tutorial-done:<username>`),
-  and it does not appear automatically again (in another browser or PC, it appears again if there are 0 conversations).
+  and it does not appear automatically again (the marker is per browser, so it appears again in another browser or PC). If the page is closed midway, it appears again the next time.
 - It can be started at any time with "Start the tutorial" in the display settings (palette icon).
 - Parts in closed drawers at mobile width (conversation list, run details) are not highlighted; only the explanation is shown.
 

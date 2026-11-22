@@ -155,7 +155,7 @@ saving and restarting and actually using "Ask AI", to opening the chat screen (i
 and run it again at any time with "Getting started tutorial" on the instance list).
 When there are skills users made in the chat (drafts), **"Skill Lab tutorial"** in the "Skill Lab" tab at the top walks you through
 finishing a draft into a skill usable in production (creating a theme, the theme settings, the skill tuning loop and promotion).
-The chat screen also shows a **tutorial** when a user with no conversations yet opens it for the first time. It explains the input field,
+The chat screen also shows a **tutorial** once when each user opens it for the first time (users from earlier versions see it once too). It explains the input field,
 attachments, the working folder, the conversation list and so on, and finally guides you through actually sending an example instruction
 to the AI until the answer arrives (you can see it again at any time from the display settings (palette icon) at the top right →
 "Start the tutorial").

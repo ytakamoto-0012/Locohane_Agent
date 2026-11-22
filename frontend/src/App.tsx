@@ -550,7 +550,7 @@ function App() {
         onClose={closeMobileDrawer}
       />
       {isMobile && mobileDrawer ? <div className="drawer-backdrop" onClick={closeMobileDrawer} /> : null}
-      {/* 初めて使うユーザー（会話が1件も無い）向けの使い方のチュートリアル。最後に実際に1回送ってもらう */}
+      {/* まだ見ていないユーザー向けの使い方のチュートリアル。最後に実際に1回送ってもらう */}
       <ChatTutorial
         hasSentMessage={hasSentMessage}
         loading={loading}

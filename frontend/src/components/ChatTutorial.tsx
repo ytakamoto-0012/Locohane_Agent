@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRecoilValue } from 'recoil';
 import { currentThreadIdState, sessionIdState, useAuth, useConfig } from '@chainlit/react-client';
-import { BACKEND_URL } from '../chainlitClient';
 import { useI18n, type MessageKey } from '../i18n';
 import { useIsMobile } from '../utils/useIsMobile';
 
 /*
  * チャット画面の使い方のチュートリアル（ハローワールド）。
  *
- * 会話が1件も無いユーザーが初めて開いたとき（会話履歴の保存が有効で、/locohane/threads が空で、新規チャットを
- * 開いているとき）に自動で出す。画面の各部分を順に強調して説明し、最後に入力欄へ例の指示を入れて、
+ * まだ終えていないユーザーが新規チャットを開いたとき（会話がすでにあるユーザーにも1回は）に自動で出す。画面の各部分を順に強調して説明し、最後に入力欄へ例の指示を入れて、
  * 実際に送信 → AI の回答が届くまでを案内する。終える・スキップすると、ブラウザにユーザー別の印を残して
  * 次からは自動で出さない。表示設定（ThemePicker）の「使い方のチュートリアルを始める」から何度でも始められる
  * （START_TUTORIAL_EVENT）。
@@ -376,23 +374,19 @@ export function ChatTutorial({
     return () => document.removeEventListener('click', onClick, true);
   }, [step, steps, withStarters, user?.identifier]);
 
-  // 初めて開いたユーザー（会話が1件も無い）なら、接続できたところで1回だけ自動で始める。
-  // 会話履歴の保存が無効だと、会話が無いかを確かめられないため自動では出さない。
+  // まだ終えていないユーザーなら、新規チャットを開いて接続できたところで1回だけ自動で始める。
+  // 会話がすでにあるユーザー（チュートリアルが入る前の版から使っている人）にも1回は出すため、会話の件数は見ない
+  // （以前は /locohane/threads が空かで決めていたが、サーバーの準備前に呼ぶと空が返り、会話のある人にも出ることがあった）。
   useEffect(() => {
     if (autoCheckedRef.current || !sessionId || !config) return;
     autoCheckedRef.current = true;
-    if (!config.dataPersistence || currentThreadId || hasSentMessage) return;
+    if (currentThreadId || hasSentMessage) return;
     try {
       if (localStorage.getItem(doneKey(user?.identifier))) return;
     } catch {
       return;
     }
-    fetch(`${BACKEND_URL}/locohane/threads`, { credentials: 'include' })
-      .then((res) => (res.ok ? res.json() : Promise.reject()))
-      .then((data: { threads?: unknown[] }) => {
-        if ((data.threads ?? []).length === 0) start();
-      })
-      .catch(() => {});
+    start();
   }, [sessionId, config, currentThreadId, hasSentMessage, user?.identifier, start]);
 
   // 送ってみる手順: 入ったときに入力欄へ例の指示を入れ、そのときのメッセージ数を控える。
