@@ -2431,8 +2431,11 @@ The first heading has no name either; it is just "Welcome".
 
 - **When it appears automatically**: a new chat is open (no conversation in the URL), nothing has been sent on this screen yet, and the user has not finished it yet.
   The number of conversations is not checked (users who already have conversations see it once too). It also appears with `[thread_store] enabled = false` (without the conversation list steps).
-- Finishing with "Done" or "Skip" leaves a per-user marker in the browser's localStorage (`la-chat-tutorial-done:<username>`),
-  and it does not appear automatically again (the marker is per browser, so it appears again in another browser or PC). If the page is closed midway, it appears again the next time.
+- After finishing with "Done" or "Skip", it does not appear automatically again. The marker is kept per user on the server
+  (`chat_tutorial_done_at` in `metadata_json` of the `users` table in the conversation DB `[thread_store] db`;
+  `GET /locohane/tutorial` and `POST /locohane/tutorial/done`), so it does not appear in another browser or PC either. In anonymous mode, everyone shares one marker.
+  Only with `[thread_store] enabled = false` is the browser's localStorage (`la-chat-tutorial-done:<username>`) used.
+  Right after startup, when the server is not ready yet (503), it asks again after a while; if it cannot get an answer, it does not appear automatically. If the page is closed midway, it appears again the next time.
 - It can be started at any time with "Start the tutorial" in the display settings (palette icon).
 - Parts in closed drawers at mobile width (conversation list, run details) are not highlighted; only the explanation is shown.
 

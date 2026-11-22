@@ -204,6 +204,24 @@ async def test_get_or_create_user_round_trip(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_user_metadata_merges_and_survives_login(tmp_path) -> None:
+    """チュートリアルを終えた印等: 行が無くても書け、既存のキーを消さず、ログイン時の create_user_row でも消えない。"""
+    conn = await thread_store.init_db(tmp_path / "chat_threads.sqlite")
+    try:
+        assert await thread_store.get_user_metadata(conn, "anonymous") == {}
+        await thread_store.update_user_metadata(conn, "anonymous", {"chat_tutorial_done_at": "t1"})
+        assert await thread_store.get_user_metadata(conn, "anonymous") == {"chat_tutorial_done_at": "t1"}
+
+        await thread_store.create_user_row(conn, User(identifier="alice", metadata={"role": "user"}))
+        await thread_store.update_user_metadata(conn, "alice", {"chat_tutorial_done_at": "t2"})
+        await thread_store.create_user_row(conn, User(identifier="alice"))
+        assert await thread_store.get_user_metadata(conn, "alice") == {"role": "user", "chat_tutorial_done_at": "t2"}
+        assert await thread_store.get_user_metadata(conn, "bob") == {}
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_old_threads_noop_when_retention_non_positive(tmp_path) -> None:
     conn = await thread_store.init_db(tmp_path / "chat_threads.sqlite")
     try:

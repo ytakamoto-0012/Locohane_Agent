@@ -970,6 +970,38 @@ if _config.thread_store_enabled:
         if owner != thread_store.resolve_owner(current_user):
             raise HTTPException(status_code=404, detail="Thread not found")
 
+    # チャットの使い方のチュートリアルを終えた日時を入れる users.metadata_json のキー。
+    _CHAT_TUTORIAL_DONE_KEY = "chat_tutorial_done_at"
+
+    def _tutorial_user_key(current_user) -> str:
+        """users 行の identifier。ログイン中はその identifier、匿名モードは全員で1つ（会話の一覧と同じまとめ方）。"""
+        identifier = getattr(current_user, "identifier", None)
+        return identifier or resolve_log_username(None)
+
+    @_chainlit_asgi_app.get("/locohane/tutorial")
+    async def _locohane_get_tutorial(current_user=Depends(_cl_get_current_user)):
+        """チャットのチュートリアルをこのユーザーが終えたか（{done}）。ブラウザ・PC が変わっても同じ答えにするため、サーバーに持つ。
+
+        _setup() の前（起動直後に WebSocket の接続より先に届いた等）は 503 を返す。フロントは少し待って聞き直す
+        （ここで「終えていない」と返すと、終えたユーザーにも出てしまうため）。
+        """
+        if _thread_store_conn is None:
+            raise HTTPException(status_code=503, detail="Not ready yet")
+        metadata = await thread_store.get_user_metadata(_thread_store_conn, _tutorial_user_key(current_user))
+        return {"done": bool(metadata.get(_CHAT_TUTORIAL_DONE_KEY))}
+
+    @_chainlit_asgi_app.post("/locohane/tutorial/done")
+    async def _locohane_tutorial_done(current_user=Depends(_cl_get_current_user)):
+        """チャットのチュートリアルを終えた（完了・スキップ）と記録する。"""
+        if _thread_store_conn is None:
+            raise HTTPException(status_code=503, detail="Not ready yet")
+        await thread_store.update_user_metadata(
+            _thread_store_conn,
+            _tutorial_user_key(current_user),
+            {_CHAT_TUTORIAL_DONE_KEY: runtime_status.now_iso()},
+        )
+        return {"success": True}
+
     @_chainlit_asgi_app.get("/locohane/threads")
     async def _locohane_list_threads(
         limit: int = 30,

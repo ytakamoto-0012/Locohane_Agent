@@ -4,6 +4,7 @@
   （以前は後ろに登録していたため "generating" が thread_id として扱われ、常に 404 だった）。
 - /locohane/elements/{id} は、ラスター画像だけを inline で返し、HTML・SVG 等はダウンロードにする
   （inline で返すと、LLM が作った HTML を開いたときにアプリと同じオリジンでスクリプトが動く）。
+- /locohane/tutorial は、チャットのチュートリアルを終えたかをユーザー単位で返し、準備前は 503 にする。
 """
 
 from __future__ import annotations
@@ -67,3 +68,28 @@ def test_elements_are_inline_only_for_raster_images(monkeypatch, tmp_path, name,
         assert not disposition.startswith("attachment")
     else:
         assert disposition.startswith("attachment") and name in disposition
+
+
+def test_chat_tutorial_done_is_kept_per_user_on_the_server(monkeypatch):
+    """チャットのチュートリアルを終えた印はサーバーにユーザー単位で持つ（ブラウザ・PC が変わっても出ない）。"""
+    store: dict[str, dict] = {}
+
+    async def fake_get(conn, identifier):
+        return dict(store.get(identifier, {}))
+
+    async def fake_update(conn, identifier, values):
+        store.setdefault(identifier, {}).update(values)
+
+    monkeypatch.setattr(app.thread_store, "get_user_metadata", fake_get)
+    monkeypatch.setattr(app.thread_store, "update_user_metadata", fake_update)
+    client = TestClient(chainlit_app)
+
+    # 準備前は「終えていない」と答えず 503（終えた人に出さないため、フロントは聞き直す）
+    monkeypatch.setattr(app, "_thread_store_conn", None)
+    assert client.get("/locohane/tutorial").status_code == 503
+
+    monkeypatch.setattr(app, "_thread_store_conn", object())
+    assert client.get("/locohane/tutorial").json() == {"done": False}
+    assert client.post("/locohane/tutorial/done").json() == {"success": True}
+    assert client.get("/locohane/tutorial").json() == {"done": True}
+    assert set(store) == {"anonymous"}

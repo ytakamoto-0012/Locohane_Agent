@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRecoilValue } from 'recoil';
 import { currentThreadIdState, sessionIdState, useAuth, useConfig } from '@chainlit/react-client';
+import { BACKEND_URL } from '../chainlitClient';
 import { useI18n, type MessageKey } from '../i18n';
 import { useIsMobile } from '../utils/useIsMobile';
 
@@ -8,8 +9,8 @@ import { useIsMobile } from '../utils/useIsMobile';
  * チャット画面の使い方のチュートリアル（ハローワールド）。
  *
  * まだ終えていないユーザーが新規チャットを開いたとき（会話がすでにあるユーザーにも1回は）に自動で出す。画面の各部分を順に強調して説明し、最後に入力欄へ例の指示を入れて、
- * 実際に送信 → AI の回答が届くまでを案内する。終える・スキップすると、ブラウザにユーザー別の印を残して
- * 次からは自動で出さない。表示設定（ThemePicker）の「使い方のチュートリアルを始める」から何度でも始められる
+ * 実際に送信 → AI の回答が届くまでを案内する。終える・スキップすると、サーバー（POST /locohane/tutorial/done。
+ * ユーザー単位）とブラウザに印を残して次からは自動で出さない。表示設定（ThemePicker）の「使い方のチュートリアルを始める」から何度でも始められる
  * （START_TUTORIAL_EVENT）。
  *
  * 説明のカードは右下に出し、画面は覆わない（説明を読みながら実際に操作できるように）。強調は対象の要素へ
@@ -262,6 +263,45 @@ function doneKey(identifier: string | undefined): string {
   return DONE_KEY_PREFIX + (identifier ?? '');
 }
 
+/** このブラウザで終えた印があるか（読めないときも「ある」扱いにして、勝手には出さない）。 */
+function readLocalDone(identifier: string | undefined): boolean {
+  try {
+    return Boolean(localStorage.getItem(doneKey(identifier)));
+  } catch {
+    return true;
+  }
+}
+
+// サーバーの準備前（503）・接続の失敗のときに聞き直す回数と間隔
+const SERVER_DONE_RETRIES = 10;
+const SERVER_DONE_RETRY_MS = 1500;
+
+/** サーバーに記録した「このユーザーは終えたか」。聞けなかったら null。 */
+async function readServerDone(): Promise<boolean | null> {
+  for (let i = 0; i < SERVER_DONE_RETRIES; i++) {
+    try {
+      const res = await fetch(`${BACKEND_URL}/locohane/tutorial`, { credentials: 'include' });
+      if (res.ok) {
+        const data = (await res.json()) as { done?: boolean };
+        return Boolean(data.done);
+      }
+      if (res.status !== 503) return null;
+    } catch {
+      /* 聞き直す */
+    }
+    await new Promise((resolve) => setTimeout(resolve, SERVER_DONE_RETRY_MS));
+  }
+  return null;
+}
+
+async function postServerDone(): Promise<void> {
+  try {
+    await fetch(`${BACKEND_URL}/locohane/tutorial/done`, { method: 'POST', credentials: 'include' });
+  } catch {
+    /* 記録できなくても閉じる（このブラウザの印は残る） */
+  }
+}
+
 export function ChatTutorial({
   hasSentMessage,
   loading,
@@ -329,7 +369,8 @@ export function ChatTutorial({
     } catch {
       /* 保存できなくても閉じる */
     }
-  }, [user?.identifier]);
+    if (config?.dataPersistence) void postServerDone();
+  }, [user?.identifier, config?.dataPersistence]);
 
   // 表示設定の「使い方のチュートリアルを始める」から始める。
   useEffect(() => {
@@ -375,18 +416,41 @@ export function ChatTutorial({
   }, [step, steps, withStarters, user?.identifier]);
 
   // まだ終えていないユーザーなら、新規チャットを開いて接続できたところで1回だけ自動で始める。
-  // 会話がすでにあるユーザー（チュートリアルが入る前の版から使っている人）にも1回は出すため、会話の件数は見ない
-  // （以前は /locohane/threads が空かで決めていたが、サーバーの準備前に呼ぶと空が返り、会話のある人にも出ることがあった）。
+  // 会話がすでにあるユーザー（チュートリアルが入る前の版から使っている人）にも1回は出すため、会話の件数は見ない。
+  // 終えたかは、会話履歴の保存が有効ならサーバー（ユーザー単位。ブラウザ・PC が変わっても同じ）、無効ならこのブラウザで見る。
+  const hasSentRef = useRef(hasSentMessage);
+  hasSentRef.current = hasSentMessage;
+  const openRef = useRef(open);
+  openRef.current = open;
+  const unmountedRef = useRef(false);
+  useEffect(
+    () => () => {
+      unmountedRef.current = true;
+    },
+    []
+  );
   useEffect(() => {
     if (autoCheckedRef.current || !sessionId || !config) return;
     autoCheckedRef.current = true;
     if (currentThreadId || hasSentMessage) return;
-    try {
-      if (localStorage.getItem(doneKey(user?.identifier))) return;
-    } catch {
+    // 問い合わせている間に送信した・表示設定から始めていたら始めない
+    const startIfStillNew = () => {
+      if (!unmountedRef.current && !hasSentRef.current && !openRef.current) start();
+    };
+    if (!config.dataPersistence) {
+      if (!readLocalDone(user?.identifier)) start();
       return;
     }
-    start();
+    void readServerDone().then((done) => {
+      if (done === null) return; // 聞けなかったときは出さない（終えた人に出さないことを優先）
+      if (done) return;
+      if (readLocalDone(user?.identifier)) {
+        // このブラウザで終えた印だけある（サーバーに持つ前の版で終えた）ならサーバーへ写す
+        void postServerDone();
+        return;
+      }
+      startIfStillNew();
+    });
   }, [sessionId, config, currentThreadId, hasSentMessage, user?.identifier, start]);
 
   // 送ってみる手順: 入ったときに入力欄へ例の指示を入れ、そのときのメッセージ数を控える。

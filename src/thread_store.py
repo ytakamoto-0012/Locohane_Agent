@@ -834,6 +834,31 @@ async def create_user_row(conn: aiosqlite.Connection, user: User) -> PersistedUs
     return persisted
 
 
+async def get_user_metadata(conn: aiosqlite.Connection, identifier: str) -> dict:
+    """users 行の metadata_json を返す（行が無ければ空の dict）。"""
+    cursor = await conn.execute("SELECT metadata_json FROM users WHERE identifier = ?", (identifier,))
+    row = await cursor.fetchone()
+    if row is None:
+        return {}
+    try:
+        value = json.loads(row[0] or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+async def update_user_metadata(conn: aiosqlite.Connection, identifier: str, values: dict) -> None:
+    """users 行の metadata_json へ values を統合する（行が無ければ作る。匿名モードの "anonymous" 等）。"""
+    merged = await get_user_metadata(conn, identifier)
+    merged.update(values)
+    await conn.execute(
+        "INSERT INTO users (id, identifier, created_at, metadata_json) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(identifier) DO UPDATE SET metadata_json = excluded.metadata_json",
+        (identifier, identifier, _now(), json.dumps(merged, ensure_ascii=False)),
+    )
+    await conn.commit()
+
+
 async def cleanup_old_threads(
     conn: aiosqlite.Connection, retention_days: int, elements_dir: Path | None = None
 ) -> int:
