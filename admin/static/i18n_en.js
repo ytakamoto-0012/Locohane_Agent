@@ -1428,7 +1428,7 @@ const I18N_EN = {
   "最後に、右上の「AIに相談」を実際に使ってみます。設定で困ったときに、どの画面のどの設定を変えればよいかを AI が助言します（AI は設定を読むだけで、変更・保存はしません）。\n光っている「AIに相談」を押してください。右に相談のパネルが開くと、自動で次に進みます。": "Finally, let's actually use \"Ask AI\" at the top right. When you are stuck with settings, the AI advises which setting on which screen to change (the AI only reads the settings; it does not change or save them).\nPress the highlighted \"Ask AI\". When the consultation panel opens on the right, the guide moves on automatically.",
   "「AIに相談」を押すと進みます": "Press \"Ask AI\" to go on",
   "相談の対象": "What to consult about",
-  "「対象」で、どのインスタンスの設定について相談するかを選びます。ここでは「{0}」を選んでおきました。\nその下に、回答にどのインスタンスの LLM を使うかが出ます（管理者設定の「回答に使う LLM」）。": "In \"Target\", choose which instance's settings you are consulting about. \"{0}\" has been chosen here.\nBelow it, the panel shows which instance's LLM is used for the answers (\"LLM used for answers\" in the admin settings).",
+  "「対象」で、どのインスタンスの設定について相談するかを選びます。ここでは「{0}」を選んでおきました（前の相談が残っていたら、消しておきました）。\nその下に、回答にどのインスタンスの LLM を使うかが出ます（管理者設定の「回答に使う LLM」）。": "In \"Target\", choose which instance's settings you are consulting about. \"{0}\" has been chosen here (any earlier consultation left in this tab has been cleared).\nBelow it, the panel shows which instance's LLM is used for the answers (\"LLM used for answers\" in the admin settings).",
   "相談を送ってみる": "Send a consultation",
   "入力欄に、例の相談を入れました。「送信」を押してください（文章は自由に変えて構いません。Enter でも送れます）。\n送ると、自動で次に進みます。": "An example consultation has been put in the input field. Press \"Send\" (feel free to change the text; Enter also sends it).\nWhen you send it, the guide moves on automatically.",
   "「送信」を押すと進みます": "Press \"Send\" to go on",

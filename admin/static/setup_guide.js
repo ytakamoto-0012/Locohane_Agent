@@ -12,6 +12,8 @@
  * admin.js の後に読み込む（$・api・renderInstanceDetail 等を使う）。
  */
 
+// 対象の高さが画面のこの割合を超えたら、中央ではなく先頭（見出し）が見えるようにスクロールする。
+const SETUP_GUIDE_TALL_RATIO = 0.6;
 // 強調する場所を探し直す間隔（ms）。画面の作り直し（renderKeyList 等）で要素が入れ替わっても強調を付け直すため。
 const SETUP_GUIDE_POLL_MS = 600;
 // 一度出したインスタンス（ページを開いている間は、同じインスタンスで自動では出し直さない）。
@@ -313,10 +315,17 @@ function setupGuideAssistantSteps(name) {
     {
       title: _t("相談の対象"),
       anchor: () => $("#assistant-panel"),
-      body: _t("「対象」で、どのインスタンスの設定について相談するかを選びます。ここでは「{0}」を選んでおきました。\nその下に、回答にどのインスタンスの LLM を使うかが出ます（管理者設定の「回答に使う LLM」）。", setupGuideLabel(name)),
+      body: _t("「対象」で、どのインスタンスの設定について相談するかを選びます。ここでは「{0}」を選んでおきました（前の相談が残っていたら、消しておきました）。\nその下に、回答にどのインスタンスの LLM を使うかが出ます（管理者設定の「回答に使う LLM」）。", setupGuideLabel(name)),
       skip,
       cardClass,
       enter: () => {
+        // 前に開いた相談がこのタブに残っていると、送った・回答が届いたの見分けがずれるため、先に消す（「会話をクリア」と同じ）。
+        if (typeof assistantAbort !== "undefined" && assistantAbort) assistantAbort.abort();
+        if (typeof assistantState !== "undefined" && assistantState.messages.length) {
+          assistantState.messages = [];
+          saveAssistantState();
+          renderAssistantMessages();
+        }
         const select = $("#assistant-instance");
         if (select && [...select.options].some((o) => o.value === name) && select.value !== name) {
           select.value = name;
@@ -711,6 +720,10 @@ function setupGuideRefreshHighlight() {
   const found = (step.target ? step.target() : []).filter(Boolean);
   // カードを置く基準の対象（「並列数」の手順は、左のボタンではなく最初の設定の行）
   const anchor = (step.anchor ? step.anchor() : found[found.length > 1 && step.preset ? 1 : 0]) || null;
+  // 画面より高い対象（項目の多いリストの設定等）は、中央に合わせると見出し（キー名・説明）が画面の外に出て、
+  // 何の設定か分からなくなるため、先頭が見えるようにスクロールする（カードは横に収まらないので右下に出て、
+  // 画面の上の見出し・説明には被らない）。
+  const tall = anchor ? anchor.getBoundingClientRect().height > window.innerHeight * SETUP_GUIDE_TALL_RATIO : false;
   setupGuidePlaceCard(guide.card, anchor);
   const same = found.length === guide.targets.length && found.every((t, i) => t === guide.targets[i]);
   if (same) return;
@@ -719,7 +732,7 @@ function setupGuideRefreshHighlight() {
   guide.targets = found;
   if (anchor && !guide.scrolled) {
     guide.scrolled = true;
-    anchor.scrollIntoView({ block: "center", behavior: "smooth" });
+    anchor.scrollIntoView({ block: tall ? "start" : "center", behavior: "smooth" });
   }
 }
 
