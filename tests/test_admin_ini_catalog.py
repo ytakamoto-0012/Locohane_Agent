@@ -130,7 +130,7 @@ def test_schema_matches_default_value_for_every_schema_key():
     }
     for info in schema_keys:
         assert info.ui_kind == "list", f"[{info.section}].{info.key}"
-        assert _schema_matches(info.schema, ast.literal_eval(info.default_value.strip())), f"[{info.section}].{info.key}"
+        assert _schema_matches(info.schema, ast.literal_eval(info.default_value.strip() or "[]")), f"[{info.section}].{info.key}"
 
 
 def test_schema_accepts_documented_allow_sandbox_dir_example():

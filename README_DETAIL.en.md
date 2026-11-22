@@ -2067,7 +2067,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 |-----------|------|------|------------------|
 | `[llm]` | `main_url` | List of LLM endpoints for the main agent (a JSON/Python-style list `[{"base_url":...,"api_key":...,"model":...}]`; several allowed. Each element can optionally add `start`/`end` (the time range it can be used; the unit is hours, minutes as decimals, always specified as a pair) and `provider` (`openai_compatible` default/`llama_cpp`/`vllm`; the kind of inference server, adjusting extension parameter names and thinking field names to the server (`src/llm/dialect.py`); `llama_cpp` also becomes a target of checking free slots with GET /slots before the `round_robin`/`priority_failover` strategies choose it). The list as a whole needs at least one always-available endpoint with both `start`/`end` omitted) | `LLM_MAIN_URL` |
 | `[llm]` | `main_routing_strategy` | How to choose when `main_url` has several entries (`round_robin`/`random`/`priority_failover`. `round_robin`/`priority_failover` check free slots with GET /slots before choosing an endpoint with provider="llama_cpp", skip to the next if none, and wait if all are full. Between choosing and the first send, the free slot is reserved so other calls being chosen at the same time do not use it) | `LLM_MAIN_ROUTING_STRATEGY` |
-| `[llm]` | `sub_url` | List of LLM endpoints for sub-agents (`dispatch_agent`). Same format as `main_url` | `LLM_SUB_URL` |
+| `[llm]` | `sub_url` | List of LLM endpoints for sub-agents (`dispatch_agent`). Same format as `main_url`. Empty by default (`main_url` is used as is) | `LLM_SUB_URL` |
 | `[llm]` | `sub_routing_strategy` | How to choose when `sub_url` has several entries. Same format as `main_routing_strategy`. When a sub-agent has a model specified (`model` of `agents/*.md` / the `model` argument of `dispatch_agent`), only endpoints of that model are candidates under this rule (if none match, `sub_default_model`; if that is not available either, the specification is ignored) | `LLM_SUB_ROUTING_STRATEGY` |
 | `[llm]` | `sub_default_model` | The model name used when a sub-agent has no model specified (or there is no endpoint of the specified model, or all are out of their time range) (matched case-insensitively against `model` of `sub_url`). Prevents delegations without a model from being sent randomly when `sub_url` mixes lightweight and high-performance models. If empty, endpoints are chosen without looking at model names as before (ignored if no endpoint matches or all are out of their time range; a wrong name logs a WARNING once at startup). **Also effective when `sub_url` is not set (the setting that inherits the main endpoints): if the main agent is using an endpoint of another model, it is not inherited, and an endpoint of this model is chosen from `main_url`** | `LLM_SUB_DEFAULT_MODEL` |
 | `[llm]` | `temperature` | Randomness of generation | `LLM_TEMPERATURE` |
@@ -2411,6 +2411,23 @@ or thinking) are recorded in text files without using a database.
   of the same thread_id (it is not split into a new file).
   The moment it was resumed is recorded in the file as a separator line `----- resumed YYYY-MM-DD HH:MM:SS -----`.
 
+## Tutorial (chat screen)
+
+When a user with no conversations yet opens the chat screen for the first time, a tutorial appears (`frontend/src/components/ChatTutorial.tsx`).
+The explanation card is shown near the highlighted place (below, above, right or left, whichever side fits on the screen without covering it). For steps with no target or no side that fits, and at mobile width, it is shown at the bottom right (the bottom edge on mobile).
+Going on with "Next" following the explanation card, it highlights and explains, in order: welcome → input field → attachments → working folder → reasoning depth →
+starter buttons (only if there are any) → conversation list and new chat → run details → display settings. In the last step it puts an example instruction
+in the input field; when the user presses "Send", it moves on automatically to "The AI is thinking", and when the answer arrives it shows the closing explanation (a hello world).
+It does not cover the screen, so you can operate it while reading. The tutorial texts do not contain the app name (the display settings may set it to your company's AI name).
+The first heading uses the first line of header.md in the display settings (the same as the screen heading) as "Welcome to …"; if it cannot be read or is longer than 30 characters, it is just "Welcome".
+
+- **When it appears automatically**: `[thread_store] enabled = true` (it checks with `GET /locohane/threads` that there are no conversations; if disabled, it does not appear automatically),
+  the user has 0 conversations, a new chat is open, and the user has not finished it yet.
+- Finishing with "Done" or "Skip" leaves a per-user marker in the browser's localStorage (`la-chat-tutorial-done:<username>`),
+  and it does not appear automatically again (in another browser or PC, it appears again if there are 0 conversations).
+- It can be started at any time with "Start the tutorial" in the display settings (palette icon).
+- Parts in closed drawers at mobile width (conversation list, run details) are not highlighted; only the explanation is shown.
+
 ## Conversation thread list and resuming (left sidebar)
 
 With `[thread_store] enabled = true` (default), a list of past conversations is shown in a sidebar
@@ -2629,6 +2646,29 @@ The host and port the admin tool itself listens on are specified with `ADMIN_HOS
 `ADMIN_PORT` in `admin.bat` (they take precedence over the `[admin]` section of `config.ini`.
 To change them, open `admin.bat` in a text editor and rewrite these 2 lines).
 
+#### Setup guide
+
+On the first start (when `instances/` does not exist and `default` is created) and when you create a new app (chat) instance,
+the dashboard shows a setup guide (`admin/static/setup_guide.js`). As you go on with "Next" following the explanation card at the
+bottom right, the guide opens the screens and highlights the places to look at. In the config.ini steps, only the settings of
+that step are shown.
+
+1. config.ini: `[llm] main_url` → `[graph] token_guard_soft_threshold` → the three keys of the "Concurrency" preset → `[paths] common_data_dir` →
+   `[paths] project_locohane_dir` → `[subagent] agent_type_run_script_allowlist` → `[main_agent_tool_guard] allow_entries` →
+   `[plan] plan_approval_exempt_scripts` → `[vector_db] enabled` → `backend`, `qdrant_url`, `qdrant_preset` →
+   `include_extensions`, `text_extensions`, `image_input_extensions` → `embedding_url` → `embedded_images` →
+   `[auth] enabled`, `require_password` → saving the changes ("Review changes" → "Save these changes"; if there are unsaved changes, it asks before going on)
+2. The "Users" tab → the "Display settings" tab → the "Knowledge" tab → the "Admin settings" tab at the top (ingest concurrency → child processes for text extraction and rendering →
+   embedding request concurrency → source folder scan concurrency → maximum files per collection → maximum file size →
+   Office PDF export time limit → temporary files for imports → Qdrant resend count → "LLM used for answers" of Ask AI →
+   "embedding for finding related settings", highlighting one item at a time, then "Save"; if there are unsaved changes, it asks before going on)
+3. Back at the instance list, it asks you to press "Restart" ("Start" if stopped) on that instance's card so the saved settings take effect, then to press "Open" (the guide ends when you press it)
+
+You can end it at any time with "Skip". Once finished or skipped, it is not shown automatically again. You can run it again at any
+time with "Setup guide" next to the heading of the instance details. Whether to show it is decided by whether
+`instances/<instance name>/.setup_guide_pending` exists (`admin/instances.py`; `setup_guide_pending` of the list API), and finishing or
+skipping removes it with `POST /api/instances/{name}/setup-guide/done` (`setup_guide_done` in the change history). It is not shown for skill tuning workers.
+
 You can still start the `default` instance standalone with `app.bat` as before
 (it follows the host/port of `instances/default/instance.json`). But
 in that case the admin tool shows it as "Running externally", and it cannot be
@@ -2681,6 +2721,7 @@ instances/
 │   ├── .env                     # instance-only sign-in users etc. (optional)
 │   ├── settings/                # instance-only display settings (optional; see below)
 │   ├── backups/                 # snapshots before saving/restoring
+│   ├── .setup_guide_pending     # marker that the setup guide has not been finished yet (removed when finished or skipped)
 │   └── app_stdout.log           # stdout of the main process
 ├── <other instance name>/
 │   └── ... (same as above)
@@ -2985,6 +3026,14 @@ If you do not use it, `[admin] assistant_enabled = false` hides the button and t
 
 A screen for finishing users' drafts and new skills and **sub-agents** created by developers into something that can withstand production, by letting the AI fix defects by itself,
 and promoting approved ones to an instance (the "Skill Lab" tab at the top; `admin/skill_lab/`, `admin/static/skill_lab.js`).
+
+"Skill Lab tutorial" next to the heading (`admin/static/skill_lab_tutorial.js`; it uses the same explanation card and highlighting as the setup guide)
+can be pressed only when some instance has user drafts. Using a draft as the example, it guides you one item at a time: skill tuning workers (if there are none yet, the type,
+instance name, display name, autostart, copy from and create of the creation dialog → setting and saving the worker's `[llm] main_url` → starting it, one by one; skipped if one exists) → target instance →
+creating a theme from a draft → the theme heading and tabs → each item of "Theme settings" (theme name, worker in charge, tryout count,
+advanced settings, saving, ① research targets and how to add them, ② what it should do and the AI draft, ③ the case list / writing a case yourself / having the AI create cases /
+files for cases, the config patch, requests to the AI) → starting the skill tuning loop → run log → review & promote → history.
+If you go on without opening a theme screen, you can just read the explanations (nothing is highlighted). Nothing is recorded when it ends, and it can be started any number of times.
 
 The entrances and roles on screen are as follows (things called "lab" are the workspace; what actually runs the AI is the skill tuning worker).
 

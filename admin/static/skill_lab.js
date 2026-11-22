@@ -72,8 +72,10 @@ async function renderSkillLab() {
   mainEl.innerHTML = "";
   const sidebar = el("div", { class: "lab-sidebar" });
   const panel = el("div", { class: "lab-panel" });
+  // スキル研究室のチュートリアル（skill_lab_tutorial.js）。利用者のドラフトがあるときだけ押せる（ドラフトを題材に案内するため）。
+  const tutorialBtn = el("button", { type: "button", class: "lab-tutorial-btn guide-start-btn", "data-no-busy": "", text: "🧭 " + _t("スキル研究室チュートリアル"), disabled: "disabled" });
   mainEl.append(
-    el("div", { class: "view-header" }, [el("h2", { text: _t("スキル研究室") })]),
+    el("div", { class: "view-header" }, [el("h2", { text: _t("スキル研究室") }), tutorialBtn]),
     el("p", {
       class: "hint",
       text:
@@ -83,6 +85,15 @@ async function renderSkillLab() {
     el("div", { class: "lab-layout" }, [sidebar, panel]),
   );
   const data = await api("/api/skill-lab/overview");
+  const withDrafts = data.instances.filter((r) => !r.error && ((r.counts || {}).drafts || 0) > 0);
+  tutorialBtn.disabled = !withDrafts.length || typeof startSkillLabTutorial !== "function";
+  tutorialBtn.title = withDrafts.length
+    ? _t("利用者のドラフトスキルを題材に、テーマの作り方・設定・スキル調整ループ・昇格までを順番に案内します")
+    : _t("利用者のドラフトスキルがあると使えます（チャットで skill-creator を使ってスキルを作ると、ドラフトができます）");
+  tutorialBtn.addEventListener("click", () => {
+    const target = withDrafts.find((r) => r.name === labSelectedInstance) || withDrafts[0];
+    if (target) startSkillLabTutorial(target.name, target.display_name);
+  });
   const labsBox = el("div", { class: "lab-labs" }, [el("h4", { text: _t("スキル調整ワーカー（実行役）") })]);
   if (!data.labs.length) {
     labsBox.append(
@@ -123,8 +134,25 @@ async function renderSkillLabPanel(container, name) {
   const [themesData, src] = await Promise.all([api(labPath(name, "/themes")), api(labPath(name, "/sources"))]);
   const meta = (typeof instanceCache !== "undefined" ? instanceCache : []).find((i) => i.name === name);
   container.append(labPanelHeader(name, meta ? meta.display_name : name, themesData.labs));
+  // インスタンス詳細の「スキル研究室」サブタブからも、チュートリアルを始められるようにする（上部のタブでは見出しに出しているので出さない）。
+  // チュートリアルは上部の「スキル研究室」タブへ移って、このインスタンスで案内する。
+  if (!container.closest(".lab-layout")) {
+    const hasDrafts = src.drafts.length > 0;
+    const tutorialBtn = el("button", {
+      type: "button",
+      class: "lab-tutorial-btn guide-start-btn",
+      "data-no-busy": "",
+      text: "🧭 " + _t("スキル研究室チュートリアル"),
+      disabled: hasDrafts && typeof startSkillLabTutorial === "function" ? null : "disabled",
+      title: hasDrafts
+        ? _t("利用者のドラフトスキルを題材に、テーマの作り方・設定・スキル調整ループ・昇格までを順番に案内します")
+        : _t("利用者のドラフトスキルがあると使えます（チャットで skill-creator を使ってスキルを作ると、ドラフトができます）"),
+      onclick: () => startSkillLabTutorial(name, meta ? meta.display_name : name),
+    });
+    container.append(el("div", { class: "lab-tutorial-row" }, [tutorialBtn]));
+  }
 
-  const createBtn = el("button", { class: "primary", text: _t("＋ テーマを作成"), onclick: () => openCreateThemeModal(container, name, themesData.labs) });
+  const createBtn = el("button", { class: "primary", "data-guide": "create-theme", text: _t("＋ テーマを作成"), onclick: () => openCreateThemeModal(container, name, themesData.labs) });
   container.append(el("div", { class: "lab-section-head" }, [el("h3", { text: _t("研究テーマ") }), createBtn]));
   const rows = themesData.themes.map((t) => [
     linkBtn(t.title, () => renderThemeDetail(container, name, t.id)),
@@ -137,7 +165,9 @@ async function renderSkillLabPanel(container, name) {
       ? ""
       : el("button", { class: "btn-danger", text: _t("削除"), onclick: () => deleteTheme(name, t, () => renderSkillLabPanel(container, name)) }),
   ]);
-  container.append(dataTable([_t("テーマ"), _t("状態"), _t("研究対象"), _t("ケース"), _t("最新の結果"), _t("更新"), ""], rows, _t("まだテーマはありません。")));
+  const themesTable = dataTable([_t("テーマ"), _t("状態"), _t("研究対象"), _t("ケース"), _t("最新の結果"), _t("更新"), ""], rows, _t("まだテーマはありません。"));
+  themesTable.dataset.guide = "themes";
+  container.append(themesTable);
 
   container.append(el("h3", { text: _t("利用者のドラフト（このインスタンス）") }));
   const draftRows = src.drafts.map((d) => [
@@ -172,7 +202,9 @@ async function renderSkillLabPanel(container, name) {
           }),
     ]),
   ]);
-  container.append(dataTable([_t("ドラフト"), _t("状態"), _t("更新"), ""], draftRows, _t("このインスタンスにドラフトはありません。")));
+  const draftsTable = dataTable([_t("ドラフト"), _t("状態"), _t("更新"), ""], draftRows, _t("このインスタンスにドラフトはありません。"));
+  draftsTable.dataset.guide = "drafts";
+  container.append(draftsTable);
 }
 
 function defaultLab(labs) {
@@ -226,7 +258,7 @@ async function renderThemeDetail(container, name, id, sub) {
   container.innerHTML = "";
   const state = { name, id, sub: sub || "overview", data: null, sources: null };
   const header = el("div", { class: "theme-header" });
-  const nav = el("nav", { class: "subtabs" });
+  const nav = el("nav", { class: "subtabs theme-subtabs" });
   const body = el("div", { class: "theme-body" });
   const back = el("button", { class: "back-btn", text: _t("← テーマ一覧"), onclick: () => renderSkillLabPanel(container, name) });
   container.append(back, header, nav, body);
@@ -345,7 +377,7 @@ function renderThemeHeader(state, header, container) {
     el("div", { class: "theme-title-row" }, [el("h3", { text: d.title }), statusBadge(d.status)]),
     el("div", { class: "hint", text: _t(`対象インスタンス: {0} ／ 担当の スキル調整ワーカー: {1} ／ 反復 {2} 回 ／ 作成 {3} {4}`, d.instance, lab ? lab.display_name : _t("未選択"), (d.iterations || []).length, d.created_by || "", fmtTime(d.created_at)) }),
     ...notes,
-    el("div", { class: "theme-actions" }, buttons),
+    el("div", { class: "theme-actions", "data-guide": "theme-actions" }, buttons),
   );
 }
 
@@ -487,7 +519,7 @@ function loopSettingsEditor(d, disabled) {
     const label = LOOP_SETTING_LABELS[spec.key] ? LOOP_SETTING_LABELS[spec.key]() : spec.key;
     return el("label", { title: source }, [`${label}（${source}）`, input]);
   });
-  const details = el("details", { class: "theme-advanced" }, [
+  const details = el("details", { class: "theme-advanced", "data-guide": "theme-advanced" }, [
     el("summary", { text: _t("上級者向け設定（このテーマだけ。空欄なら既定）") }),
     el("p", {
       class: "hint",
@@ -558,9 +590,9 @@ function renderThemeSettings(state, box) {
   });
   box.append(
     el("h4", { text: _t("テーマの設定") }),
-    el("label", {}, [_t("テーマ名"), title]),
-    el("label", {}, [_t("担当の スキル調整ワーカー"), lab]),
-    el("label", {}, [
+    el("label", { "data-guide": "theme-title" }, [_t("テーマ名"), title]),
+    el("label", { "data-guide": "theme-lab" }, [_t("担当の スキル調整ワーカー"), lab]),
+    el("label", { "data-guide": "theme-repeats" }, [
       _t("トライアウトの回数（各ケースをこの回数ずつ実行し、全回合格で合格。空欄なら既定の {0} 回）", d.tryout_repeats_default),
       repeats,
     ]),
@@ -568,7 +600,7 @@ function renderThemeSettings(state, box) {
     active ? el("p", { class: "hint", text: _t("ループ・トライアウトの実行中・開始待ちの間は、担当・トライアウトの回数・上級者向け設定を変えられません。先に停止してください。") }) : null,
     closed ? el("p", { class: "hint", text: _t("このテーマは終わっています。「再開して編集」で戻すと変えられます。") }) : null,
     err,
-    el("div", { class: "inline-form" }, [save]),
+    el("div", { class: "inline-form", "data-guide": "theme-settings-save" }, [save]),
   );
   return inputsChanged(box);
 }
@@ -825,7 +857,7 @@ async function renderThemeSpec(state, box) {
   let saved = read();
   const request = el("input", { type: "text", placeholder: _t("AI への補足（任意）") });
   box.append(
-    el("div", { class: "inline-form" }, [
+    el("div", { class: "inline-form", "data-guide": "spec-actions" }, [
       el("button", {
         class: "primary",
         text: _t("保存"),
@@ -1047,7 +1079,7 @@ function targetAddForms(state) {
     err.textContent = "";
   };
   select(state.addWay || null);
-  return el("details", { class: "asset-add", open: state.data.summary.assets.skills.length + state.data.summary.assets.agents.length ? null : "open" }, [
+  return el("details", { class: "asset-add", "data-guide": "asset-add", open: state.data.summary.assets.skills.length + state.data.summary.assets.agents.length ? null : "open" }, [
     el("summary", { text: _t("研究対象を追加") }),
     el("div", { class: "seg-group" }, buttons),
     placeholder,
@@ -1301,6 +1333,8 @@ function renderThemeCases(state, body) {
       ...(editable ? [" ", linkBtn(_t("削除"), () => deleteCase(state, c, err))] : []),
     ]),
   ]);
+  const casesTable = dataTable(["ID", _t("利用者の指示"), _t("使うファイル"), _t("AI が判断する点"), ""], rows, _t("まだケースはありません。"));
+  casesTable.dataset.guide = "cases-table";
   body.append(
     el("h4", {}, [requiredLabel(_t("③ ケース（1件以上）"), true)]),
     el("p", { class: "hint", text: _t("② のとおりに動くかを、実際に試すための問題です。1問ごとに「利用者が打ちそうな指示」と「どうなっていれば合格か」を決めます。") }),
@@ -1309,17 +1343,17 @@ function renderThemeCases(state, body) {
       class: "hint",
       text: _t("「スキル調整ループを開始」を押すと、AI がこの試験を何度も解き、不合格ならスキルを直して解き直します。AI は問題を書き換えません。問題そのもの（指示・合格の決め方）に原因があると AI が判断したときは、ループを止めて知らせます。"),
     }),
-    dataTable(["ID", _t("利用者の指示"), _t("使うファイル"), _t("AI が判断する点"), ""], rows, _t("まだケースはありません。")),
+    casesTable,
     err,
   );
   if (editable) {
     const count = el("input", { type: "number", min: 1, max: 10, value: 3, class: "narrow" });
     const request = el("input", { type: "text", placeholder: _t("AI への補足（任意）") });
     body.append(
-      el("div", { class: "inline-form" }, [
+      el("div", { class: "inline-form", "data-guide": "case-create" }, [
         el("button", { class: "primary", text: _t("＋ ケースを自分で作る"), onclick: () => openCaseEditor(state, null) }),
       ]),
-      el("div", { class: "inline-form" }, [
+      el("div", { class: "inline-form", "data-guide": "case-ai" }, [
         el("span", { class: "hint", text: _t("または ① と ② をもとに AI に") }),
         count,
         el("span", { class: "hint", text: _t("問 作ってもらう") }),
@@ -1333,7 +1367,7 @@ function renderThemeCases(state, body) {
   }
 
   body.append(
-    el("h5", {}, [requiredLabel(_t("ケースで使うファイル"), false)]),
+    el("h5", { "data-guide": "fixtures" }, [requiredLabel(_t("ケースで使うファイル"), false)]),
     el("p", { class: "hint", text: _t("見積書など、ケースで AI に渡すファイルをここに置きます。試験のたびに写しを使うので、元のファイルは変わりません。") }),
   );
   const fixtureFiles = d.files.filter((f) => f.path.startsWith("cases/fixtures/"));

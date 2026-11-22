@@ -2765,3 +2765,79 @@
     padding: 10px;
   }
 }
+
+/* 使い方のチュートリアル（ChatTutorial.tsx）。説明のカードは右下に出し、画面は覆わない。 */
+.chat-tutorial-card {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 60;
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  color: var(--text);
+  border: 2px solid var(--accent);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.25);
+}
+.chat-tutorial-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  font-size: 13px;
+}
+.chat-tutorial-count { flex: 1; color: var(--text-muted); }
+.chat-tutorial-collapse { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 14px; }
+.chat-tutorial-card--collapsed .chat-tutorial-head { border-bottom: none; border-radius: var(--radius-lg); }
+.chat-tutorial-body { padding: 4px 16px; overflow-y: auto; font-size: 13px; line-height: 1.65; }
+.chat-tutorial-body h4 { margin: 10px 0 6px; font-size: 15px; }
+.chat-tutorial-body p { margin: 0 0 8px; }
+.chat-tutorial-actions { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); }
+.chat-tutorial-actions button {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+}
+.chat-tutorial-actions button:disabled { opacity: 0.5; cursor: default; }
+.chat-tutorial-actions .chat-tutorial-skip { margin-right: auto; background: none; border: none; color: var(--text-muted); text-decoration: underline; padding: 6px 0; }
+.chat-tutorial-actions .chat-tutorial-next { background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 600; }
+.chat-tutorial-target {
+  outline: 2px solid var(--accent) !important;
+  outline-offset: 3px;
+  animation: chat-tutorial-pulse 1.6s ease-in-out infinite;
+}
+@keyframes chat-tutorial-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 50%, transparent); }
+  50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--accent) 12%, transparent); }
+}
+/* 表示設定のチュートリアルのボタン */
+.theme-picker-tutorial-button {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+}
+@media (max-width: 640px) {
+  .chat-tutorial-card { right: 16px; bottom: 16px; width: auto; left: 16px; max-height: 55vh; }
+}
+/* 対象の近くに置いたカード（ChatTutorial.tsx の placeCard が left/top を入れる） */
+.chat-tutorial-card--anchored {
+  right: auto;
+  bottom: auto;
+  transition: left 0.2s ease, top 0.2s ease;
+}

@@ -9,6 +9,7 @@ import { WorkDirButton } from './WorkDirButton';
 import { ReasoningEffortButton, getStoredReasoningEffort } from './ReasoningEffortButton';
 import { PlanModeBadge } from './PlanModeBadge';
 import { Icon } from './Icon';
+import { FILL_COMPOSER_EVENT } from './ChatTutorial';
 import { selectAppliedInjectionIds, type InputLimits } from '../utils/messageTree';
 
 export interface PendingAttachment {
@@ -113,7 +114,20 @@ export function Composer({
   const [pasteError, setPasteError] = useState<string | null>(null);
   const [queued, setQueued] = useState<QueuedInstruction[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesRef = useRef(messages);
+
+  // 使い方のチュートリアルが、入力欄に例の指示を入れる（ChatTutorial.tsx の FILL_COMPOSER_EVENT）。
+  useEffect(() => {
+    const onFill = (ev: Event) => {
+      const text = (ev as CustomEvent<string>).detail;
+      if (typeof text !== 'string') return;
+      setValue(text);
+      textareaRef.current?.focus();
+    };
+    window.addEventListener(FILL_COMPOSER_EVENT, onFill);
+    return () => window.removeEventListener(FILL_COMPOSER_EVENT, onFill);
+  }, []);
   messagesRef.current = messages;
 
   const isReplying = askUser?.spec.type === 'text';
@@ -438,6 +452,7 @@ export function Composer({
       ) : null}
       <div className="composer-box">
         <textarea
+          ref={textareaRef}
           className="composer-textarea"
           value={value}
           placeholder={

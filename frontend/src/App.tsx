@@ -33,6 +33,7 @@ import { CadViewerBar } from './components/CadViewerBar';
 import { AskTextBar } from './components/AskTextBar';
 import { AskFileDropzone } from './components/AskFileDropzone';
 import { StarterPrompts } from './components/StarterPrompts';
+import { ChatTutorial } from './components/ChatTutorial';
 import { countSteps, deriveThreadView, pruneMessages, selectRunningStepChain } from './utils/messageTree';
 import type { IStep } from '@chainlit/react-client';
 import { useIsMobile } from './utils/useIsMobile';
@@ -549,6 +550,13 @@ function App() {
         onClose={closeMobileDrawer}
       />
       {isMobile && mobileDrawer ? <div className="drawer-backdrop" onClick={closeMobileDrawer} /> : null}
+      {/* 初めて使うユーザー（会話が1件も無い）向けの使い方のチュートリアル。最後に実際に1回送ってもらう */}
+      <ChatTutorial
+        hasSentMessage={hasSentMessage}
+        loading={loading}
+        hasAnswer={lastMain?.type === 'assistant_message' && !lastMain.streaming}
+        hasStarters={!hasSentMessage && starterPrompts.length > 0}
+      />
     </div>
   );
 }

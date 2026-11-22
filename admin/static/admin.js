@@ -335,6 +335,8 @@ async function renderInstances() {
   // 一覧の取得中に別の画面へ移っていたら始めない。
   const cards = $("#instance-cards");
   if (cards) startMonitorPolling(cards, refreshCardActivity);
+  // 初回起動の default・新しく作ったインスタンスなら、初期設定ガイドを出す（setup_guide.js）。
+  if (cards && typeof maybeStartSetupGuide === "function") maybeStartSetupGuide();
 }
 
 async function refreshInstanceCards() {
@@ -763,6 +765,8 @@ function openCreateInstanceModal() {
       if (skipped.length) {
         alert(_t(`インスタンス {0} を作成しました。複製元の次の設定は引き継いでいません:\n\n{1}`, created.name, skipped.map((s) => `・${s}`).join("\n")));
       }
+      // 本体（チャット）を作ったら、そのインスタンスの初期設定ガイドを始める（setup_guide.js）。
+      if (created.setup_guide_pending && typeof startSetupGuide === "function") startSetupGuide(created.name);
     } catch (e) {
       modal.querySelector("#create-instance-error").textContent = e.message;
     }
@@ -948,6 +952,10 @@ async function renderInstanceDetail(name, initialView) {
     const hide = isLab ? ["monitor", "threads", "usage", "users", "display", "skill-lab", "knowledge", "memory"].includes(btn.dataset.subview) : false;
     btn.classList.toggle("hidden", hide);
   });
+  // 初期設定ガイド（setup_guide.js）をもう一度始めるボタン。スキル調整ワーカーには対象の設定が無いため出さない。
+  const guideBtn = $(".setup-guide-start-btn");
+  guideBtn.classList.toggle("hidden", isLab || typeof startSetupGuide !== "function");
+  guideBtn.addEventListener("click", () => startSetupGuide(name));
   await selectInstanceSubview(initialView || "config");
 }
 

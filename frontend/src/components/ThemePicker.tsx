@@ -17,6 +17,7 @@ import {
   type TestNotifyResult
 } from '../notify';
 import { Icon } from './Icon';
+import { START_TUTORIAL_EVENT } from './ChatTutorial';
 
 const TEST_RESULT_NOTE: Record<TestNotifyResult | 'pending', MessageKey> = {
   pending: 'theme.notifyTestPending',
@@ -182,6 +183,19 @@ export function ThemePicker() {
               </button>
             </div>
             <div className="theme-picker-note">{t(notifyNote ?? 'theme.notifyNote')}</div>
+          </div>
+          <div className="theme-picker-section">
+            <div className="theme-picker-section-title">{t('tutorial.startSection')}</div>
+            <button
+              type="button"
+              className="theme-picker-tutorial-button"
+              onClick={() => {
+                setOpen(false);
+                window.dispatchEvent(new Event(START_TUTORIAL_EVENT));
+              }}
+            >
+              {t('tutorial.start')}
+            </button>
           </div>
         </div>
       ) : null}

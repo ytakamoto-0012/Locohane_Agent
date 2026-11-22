@@ -40,7 +40,7 @@ def _t_call_keys(source: str) -> set[str]:
 def test_every_translated_js_string_has_english() -> None:
     english = _english_keys()
     missing = {}
-    for name in ("admin.js", "skill_lab.js", "knowledge.js", "assistant.js", "data_backup.js", "admin_settings.js"):
+    for name in ("admin.js", "skill_lab.js", "knowledge.js", "assistant.js", "data_backup.js", "admin_settings.js", "setup_guide.js", "skill_lab_tutorial.js"):
         keys = _t_call_keys((STATIC_DIR / name).read_text(encoding="utf-8"))
         lacking = sorted(k for k in keys if k not in english)
         if lacking:

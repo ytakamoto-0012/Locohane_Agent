@@ -283,6 +283,9 @@ def _infer_ui_kind(section: str, key: str, value: str) -> str:
     if (section, key) in _MULTILINE_KEYS:
         return "multiline"
     stripped = value.strip()
+    # 値の構造（_KEY_SCHEMAS）を持つキーはリスト。既定値が空（[llm] sub_url 等。空リストと同じに読む）でもリストの編集欄にする。
+    if (section, key) in _KEY_SCHEMAS and not stripped:
+        return "list"
     if stripped.startswith("["):
         try:
             if isinstance(ast.literal_eval(stripped), list):

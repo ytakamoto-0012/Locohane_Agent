@@ -54,7 +54,7 @@ DESCRIPTIONS: dict[str, str] = {
         'Endpoints with provider="openai_compatible" are not checked and are chosen immediately as before.'
     ),
     'llm.sub_url': (
-        'Same format and default as main_url. Change this when you want to route to a llama-server instance / model different from the main agent.\n'
+        'Same format as main_url. Empty by default (main_url is used as is). Set it only when you want to route to a llama-server instance / model different from the main agent.\n'
         'If not specified (no key, or an empty value), main_url is used as is.\n'
         'If a model name is specified with the frontmatter model of agents/*.md (or the model argument of dispatch_agent), only endpoints whose "model" here matches are candidates, chosen with sub_routing_strategy. If no endpoint matches (or all are out of their time range), sub_default_model below is used, and if that cannot be used either, the specification is ignored.'
     ),

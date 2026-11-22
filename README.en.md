@@ -143,6 +143,17 @@ The admin tool (settings dashboard) starts at `http://127.0.0.1:8001`, and Locoh
    to the inference server you started in step 2, save, and restart the instance.
 2. Open `http://127.0.0.1:8000` in a browser to see the chat screen.
 
+On the first start (and when you create a new instance), the admin tool shows a **setup guide**.
+It walks you step by step, with explanations, from the settings such as the AI endpoints, the data location, the vector DB and sign-in,
+through saving and restarting, to opening the chat screen (it also guides you through 1. and 2. above; you can end it with "Skip",
+and run it again at any time with "Setup guide" on the instance's settings screen).
+When there are skills users made in the chat (drafts), **"Skill Lab tutorial"** in the "Skill Lab" tab at the top walks you through
+finishing a draft into a skill usable in production (creating a theme, the theme settings, the skill tuning loop and promotion).
+The chat screen also shows a **tutorial** when a user with no conversations yet opens it for the first time. It explains the input field,
+attachments, the working folder, the conversation list and so on, and finally guides you through actually sending an example instruction
+to the AI until the answer arrives (you can see it again at any time from the display settings (palette icon) at the top right →
+"Start the tutorial").
+
 To use English from the start for everyone, set `default_language = en` in the `[ui]` section of `config.ini`
 (see "Display language" below).
 

@@ -257,6 +257,8 @@ def _instance_summary(name: str) -> dict[str, Any]:
         "url": f"{_URL_SCHEME}://127.0.0.1:{meta.app_port}",
         "is_default": name == inst.DEFAULT_INSTANCE_NAME,
         "kind": meta.kind,
+        # 初期設定ガイドをまだ終えていない（初回起動の default・新しく作った本体）。ダッシュボードがガイドを出す。
+        "setup_guide_pending": inst.is_setup_guide_pending(INSTANCES_ROOT, name),
     }
 
 
@@ -316,6 +318,37 @@ def create_instance(
     )
     # 複製元から引き継がなかった設定（固定パスの common_data_dir 等）。作成ダイアログが管理者に知らせる。
     return {**_instance_summary(meta.name), "skipped_settings": skipped}
+
+
+class SetupGuideBody(BaseModel):
+    # finished（最後まで進んだ）/ skipped（スキップした）。変更履歴に残すだけで、どちらも印を消す。
+    result: str = "finished"
+
+
+@app.post("/api/instances/{name}/setup-guide/done")
+def finish_setup_guide(
+    name: str,
+    body: SetupGuideBody,
+    request: Request,
+    user: str = Depends(require_login),
+    _csrf: None = Depends(require_csrf),
+):
+    """初期設定ガイドを終えた・スキップした印として、.setup_guide_pending を消す（次からは自動で出さない）。"""
+    _require_instance(name)
+    was_pending = inst.is_setup_guide_pending(INSTANCES_ROOT, name)
+    inst.set_setup_guide_pending(INSTANCES_ROOT, name, False)
+    if was_pending:
+        audit.append(
+            AUDIT_LOG_PATH,
+            {
+                "instance": name,
+                "actor": user,
+                "remote_addr": _client_ip(request),
+                "action": "setup_guide_done",
+                "result": "skipped" if body.result == "skipped" else "finished",
+            },
+        )
+    return {"success": True}
 
 
 class UpdateInstanceBody(BaseModel):
@@ -1761,8 +1794,22 @@ app.include_router(
 # 静的ファイル（ログイン画面・ダッシュボードUI）
 # ---------------------------------------------------------------------------
 
+class _RevalidatingStaticFiles(StaticFiles):
+    """ダッシュボードの画面ファイルを、読み込むたびに更新の有無を確かめさせる（Cache-Control: no-cache）。
+
+    ファイル名に版が入っていない（admin.js 等）ため、キャッシュの指示が無いとブラウザが Last-Modified から
+    推測した期間だけ古いファイルを使い続け、更新した画面（新しいボタン等）が出ないことがあった。
+    no-cache でも ETag で確かめるので、変わっていなければ 304 で済む。
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 if STATIC_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+    app.mount("/", _RevalidatingStaticFiles(directory=str(STATIC_DIR), html=True), name="static")
 
 
 def _setup_file_logging() -> None:

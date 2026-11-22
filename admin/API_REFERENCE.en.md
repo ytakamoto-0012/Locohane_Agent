@@ -128,7 +128,21 @@ $C $BASE/api/instances
 
 Main fields of each element: `name`, `display_name`, `app_host`, `app_port`,
 `autostart`, `headless`, `watch`, `state` (`running`/`stopped`/`external`/`crashed`),
-`pid`, `url`, `is_default`, `kind` (`app` = Locohane itself / `skill_lab` = Skill Lab).
+`pid`, `url`, `is_default`, `kind` (`app` = Locohane itself / `skill_lab` = Skill Lab),
+`setup_guide_pending` (the setup guide has not been finished yet = `default` on the first start, or a newly created app instance; see "Finish the setup guide" below).
+
+### Finish the setup guide
+
+Sets `setup_guide_pending` to `false` (the dashboard no longer shows the guide automatically). `result` is
+`finished` (went to the end) or `skipped` (skipped), and is only recorded in the change history (`setup_guide_done`).
+
+```bash
+$C -X POST $BASE/api/instances/default/setup-guide/done -H "$H" -H "$J" -d '{"result":"skipped"}'
+```
+
+```bat
+%C% -X POST %BASE%/api/instances/default/setup-guide/done -H %H% -H %J% -d "{\"result\":\"skipped\"}"
+```
 
 ### Create
 

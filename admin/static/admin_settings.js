@@ -19,6 +19,10 @@ async function renderAdminSettings(notice = "") {
   mainEl.innerHTML = "";
   const container = el("section", { class: "admin-settings" });
   mainEl.append(container);
+  // 保存していない変更がある印（初期設定ガイドが、保存せずに先へ進む前に確かめる）。保存すると画面ごと作り直すので消える。
+  const markDirty = () => (container.dataset.dirty = "1");
+  container.addEventListener("input", markDirty);
+  container.addEventListener("change", markDirty);
   const data = await api("/api/admin-settings");
   const byKey = Object.fromEntries(data.settings.map((s) => [`${s.section}.${s.key}`, s]));
   const inputs = {};
@@ -38,7 +42,8 @@ async function renderAdminSettings(notice = "") {
     const s = byKey[name];
     inputs[name] = control;
     if (s.source === "env") control.disabled = true;
-    return el("div", { class: "admin-setting" }, [
+    // data-setting: 初期設定ガイド（setup_guide.js）が項目を探して強調する目印。
+    return el("div", { class: "admin-setting", "data-setting": name }, [
       el("label", {}, [el("span", { class: "admin-setting-label", text: label }), sourceBadge(s), control]),
       el("div", { class: "hint", text: _t(`[{0}] {1}（config.ini の値: {2}）`, s.section, s.key, s.default === "" ? _t("（空）") : s.default) }),
       s.source === "env" ? el("div", { class: "warn-box", text: _t(`環境変数 {0} で上書きされているため、ここでは変えられません。`, s.env) }) : null,

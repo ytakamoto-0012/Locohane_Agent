@@ -600,3 +600,35 @@ input.narrow { width: 80px; }
 .lab-progress { display: flex; align-items: center; gap: 8px; margin: 8px 0; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; }
 .lab-spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent, #4a8cff); border-radius: 50%; animation: lab-spin 0.9s linear infinite; flex: none; }
 @keyframes lab-spin { to { transform: rotate(360deg); } }
+
+/* 初期設定ガイド（setup_guide.js）。説明のカードは右下に出し、操作の邪魔をしないよう画面は覆わない。
+   ダイアログ（.modal-backdrop、z-index 100）より手前（チュートリアルがインスタンス作成のダイアログを案内するため）。 */
+.setup-guide-card { position: fixed; right: 84px; bottom: 24px; z-index: 110; width: 420px; max-width: calc(100vw - 108px); max-height: calc(100vh - 120px);
+  display: flex; flex-direction: column; background: var(--panel); border: 2px solid var(--accent); border-radius: var(--radius);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6); }
+.setup-guide-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--panel-2); border-bottom: 1px solid var(--border); border-radius: var(--radius) var(--radius) 0 0; }
+.setup-guide-head .hint { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setup-guide-body { padding: 4px 14px; overflow-y: auto; line-height: 1.6; font-size: 13px; }
+.setup-guide-body h4 { margin: 10px 0 6px; font-size: 14px; }
+.setup-guide-body p { margin: 0 0 8px; }
+.setup-guide-actions { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); }
+.setup-guide-actions .link-btn { margin-right: auto; }
+.setup-guide-card.collapsed .setup-guide-body, .setup-guide-card.collapsed .setup-guide-actions { display: none; }
+.setup-guide-target { outline: 2px solid var(--accent) !important; outline-offset: 3px; border-radius: var(--radius); animation: setup-guide-pulse 1.6s ease-in-out infinite; }
+@keyframes setup-guide-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(74, 134, 232, 0.55); } 50% { box-shadow: 0 0 0 6px rgba(74, 134, 232, 0.15); } }
+/* ガイド表示中は、右下のカードに「変更を確認」「保存」や下の方の設定が隠れないよう、ずらす・余白を足す。 */
+body.setup-guide-open .config-footer { padding-right: 530px; }
+body.setup-guide-open #main { padding-bottom: 40vh; }
+@media (max-width: 900px) { body.setup-guide-open .config-footer { padding-right: 64px; } }
+/* 初期設定ガイド・スキル研究室チュートリアルを始めるボタン。見つけてもらえるよう、見出しのすぐ横に目立つ色で出す。 */
+.guide-start-btn { padding: 8px 18px; background: #f0a531; border: 2px solid #f0a531; color: #1a1206; font-weight: 700; font-size: 14px; border-radius: 999px; box-shadow: 0 0 0 4px rgba(240, 165, 49, 0.22); }
+.guide-start-btn:hover:not(:disabled) { background: #ffbf5c; border-color: #ffbf5c; }
+.guide-start-btn:disabled { background: var(--panel-2); border-color: var(--border); color: var(--text-dim); box-shadow: none; font-weight: 600; cursor: not-allowed; }
+.lab-tutorial-row { margin: 10px 0 4px; text-align: center; }
+.lab-tutorial-row .guide-start-btn { margin-left: 0; }
+/* 見出しの行では真ん中に置く（右端だとウィンドウを最大化したとき目に入らないため）。狭い画面では見出しと重ならないよう、見出しと右側の間の真ん中に置く。 */
+.view-header { position: relative; }
+.view-header .guide-start-btn { position: absolute; left: 50%; transform: translateX(-50%); }
+@media (max-width: 1100px) {
+  .view-header .guide-start-btn { position: static; transform: none; margin: 0 auto; }
+}
