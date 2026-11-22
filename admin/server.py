@@ -912,8 +912,8 @@ def set_user_rank(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except overrides.ValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    needs_restart = _supervisor.status(name).state == supervisor.InstanceState.RUNNING
-    return {"rank": body.rank, "needs_restart": needs_restart}
+    # ランクは本体が送信のたびに config_overrides.json の変化を見て読み直すため、再起動は要らない（src/live_settings.py）。
+    return {"rank": body.rank, "needs_restart": False}
 
 
 class UserAddBody(BaseModel):

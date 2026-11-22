@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRecoilValue } from 'recoil';
 import { currentThreadIdState, sessionIdState, useAuth, useConfig } from '@chainlit/react-client';
 import { BACKEND_URL } from '../chainlitClient';
@@ -32,7 +32,19 @@ const TARGET_CLASS = 'chat-tutorial-target';
 // 「〇〇へようこそ」に入れる名前の長さの上限。header.md の1行目がこれより長い（名前ではなく文章）なら名前を入れない。
 const APP_NAME_MAX_CHARS = 30;
 
+// 「新規チャット」・会話の一覧のクリックはページを読み込み直すため、続きの手順を sessionStorage（このタブだけ）に残して、
+// 読み込み直した後にそこから再開する。
+const RESUME_KEY = 'la-chat-tutorial-resume';
+
+interface ResumeState {
+  stepId: string;
+  withStarters: boolean;
+  user: string;
+}
+
 interface Step {
+  /** 読み込み直した後に再開する手順の名前（waitClick の next に使う） */
+  id?: string;
   title: MessageKey;
   body: MessageKey;
   /** 強調する要素の CSS セレクター（見つからなければ強調しない。スマホ幅で引き出しが閉じている等） */
@@ -43,6 +55,10 @@ interface Step {
   waitAnswer?: boolean;
   /** 定型文のボタンがあるときだけ出す手順 */
   needsStarters?: boolean;
+  /** 会話の一覧（[thread_store] enabled）があるときだけ出す手順 */
+  needsThreads?: boolean;
+  /** この要素のクリックを待つ手順（押すとページを読み込み直すので、next の手順から再開する） */
+  waitClick?: { selector: string; ignore?: string; next: string };
 }
 
 const STEPS: Step[] = [
@@ -52,13 +68,65 @@ const STEPS: Step[] = [
   { title: 'tutorial.workdirTitle', body: 'tutorial.workdirBody', targets: ['.work-dir-button'] },
   { title: 'tutorial.effortTitle', body: 'tutorial.effortBody', targets: ['.effort-button'] },
   { title: 'tutorial.startersTitle', body: 'tutorial.startersBody', targets: ['.starter-prompts'], needsStarters: true },
-  { title: 'tutorial.threadsTitle', body: 'tutorial.threadsBody', targets: ['.thread-sidebar', '.new-chat-button'] },
   { title: 'tutorial.detailsTitle', body: 'tutorial.detailsBody', targets: ['.side-panel'] },
   { title: 'tutorial.themeTitle', body: 'tutorial.themeBody', targets: ['.theme-picker-trigger'] },
-  { title: 'tutorial.tryTitle', body: 'tutorial.tryBody', targets: ['.composer-submit-button', '.composer-box'], tryIt: true },
+  // カードは最初の対象（入力欄全体）の上に置く。送信ボタンを基準にすると入力欄に被り、入れた例の指示が見えないため
+  { title: 'tutorial.tryTitle', body: 'tutorial.tryBody', targets: ['.composer-box', '.composer-submit-button'], tryIt: true },
   { title: 'tutorial.waitTitle', body: 'tutorial.waitBody', targets: ['.side-panel', '.composer-stop-button'], waitAnswer: true },
-  { title: 'tutorial.doneTitle', body: 'tutorial.doneBody', targets: ['.messages-scroll'] }
+  { title: 'tutorial.doneTitle', body: 'tutorial.doneBody', targets: ['.messages-scroll'] },
+  // 会話の一覧は、送った会話が一覧に入った後に、実際に操作してもらう:
+  // 新規チャットを押す → 一覧から今の会話を開く → もう一度新規チャットを押す → 締め（新しい会話の画面）
+  {
+    id: 'newChat',
+    title: 'tutorial.newChatTitle',
+    body: 'tutorial.newChatBody',
+    targets: ['.new-chat-button'],
+    needsThreads: true,
+    waitClick: { selector: '.new-chat-button', next: 'openThread' }
+  },
+  {
+    id: 'openThread',
+    title: 'tutorial.openThreadTitle',
+    body: 'tutorial.openThreadBody',
+    targets: ['.thread-list-item', '.thread-sidebar'],
+    needsThreads: true,
+    waitClick: { selector: '.thread-list-item', ignore: '.thread-list-item-actions', next: 'resumed' }
+  },
+  {
+    id: 'resumed',
+    title: 'tutorial.resumedTitle',
+    body: 'tutorial.resumedBody',
+    targets: ['.thread-list-item-active', '.messages-scroll'],
+    needsThreads: true
+  },
+  {
+    id: 'newChatAgain',
+    title: 'tutorial.newChatAgainTitle',
+    body: 'tutorial.newChatAgainBody',
+    targets: ['.new-chat-button'],
+    needsThreads: true,
+    waitClick: { selector: '.new-chat-button', next: 'finish' }
+  },
+  { id: 'finish', title: 'tutorial.finishTitle', body: 'tutorial.finishBody', targets: [], needsThreads: true }
 ];
+
+function readResume(): ResumeState | null {
+  try {
+    const raw = sessionStorage.getItem(RESUME_KEY);
+    return raw ? (JSON.parse(raw) as ResumeState) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeResume(state: ResumeState | null) {
+  try {
+    if (state) sessionStorage.setItem(RESUME_KEY, JSON.stringify(state));
+    else sessionStorage.removeItem(RESUME_KEY);
+  } catch {
+    /* 残せなければ、読み込み直した後は再開しない */
+  }
+}
 
 // 説明のカードと対象の間・画面の端との間（px）。
 const CARD_GAP = 14;
@@ -73,7 +141,7 @@ function clamp(value: number, min: number, max: number): number {
 /**
  * 説明のカードを対象の要素の近くへ置く。対象の下・上・右・左のうち、カードが画面に収まって対象と重ならない側を、
  * 空いている広さの順に選ぶ（入力欄なら上、左の会話一覧なら右、右の実行の詳細なら左になる）。
- * 対象が無い・どこにも収まらない（会話の欄全体等）・スマホ幅なら、置き場所の指定を外して既定（右下）に戻す。
+ * 対象が無い手順は画面の中央に置く。どこにも収まらない（会話の欄全体等）・スマホ幅なら、置き場所の指定を外して既定（右下。スマホは下端）に戻す。
  */
 function placeCard(card: HTMLElement, target: Element | null) {
   const reset = () => {
@@ -83,7 +151,14 @@ function placeCard(card: HTMLElement, target: Element | null) {
   };
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  if (!target || vw <= MOBILE_MAX_WIDTH) return reset();
+  if (vw <= MOBILE_MAX_WIDTH) return reset();
+  if (!target) {
+    // 対象の無い手順（最初の「ようこそ」）は、目に留まるよう画面の中央に出す。
+    card.classList.add('chat-tutorial-card--anchored');
+    card.style.left = `${Math.round(Math.max(VIEWPORT_MARGIN, (vw - card.offsetWidth) / 2))}px`;
+    card.style.top = `${Math.round(Math.max(VIEWPORT_MARGIN, (vh - card.offsetHeight) / 2))}px`;
+    return;
+  }
   const r = target.getBoundingClientRect();
   if (r.width === 0 && r.height === 0) return reset();
   const w = card.offsetWidth;
@@ -148,10 +223,21 @@ export function ChatTutorial({
       })
       .catch(() => setAppName(null));
   }, [open]);
-  const steps = STEPS.filter((s) => !s.needsStarters || hasStarters);
+  // 定型文の手順を出すかは、始めた時点で決める。送信すると定型文のボタンが消えるため、その場で数え直すと
+  // 手順の番号がずれ、「AI が考えています」等の手順を飛ばしてしまう。
+  const hasStartersRef = useRef(hasStarters);
+  hasStartersRef.current = hasStarters;
+  const [withStarters, setWithStarters] = useState(false);
+  // 会話の一覧の操作の手順は、会話履歴の保存が有効なときだけ（無効なら会話の一覧が無い）
+  const withThreads = Boolean(config?.dataPersistence);
+  const steps = useMemo(
+    () => STEPS.filter((s) => (!s.needsStarters || withStarters) && (!s.needsThreads || withThreads)),
+    [withStarters, withThreads]
+  );
   const step = open ? steps[Math.min(index, steps.length - 1)] : undefined;
 
   const start = useCallback(() => {
+    setWithStarters(hasStartersRef.current);
     setIndex(0);
     setCollapsed(false);
     setOpen(true);
@@ -159,6 +245,7 @@ export function ChatTutorial({
 
   const finish = useCallback(() => {
     setOpen(false);
+    writeResume(null);
     try {
       localStorage.setItem(doneKey(user?.identifier), new Date().toISOString());
     } catch {
@@ -172,6 +259,42 @@ export function ChatTutorial({
     window.addEventListener(START_TUTORIAL_EVENT, onStart);
     return () => window.removeEventListener(START_TUTORIAL_EVENT, onStart);
   }, [start]);
+
+  // 「新規チャット」・会話の一覧のクリックで読み込み直した後は、残しておいた手順から再開する（このタブで1回だけ）。
+  const resumeCheckedRef = useRef(false);
+  useEffect(() => {
+    if (resumeCheckedRef.current || !config) return;
+    resumeCheckedRef.current = true;
+    const saved = readResume();
+    if (!saved) return;
+    writeResume(null);
+    if (saved.user !== (user?.identifier ?? '')) return;
+    autoCheckedRef.current = true; // 再開したら、下の自動の開始はしない
+    const list = STEPS.filter(
+      (s) => (!s.needsStarters || saved.withStarters) && (!s.needsThreads || config.dataPersistence)
+    );
+    const i = list.findIndex((s) => s.id === saved.stepId);
+    if (i < 0) return;
+    setWithStarters(saved.withStarters);
+    setIndex(i);
+    setCollapsed(false);
+    setOpen(true);
+  }, [config, user?.identifier]);
+
+  // クリックを待つ手順: 対象を押したら、続きの手順を残して進める（押した後にページが読み込み直される）。
+  useEffect(() => {
+    const wait = step?.waitClick;
+    if (!wait) return;
+    const onClick = (ev: MouseEvent) => {
+      const node = ev.target instanceof Element ? ev.target : null;
+      if (!node || (wait.ignore && node.closest(wait.ignore)) || !node.closest(wait.selector)) return;
+      writeResume({ stepId: wait.next, withStarters, user: user?.identifier ?? '' });
+      const i = steps.findIndex((s) => s.id === wait.next);
+      if (i >= 0) setIndex(i);
+    };
+    document.addEventListener('click', onClick, true);
+    return () => document.removeEventListener('click', onClick, true);
+  }, [step, steps, withStarters, user?.identifier]);
 
   // 初めて開いたユーザー（会話が1件も無い）なら、接続できたところで1回だけ自動で始める。
   // 会話履歴の保存が無効だと、会話が無いかを確かめられないため自動では出さない。
@@ -250,8 +373,25 @@ export function ChatTutorial({
   if (!step) return null;
   const position = steps.indexOf(step);
   const last = position === steps.length - 1;
-  // 送信・回答を待つ手順では「次へ」を押さなくても進む（押せば待たずに進める）。
-  const next = () => (last ? finish() : setIndex(position + 1));
+  // 送信・回答を待つ手順は、送信した・回答が終わったときに自動で進む。その間は「次へ」を押せない（送らずに先へ
+  // 進むと、初めての人には何が起きたか分からないため）。回答が終わった後の手順から、また「次へ」を押せる。
+  const waiting = Boolean(step.tryIt || step.waitAnswer || step.waitClick);
+  const prev = steps[position - 1];
+  // 「戻る」で送信待ち・回答待ちの手順へは戻らない（戻ってもすぐ自動で進んでしまうため）。回答待ちの間も押せない。
+  const backDisabled =
+    position === 0 || Boolean(step.waitAnswer) || Boolean(prev?.tryIt || prev?.waitAnswer || prev?.waitClick);
+  const waitingLabel = step.tryIt
+    ? t('tutorial.waitingSend')
+    : step.waitAnswer
+      ? t('tutorial.waitingAnswer')
+      : step.waitClick
+        ? t('tutorial.waitingClick')
+        : null;
+  const next = () => {
+    if (waiting) return;
+    if (last) finish();
+    else setIndex(position + 1);
+  };
 
   return (
     <div
@@ -294,11 +434,17 @@ export function ChatTutorial({
             <button type="button" className="chat-tutorial-skip" title={t('tutorial.skipTitle')} onClick={finish}>
               {t('tutorial.skip')}
             </button>
-            <button type="button" disabled={position === 0} onClick={() => setIndex(position - 1)}>
+            <button type="button" disabled={backDisabled} onClick={() => setIndex(position - 1)}>
               {t('tutorial.back')}
             </button>
-            <button type="button" className="chat-tutorial-next" onClick={next}>
-              {last ? t('tutorial.done') : t('tutorial.next')}
+            <button
+              type="button"
+              className="chat-tutorial-next"
+              disabled={waiting}
+              title={waitingLabel ?? undefined}
+              onClick={next}
+            >
+              {waitingLabel ?? (last ? t('tutorial.done') : t('tutorial.next'))}
             </button>
           </div>
         </>

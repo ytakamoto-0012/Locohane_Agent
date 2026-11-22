@@ -2680,11 +2680,8 @@ function buildUserRankCell(name, data) {
         { method: "PUT", body: { rank: text === "" ? null : Number(text) } }
       );
       $("#users-error").textContent = "";
-      alert(
-        result.needs_restart
-          ? _t("ランクを保存しました。反映にはインスタンスの再起動が必要です。")
-          : _t("ランクを保存しました。")
-      );
+      // ランクは再起動しなくても、そのインスタンスの次の送信から効く（src/live_settings.py）。
+      alert(_t("ランクを保存しました。次の送信から効きます（再起動は要りません）。"));
     } catch (e) {
       $("#users-error").textContent = e.message;
     } finally {
@@ -2790,7 +2787,7 @@ async function renderUsers(container) {
   syncSelection();
   $("#users-rank-note").textContent = data.rank_error
     ? _t("ランクを読み込めません: {0}", data.rank_error)
-    : _t("ランクは、内容が食い違うメモリーをどのユーザーのものに従わせるかに使います（数が大きいほど上位。空欄は {0}）。保存後、インスタンスの再起動で反映されます。", data.default_rank);
+    : _t("ランクは、内容が食い違うメモリーをどのユーザーのものに従わせるかに使います（数が大きいほど上位。空欄は {0}）。保存すると、再起動しなくても次の送信から効きます。", data.default_rank);
 
   $("#add-user-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();

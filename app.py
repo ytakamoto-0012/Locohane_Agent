@@ -72,6 +72,8 @@ from src.config import resolve_instances_root as _resolve_instances_root
 _INSTANCE_NAME = os.getenv("LOCOHANE_INSTANCE") or "default"
 _INSTANCE_DIR = _resolve_instances_root() / _INSTANCE_NAME
 _instance_env_path = os.getenv("LOCOHANE_INSTANCE_ENV") or str(_INSTANCE_DIR / ".env")
+# .env を読む前の OS の環境変数 AUTH_USERS（ログインユーザーを再起動なしで読み直すときの優先度に使う。src/auth_users.py）
+_OS_AUTH_USERS = os.environ.get("AUTH_USERS")
 _load_dotenv(_instance_env_path, override=True)
 
 import uuid
@@ -99,6 +101,8 @@ from src.cleanup import cleanup_old_dirs, cleanup_old_files, cleanup_old_files_i
 from src.cleanup import run_cleanup_dirs_loop as cleanup_run_cleanup_dirs_loop
 from src.cleanup import run_cleanup_files_in_subdirs_loop as cleanup_run_cleanup_files_in_subdirs_loop
 from src.cleanup import run_cleanup_loop as cleanup_run_cleanup_loop
+from src.auth_users import AuthUsersSource
+from src.live_settings import MemoryRanksReloader
 from src.config import (
     load_config,
     with_reasoning_effort,
@@ -218,6 +222,8 @@ def _tool_step_label(event: dict) -> str:
 # （_setup() 内の遅延初期化より前）で行う必要がある。
 _config = load_config()
 i18n.set_default_language(_config.ui_default_language)
+# 設定ダッシュボードの「ユーザー」タブで変えたランクを、再起動せずに次の送信から使う（src/live_settings.py）。
+_memory_ranks = MemoryRanksReloader(_config)
 # セッションごとのグラフ構築（on_chat_start）・再構築（_rebuild_graph）に
 # 使い回すため保持しておく。
 _system_prompt = None
@@ -656,6 +662,9 @@ if _config.auth_enabled:
             "[auth] enabled=true in config.ini, but AUTH_USERS in .env is not set or empty. Register at least one username/password pair."
         )
 
+    # 設定ダッシュボードの「ユーザー」タブで変えたユーザーを、再起動せずに次のログインから使う（.env が変わったら読み直す）。
+    _auth_users = AuthUsersSource(Path(_instance_env_path), Path(__file__).resolve().parent / ".env", _OS_AUTH_USERS, _config.auth_users)
+
     @cl.password_auth_callback
     async def auth_callback(username: str, password: str) -> cl.User | None:
         """[auth] enabled=true のときのみ登録されるログイン検証コールバック。
@@ -664,8 +673,9 @@ if _config.auth_enabled:
             （hmac.compare_digest でタイミング攻撃を軽減した定数時間比較）。
         require_password=false: AUTH_USERS に登録済みのユーザー名であれば
             パスワードの内容を問わず通す。
+        ユーザーの一覧は .env が変わっていれば読み直す（再起動しなくても追加・削除・パスワードの変更が効く）。
         """
-        stored_password = _config.auth_users.get(username)
+        stored_password = _auth_users.get().get(username)
         if stored_password is None:
             return None
         # UTF-8 のバイト列で比べる（str のままだと ASCII 以外の文字を含むパスワードで TypeError になる）。
@@ -5695,6 +5705,11 @@ async def on_message(message: cl.Message) -> None:
     try/finally で必ず記録・中継設定を元に戻すため、正常終了・例外・
     停止ボタンによる CancelledError のいずれの経路でも取りこぼさない。
     """
+    # ユーザーのランクが設定ダッシュボードで変わっていれば読み直す（config_overrides.json が変わったときだけ読む）。
+    try:
+        await asyncio.to_thread(_memory_ranks.refresh)
+    except Exception:  # noqa: BLE001 - 読み直せなくても送信は続ける
+        logging.getLogger(__name__).warning("Failed to reload the user ranks", exc_info=True)
     thread_id = cl.user_session.get("thread_id")
     session = cl.context.session if thread_id is not None else None
     owner = thread_store.resolve_owner(session.user) if session is not None else None

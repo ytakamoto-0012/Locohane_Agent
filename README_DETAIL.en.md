@@ -1152,8 +1152,9 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
 - **User ranks** (`[memory] user_ranks`, `default_rank`): a number (an integer of 0 or more; larger is more senior) so
   that, in an organization, a manager's memories take precedence over their team members'. It can also be set in the rank
   column of the "Users" screen of the settings dashboard, and is saved in `[memory] user_ranks` as `{"username": rank}`
-  (unlike passwords it is not secret, so it can be set for users inherited from the project's `.env` too; it applies
-  after the instance restarts). Once a rank is set for anyone, lists and the index are ordered from the highest owner
+  (unlike passwords it is not secret, so it can be set for users inherited from the project's `.env` too). No restart is needed:
+  the app checks the modification time of `config_overrides.json` on every message and reloads only the ranks when it changed
+  (`src/live_settings.py`; list order and the `read_memory` notes apply from the next message, the system prompt explanation from the next new conversation). Once a rank is set for anyone, lists and the index are ordered from the highest owner
   rank (within the same rank: your own, then common, then other users'), and each line shows `rank N`. Common memories
   and users not in `user_ranks` have `default_rank` (default 1). The system prompt and the note `read_memory` adds
   (showing the owner's rank and yours) tell the LLM to follow the memory whose owner has the higher rank when memories
@@ -2414,10 +2415,15 @@ or thinking) are recorded in text files without using a database.
 ## Tutorial (chat screen)
 
 When a user with no conversations yet opens the chat screen for the first time, a tutorial appears (`frontend/src/components/ChatTutorial.tsx`).
-The explanation card is shown near the highlighted place (below, above, right or left, whichever side fits on the screen without covering it). For steps with no target or no side that fits, and at mobile width, it is shown at the bottom right (the bottom edge on mobile).
+The explanation card is shown near the highlighted place (below, above, right or left, whichever side fits on the screen without covering it). The first step with no target (welcome) is shown in the center of the screen; steps with no side that fits, and mobile width, show it at the bottom right (the bottom edge on mobile).
 Going on with "Next" following the explanation card, it highlights and explains, in order: welcome → input field → attachments → working folder → reasoning depth →
-starter buttons (only if there are any) → conversation list and new chat → run details → display settings. In the last step it puts an example instruction
-in the input field; when the user presses "Send", it moves on automatically to "The AI is thinking", and when the answer arrives it shows the closing explanation (a hello world).
+starter buttons (only if there are any) → run details → display settings. Then it puts an example instruction in the input field; when the user presses "Send",
+it moves on automatically to "The AI is thinking", when the answer arrives it explains how to correct answers (a hello world). Then the user actually operates the conversation list:
+press "New chat" → on the new conversation, open this conversation from the list (continuing it, renaming and deleting) → press "New chat" again →
+the closing explanation on a new conversation (center of the screen). "New chat" and clicking the list reload the page, so the next step is kept in sessionStorage
+(`la-chat-tutorial-resume`, this tab only) and the tutorial resumes from it after the reload. The conversation list steps appear only with `[thread_store] enabled = true`. Whether to include the starter step is decided when it starts (so the step numbers do not shift when sending hides the starter buttons).
+The steps waiting for the send, for the answer and for a click move on automatically when the message is sent, the answer is finished or the item is pressed; meanwhile "Next" and "Back" cannot be pressed
+(the button shows “Press "Send" to go on” etc.). "Next" can be pressed again from the step after the answer. The card of the send step is placed above the whole input field so it does not hide the example instruction.
 It does not cover the screen, so you can operate it while reading. The tutorial texts do not contain the app name (the display settings may set it to your company's AI name).
 The first heading uses the first line of header.md in the display settings (the same as the screen heading) as "Welcome to …"; if it cannot be read or is longer than 30 characters, it is just "Welcome".
 
@@ -2794,6 +2800,11 @@ On the "Environment variables" tab, `LOCOHANE_INSTANCE`, `LOCOHANE_INSTANCE_ENV`
 so changing the storage location or instance name with these would conflict with those checks. Change the data storage location
 from `[paths]` on the settings screen). Values are always written with quotes, so
 passwords and values containing spaces or `#` are saved as they are.
+
+Adding or deleting users and changing passwords takes effect from the next sign-in without restarting the instance. On every sign-in
+the app checks the modification times of the instance `.env` and the project root `.env`, and reloads `AUTH_USERS` if they changed
+(same priority as at startup; if it cannot be read because of a typo, the previous list is kept and a WARNING is logged; `src/auth_users.py`).
+Deleting a signed-in user does not end that browser's sign-in (JWT) before it expires. Regenerating the JWT signing key (`CHAINLIT_AUTH_SECRET`) takes effect after a restart.
 
 While no instance-only users are set, the UI shows them as inheriting `AUTH_USERS` of `.env` at the project root.
 Adding a user switches it to the instance's own settings (no longer inherited from then on).
