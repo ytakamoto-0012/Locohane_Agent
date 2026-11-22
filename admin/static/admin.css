@@ -616,9 +616,11 @@ input.narrow { width: 80px; }
 .setup-guide-card.collapsed .setup-guide-body, .setup-guide-card.collapsed .setup-guide-actions { display: none; }
 .setup-guide-target { outline: 2px solid var(--accent) !important; outline-offset: 3px; border-radius: var(--radius); animation: setup-guide-pulse 1.6s ease-in-out infinite; }
 @keyframes setup-guide-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(74, 134, 232, 0.55); } 50% { box-shadow: 0 0 0 6px rgba(74, 134, 232, 0.15); } }
-/* ガイド表示中は、右下のカードに「変更を確認」「保存」や下の方の設定が隠れないよう、ずらす・余白を足す。 */
+/* ガイド表示中は、右下のカードに「変更を確認」「保存」や下の方の設定が隠れないよう、ずらす・余白を足す。
+   余白は #main の padding-bottom ではなく末尾の空のブロックで取る。padding にすると、下端に貼り付く .config-footer
+   （position: sticky; bottom: 0）が padding の分だけ上に浮き、画面の中ほどで設定に被るため。 */
 body.setup-guide-open .config-footer { padding-right: 530px; }
-body.setup-guide-open #main { padding-bottom: 40vh; }
+body.setup-guide-open #main::after { content: ""; display: block; height: 40vh; }
 @media (max-width: 900px) { body.setup-guide-open .config-footer { padding-right: 64px; } }
 /* 初期設定ガイド・スキル研究室チュートリアルを始めるボタン。見つけてもらえるよう、見出しのすぐ横に目立つ色で出す。 */
 .guide-start-btn { padding: 8px 18px; background: #f0a531; border: 2px solid #f0a531; color: #1a1206; font-weight: 700; font-size: 14px; border-radius: 999px; box-shadow: 0 0 0 4px rgba(240, 165, 49, 0.22); }
@@ -648,4 +650,4 @@ body.setup-guide-open #main { padding-bottom: 40vh; }
 .setup-guide-card--docked .setup-guide-body p { margin: 0 0 6px; }
 .setup-guide-card--docked .setup-guide-actions { padding: 6px 12px; }
 /* 下端の帯に「変更を確認」「保存」・下の方の設定が隠れないよう、余白を足す（帯の高さの上限 45vh 分）。 */
-@media (max-width: 900px) { body.setup-guide-open #main { padding-bottom: 50vh; } }
+@media (max-width: 900px) { body.setup-guide-open #main::after { height: 50vh; } }
