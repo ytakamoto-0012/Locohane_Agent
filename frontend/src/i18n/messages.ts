@@ -305,14 +305,17 @@ export const ja = {
   'tutorial.next': '次へ',
   'tutorial.done': '完了',
   'tutorial.waitingSend': '「送信」を押すと進みます',
-  'tutorial.waitingAnswer': '回答が終わると進みます',
+  'tutorial.waitingAnswer': '回答が出始めると進みます',
+  'tutorial.waitingAnswerDone': '回答が終わると押せます',
   'tutorial.waitingClick': '対象を押すと進みます',
   'tutorial.newChatTitle': '新しい会話を始める',
   'tutorial.newChatBody': '別の話題を頼むときは、新しい会話を始めます。光っている「新規チャット」を押してください。今の会話は消えずに、左の会話の一覧に残ります。\n押すと画面が読み込み直され、続きの説明が出ます。',
   'tutorial.openThreadTitle': '前の会話を開く',
   'tutorial.openThreadBody': '新しい会話の画面になりました。さっきの会話は、左の会話の一覧に入っています。一覧の会話を押して開いてください（スマホでは、左上のボタンで一覧を開きます）。\n押すと画面が読み込み直され、続きの説明が出ます。',
-  'tutorial.resumedTitle': '会話の続きから頼める',
-  'tutorial.resumedBody': 'さっきの会話が開きました。ここで続けて指示を送ると、前のやり取りを踏まえて答えます。一覧の会話にマウスを乗せると、名前の変更（鉛筆）と削除（ごみ箱）のボタンが出ます。\n話題ごとに会話を分けると、AI が前の話に引きずられず、答えが正確になります。',
+  'tutorial.resumedTitle': '会話が開きました',
+  'tutorial.resumedBody': 'さっきの会話が開きました。前のやり取りが、そのまま表示されています。\n左の一覧の会話にマウスを乗せると、名前の変更（鉛筆）と削除（ごみ箱）のボタンが出ます。',
+  'tutorial.continueTitle': '会話の続きから頼める',
+  'tutorial.continueBody': 'この入力欄に続けて指示を書いて送ると、AI は前のやり取りを踏まえて答えます（例: 「2つ目をもっと詳しく」）。\n話題ごとに会話を分けると、AI が前の話に引きずられず、答えが正確になります。',
   'tutorial.newChatAgainTitle': 'もう一度、新しい会話へ',
   'tutorial.newChatAgainBody': '最後に、もう一度「新規チャット」を押して、新しい会話の画面に戻りましょう。',
   'tutorial.finishTitle': '準備ができました',
@@ -342,9 +345,9 @@ export const ja = {
   'tutorial.tryBody': '入力欄に、例の指示を入れました。「送信」を押してください（文章は自由に変えて構いません）。\n送ると、自動で次の説明に進みます（それまで「次へ」は押せません）。',
   'tutorial.tryPrompt': 'こんにちは！あなたができることを3つ、短く教えてください。',
   'tutorial.waitTitle': 'AI が考えています',
-  'tutorial.waitBody': 'AI が答えを作っています。「…」の横に今している処理が出て、右の「実行の詳細」に経過が並びます。答えは届いた所から少しずつ表示されます。\n止めたいときは「停止」を押します。答えを最後まで書き終えると、自動で次に進みます（それまで「次へ」は押せません）。',
+  'tutorial.waitBody': 'AI が答えを作っています。「…」の横に今している処理が出て、右の「実行の詳細」に経過が並びます。答えは届いた所から少しずつ表示されます。\n止めたいときは「停止」を押します。答えが出始めると、自動で次に進みます（それまで「次へ」は押せません）。',
   'tutorial.doneTitle': '回答が届きました',
-  'tutorial.doneBody': 'AI の答えが表示されました。答えが違うときは、どこが違うかをそのまま書いて送ると直してくれます。\nほかの仕事を頼むときも、何をしてほしいかをふつうの言葉で書いてみてください。'
+  'tutorial.doneBody': 'AI の答えが表示され始めました。書き終わるまで少し待ってください（書き終わると「次へ」を押せます）。\n答えが違うときは、どこが違うかをそのまま書いて送ると直してくれます。\nほかの仕事を頼むときも、何をしてほしいかをふつうの言葉で書いてみてください。'
 };
 
 export type MessageKey = keyof typeof ja;
@@ -647,14 +650,17 @@ const en: Record<MessageKey, string> = {
   'tutorial.next': 'Next',
   'tutorial.done': 'Done',
   'tutorial.waitingSend': 'Press "Send" to go on',
-  'tutorial.waitingAnswer': 'Goes on when the answer is done',
+  'tutorial.waitingAnswer': 'Goes on when the answer starts',
+  'tutorial.waitingAnswerDone': 'Available when the answer is done',
   'tutorial.waitingClick': 'Press the highlighted item to go on',
   'tutorial.newChatTitle': 'Start a new conversation',
   'tutorial.newChatBody': 'When you ask about a different topic, start a new conversation. Press the highlighted "New chat". The current conversation is not lost; it stays in the conversation list on the left.\nThe screen reloads, and the explanation continues.',
   'tutorial.openThreadTitle': 'Open the previous conversation',
   'tutorial.openThreadBody': 'You are now on a new conversation. The previous conversation is in the conversation list on the left. Press it in the list to open it (on a phone, open the list with the button at the top left).\nThe screen reloads, and the explanation continues.',
-  'tutorial.resumedTitle': 'Continue a conversation',
-  'tutorial.resumedBody': 'The previous conversation is open. If you send an instruction here, the AI answers taking the earlier exchange into account. Hover over a conversation in the list to show the buttons for renaming (pencil) and deleting (trash can).\nKeeping one conversation per topic keeps the AI from being pulled by earlier talk and makes its answers more accurate.',
+  'tutorial.resumedTitle': 'The conversation is open',
+  'tutorial.resumedBody': 'The previous conversation is open. The earlier exchange is shown as it was.\nHover over a conversation in the list on the left to show the buttons for renaming (pencil) and deleting (trash can).',
+  'tutorial.continueTitle': 'Continue a conversation',
+  'tutorial.continueBody': 'If you write and send a follow-up instruction in this input field, the AI answers taking the earlier exchange into account (e.g. "Tell me more about the second one").\nKeeping one conversation per topic keeps the AI from being pulled by earlier talk and makes its answers more accurate.',
   'tutorial.newChatAgainTitle': 'Back to a new conversation',
   'tutorial.newChatAgainBody': 'Finally, press "New chat" once more to go back to a new conversation.',
   'tutorial.finishTitle': 'You are all set',
@@ -684,9 +690,9 @@ const en: Record<MessageKey, string> = {
   'tutorial.tryBody': 'An example instruction has been put in the input field. Press "Send" (feel free to change the text).\nWhen you send it, the tutorial moves on automatically ("Next" cannot be pressed until then).',
   'tutorial.tryPrompt': 'Hello! Please briefly tell me three things you can do.',
   'tutorial.waitTitle': 'The AI is thinking',
-  'tutorial.waitBody': 'The AI is writing its answer. What it is doing now appears next to "…", and the progress is listed in "Run details" on the right. The answer is shown little by little as it arrives.\nTo stop it, press "Stop". When the AI has finished writing the answer, the tutorial moves on automatically ("Next" cannot be pressed until then).',
+  'tutorial.waitBody': 'The AI is writing its answer. What it is doing now appears next to "…", and the progress is listed in "Run details" on the right. The answer is shown little by little as it arrives.\nTo stop it, press "Stop". When the answer starts to appear, the tutorial moves on automatically ("Next" cannot be pressed until then).',
   'tutorial.doneTitle': 'The answer has arrived',
-  'tutorial.doneBody': 'The AI\'s answer is shown. If the answer is not right, just write what is wrong and send it, and the AI will fix it.\nFor other work too, try writing in plain words what you want done.'
+  'tutorial.doneBody': 'The AI\'s answer has started to appear. Please wait a little until it is finished (then you can press "Next").\nIf the answer is not right, just write what is wrong and send it, and the AI will fix it.\nFor other work too, try writing in plain words what you want done.'
 };
 
 export const MESSAGES: Record<Lang, Record<MessageKey, string>> = { ja, en };

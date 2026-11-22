@@ -53,6 +53,8 @@ interface Step {
   tryIt?: boolean;
   /** 回答が届くのを待つ手順 */
   waitAnswer?: boolean;
+  /** 回答を書き終えるまで「次へ」を押せない手順（回答が出始めたら入る「回答が届きました」） */
+  waitAnswerDone?: boolean;
   /** 定型文のボタンがあるときだけ出す手順 */
   needsStarters?: boolean;
   /** 会話の一覧（[thread_store] enabled）があるときだけ出す手順 */
@@ -73,7 +75,7 @@ const STEPS: Step[] = [
   // カードは最初の対象（入力欄全体）の上に置く。送信ボタンを基準にすると入力欄に被り、入れた例の指示が見えないため
   { title: 'tutorial.tryTitle', body: 'tutorial.tryBody', targets: ['.composer-box', '.composer-submit-button'], tryIt: true },
   { title: 'tutorial.waitTitle', body: 'tutorial.waitBody', targets: ['.side-panel', '.composer-stop-button'], waitAnswer: true },
-  { title: 'tutorial.doneTitle', body: 'tutorial.doneBody', targets: ['.messages-scroll'] },
+  { title: 'tutorial.doneTitle', body: 'tutorial.doneBody', targets: ['.messages-scroll'], waitAnswerDone: true },
   // 会話の一覧は、送った会話が一覧に入った後に、実際に操作してもらう:
   // 新規チャットを押す → 一覧から今の会話を開く → もう一度新規チャットを押す → 締め（新しい会話の画面）
   {
@@ -96,7 +98,15 @@ const STEPS: Step[] = [
     id: 'resumed',
     title: 'tutorial.resumedTitle',
     body: 'tutorial.resumedBody',
-    targets: ['.thread-list-item-active', '.messages-scroll'],
+    // 開いた会話（会話の欄全体）を囲む
+    targets: ['.messages-scroll', '.thread-list-item-active'],
+    needsThreads: true
+  },
+  {
+    title: 'tutorial.continueTitle',
+    body: 'tutorial.continueBody',
+    // 続きはここに書いて送る
+    targets: ['.composer-box'],
     needsThreads: true
   },
   {
@@ -186,6 +196,7 @@ export function ChatTutorial({
   hasSentMessage,
   loading,
   hasAnswer,
+  answerStarted,
   hasStarters
 }: {
   /** この会話で1回でも送信したか */
@@ -194,6 +205,8 @@ export function ChatTutorial({
   loading: boolean;
   /** 最後のメッセージが、書き終わった AI の回答か */
   hasAnswer: boolean;
+  /** 最後のメッセージが AI の回答か（書いている途中も含む） */
+  answerStarted: boolean;
   /** 定型文のボタンが出ているか */
   hasStarters: boolean;
 }) {
@@ -327,12 +340,23 @@ export function ChatTutorial({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step?.tryIt, hasSentMessage]);
 
-  // 回答待ちの手順: 生成が止まって回答が届いたら、少し待ってから完了の手順へ進む。
+  // 回答待ちの手順: 回答が出始めたら、すぐ「回答が届きました」の手順へ進む。
   useEffect(() => {
-    if (!step?.waitAnswer || loading || !hasAnswer) return;
-    const timer = setTimeout(() => setIndex((i) => i + 1), ANSWER_SETTLE_MS);
+    if (!step?.waitAnswer || !answerStarted) return;
+    setIndex((i) => i + 1);
+  }, [step?.waitAnswer, answerStarted]);
+
+  // 「回答が届きました」の手順: 回答を書き終えて生成が止まったら（承認待ち等で一瞬止まるのと見分けるため少し待って）、
+  // 「次へ」を押せるようにする。
+  const [answerDone, setAnswerDone] = useState(false);
+  useEffect(() => {
+    if (!step?.waitAnswerDone || loading || !hasAnswer) {
+      setAnswerDone(false);
+      return;
+    }
+    const timer = setTimeout(() => setAnswerDone(true), ANSWER_SETTLE_MS);
     return () => clearTimeout(timer);
-  }, [step?.waitAnswer, loading, hasAnswer]);
+  }, [step?.waitAnswerDone, loading, hasAnswer]);
 
   // 対象の要素を強調する（描き直しで入れ替わっても付け直す）。
   useEffect(() => {
@@ -375,7 +399,7 @@ export function ChatTutorial({
   const last = position === steps.length - 1;
   // 送信・回答を待つ手順は、送信した・回答が終わったときに自動で進む。その間は「次へ」を押せない（送らずに先へ
   // 進むと、初めての人には何が起きたか分からないため）。回答が終わった後の手順から、また「次へ」を押せる。
-  const waiting = Boolean(step.tryIt || step.waitAnswer || step.waitClick);
+  const waiting = Boolean(step.tryIt || step.waitAnswer || step.waitClick || (step.waitAnswerDone && !answerDone));
   const prev = steps[position - 1];
   // 「戻る」で送信待ち・回答待ちの手順へは戻らない（戻ってもすぐ自動で進んでしまうため）。回答待ちの間も押せない。
   const backDisabled =
@@ -386,7 +410,9 @@ export function ChatTutorial({
       ? t('tutorial.waitingAnswer')
       : step.waitClick
         ? t('tutorial.waitingClick')
-        : null;
+        : step.waitAnswerDone && !answerDone
+          ? t('tutorial.waitingAnswerDone')
+          : null;
   const next = () => {
     if (waiting) return;
     if (last) finish();

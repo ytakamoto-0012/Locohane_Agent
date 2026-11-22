@@ -2419,11 +2419,12 @@ The explanation card is shown near the highlighted place (below, above, right or
 Going on with "Next" following the explanation card, it highlights and explains, in order: welcome → input field → attachments → working folder → reasoning depth →
 starter buttons (only if there are any) → run details → display settings. Then it puts an example instruction in the input field; when the user presses "Send",
 it moves on automatically to "The AI is thinking", when the answer arrives it explains how to correct answers (a hello world). Then the user actually operates the conversation list:
-press "New chat" → on the new conversation, open this conversation from the list (continuing it, renaming and deleting) → press "New chat" again →
+press "New chat" → on the new conversation, open this conversation from the list → the conversation is open (the whole conversation area is highlighted; renaming and deleting) →
+continue a conversation (the input field is highlighted) → press "New chat" again →
 the closing explanation on a new conversation (center of the screen). "New chat" and clicking the list reload the page, so the next step is kept in sessionStorage
 (`la-chat-tutorial-resume`, this tab only) and the tutorial resumes from it after the reload. The conversation list steps appear only with `[thread_store] enabled = true`. Whether to include the starter step is decided when it starts (so the step numbers do not shift when sending hides the starter buttons).
-The steps waiting for the send, for the answer and for a click move on automatically when the message is sent, the answer is finished or the item is pressed; meanwhile "Next" and "Back" cannot be pressed
-(the button shows “Press "Send" to go on” etc.). "Next" can be pressed again from the step after the answer. The card of the send step is placed above the whole input field so it does not hide the example instruction.
+The steps waiting for the send, for the answer and for a click move on automatically when the message is sent, the answer starts to appear or the item is pressed; meanwhile "Next" and "Back" cannot be pressed
+(the button shows “Press "Send" to go on” etc.). When the answer starts to appear, it switches to "The answer has arrived", where "Next" cannot be pressed until the answer is finished (the button shows "Available when the answer is done"). The card of the send step is placed above the whole input field so it does not hide the example instruction.
 It does not cover the screen, so you can operate it while reading. The tutorial texts do not contain the app name (the display settings may set it to your company's AI name).
 The first heading uses the first line of header.md in the display settings (the same as the screen heading) as "Welcome to …"; if it cannot be read or is longer than 30 characters, it is just "Welcome".
 
