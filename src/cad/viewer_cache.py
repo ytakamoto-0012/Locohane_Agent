@@ -8,6 +8,7 @@
 - 三角形化などの設定（src/tools/cad_viewer.py の _options）
 - compare_with で比べる前の版のファイルのパス・サイズ・更新時刻
 - 変換のコード（src/cad/*.py）の中身のハッシュ（アプリを更新したら作り直す）
+- 変換に使う Python の cadquery・cadquery-ocp・ezdxf の版（更新すると面・辺の ID の並びが変わりうるため）
 
 置き場の合計が [cad_viewer].cache_max_mb を超えたら、使った時刻（ファイルの更新時刻。使うたびに更新する）の
 古いものから消す。書き込みの途中で強制終了して残った一時ファイル（.tmp_*）も、古いものは片付けで消す。
@@ -59,6 +60,56 @@ def converter_digest() -> str:
     return h.hexdigest()[:16]
 
 
+# 三角形化・面や辺の並び（ID）を左右するライブラリ。版が変わればキャッシュの ID が今の形と合わなくなる。
+_LIBRARIES = ("cadquery", "cadquery-ocp", "ezdxf")
+_VERSION_PROBE = (
+    "import importlib.metadata as m, json, sys\n"
+    "out = {}\n"
+    "for n in sys.argv[1:]:\n"
+    "    try:\n"
+    "        out[n] = m.version(n)\n"
+    "    except Exception:\n"
+    "        out[n] = None\n"
+    "print(json.dumps(out))\n"
+)
+
+
+@functools.lru_cache(maxsize=8)
+def library_versions(python: str | None = None) -> str:
+    """ビューア用データを作る Python（[scripts] の Python。None ならこのプロセス）に入っている CAD ライブラリの版。
+
+    変換はサブプロセスの Python で動くので、アプリの Python ではなくそちらに聞く（OCP を import しない
+    importlib.metadata で読むだけなので軽い）。聞けなければ空文字（版はキーに入らない）。
+    """
+    if python is None:
+        import importlib.metadata as md
+
+        found: dict[str, str | None] = {}
+        for name in _LIBRARIES:
+            try:
+                found[name] = md.version(name)
+            except md.PackageNotFoundError:
+                found[name] = None
+        return json.dumps(found, sort_keys=True)
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [python, "-I", "-c", _VERSION_PROBE, *_LIBRARIES],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        found = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.returncode == 0 and proc.stdout.strip() else None
+    except (OSError, ValueError, subprocess.SubprocessError, IndexError):
+        found = None
+    if not isinstance(found, dict):
+        logger.warning("cad viewer cache: could not read the CAD library versions from %s", python)
+        return ""
+    return json.dumps(found, sort_keys=True)
+
+
 def _file_sig(path: Path) -> dict[str, Any]:
     st = path.stat()
     return {"path": os.path.normcase(str(path.resolve())), "size": st.st_size, "mtime_ns": st.st_mtime_ns}
@@ -98,10 +149,11 @@ def _compare_sig(compare: str) -> list[dict[str, Any]]:
     return sigs
 
 
-def cache_key(path: Path, options: dict[str, Any]) -> str | None:
+def cache_key(path: Path, options: dict[str, Any], python: str | None = None) -> str | None:
     """path を options でビューア用データにした結果のキー。ファイルを読めなければ None（キャッシュを使わない）。
 
     options["compare_with"] があれば、そのファイルも中身の目印（サイズ・更新時刻）ごとキーに入れる。
+    python はビューア用データを作る Python（その CAD ライブラリの版をキーに入れる）。
     """
     try:
         opts = dict(options)
@@ -111,6 +163,7 @@ def cache_key(path: Path, options: dict[str, Any]) -> str | None:
             "compare_with": _compare_sig(compare) if compare else None,
             "options": opts,
             "converter": converter_digest(),
+            "libraries": library_versions(python),
         }
     except OSError:
         return None

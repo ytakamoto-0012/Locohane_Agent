@@ -1680,6 +1680,8 @@ DESCRIPTIONS: dict[str, str] = {
         'A consultation only gives advice after the related settings and explanations have been found and passed to it, so it does not need deep thinking. With the instance setting (default medium) the thinking takes time\n'
         'and you wait before the answer appears, so the default is low. The accepted values depend on the model template, and unsupported values cause an error\n'
         '(e.g. Qwen3.8 accepts only low / medium / high / xhigh). If empty, the [llm] reasoning_effort of the instance whose LLM is used for answers is used as is.\n'
+        'It is used only when it is shallower than the instance setting (the instance setting stays when the instance turns thinking off with none or enable_thinking=false, sends nothing with default or empty,\n'
+        'or already uses a shallower value).\n'
         'Can be overridden with the environment variable ADMIN_ASSISTANT_REASONING_EFFORT.'
     ),
     'data_backup.enabled': (

@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import contextvars
 import logging
 import os
 import re
@@ -690,7 +691,8 @@ def _signin_revoked(identifier: str | None, token: str | None) -> bool:
     """ログイン済みのユーザーが、ダッシュボードで削除された・パスワードを変えられた後の古いログインなら True。
 
     ログインのときだけ確かめると、削除したユーザーのブラウザが JWT の期限まで使い続けられるため、
-    チャットの開始・再開・送信と独自の HTTP ルートでも確かめる（src/auth_users.py の session_allowed）。
+    チャットの開始・再開・送信、ask の答え（src/ask_reconnect.py）と HTTP ルートでも確かめる
+    （src/auth_users.py の session_allowed）。
     [auth] enabled=false（匿名）なら常に False。
     """
     if not _config.auth_enabled or identifier is None:
@@ -698,15 +700,23 @@ def _signin_revoked(identifier: str | None, token: str | None) -> bool:
     return not _auth_users.session_allowed(identifier, token_issued_at(token))
 
 
+def _session_signin_revoked(session) -> bool:
+    """WebSocket のセッション（cl.context.session）のログインが、もう使えなければ True。"""
+    if not _config.auth_enabled:
+        return False
+    return _signin_revoked(getattr(getattr(session, "user", None), "identifier", None), getattr(session, "token", None))
+
+
 async def _reject_revoked_session() -> bool:
     """WebSocket のセッションが使えなくなったログインなら、案内を出して True（呼び出し元は何もせずに戻る）。"""
     if not _config.auth_enabled:
         return False
     session = cl.context.session
-    user = getattr(session, "user", None)
-    if not _signin_revoked(getattr(user, "identifier", None), getattr(session, "token", None)):
+    if not _session_signin_revoked(session):
         return False
-    logging.getLogger(__name__).info("Rejected a session whose sign-in is no longer valid (user=%s)", getattr(user, "identifier", None))
+    logging.getLogger(__name__).info(
+        "Rejected a session whose sign-in is no longer valid (user=%s)", getattr(getattr(session, "user", None), "identifier", None)
+    )
     await cl.Message(content=i18n.t("notice.signin_revoked"), type="system_message").send()
     return True
 
@@ -728,11 +738,43 @@ def _patch_chainlit_authenticate_user() -> None:
     async def authenticate_user(token: str):
         user = await original(token)
         if user is not None and _signin_revoked(getattr(user, "identifier", None), token):
-            raise HTTPException(status_code=401, detail="Sign in again")
+            raise HTTPException(status_code=401, detail=_REVOKED_DETAIL)
         return user
 
     authenticate_user._locohane_checks_revoked = True  # type: ignore[attr-defined]
     cl_auth.authenticate_user = authenticate_user
+    logging.getLogger("chainlit").addFilter(_RevokedConnectLogFilter())
+
+
+# 使えなくなったログインを断るときの 401 の detail（ログの絞り込みにも使う）。
+_REVOKED_DETAIL = "Sign in again"
+# WebSocket の接続を、使えなくなったログインとして断っている途中か（同じ接続処理の続きのログを見分ける）。
+_revoked_connect: contextvars.ContextVar[bool] = contextvars.ContextVar("locohane_revoked_connect", default=False)
+
+
+class _RevokedConnectLogFilter(logging.Filter):
+    """削除・パスワード変更したユーザーの開いたままのタブが再接続するたびに出る、Chainlit の ERROR（トレースバック付きの
+    "Exception authenticating connection" と続く "Authentication failed in websocket connect."）を INFO に下げる。
+
+    Socket.IO は断られても間隔を空けて繋ぎ直し続けるので、そのままではタブを閉じるまで ERROR が並び、
+    monitor-app-log が issue として起票してしまう。想定どおりの拒否なので、理由が分かる 1 行の INFO にする。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno < logging.ERROR:
+            return True
+        exc = record.exc_info[1] if record.exc_info else None
+        if getattr(exc, "status_code", None) == 401 and getattr(exc, "detail", None) == _REVOKED_DETAIL:
+            _revoked_connect.set(True)
+            record.msg, record.args = "Refused a WebSocket connection whose sign-in is no longer valid (deleted user or changed password).", ()
+        elif _revoked_connect.get() and record.getMessage() == "Authentication failed in websocket connect.":
+            _revoked_connect.set(False)
+            return False
+        else:
+            return True
+        record.exc_info, record.exc_text, record.stack_info = None, None, None
+        record.levelno, record.levelname = logging.INFO, logging.getLevelName(logging.INFO)
+        return True
 
 
 if _config.auth_enabled:
@@ -831,6 +873,10 @@ def _patch_chainlit_disable_disconnect_thread_touch() -> None:
     )
 
 
+# 履歴（最大 4,000,000 文字）＋画面の画像（最大 4MB を base64 にしたもの）＋選択・色・属性に余裕を持たせた値。
+_WEBSOCKET_MAX_MESSAGE_BYTES = 32 * 1024 * 1024
+
+
 def _patch_chainlit_websocket_ping_timeout() -> None:
     """WebSocket（Socket.IO）の ping_interval/ping_timeout を [websocket]
     （config.ini）の値で上書きする。
@@ -854,10 +900,15 @@ def _patch_chainlit_websocket_ping_timeout() -> None:
 
     _sio.eio.ping_interval = _config.websocket_ping_interval_seconds
     _sio.eio.ping_timeout = _config.websocket_ping_timeout_seconds
+    # 1回に受け取るメッセージの上限。engineio の既定（1,000,000 バイト）のままだと、3D ビューアの確定の答え
+    # （選択・色・元に戻す履歴・画面の画像を ack でまとめて返す）が超えて接続ごと切られ、確定が届かない。
+    # backend 側で受け付ける上限（src/tools/cad_viewer.py の履歴・画像の上限）が収まる大きさにする。
+    _sio.eio.max_http_buffer_size = max(int(_sio.eio.max_http_buffer_size or 0), _WEBSOCKET_MAX_MESSAGE_BYTES)
     logging.getLogger(__name__).info(
-        "Applied WebSocket ping_interval=%ss ping_timeout=%ss.",
+        "Applied WebSocket ping_interval=%ss ping_timeout=%ss max_message=%s bytes.",
         _config.websocket_ping_interval_seconds,
         _config.websocket_ping_timeout_seconds,
+        _sio.eio.max_http_buffer_size,
     )
 
 
@@ -2088,7 +2139,10 @@ def _patch_chainlit_connection_successful_task_end() -> None:
         # （src/ask_reconnect.py 参照）。clear_ask・resume_thread より後に呼ぶこと。
         ask_reconnect.notify_reconnected(context.session)
 
-    ask_reconnect.install()
+    # ask（approve_plan・AskUserQuestion・ask_user_choice・show_cad_viewer）の答えは既存の WebSocket の確認応答で
+    # 届き、on_message・HTTP ルートの確認を通らない。削除・パスワード変更されたユーザーの開いたままのタブから
+    # 答えられないよう、答えを受け取ったときにも確かめる。
+    ask_reconnect.install(revoked_check=_session_signin_revoked)
     logging.getLogger(__name__).info(
         "Applied the patch preventing a spurious task_end on Chainlit connection_successful."
     )

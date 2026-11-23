@@ -1093,3 +1093,29 @@ def test_dxf_export_resets_a_removed_layer_color(tmp_path) -> None:
     assert abs(layer.color) == 7 and layer.rgb is None
     assert layer.is_off()
     assert any("RED" in n for n in notes)
+
+
+@pytest.mark.asyncio
+async def test_cone_radius_keeps_the_approximate_flag(env, tmp_path) -> None:
+    """円錐の半径を表示用の三角形の上の点で測ったとき（measure.ts）の approximate を LLM へ渡す。"""
+    _viewer.response = {
+        "submitted": True,
+        "selected": [],
+        "measurements": [{"type": "radius", "radius": 4.9, "diameter": 9.8, "geomType": "CONE", "radius_at": "clicked point", "approximate": True}],
+    }
+    out = json.loads(await _call(file_path=str(_cube_stl(tmp_path))))
+    assert out["measurements"][0]["approximate"] is True
+
+
+@pytest.mark.asyncio
+async def test_broken_viewer_data_does_not_raise_on_confirm(env, tmp_path) -> None:
+    """LLM が書いた・手で直したビューア用データ（製品の並びに文字列）でも、確定で例外を出さず結果を返す。"""
+    _viewer.response = {"submitted": True, "selected": [], "colors": {"faces": {"0": "#ff0000"}, "parts": {}}}
+    first = json.loads(await _call(file_path=str(_cube_stl(tmp_path))))
+    broken = Path(first["viewer_data"])
+    data = json.loads(broken.read_text(encoding="utf-8"))
+    data["step"] = {"products": ["not a dict"]}
+    broken.write_text(json.dumps(data), encoding="utf-8")
+    _viewer.response = {"submitted": True, "selected": [], "attributes": {"x": []}}
+    out = await _call(file_path=str(broken))
+    assert isinstance(out, str)

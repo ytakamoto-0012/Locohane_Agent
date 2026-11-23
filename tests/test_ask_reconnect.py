@@ -175,3 +175,37 @@ def test_install_routes_only_ask_through_resilient_call(monkeypatch):
         assert await call_fn == "fn"
 
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_answer_from_a_revoked_sign_in_is_ignored(monkeypatch):
+    """ダッシュボードで削除・パスワード変更したユーザーの開いたままのタブからの答えは捨てる（答えなし）。"""
+    revoked = {"value": False}
+    monkeypatch.setattr(ask_reconnect, "_revoked_check", lambda session: revoked["value"])
+    data = {"msg": {"id": "step1"}, "spec": {"type": "text", "step_id": "step1"}}
+
+    session = _FakeSession()
+    task = asyncio.create_task(ask_reconnect._resilient_ask_call(session, data, 1000))
+    await _wait_calls(session, 1)
+    session.answers["sid-1"].set_result({"output": "ok"})
+    assert await task == {"output": "ok"}
+
+    revoked["value"] = True
+    session = _FakeSession("s2")
+    task = asyncio.create_task(ask_reconnect._resilient_ask_call(session, data, 1000))
+    await _wait_calls(session, 1)
+    session.answers["sid-1"].set_result({"output": "approve"})
+    assert await task is None
+
+
+@pytest.mark.asyncio
+async def test_a_failing_revoked_check_keeps_the_answer(monkeypatch):
+    def broken(session):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ask_reconnect, "_revoked_check", broken)
+    session = _FakeSession()
+    task = asyncio.create_task(ask_reconnect._resilient_ask_call(session, {"spec": {"type": "text"}}, 1000))
+    await _wait_calls(session, 1)
+    session.answers["sid-1"].set_result("ok")
+    assert await task == "ok"

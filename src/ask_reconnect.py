@@ -37,6 +37,7 @@ import asyncio
 import contextlib
 import logging
 import weakref
+from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,11 @@ _sent_actions: dict[str, dict] = {}
 _sent_custom_elements: dict[str, dict] = {}
 
 _installed = False
+
+# 答えを受け取ったときに、そのセッションのログインがもう使えない（ダッシュボードでユーザーを削除した・
+# パスワードを変えた）かを調べる関数（app.py が install() で渡す）。True なら答えを捨てて「答えなし」にする。
+# ask の答えは既存の WebSocket の確認応答で届き、on_message・HTTP ルートの確認を通らないため。
+_revoked_check: Callable[[Any], bool] | None = None
 
 
 def notify_reconnected(session) -> None:
@@ -87,6 +93,16 @@ async def _resend_ask_assets(session, spec: dict) -> None:
             await session.emit("element", element)
 
 
+def _answer_revoked(session) -> bool:
+    if _revoked_check is None:
+        return False
+    try:
+        return bool(_revoked_check(session))
+    except Exception:  # noqa: BLE001 - 確認の失敗で答えを失わせない（ログイン自体は接続時にも確かめている）
+        logger.warning("Could not check whether the sign-in is still valid", exc_info=True)
+        return False
+
+
 async def _resilient_ask_call(session, data: dict, timeout: float) -> Any:
     """session.emit_call("ask", ...) を、再接続のたびに新しい sid へ送り直しながら待つ。
 
@@ -118,7 +134,11 @@ async def _resilient_ask_call(session, data: dict, timeout: float) -> Any:
                     with contextlib.suppress(BaseException):
                         await call_task
             if not call_task.cancelled():
-                return call_task.result()
+                result = call_task.result()
+                if result is not None and _answer_revoked(session):
+                    logger.info("Ignored an answer from a session whose sign-in is no longer valid [session_id=%s]", session.id)
+                    return None
+                return result
             logger.info("WebSocket reconnect: resending pending questions to the new connection [session_id=%s]", session.id)
             resend = True
     finally:
@@ -127,11 +147,16 @@ async def _resilient_ask_call(session, data: dict, timeout: float) -> Any:
         _sent_custom_elements.pop(spec.get("element_id") or "", None)
 
 
-def install() -> None:
+def install(revoked_check: Callable[[Any], bool] | None = None) -> None:
     """ChainlitEmitter.emit_call・send_element と Action.send/remove を差し替える。
     何度呼んでも1回だけ適用する。
+
+    revoked_check: セッションを受け取り、そのログインがもう使えなければ True を返す関数。
+    渡すと、使えなくなったログインからの ask の答えを捨てる（答えなし = 時間切れと同じ扱い）。
     """
-    global _installed
+    global _installed, _revoked_check
+    if revoked_check is not None:
+        _revoked_check = revoked_check
     if _installed:
         return
     from chainlit.action import Action

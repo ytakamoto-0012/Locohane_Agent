@@ -412,3 +412,25 @@ def test_chat_uses_admin_reasoning_effort(tmp_path, setting):
     assert res.status_code == 200
     instance_effort = load_config().reasoning_effort
     assert built[0].reasoning_effort == (setting or instance_effort)
+
+
+@pytest.mark.parametrize(
+    ("instance_effort", "enable_thinking", "setting", "expected"),
+    [
+        ("medium", None, "low", "low"),  # 浅くするときだけ当てる
+        ("high", True, "low", "low"),
+        ("minimal", None, "low", "minimal"),  # インスタンスの方が浅い
+        ("low", None, "low", "low"),
+        ("none", None, "low", "none"),  # thinking を切っているインスタンスで入れ直さない
+        ("medium", False, "low", "medium"),  # enable_thinking=false も同じ
+        ("default", None, "low", "default"),  # 何も送っていないインスタンスに値を送らない（テンプレートが受け付けないことがある）
+        ("medium", None, "", "medium"),  # 空欄はインスタンスの設定のまま
+        ("medium", None, "default", "medium"),
+        ("medium", None, "none", "none"),
+    ],
+)
+def test_lighter_reasoning_only_lowers(instance_effort, enable_thinking, setting, expected):
+    from admin.assistant import _lighter_reasoning
+
+    config = dataclasses.replace(load_config(), reasoning_effort=instance_effort, enable_thinking=enable_thinking)
+    assert _lighter_reasoning(config, setting).reasoning_effort == expected

@@ -2382,7 +2382,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[admin]` | `assistant_use_embedding` | 相談内容に近いキー・段落を選ぶのに埋め込み（`[vector_db] embedding_url`）を使うか。false なら文字2-gram だけ | `ADMIN_ASSISTANT_USE_EMBEDDING` |
 | `[admin]` | `assistant_embedding_instance` | 埋め込みの接続先を取るインスタンス名。空欄なら自動で探す | `ADMIN_ASSISTANT_EMBEDDING_INSTANCE` |
 | `[admin]` | `assistant_max_history_messages` | AI に渡す直近の会話の最大メッセージ数 | `ADMIN_ASSISTANT_MAX_HISTORY_MESSAGES` |
-| `[admin]` | `assistant_reasoning_effort` | 「AIに相談」の回答で使う推論の深さ（`[llm] reasoning_effort` と同じ値。既定 `low`）。相談は探した設定・説明をもとに助言するだけなので浅く考えて速く答える。空欄なら回答に使う LLM のインスタンスの `[llm] reasoning_effort` のまま。対応外の値はモデルによってはエラーになる | `ADMIN_ASSISTANT_REASONING_EFFORT` |
+| `[admin]` | `assistant_reasoning_effort` | 「AIに相談」の回答で使う推論の深さ（`[llm] reasoning_effort` と同じ値。既定 `low`）。相談は探した設定・説明をもとに助言するだけなので浅く考えて速く答える。空欄なら回答に使う LLM のインスタンスの `[llm] reasoning_effort` のまま。インスタンスの設定より浅いときだけ使う（インスタンスが `none`・`enable_thinking=false`・`default`・空、またはここより浅い値ならインスタンスの設定のまま）。対応外の値はモデルによってはエラーになる | `ADMIN_ASSISTANT_REASONING_EFFORT` |
 | `[admin]` | `instances_dir` | インスタンス別ディレクトリのルート（既定 `../Locohane_Agent-Settings/instances`）。app.bat直接起動時のdefaultインスタンスの`.env`・`config_overrides.json`の読み込み先にも使われる。変更時は既存の中身を手動で移動する | `INSTANCES_DIR` |
 | `[data_backup]` | `enabled`・`dest_dir`・`times`・`weekdays`・`keep`・`exclude_workdir`・`exclude_logs`・`exclude` | データのバックアップ（「データバックアップ」節）の既定値。全インスタンス共通（インスタンス別に上書きできない）。設定ダッシュボードで保存した値（`<instances_dir>/data_backup.json`）が優先する | - |
 | `[ui]` | `default_language` | 表示言語の既定値（`auto`＝ブラウザの言語 / `ja` / `en`）。利用者が画面で言語を選ぶとそちらが優先される。AI も選んだ言語で回答する（「言語切り替え（日本語 / 英語）」節） | `UI_DEFAULT_LANGUAGE` |

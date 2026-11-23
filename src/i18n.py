@@ -266,6 +266,7 @@ MESSAGES: dict[str, dict[str, str]] = {
     "ask.cancel": {"ja": "❌ キャンセル", "en": "❌ Cancel"},
     "ask.other": {"ja": "✏️ その他（自由入力）", "en": "✏️ Other (free text)"},
     "ask.none_selected": {"ja": "(選択なし)", "en": "(nothing selected)"},
+    "ask.confirmed": {"ja": "✅ 確定", "en": "✅ Confirmed"},
     # --- 3D ビューア（src/tools/cad_viewer.py）で選んだ要素の表示 ---
     "cad.kind.face": {"ja": "面", "en": "Face"},
     "cad.kind.edge": {"ja": "エッジ", "en": "Edge"},

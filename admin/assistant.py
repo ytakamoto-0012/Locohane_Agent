@@ -299,6 +299,25 @@ def _ndjson(obj: dict[str, Any]) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
 
+# 推論の深さの順（浅い順）。"default"（何も送らない）は深さが分からないので含めない。
+_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def _lighter_reasoning(config: Config, value: object) -> Config:
+    """相談用の推論の深さ value を、インスタンスの深さより浅くなるときだけ当てた Config を返す。
+
+    インスタンスが thinking を切っている（reasoning_effort=none・enable_thinking=false）なら、相談で thinking を
+    入れ直すと遅くなるのでそのまま。"default"・空（何も送らない）も、テンプレートによっては送った値を受け付けず
+    HTTP 500 になる（config.ini [llm].reasoning_effort の説明）ので、そのままにする。
+    """
+    current = config.reasoning_effort
+    if not isinstance(value, str) or value not in _EFFORT_ORDER or config.enable_thinking is False:
+        return config
+    if current not in _EFFORT_ORDER or _EFFORT_ORDER.index(value) >= _EFFORT_ORDER.index(current):
+        return config
+    return with_reasoning_effort(config, value)
+
+
 def build_router(
     *,
     require_login: Callable,
@@ -430,9 +449,9 @@ def build_router(
             answer: list[str] = []
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
             try:
-                # 相談では、インスタンスの推論の深さではなく [admin] assistant_reasoning_effort（既定 low）で答える
+                # 相談では、インスタンスの推論の深さより浅いときだけ [admin] assistant_reasoning_effort（既定 low）で答える
                 # （深く考えると、回答が出るまで待たされるため）。空欄ならインスタンスの設定のまま。
-                llm_config = with_reasoning_effort(config_loader(llm_instance), admin_config.admin_assistant_reasoning_effort)
+                llm_config = _lighter_reasoning(config_loader(llm_instance), admin_config.admin_assistant_reasoning_effort)
                 model = await _build_model(llm_config)
                 async for chunk in _usage_tracked(model.astream(lc_messages), usage):
                     text = think.feed(_chunk_text(chunk))

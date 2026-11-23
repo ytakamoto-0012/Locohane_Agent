@@ -170,7 +170,9 @@ export function measureRadius(info: CadItemInfo | undefined, pick: MeasurePick):
         center: vecOut(center),
         ...(axis ? { axis: vecOut(axis) } : {}),
         item: ref(pick.item),
-        ...extra
+        ...extra,
+        // 円錐の半径をクリックした点が表示用の三角形の上だったときだけ入れる（AI に概算と分かるように）。
+        ...(approximate ? { approximate } : {})
       }
     }
   };

@@ -120,3 +120,28 @@ def test_prune_and_clear_leave_files_the_cache_did_not_make(tmp_path) -> None:
     assert other.exists()
     viewer_cache.clear(cache)
     assert other.exists()
+
+
+def test_key_changes_with_the_cad_library_versions(tmp_path, monkeypatch) -> None:
+    """cadquery・OCP を更新したら作り直す（面・辺の ID の並びが変わりうるため）。"""
+    f = _src(tmp_path, "model.step")
+    versions = {"v": '{"cadquery": "2.8.0"}'}
+    monkeypatch.setattr(viewer_cache, "library_versions", lambda python=None: versions["v"])
+    key = viewer_cache.cache_key(f, {})
+    versions["v"] = '{"cadquery": "2.9.0"}'
+    assert key != viewer_cache.cache_key(f, {})
+
+
+def test_library_versions_asks_the_script_python(tmp_path) -> None:
+    import sys
+
+    viewer_cache.library_versions.cache_clear()
+    try:
+        here = json.loads(viewer_cache.library_versions(None))
+        there = json.loads(viewer_cache.library_versions(sys.executable))
+        assert set(here) == set(viewer_cache._LIBRARIES)
+        assert there == here
+        # 聞けない Python なら空（版はキーに入らないだけで、キャッシュは使える）。
+        assert viewer_cache.library_versions(str(tmp_path / "no_python.exe")) == ""
+    finally:
+        viewer_cache.library_versions.cache_clear()

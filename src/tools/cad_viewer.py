@@ -81,6 +81,8 @@ _MEASURE_FIELDS: dict[str, dict[str, tuple[str, ...]]] = {
         "vec": ("center", "axis"),
         "text": ("geomType", "radius_at"),
         "item": ("item",),
+        # 円錐の半径を表示用の三角形の上の点で測ったとき（frontend の measure.ts measureRadius）。
+        "flag": ("approximate",),
     },
     "distance": {"value": ("distance",), "num": ("distance",), "vec": ("delta",), "points": ("points",), "items": ("items",), "flag": ("approximate",)},
     "plane_distance": {"value": ("distance",), "num": ("distance",), "vec": ("direction",), "items": ("items",)},
@@ -600,9 +602,9 @@ async def _save_locked(target: _SaveTarget, payload: dict[str, Any]) -> dict[str
     suffix = output_suffix(data)
     if suffix is None:
         return {"ok": False, "error": "This model cannot be exported."}
-    colors = _valid_colors(data, payload.get("colors"))
     # 色を当てたビューア用データを作るのは、大きなモデルでは数秒かかる（JSON の写し・三角形の色の書き換え）。
     try:
+        colors = _valid_colors(data, payload.get("colors"))
         edited, _changed = await asyncio.to_thread(_view_edits, data, payload, colors)
     except Exception as e:  # noqa: BLE001 - 壊れたビューア用データ（LLM が書いた JSON 等）で落とさない
         logger.warning("show_cad_viewer: could not apply the viewer edits", exc_info=True)
@@ -750,8 +752,9 @@ async def _viewer_data_from_file(file_path: str, compare_with: str = "") -> tupl
     out = _new_data_path(workdir)
     options = _options(compare_with)
     cache_dir, cache_bytes = _cache_settings()
-    key = viewer_cache.cache_key(path, options) if cache_bytes > 0 else None
-    cached = viewer_cache.lookup(cache_dir, key) if key else None
+    # キーは compare_with のビューア用データ（数十 MB になりうる）を読んで作るので、イベントループを止めないようスレッドで。
+    key = await asyncio.to_thread(viewer_cache.cache_key, path, options, _state._SCRIPT_PYTHON) if cache_bytes > 0 else None
+    cached = await asyncio.to_thread(viewer_cache.lookup, cache_dir, key) if key else None
     if cached is not None:
         # 前に同じファイルを同じ設定で作ったビューア用データを写して使う（会話ごとに別のファイルにして、
         # 色・表示の変更の自動保存がキャッシュや他の会話のデータを書き換えないようにする）。
@@ -1187,14 +1190,18 @@ async def _ask_selection(
             logger.warning("Could not remove the 3D viewer element", exc_info=True)
         if res is not None:
             if res.get("submitted", True):
-                answer = _echo_text(
-                    data,
-                    _valid_selection(data, kinds, res.get("selected")),
-                    _valid_colors(data, res.get("colors")),
-                    _valid_message(res.get("message")),
-                    len(_attribute_changes(data, _valid_attributes(data, res.get("attributes")))),
-                    len(_valid_measurements(data, res.get("measurements"))),
-                )
+                try:
+                    answer = _echo_text(
+                        data,
+                        _valid_selection(data, kinds, res.get("selected")),
+                        _valid_colors(data, res.get("colors")),
+                        _valid_message(res.get("message")),
+                        len(_attribute_changes(data, _valid_attributes(data, res.get("attributes")))),
+                        len(_valid_measurements(data, res.get("measurements"))),
+                    )
+                except Exception:  # noqa: BLE001 - LLM が書いた・手で編集した JSON で落とさない（答えの表示だけ簡単にする）
+                    logger.warning("show_cad_viewer: could not summarize the viewer's answer", exc_info=True)
+                    answer = t("ask.confirmed")
             else:
                 answer = t("ask.cancel")
             await _echo_ask_answer(ask_message, question, answer)
@@ -1204,13 +1211,19 @@ async def _ask_selection(
         res = await _ask_with_cross_session_relay(thread_id, _factory, timeout)
     if res is None:
         return ASK_TIMEOUT_MESSAGE
+    if not isinstance(res, dict):
+        return "Error: the viewer returned an answer in an unexpected form. The selection was lost."
     # 閉じた（submitted: false）ときも返す（色・表示の変更を自動で保存するため。選択は使わない）。
-    return (
-        res,
-        _valid_selection(data, kinds, res.get("selected")) if res.get("submitted", True) else [],
-        _valid_colors(data, res.get("colors")),
-        _valid_message(res.get("message")),
-    )
+    try:
+        return (
+            res,
+            _valid_selection(data, kinds, res.get("selected")) if res.get("submitted", True) else [],
+            _valid_colors(data, res.get("colors")),
+            _valid_message(res.get("message")),
+        )
+    except Exception as e:  # noqa: BLE001 - 壊れたビューア用データ（LLM が書いた JSON 等）でも Error: 文字列で返す
+        logger.warning("show_cad_viewer: could not read the viewer's answer", exc_info=True)
+        return f"Error: could not process the viewer's answer ({type(e).__name__}: {e}). The selection was lost."
 
 
 def _model_summary(data: dict) -> dict[str, Any]:
