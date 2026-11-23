@@ -151,6 +151,10 @@ def _source_path_error(data: dict) -> str:
             src = source.get(key)
             if not src or not isinstance(src, str):
                 continue
+            if not Path(src).is_absolute():
+                # 保存・比較の子プロセスは中の文字列をそのまま（cwd はこのセッションの `_tmp_`）開くので、
+                # 相対パス・@N はここで確かめたファイルと別のファイルを指しうる。ビューアが書くパスは常に絶対パス。
+                return f"the model file of this viewer data cannot be used: {key} must be an absolute path (got {src!r})"
             path, err = _resolve_input_path(src)
             if err or path is None:
                 return f"the model file of this viewer data cannot be used: {err}"
@@ -747,6 +751,9 @@ async def _viewer_data_from_file(file_path: str, compare_with: str = "") -> tupl
         # 前に比べたときの結果は出し直さない（今回は比べていない）。
         data.pop("diff", None)
         return data, path, []
+    if compare_with and fmt not in _COMPARABLE_FORMATS:
+        # STL・DXF は B-rep が無く比べられない（黙って diff の無い結果を返すと、比べたと思われる）。
+        return f"Error: compare_with needs a STEP/IGES/BREP/BIN model as the new version (got {fmt}; STL and DXF cannot be compared)."
 
     workdir = _resolve_exec_workdir()
     out = _new_data_path(workdir)
@@ -933,7 +940,8 @@ def _valid_history(data: dict, raw: Any) -> dict[str, Any] | None:
     中身はビューアだけが使うが、ビューア用データに書くので形と大きさを確かめる。おかしければ履歴を捨てる
     （開き直したときに前の操作まで戻れなくなるだけで、今の状態は変わらない）。
     """
-    if not isinstance(raw, dict) or len(json.dumps(raw)) > _HISTORY_MAX_CHARS:
+    # ensure_ascii=False: frontend は JSON.stringify の文字数で上限を守るので、日本語を \uXXXX（6 文字）で数えない。
+    if not isinstance(raw, dict) or len(json.dumps(raw, ensure_ascii=False, separators=(",", ":"))) > _HISTORY_MAX_CHARS:
         return None
     n_faces = len(data.get("faces") or [])
     n_parts = len(data.get("parts") or [])

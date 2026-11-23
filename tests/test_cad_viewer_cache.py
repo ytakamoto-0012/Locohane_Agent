@@ -141,7 +141,34 @@ def test_library_versions_asks_the_script_python(tmp_path) -> None:
         there = json.loads(viewer_cache.library_versions(sys.executable))
         assert set(here) == set(viewer_cache._LIBRARIES)
         assert there == here
-        # 聞けない Python なら空（版はキーに入らないだけで、キャッシュは使える）。
+        # 聞けない Python なら空（cache_key はキャッシュを使わない）。
         assert viewer_cache.library_versions(str(tmp_path / "no_python.exe")) == ""
+    finally:
+        viewer_cache.library_versions.cache_clear()
+
+
+def test_library_versions_are_asked_again_and_failures_are_not_kept(tmp_path, monkeypatch) -> None:
+    """[scripts] の Python はアプリを動かしたまま更新できるので、版は時間がたてば聞き直す。聞けなかった結果は
+    覚えず、版の分からないときはキャッシュを使わない（更新後に前の ID のキャッシュを使わないため）。"""
+    calls: list[str | None] = []
+    answers = {"v": ""}
+
+    def probe(python):
+        calls.append(python)
+        return answers["v"]
+
+    monkeypatch.setattr(viewer_cache, "_probe_library_versions", probe)
+    viewer_cache.library_versions.cache_clear()
+    try:
+        f = _src(tmp_path, "model.step")
+        assert viewer_cache.cache_key(f, {}, "py") is None
+        answers["v"] = '{"cadquery": "2.8.0"}'
+        key = viewer_cache.cache_key(f, {}, "py")
+        assert key is not None and len(calls) == 2
+        viewer_cache.cache_key(f, {}, "py")
+        assert len(calls) == 2  # 覚えている間は聞き直さない
+        answers["v"] = '{"cadquery": "2.9.0"}'
+        monkeypatch.setattr(viewer_cache, "_VERSIONS_TTL_SEC", 0.0)
+        assert viewer_cache.cache_key(f, {}, "py") != key
     finally:
         viewer_cache.library_versions.cache_clear()

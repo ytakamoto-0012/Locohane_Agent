@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -74,13 +75,41 @@ _VERSION_PROBE = (
 )
 
 
-@functools.lru_cache(maxsize=8)
+# library_versions の結果を覚えておく秒数。[scripts] の Python はアプリを動かしたまま更新できるので、
+# ずっとは覚えない（聞けなかったときは覚えない）。
+_VERSIONS_TTL_SEC = 300.0
+_versions_memo: dict[str | None, tuple[float, str]] = {}
+_versions_lock = threading.Lock()
+
+
 def library_versions(python: str | None = None) -> str:
     """ビューア用データを作る Python（[scripts] の Python。None ならこのプロセス）に入っている CAD ライブラリの版。
 
     変換はサブプロセスの Python で動くので、アプリの Python ではなくそちらに聞く（OCP を import しない
-    importlib.metadata で読むだけなので軽い）。聞けなければ空文字（版はキーに入らない）。
+    importlib.metadata で読むだけなので軽い）。聞けなければ空文字（cache_key はキャッシュを使わない）。
+    聞けた結果は _VERSIONS_TTL_SEC 秒だけ覚える。
     """
+    now = time.monotonic()
+    with _versions_lock:
+        memo = _versions_memo.get(python)
+    if memo is not None and now - memo[0] < _VERSIONS_TTL_SEC:
+        return memo[1]
+    value = _probe_library_versions(python)
+    if value:
+        with _versions_lock:
+            _versions_memo[python] = (now, value)
+    return value
+
+
+def _clear_library_versions() -> None:
+    with _versions_lock:
+        _versions_memo.clear()
+
+
+library_versions.cache_clear = _clear_library_versions  # type: ignore[attr-defined]
+
+
+def _probe_library_versions(python: str | None) -> str:
     if python is None:
         import importlib.metadata as md
 
@@ -155,6 +184,10 @@ def cache_key(path: Path, options: dict[str, Any], python: str | None = None) ->
     options["compare_with"] があれば、そのファイルも中身の目印（サイズ・更新時刻）ごとキーに入れる。
     python はビューア用データを作る Python（その CAD ライブラリの版をキーに入れる）。
     """
+    libraries = library_versions(python)
+    if not libraries:
+        # 版が分からないと、ライブラリを更新した後も前の ID のキャッシュを使ってしまうので使わない。
+        return None
     try:
         opts = dict(options)
         compare = opts.pop("compare_with", "")
@@ -163,7 +196,7 @@ def cache_key(path: Path, options: dict[str, Any], python: str | None = None) ->
             "compare_with": _compare_sig(compare) if compare else None,
             "options": opts,
             "converter": converter_digest(),
-            "libraries": library_versions(python),
+            "libraries": libraries,
         }
     except OSError:
         return None

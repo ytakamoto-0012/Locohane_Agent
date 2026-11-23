@@ -34,6 +34,7 @@ import asyncio
 import hmac
 import json
 import contextvars
+import functools
 import logging
 import os
 import re
@@ -875,6 +876,31 @@ def _patch_chainlit_disable_disconnect_thread_touch() -> None:
 
 # 履歴（最大 4,000,000 文字）＋画面の画像（最大 4MB を base64 にしたもの）＋選択・色・属性に余裕を持たせた値。
 _WEBSOCKET_MAX_MESSAGE_BYTES = 32 * 1024 * 1024
+
+
+def _patch_uvicorn_ws_max_size() -> None:
+    """uvicorn の WebSocket の 1 フレームの上限（ws_max_size。既定 16MiB）を _WEBSOCKET_MAX_MESSAGE_BYTES まで上げる。
+
+    engineio の max_http_buffer_size だけ上げても、`chainlit run` は ws_max_size を指定せずに uvicorn.Config を
+    作るので、16MiB を超えるフレームは uvicorn が 1009 で切る（3D ビューアの確定が届かない）。chainlit の
+    run_chainlit は app.py を読み込んだ後に uvicorn.Config を作るので、ここで既定を差し替えれば効く。
+    """
+    import uvicorn
+
+    original = uvicorn.Config.__init__
+    if getattr(original, "_locohane_ws_max_size", False):
+        return
+
+    @functools.wraps(original)
+    def __init__(self, *args, **kwargs):  # noqa: N807 - uvicorn.Config.__init__ の差し替え
+        kwargs["ws_max_size"] = max(int(kwargs.get("ws_max_size") or 0), _WEBSOCKET_MAX_MESSAGE_BYTES)
+        original(self, *args, **kwargs)
+
+    __init__._locohane_ws_max_size = True  # type: ignore[attr-defined]
+    uvicorn.Config.__init__ = __init__
+
+
+_patch_uvicorn_ws_max_size()
 
 
 def _patch_chainlit_websocket_ping_timeout() -> None:

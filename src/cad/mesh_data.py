@@ -288,17 +288,51 @@ def apply_view_edits(
     if history:
         out["viewState"]["history"] = history
     previous = (data.get("edits") or {}).get("color_changes") or []
-    out["edits"] = {"saved_at": saved_at, "color_changes": merge_color_changes(previous, color_changes)}
+    face_parts: dict[int, int] = {}
+    for fi, face in enumerate(faces):
+        try:
+            face_parts[fi] = int(face["part"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    out["edits"] = {"saved_at": saved_at, "color_changes": merge_color_changes(previous, color_changes, face_parts)}
     return out
 
 
-def merge_color_changes(previous: Sequence[dict[str, Any]], current: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+def merge_color_changes(
+    previous: Sequence[dict[str, Any]],
+    current: Sequence[dict[str, Any]],
+    face_parts: dict[int, int] | None = None,
+) -> list[dict[str, Any]]:
     """前回までに保存した色の変更（開き直したビューア用データの edits.color_changes）に、今回の変更を重ねる。
 
     同じ面・部品は、最初の from（元のファイルの色）と最後の to を残し、元の色に戻ったものは外す。開き直した
     データを書き出すとき、前の回に変えた色も変更として扱われるように（step_xcaf.export_step_xcaf 等は
-    edits.color_changes を見て色を付ける）。
+    edits.color_changes を見て色を付ける）。face_parts（面の番号 → 部品の番号）を渡すと、今回色を変えた
+    部品の面について前の回の面の色の変更を捨てる（ビューアはその面を新しい部品の色で描くので。今回その面の
+    色も変えていれば今回の変更が残る）。
     """
+    current = [c for c in current if isinstance(c, dict)]
+    recolored_parts: set[int] = set()
+    current_faces: set[int] = set()
+    for c in current:
+        try:
+            if c.get("kind") == "part":
+                recolored_parts.add(int(c["id"]))
+            elif c.get("kind") == "face":
+                current_faces.add(int(c["id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if face_parts and recolored_parts:
+        kept = []
+        for c in previous:
+            try:
+                fid = int(c["id"]) if isinstance(c, dict) and c.get("kind") == "face" else None
+            except (KeyError, TypeError, ValueError):
+                fid = None
+            if fid is not None and fid not in current_faces and face_parts.get(fid) in recolored_parts:
+                continue
+            kept.append(c)
+        previous = kept
     merged: dict[tuple[str, int], dict[str, Any]] = {}
     for c in [*previous, *current]:
         if not isinstance(c, dict) or c.get("kind") not in ("face", "part"):

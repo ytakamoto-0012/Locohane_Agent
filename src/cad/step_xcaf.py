@@ -494,11 +494,14 @@ def export_step_xcaf(data: dict[str, Any], parts: list, face_map, out: Path, sch
         return "#{:02x}{:02x}{:02x}".format(*rgb) if rgb else None
 
     for pi, part in enumerate(parts):
-        info = part_info[pi] if pi < len(part_info) else {}
         if pi in hidden:
             continue
-        pc = info.get("color") or None
         before = hex_of(part.color)
+        if pi < len(part_info) and isinstance(part_info[pi], dict):
+            pc = part_info[pi].get("color") or None
+        else:
+            # 部品の一覧が無い（アセンブリでない STEP）ときは、ビューアで部品の色を変えられないので元の色のまま。
+            pc = before
         part_changed = (before or "").lower() != (pc or "").lower()
         n_uses = uses(part)
         if part_changed:

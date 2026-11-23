@@ -301,3 +301,51 @@ def test_step_assembly_save_drops_hidden_parts(tmp_path) -> None:
     names = [p["name"] for p in back.get("parts") or []] or [back["step"]["products"][0]["name"]]
     assert "b" not in names and back["faces"][0].get("color") == "#00ff00"
     assert json.dumps(back["step"]["header"]).count("Locohane") == 1
+
+
+def test_single_part_step_save_keeps_the_body_color_of_unchanged_faces(tmp_path) -> None:
+    """部品の一覧が無い（アセンブリでない）STEP で 1 面だけ色を変えて保存しても、ほかの面の色は消えない。"""
+    cq = pytest.importorskip("cadquery")
+    from src.cad.export_mesh import Options, cad_file_to_viewer_data
+    from src.cad.export_model import export_model
+    from src.cad.mesh_data import apply_view_edits
+
+    assy = cq.Assembly(name="one")
+    assy.add(cq.Workplane().box(10, 10, 10), name="body", color=cq.Color(1, 0, 0, 1))
+    src = tmp_path / "one.step"
+    assy.export(str(src))
+    data = cad_file_to_viewer_data(src, "STEP", Options())
+    assert not data.get("parts")
+    edited = apply_view_edits(data, face_colors={1: "#00ff00"}, part_colors={}, color_changes=[{"kind": "face", "id": 1, "from": "#ff0000", "to": "#00ff00"}])
+    edited["exportOptions"] = {"step_write_schema": "auto"}
+    out = tmp_path / "saved.step"
+    export_model(edited, out)
+    back = cad_file_to_viewer_data(out, "STEP", Options())
+    colors = [f.get("color") for f in back["faces"]]
+    assert colors[1] == "#00ff00"
+    assert all(c == "#ff0000" for i, c in enumerate(colors) if i != 1)
+
+
+def test_reopened_data_part_recolor_wins_over_an_earlier_face_color(tmp_path) -> None:
+    """前の回に面の色を変えたデータを開き直し、その部品の色を変えて保存すると、面はビューアと同じ部品の色になる。"""
+    cq = pytest.importorskip("cadquery")
+    from src.cad.export_mesh import Options, cad_file_to_viewer_data
+    from src.cad.export_model import export_model
+    from src.cad.mesh_data import apply_view_edits
+
+    assy = cq.Assembly(name="asm")
+    assy.add(cq.Workplane().box(10, 10, 10), name="a", color=cq.Color(1, 0, 0, 1))
+    assy.add(cq.Workplane().sphere(3), name="b", loc=cq.Location((0, 20, 0)))
+    src = tmp_path / "asm.step"
+    assy.export(str(src))
+    data = cad_file_to_viewer_data(src, "STEP", Options())
+    face = next(i for i, f in enumerate(data["faces"]) if f.get("part") == 0)
+    first = apply_view_edits(data, face_colors={face: "#0000ff"}, part_colors={}, color_changes=[{"kind": "face", "id": face, "from": "#ff0000", "to": "#0000ff"}])
+    second = apply_view_edits(first, face_colors={}, part_colors={0: "#00ff00"}, color_changes=[{"kind": "part", "id": 0, "from": "#ff0000", "to": "#00ff00"}])
+    assert second["faces"][face]["color"] == "#00ff00"
+    assert all(c["kind"] != "face" for c in second["edits"]["color_changes"])
+    second["exportOptions"] = {"step_write_schema": "auto"}
+    out = tmp_path / "saved.step"
+    export_model(second, out)
+    back = cad_file_to_viewer_data(out, "STEP", Options())
+    assert back["faces"][face].get("color") == "#00ff00"

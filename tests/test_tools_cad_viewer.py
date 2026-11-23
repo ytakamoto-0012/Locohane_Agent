@@ -1119,3 +1119,37 @@ async def test_broken_viewer_data_does_not_raise_on_confirm(env, tmp_path) -> No
     _viewer.response = {"submitted": True, "selected": [], "attributes": {"x": []}}
     out = await _call(file_path=str(broken))
     assert isinstance(out, str)
+
+
+@pytest.mark.asyncio
+async def test_viewer_data_with_a_relative_or_at_n_source_path_is_refused(env, tmp_path) -> None:
+    """source.path が相対パス・@N なら開かない（保存・比較の子プロセスは中の文字列をそのままセッションの
+    `_tmp_` を基準に開くので、確かめたファイルと別のファイルを指しうる）。"""
+    from src.cad.mesh_data import FORMAT as VIEWER_FORMAT
+
+    for ref in (r"..\_tmp_000000000000_other\x.dxf", "cube.stl", "@1"):
+        forged = tmp_path / "forged.json"
+        forged.write_text(json.dumps({"format": VIEWER_FORMAT, "source": {"kind": "file", "format": "STL", "path": ref}}), encoding="utf-8")
+        out = await _call(file_path=str(forged))
+        assert out.startswith("Error: the model file of this viewer data cannot be used") and "absolute path" in out, ref
+    assert _viewer.shown == []
+
+
+@pytest.mark.asyncio
+async def test_compare_with_is_refused_when_the_new_version_is_a_mesh(env, tmp_path) -> None:
+    """新しい版が STL のときは比べられないので、diff の無い結果を黙って返さずにエラーにする。"""
+    cq = pytest.importorskip("cadquery")
+    old = tmp_path / "old.step"
+    cq.exporters.export(cq.Workplane().box(10, 10, 10), str(old))
+    out = await _call(file_path=str(_cube_stl(tmp_path)), compare_with=str(old))
+    assert out.startswith("Error: compare_with needs a STEP/IGES/BREP/BIN model") and "STL" in out
+    assert _viewer.shown == []
+
+
+def test_history_size_counts_japanese_as_one_character_each() -> None:
+    """履歴の大きさは frontend（JSON.stringify の文字数）と同じ数え方で確かめる（日本語をエスケープした 6 文字で数えない）。"""
+    data = {"faces": [{"id": 0}], "parts": []}
+    edit = {"colors": {"faces": {}, "parts": {}}, "hiddenParts": [], "visible": {}}
+    raw = {"past": [edit], "future": [], "base": {"faces": {}, "parts": {}}, "note": "属" * (cad_viewer._HISTORY_MAX_CHARS // 2)}
+    assert len(json.dumps(raw)) > cad_viewer._HISTORY_MAX_CHARS
+    assert cad_viewer._valid_history(data, raw) is not None
