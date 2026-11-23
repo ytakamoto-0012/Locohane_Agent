@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-23
+
 ### 追加
 
 - チャット内の 3D ビューア（`show_cad_viewer` ツール）を追加しました。CAD ファイル（STEP・IGES・BREP・バイナリ BREP・DXF・
@@ -1767,7 +1769,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.13...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.13...v0.8.0
 [0.7.13]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.12...v0.7.13
 [0.7.12]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.11...v0.7.12
 [0.7.11]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.10...v0.7.11
