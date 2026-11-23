@@ -91,6 +91,9 @@ For the list of bundled skills, see [README_DETAIL.en.md "Bundled skills"](READM
   (tested with [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`, vLLM, Strata, etc.)
   and a model file to run on it
 - **GPU**: recommended (the developer tests with an NVIDIA GeForce RTX 5060 Ti 16GB + Qwen3.6-35B-A3B)
+- **PC specs guide** (running Qwen3.6-35B-A3B on llama.cpp): minimum RAM 32GB / VRAM 16GB;
+  recommended RAM 48GB / VRAM 16GB or RAM 64GB / VRAM 8GB. For the recommended startup settings, see
+  [README_DETAIL.en.md "Recommended settings for Qwen3.6-35B-A3B (llama.cpp)"](README_DETAIL.en.md#recommended-settings-for-qwen36-35b-a3b-llamacpp).
 
 > **⚠️ Check the model license**
 > Licenses differ from model to model. Always check them for commercial use

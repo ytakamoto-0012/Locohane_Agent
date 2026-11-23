@@ -89,6 +89,9 @@ AI の性能の高さよりも「**何度やっても同じ結果になること
   （[llama.cpp](https://github.com/ggml-org/llama.cpp) の `llama-server`・vLLM・Strata などで動作確認済み）と、
   そこで動かすモデルファイル
 - **GPU**: 推奨（開発者は NVIDIA GeForce RTX 5060 Ti 16GB + Qwen3.6-35B-A3B で動作確認）
+- **PC のスペックの目安**（Qwen3.6-35B-A3B を llama.cpp で動かす場合）: 最低構成 RAM 32GB / VRAM 16GB、
+  推奨構成 RAM 48GB / VRAM 16GB または RAM 64GB / VRAM 8GB。お勧めの起動設定は
+  [README_DETAIL.md「Qwen3.6-35B-A3B のお勧め設定（llama.cpp）」](README_DETAIL.md#qwen36-35b-a3b-のお勧め設定llamacpp) を参照してください。
 
 > **⚠️ モデルのライセンスに注意**
 > 動かすモデルのライセンスはモデルごとに異なります。商用利用する場合は必ず確認してください

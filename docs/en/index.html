@@ -214,6 +214,17 @@
         (tested with <a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a>'s <code>llama-server</code>, vLLM, Strata, etc.) and a model file. A GPU is recommended
         (the developer tests with an RTX 5060 Ti 16GB + Qwen3.6-35B-A3B).
       </p>
+      <h3>PC specs guide (running Qwen3.6-35B-A3B on llama.cpp)</h3>
+      <div class="table-wrap" style="margin-bottom:36px">
+        <table>
+          <thead><tr><th>Configuration</th><th>RAM</th><th>VRAM (dedicated GPU memory)</th></tr></thead>
+          <tbody>
+            <tr><td>Minimum</td><td>32GB</td><td>16GB</td></tr>
+            <tr><td>Recommended</td><td>48GB</td><td>16GB</td></tr>
+            <tr><td>Recommended</td><td>64GB</td><td>8GB</td></tr>
+          </tbody>
+        </table>
+      </div>
       <div class="steps">
         <div class="step">
           <h3>Set the Python environment and install dependencies</h3>
@@ -225,6 +236,7 @@ python -m pip install -r requirements.txt</code></pre>
           <h3>Start the inference server</h3>
           <p>Example: llama-server (listening on <code>http://localhost:8080/v1</code>)</p>
 <pre><code>llama-server --model C:\path\to\model.gguf --alias local-model --host 127.0.0.1 --port 8080 -c 8192</code></pre>
+          <p>For Qwen3.6-35B-A3B, see <a href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/README_DETAIL.en.md#recommended-settings-for-qwen36-35b-a3b-llamacpp">the recommended settings</a>.</p>
         </div>
         <div class="step">
           <h3>Prepare admin tool sign-in</h3>

@@ -12,6 +12,12 @@
 
 ## [Unreleased]
 
+### 追加
+
+- Locohane の紹介サイト（GitHub Pages、`docs/`）を追加しました。日本語と英語のページがあります。
+- README_DETAIL.md の「セットアップと起動」に、Qwen3.6-35B-A3B を llama.cpp で動かすときのお勧め設定と、
+  想定する PC のスペック（最低構成 RAM 32GB / VRAM 16GB、推奨構成 RAM 48GB / VRAM 16GB または RAM 64GB / VRAM 8GB）を追加しました。
+
 ## [0.8.0] - 2026-11-23
 
 ### 追加

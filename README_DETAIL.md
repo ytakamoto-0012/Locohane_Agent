@@ -688,6 +688,61 @@ llama-server --model C:\path\to\model.gguf --alias local-model --host 127.0.0.1 
   `[llm]` 側で値を指定した場合はリクエストごとにその値が優先される（未指定＝空欄の項目のみ
   llama-server 起動時の既定値が使われる）。
 
+#### Qwen3.6-35B-A3B のお勧め設定（llama.cpp）
+
+Locohane で使うモデルとして、Qwen3.6-35B-A3B（unsloth の GGUF・`UD-IQ2_XXS` 量子化）を llama-server で動かすときの
+お勧め設定。想定する PC のスペックは次のとおり。
+
+| 構成 | RAM | VRAM（GPU の専用メモリ） |
+|------|-----|-------------------------|
+| 最低構成 | 32GB | 16GB |
+| 推奨構成 | 48GB | 16GB |
+| 推奨構成 | 64GB | 8GB |
+
+```
+  --port 8080
+  --model .\llama_cpp\models\unsloth\Qwen3.6-35B-A3B-GGUF\Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf
+  --mmproj .\llama_cpp\models\unsloth\Qwen3.6-35B-A3B-GGUF\mmproj-F16.gguf
+  --n-cpu-moe 99
+  --n-gpu-layers 99
+  --threads 10
+  --threads-batch 10
+  --threads-http 4
+  --models-max 1
+  --parallel 1
+  --batch-size 2048
+  --ubatch-size 2048
+  --ctx-size 128000
+  --temp 1.0
+  --top-p 0.95
+  --top-k 20
+  --min-p 0.0
+  --presence-penalty 0
+  --repeat-penalty 1.0
+  --cache-type-k q8_0
+  --cache-type-v q8_0
+  --cache-reuse 256
+  --cache-ram 8192
+  --flash-attn on
+  --jinja
+  --load-mode none
+  --reasoning-budget 4096
+  --reasoning-budget-message "**Excuse me!** You have a limited reasoning budget. Prioritize the key steps and stop reasoning once you have enough evidence to answer."
+  --chat-template-kwargs {"preserve_thinking": true, "reasoning_effort": "low"}
+```
+
+- `--n-cpu-moe 99` で MoE のエキスパートをすべて CPU 側（RAM）に置き、`--n-gpu-layers 99` で残りの層を GPU に載せる。
+  VRAM が少なくても動く代わりに、RAM を多く使う。
+- `--mmproj` は画像入力用。画像を使わないなら外してよい。
+- `--parallel 1` で同時に処理するリクエストを 1 件にする。メインとサブエージェントや複数の利用者からのリクエストは、
+  順番待ちになる。
+- `--threads`/`--threads-batch` は CPU のコア数に合わせて変える。
+- `--model`/`--mmproj` のパスは、モデルファイルを置いた場所に合わせる。
+- `--chat-template-kwargs` の JSON は、コマンドプロンプト（`.bat`）で書くときは全体を `"` で囲み、中の `"` を `\"` にする
+  （例: `--chat-template-kwargs "{\"preserve_thinking\": true, \"reasoning_effort\": \"low\"}"`）。
+- サンプリングや thinking の値を `config.ini` の `[llm]` 側やツールバーの「推論の深さ」で指定した場合は、
+  リクエストごとにそちらが優先される（上の値は未指定の項目の既定値になる）。
+
 **vLLM**
 
 OpenAI 互換エンドポイントを `http://localhost:8000/v1` で公開する:

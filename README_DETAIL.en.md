@@ -680,6 +680,61 @@ llama-server --model C:\path\to\model.gguf --alias local-model --host 127.0.0.1 
   with startup CLI options such as `--repeat-penalty`, but values specified on the `[llm]` side of `config.ini`
   take precedence per request (llama-server's startup defaults are used only for unspecified = empty items).
 
+#### Recommended settings for Qwen3.6-35B-A3B (llama.cpp)
+
+Recommended settings for running Qwen3.6-35B-A3B (unsloth's GGUF, `UD-IQ2_XXS` quantization) on llama-server
+as the model for Locohane. The assumed PC specs are:
+
+| Configuration | RAM | VRAM (dedicated GPU memory) |
+|------|-----|-------------------------|
+| Minimum | 32GB | 16GB |
+| Recommended | 48GB | 16GB |
+| Recommended | 64GB | 8GB |
+
+```
+  --port 8080
+  --model .\llama_cpp\models\unsloth\Qwen3.6-35B-A3B-GGUF\Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf
+  --mmproj .\llama_cpp\models\unsloth\Qwen3.6-35B-A3B-GGUF\mmproj-F16.gguf
+  --n-cpu-moe 99
+  --n-gpu-layers 99
+  --threads 10
+  --threads-batch 10
+  --threads-http 4
+  --models-max 1
+  --parallel 1
+  --batch-size 2048
+  --ubatch-size 2048
+  --ctx-size 128000
+  --temp 1.0
+  --top-p 0.95
+  --top-k 20
+  --min-p 0.0
+  --presence-penalty 0
+  --repeat-penalty 1.0
+  --cache-type-k q8_0
+  --cache-type-v q8_0
+  --cache-reuse 256
+  --cache-ram 8192
+  --flash-attn on
+  --jinja
+  --load-mode none
+  --reasoning-budget 4096
+  --reasoning-budget-message "**Excuse me!** You have a limited reasoning budget. Prioritize the key steps and stop reasoning once you have enough evidence to answer."
+  --chat-template-kwargs {"preserve_thinking": true, "reasoning_effort": "low"}
+```
+
+- `--n-cpu-moe 99` keeps all MoE experts on the CPU side (RAM) and `--n-gpu-layers 99` puts the remaining layers on the GPU.
+  It runs with little VRAM, at the cost of using more RAM.
+- `--mmproj` is for image input. You can drop it if you do not use images.
+- `--parallel 1` handles one request at a time. Requests from the main agent and sub-agents, or from several users,
+  wait their turn.
+- Adjust `--threads`/`--threads-batch` to the number of CPU cores.
+- Adjust the `--model`/`--mmproj` paths to where you put the model files.
+- When writing the `--chat-template-kwargs` JSON in Command Prompt (`.bat`), wrap the whole value in `"` and escape the inner `"` as `\"`
+  (e.g. `--chat-template-kwargs "{\"preserve_thinking\": true, \"reasoning_effort\": \"low\"}"`).
+- Sampling and thinking values set on the `[llm]` side of `config.ini` or with the toolbar's "reasoning depth" take precedence
+  per request (the values above become the defaults for unspecified items).
+
 **vLLM**
 
 Exposes an OpenAI-compatible endpoint at `http://localhost:8000/v1`:

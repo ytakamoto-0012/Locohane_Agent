@@ -214,6 +214,17 @@
         （<a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a> の <code>llama-server</code>・vLLM・Strata などで確認済み）とモデルファイル。GPU 推奨
         （開発者は RTX 5060 Ti 16GB + Qwen3.6-35B-A3B で確認）。
       </p>
+      <h3>PC のスペックの目安（Qwen3.6-35B-A3B を llama.cpp で動かす場合）</h3>
+      <div class="table-wrap" style="margin-bottom:36px">
+        <table>
+          <thead><tr><th>構成</th><th>RAM</th><th>VRAM（GPU の専用メモリ）</th></tr></thead>
+          <tbody>
+            <tr><td>最低構成</td><td>32GB</td><td>16GB</td></tr>
+            <tr><td>推奨構成</td><td>48GB</td><td>16GB</td></tr>
+            <tr><td>推奨構成</td><td>64GB</td><td>8GB</td></tr>
+          </tbody>
+        </table>
+      </div>
       <div class="steps">
         <div class="step">
           <h3>Python 環境を指定して依存パッケージを入れる</h3>
@@ -225,6 +236,7 @@ python -m pip install -r requirements.txt</code></pre>
           <h3>推論サーバーを起動する</h3>
           <p>例：llama-server（<code>http://localhost:8080/v1</code> で待ち受け）</p>
 <pre><code>llama-server --model C:\path\to\model.gguf --alias local-model --host 127.0.0.1 --port 8080 -c 8192</code></pre>
+          <p>Qwen3.6-35B-A3B を使う場合は<a href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/README_DETAIL.md#qwen36-35b-a3b-のお勧め設定llamacpp">お勧め設定</a>を参照してください。</p>
         </div>
         <div class="step">
           <h3>管理ツールのログイン情報を用意する</h3>
