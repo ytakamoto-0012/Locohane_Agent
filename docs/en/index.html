@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Locohane Agent — a local AI agent that runs on your own server</title>
+  <meta name="description" content="Locohane Agent is an AI agent that runs entirely on your company server or your own PC. Hand off Excel, Word, PowerPoint, PDF and 3D CAD work to AI without sending data outside.">
+  <meta property="og:title" content="Locohane Agent — local AI agent">
+  <meta property="og:description" content="An open-source AI agent for trying out handing work to AI, without sending internal data outside.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="../assets/icon.png">
+  <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="../assets/favicon.png" type="image/png">
+  <link rel="alternate" hreflang="ja" href="../">
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="../assets/favicon.png" alt="">Locohane Agent</a>
+    <nav class="nav">
+      <a href="#features">Features</a>
+      <a href="#screens">Screens</a>
+      <a href="#capabilities">Capabilities</a>
+      <a href="#start">Get started</a>
+      <a href="https://github.com/ytakamoto-0012/Locohane_Agent">GitHub</a>
+    </nav>
+    <a class="lang" href="../">日本語</a>
+  </div>
+</header>
+
+<main id="top">
+
+  <section class="hero">
+    <div class="wrap">
+      <div>
+        <h1>An AI agent you can <span class="accent">hand work to</span>,<br>running only on your own server</h1>
+        <p class="lead">
+          Just talk to it in the browser chat, and the AI plans and carries out tasks such as reading and creating
+          Excel, Word, PowerPoint and PDF files, checking images, and processing many files in a folder at once.
+          The AI model runs on your own server too, so conversations and files are never sent outside.
+        </p>
+        <div class="badges">
+          <span class="badge">Fully offline</span>
+          <span class="badge">MIT License</span>
+          <span class="badge">Agent Skills standard</span>
+          <span class="badge">日本語 / English</span>
+          <span class="badge">PC &amp; smartphone</span>
+        </div>
+        <div class="cta">
+          <a class="btn btn-primary" href="https://github.com/ytakamoto-0012/Locohane_Agent">View on GitHub</a>
+          <a class="btn btn-ghost" href="#start">Get started</a>
+        </div>
+        <p class="name-origin">Name origin: <strong>Lo</strong>cal + 小羽 (<strong>cohane</strong>, a Japanese name meaning "small feather")</p>
+      </div>
+      <img class="logo" src="../assets/icon.png" alt="Locohane logo">
+    </div>
+  </section>
+
+  <section id="poc">
+    <div class="wrap">
+      <h2>A PoC before adopting a full AI platform</h2>
+      <p class="section-lead">
+        Try out how an AI agent works for your company and what it brings, on your own work, without sending internal data outside.
+        If you are considering handing tasks to AI, such as Copilot Cowork in Microsoft 365 Copilot or Claude Cowork,
+        you can try that idea out on your own work first.
+      </p>
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="icon">🧪</div>
+          <h3>Skill development for your own work</h3>
+          <p>Staff turn their usual procedure into a draft skill just by talking it through in the chat. A developer then uses the "Skill Lab" to build evaluation cases, let the AI fix its problems, and publish it as an official skill for the department once it passes repeated evaluations.</p>
+        </div>
+        <div class="card">
+          <div class="icon">📊</div>
+          <h3>Admin dashboard</h3>
+          <p>Change AI endpoints and settings, start and stop instances per department, and check status, conversations and logs in the browser. Describe a problem in "Ask AI" and it tells you which setting to change.</p>
+        </div>
+        <div class="card">
+          <div class="icon">💴</div>
+          <h3>Estimating AI usage costs</h3>
+          <p>Token usage is totaled by month, department and user. Enter your AWS pricing (hourly GPU instances or per-token pricing such as Bedrock) to estimate the cost of a full rollout.</p>
+        </div>
+        <div class="card">
+          <div class="icon">📐</div>
+          <h3>CAD features for design work</h3>
+          <p>Show STEP, IGES, DXF and STL in a 3D viewer in the chat and click faces or parts to point at them. It also handles hole and volume checks, differences from the previous version, and STEP PMI (dimensions and tolerances).</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="features" class="alt">
+    <div class="wrap">
+      <h2>Features</h2>
+      <p class="section-lead">Designed for <strong>specialized work where mistakes are not acceptable</strong>, such as engineering design. Rather than raw AI capability, it puts getting the same result every time (reproducibility) first.</p>
+      <div class="grid grid-3">
+        <div class="card">
+          <div class="icon">🔒</div>
+          <h3>Fully offline</h3>
+          <p>The AI model runs on your own server, so conversations and files are never sent outside. No external communication by default.</p>
+        </div>
+        <div class="card">
+          <div class="icon">✅</div>
+          <h3>Approve the plan first</h3>
+          <p>Work that can change files shows a checklist plan first and proceeds only after you approve it (automatic approval can be configured).</p>
+        </div>
+        <div class="card">
+          <div class="icon">🛡️</div>
+          <h3>No arbitrary commands</h3>
+          <p>No general-purpose shell. The AI can only run the scripts of prepared skills and Python code with safety guards.</p>
+        </div>
+        <div class="card">
+          <div class="icon">🪶</div>
+          <h3>Stable with smaller models</h3>
+          <p>Many safeguards against runaway behavior and mistakes let it finish the job without an expensive large model.</p>
+        </div>
+        <div class="card">
+          <div class="icon">📘</div>
+          <h3>Learns work through skills</h3>
+          <p>Write a procedure as a <code>SKILL.md</code> and the AI works the same way. It follows the <a href="https://agentskills.io/specification">Agent Skills standard</a>, so skills move with you to a future AI platform.</p>
+        </div>
+        <div class="card">
+          <div class="icon">👥</div>
+          <h3>Shared by a team, PC and phone</h3>
+          <p>Several people can use one server at once (with sign-in). The chat and admin tool work in PC and smartphone browsers, in Japanese or English.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="screens">
+    <div class="wrap">
+      <h2>Screens</h2>
+      <p class="section-lead">Which skill the AI reads and which tool it uses are shown on screen as steps, so you can follow its progress. (Screenshots show the Japanese UI.)</p>
+
+      <div class="showcase">
+        <figure class="shot">
+          <img src="../assets/chat-pc.png" alt="Chat screen on a PC" loading="lazy">
+          <figcaption>PC: conversations on the left, chat in the middle, working folder, token usage and steps on the right</figcaption>
+        </figure>
+        <figure class="shot phone">
+          <img src="../assets/chat-smartphone.png" alt="Chat screen on a smartphone" loading="lazy">
+          <figcaption>Smartphone: add it to the home screen to open it like an app</figcaption>
+        </figure>
+      </div>
+
+      <div class="feature-row">
+        <div class="text">
+          <h3>View 3D CAD in the chat and point at it <span class="tag">Experimental</span></h3>
+          <ul>
+            <li><strong>View</strong>: rotate and zoom, toggle parts and layers, change colors</li>
+            <li><strong>Point and ask</strong>: click faces, edges, vertices or parts and say "make a 5 mm hole in this face"</li>
+            <li><strong>Create</strong>: ask "make a gear" and the AI builds it with CadQuery and shows it</li>
+            <li><strong>Take it home</strong>: save as STEP, DXF or colored STL</li>
+          </ul>
+        </div>
+        <figure class="shot">
+          <img src="../assets/3dview.png" alt="3D viewer in the chat showing a gear the AI made with CadQuery" loading="lazy">
+          <figcaption>A gear the AI made with CadQuery, shown in the 3D viewer</figcaption>
+        </figure>
+      </div>
+
+      <div class="feature-row reverse">
+        <div class="text">
+          <h3>For administrators: settings dashboard</h3>
+          <ul>
+            <li>Change AI endpoints, settings and sign-in users in the browser</li>
+            <li>Start, stop and restart multiple instances per department or role</li>
+            <li>Usage and cost estimates; status, conversations and logs</li>
+            <li>Skill Lab: evaluate draft skills, let the AI fix them, and promote them</li>
+            <li>Manage memory and knowledge (semantic search of internal documents)</li>
+          </ul>
+        </div>
+        <figure class="shot">
+          <img src="../assets/dashboard.png" alt="Settings dashboard" loading="lazy">
+          <figcaption>Settings dashboard (admin tool)</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section id="capabilities" class="alt">
+    <div class="wrap">
+      <h2>What it can do</h2>
+      <p class="section-lead">Ask in everyday words, e.g. "From the PDFs in this folder, list the drawing numbers and revision dates in an Excel table."</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Area</th><th>Details</th></tr></thead>
+          <tbody>
+            <tr><td>Excel</td><td>Read, create and edit (formatting, charts, images, conditional formatting, etc.), recalculate formulas, render sheets as images, read/edit/run VBA macros</td></tr>
+            <tr><td>Word</td><td>Read, create and edit (find and replace, images, tracked changes), render pages as images</td></tr>
+            <tr><td>PowerPoint</td><td>Read, create, edit parts of templates, render slides as images</td></tr>
+            <tr><td>PDF</td><td>Extract text, render pages as images, create PDFs (Japanese supported)</td></tr>
+            <tr><td>Images</td><td>Look at images and describe or judge them (with a model that supports images)</td></tr>
+            <tr><td>3D CAD</td><td>Show STEP, IGES, BREP, DXF, STL or shapes the AI made with CadQuery in 3D, and click to tell the AI which part you mean</td></tr>
+            <tr><td>Many files</td><td>Apply the same processing to many files in a folder, split among several AIs in parallel</td></tr>
+            <tr><td>Memory</td><td>Remember what you asked it to remember and use it in other conversations (persistent memory)</td></tr>
+            <tr><td>Internal document search</td><td>Find relevant parts of rules and manuals the administrator ingested, and answer with sources (vector DB)</td></tr>
+            <tr><td>Web search</td><td>Only when a Tavily API key is set (no external communication by default)</td></tr>
+            <tr><td>Your own skills</td><td>Create your own procedures (draft skills) by consulting with the AI in chat</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="start">
+    <div class="wrap">
+      <h2>Get started</h2>
+      <p class="section-lead">
+        Requirements: Windows (tested on Windows 11), a Python 3.11 virtual environment, an inference server with an OpenAI-compatible endpoint
+        (tested with <a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a>'s <code>llama-server</code>, vLLM, Strata, etc.) and a model file. A GPU is recommended
+        (the developer tests with an RTX 5060 Ti 16GB + Qwen3.6-35B-A3B).
+      </p>
+      <div class="steps">
+        <div class="step">
+          <h3>Set the Python environment and install dependencies</h3>
+          <p>Copy <code>python_env.bat.example</code> to <code>python_env.bat</code> and set <code>PYTHON_DIR</code>.</p>
+<pre><code>call python_env.bat
+python -m pip install -r requirements.txt</code></pre>
+        </div>
+        <div class="step">
+          <h3>Start the inference server</h3>
+          <p>Example: llama-server (listening on <code>http://localhost:8080/v1</code>)</p>
+<pre><code>llama-server --model C:\path\to\model.gguf --alias local-model --host 127.0.0.1 --port 8080 -c 8192</code></pre>
+        </div>
+        <div class="step">
+          <h3>Prepare admin tool sign-in</h3>
+          <p>Copy <code>.env.example</code> to <code>.env</code> and set <code>ADMIN_USERS</code>.</p>
+<pre><code>ADMIN_USERS=[["admin", "change-me"]]</code></pre>
+        </div>
+        <div class="step">
+          <h3>Start it</h3>
+          <p><code>admin.bat</code> starts the admin tool (<code>http://127.0.0.1:8001</code>) and Locohane itself. On first launch, a <strong>getting-started tutorial</strong> walks you from setting the AI endpoint to opening the chat screen at <code>http://127.0.0.1:8000</code>.</p>
+        </div>
+      </div>
+      <p class="note">
+        Licenses differ from model to model. Always check them for commercial use (models under Apache 2.0 are a safe choice if in doubt).
+        For details, see <a href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/README_DETAIL.en.md#setup-and-startup">README_DETAIL.en.md "Setup and startup"</a>.
+      </p>
+    </div>
+  </section>
+
+  <section id="docs" class="alt">
+    <div class="wrap">
+      <h2>Documentation</h2>
+      <div class="grid grid-3">
+        <a class="card" href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/README.en.md" style="text-decoration:none">
+          <h3>README</h3><p>Overview and usage (for users)</p>
+        </a>
+        <a class="card" href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/README_DETAIL.en.md" style="text-decoration:none">
+          <h3>README_DETAIL</h3><p>Design, settings reference and operations (for administrators and developers)</p>
+        </a>
+        <a class="card" href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/CHANGELOG.md" style="text-decoration:none">
+          <h3>CHANGELOG</h3><p>Changes per version and migration steps</p>
+        </a>
+        <a class="card" href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/skills/SKILLS_README.md" style="text-decoration:none">
+          <h3>Writing skills</h3><p>How to write SKILL.md (for skill developers)</p>
+        </a>
+        <a class="card" href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/mcp_server/MCP_README.md" style="text-decoration:none">
+          <h3>MCP server</h3><p>Distribute Locohane's skills as an MCP server</p>
+        </a>
+        <a class="card" href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/THIRD_PARTY_LICENSES.md" style="text-decoration:none">
+          <h3>Licenses</h3><p>MIT License. All dependencies use licenses that allow commercial use.</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© Locohane Agent — <a href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/LICENSE">MIT License</a></span>
+    <span>This software is provided "as is", without warranty of any kind.</span>
+    <a href="../">日本語</a>
+  </div>
+</footer>
+
+</body>
+</html>

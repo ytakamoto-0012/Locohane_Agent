@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Locohane Agent — 社内サーバーだけで動くローカル AI エージェント</title>
+  <meta name="description" content="Locohane（ロコハネ）Agent は、社内サーバーや手元の PC だけで動く AI エージェントです。Excel・Word・PowerPoint・PDF・3D CAD の作業を、データを外に出さずに AI に任せられます。">
+  <meta property="og:title" content="Locohane Agent — ローカル AI エージェント">
+  <meta property="og:description" content="社内データを外に出さずに、AI に仕事を任せる働き方を試せるオープンソースの AI エージェント。">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="assets/icon.png">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="assets/favicon.png" type="image/png">
+  <link rel="alternate" hreflang="en" href="en/">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="assets/favicon.png" alt="">Locohane Agent</a>
+    <nav class="nav">
+      <a href="#features">特長</a>
+      <a href="#screens">画面</a>
+      <a href="#capabilities">できること</a>
+      <a href="#start">はじめかた</a>
+      <a href="https://github.com/ytakamoto-0012/Locohane_Agent">GitHub</a>
+    </nav>
+    <a class="lang" href="en/">English</a>
+  </div>
+</header>
+
+<main id="top">
+
+  <section class="hero">
+    <div class="wrap">
+      <div>
+        <h1>社内のサーバーだけで動く、<br><span class="accent">仕事を任せられる</span> AI エージェント</h1>
+        <p class="lead">
+          ブラウザのチャットで話しかけるだけで、Excel・Word・PowerPoint・PDF の読み取りや作成、
+          画像の確認、フォルダ内の大量ファイルの一括処理などを、AI が手順を考えながら進めます。
+          AI モデルも自社のサーバーで動かすので、会話もファイルも外部へ送られません。
+        </p>
+        <div class="badges">
+          <span class="badge">完全オフライン</span>
+          <span class="badge">MIT License</span>
+          <span class="badge">Agent Skills 標準準拠</span>
+          <span class="badge">日本語 / English</span>
+          <span class="badge">PC・スマホ対応</span>
+        </div>
+        <div class="cta">
+          <a class="btn btn-primary" href="https://github.com/ytakamoto-0012/Locohane_Agent">GitHub で見る</a>
+          <a class="btn btn-ghost" href="#start">はじめかた</a>
+        </div>
+        <p class="name-origin">名前の由来：<strong>Lo</strong>cal（ローカル環境）+ 小羽（<strong>cohane</strong> / 和名）</p>
+      </div>
+      <img class="logo" src="assets/icon.png" alt="Locohane のロゴ">
+    </div>
+  </section>
+
+  <section id="poc">
+    <div class="wrap">
+      <h2>AI 基盤を本格導入する前の PoC に</h2>
+      <p class="section-lead">
+        社内データを外に出さずに、AI エージェントの使い勝手や効果を自社の業務で試せます。
+        Copilot Cowork や Claude Cowork のような「AI に仕事を任せる」働き方を検討している場合も、
+        そのイメージで社内の業務に当てはめて確かめられます。
+      </p>
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="icon">🧪</div>
+          <h3>自社業務向けのスキル開発</h3>
+          <p>現場の利用者が「いつもの手順」をチャットで相談するだけでドラフトスキル（業務手順書）を作成。開発担当者が「スキル研究室」で評価ケースとあわせて AI に不具合を自己修正させ、繰り返しの評価に合格したものを部署ごとの正式スキルとして公開できます。</p>
+        </div>
+        <div class="card">
+          <div class="icon">📊</div>
+          <h3>管理ダッシュボード</h3>
+          <p>AI の接続先や設定の変更、部署別インスタンスの起動・停止、稼働状況・会話・ログの確認をブラウザから。「AIに相談」に困りごとを書けば、どの設定を変えればよいかを AI が答えます。</p>
+        </div>
+        <div class="card">
+          <div class="icon">💴</div>
+          <h3>AI 利用料の見積もり</h3>
+          <p>トークン使用量を月別・部署別・ユーザー別に集計。AWS の料金（GPU インスタンスの時間課金・Bedrock などのトークン課金）を入力すると、本格導入時の想定料金を試算できます（円換算も可）。</p>
+        </div>
+        <div class="card">
+          <div class="icon">📐</div>
+          <h3>設計業務向けの CAD 機能</h3>
+          <p>STEP・IGES・DXF・STL などをチャット内の 3D ビューアで表示し、面や部品をクリックで指して AI に頼めます。穴・体積の数値確認、前の版との差分、STEP の PMI（寸法・公差）も扱えます。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="features" class="alt">
+    <div class="wrap">
+      <h2>特長</h2>
+      <p class="section-lead">設計業務のように<strong>ミスが許されない専門業務</strong>での利用を想定し、AI の性能の高さよりも「何度やっても同じ結果になること（再現性）」を優先しています。</p>
+      <div class="grid grid-3">
+        <div class="card">
+          <div class="icon">🔒</div>
+          <h3>完全オフライン</h3>
+          <p>AI モデルも自分のサーバーで動かすため、会話内容やファイルが外部へ送られません。既定では外部への通信を一切行いません。</p>
+        </div>
+        <div class="card">
+          <div class="icon">✅</div>
+          <h3>計画を承認してから実行</h3>
+          <p>ファイルを変更しうる作業は、実行前にチェックリスト形式の計画を提示し、あなたの承認を得てから進めます（自動承認も設定可）。</p>
+        </div>
+        <div class="card">
+          <div class="icon">🛡️</div>
+          <h3>任意のコマンドを打たせない</h3>
+          <p>汎用シェルは持たせず、実行できるのは用意されたスキルのスクリプトと、安全ガード付きの Python コードだけです。</p>
+        </div>
+        <div class="card">
+          <div class="icon">🪶</div>
+          <h3>小さめのモデルでも安定</h3>
+          <p>AI の暴走や誤操作を防ぐ仕組みを多数組み込み、高価な大規模モデルでなくても作業をやり遂げられるようにしています。</p>
+        </div>
+        <div class="card">
+          <div class="icon">📘</div>
+          <h3>「スキル」で仕事を覚える</h3>
+          <p>業務手順を <code>SKILL.md</code> にまとめておくと、AI がそれを読んで同じやり方で作業します。<a href="https://agentskills.io/specification">Agent Skills 標準</a>準拠なので、将来の AI 基盤にも持ち出せます。</p>
+        </div>
+        <div class="card">
+          <div class="icon">👥</div>
+          <h3>職場で共有・PC とスマホ</h3>
+          <p>1 台のサーバーを複数人で同時に利用（ログイン機能あり）。チャット画面も管理ツールも PC・スマホのブラウザで使え、日本語と英語を切り替えられます。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="screens">
+    <div class="wrap">
+      <h2>画面</h2>
+      <p class="section-lead">AI がどのスキルを読み、どのツールを使っているかは画面上にステップとして表示されるので、作業の進み具合を確認できます。</p>
+
+      <div class="showcase">
+        <figure class="shot">
+          <img src="assets/chat-pc.png" alt="PC のチャット画面" loading="lazy">
+          <figcaption>PC：左に会話一覧、中央にチャット、右に作業フォルダ・トークン使用量・ステップ</figcaption>
+        </figure>
+        <figure class="shot phone">
+          <img src="assets/chat-smartphone.png" alt="スマホのチャット画面" loading="lazy">
+          <figcaption>スマホ：ホーム画面に追加してアプリのように</figcaption>
+        </figure>
+      </div>
+
+      <div class="feature-row">
+        <div class="text">
+          <h3>3D CAD をチャットで見て、指さして頼む <span class="tag">機能検証中</span></h3>
+          <ul>
+            <li><strong>見る</strong>：回転・拡大して形を確かめ、部品やレイヤーの表示や色を切り替え</li>
+            <li><strong>指さして頼む</strong>：面・エッジ・頂点・部品をクリックで選び、「この面に φ5 の穴を開けて」と依頼</li>
+            <li><strong>作る</strong>：「歯車を作って」と頼めば、AI が CadQuery で形を作ってそのまま表示</li>
+            <li><strong>持ち帰る</strong>：STEP・DXF・色付き STL として保存</li>
+          </ul>
+        </div>
+        <figure class="shot">
+          <img src="assets/3dview.png" alt="チャット内の 3D ビューア（AI が CadQuery で作った歯車）" loading="lazy">
+          <figcaption>AI が CadQuery で作った歯車を 3D ビューアで表示</figcaption>
+        </figure>
+      </div>
+
+      <div class="feature-row reverse">
+        <div class="text">
+          <h3>管理者向け：設定ダッシュボード</h3>
+          <ul>
+            <li>AI の接続先・各種設定・ログインユーザーをブラウザから変更</li>
+            <li>部署・役割ごとに複数のインスタンスを起動・停止・再起動</li>
+            <li>利用量・料金の集計と試算、稼働状況・会話・ログの確認</li>
+            <li>スキル研究室：ドラフトスキルを評価・自己修正させて正式スキルへ昇格</li>
+            <li>メモリー・ナレッジ（社内文書の意味検索）の管理</li>
+          </ul>
+        </div>
+        <figure class="shot">
+          <img src="assets/dashboard.png" alt="設定ダッシュボード" loading="lazy">
+          <figcaption>設定ダッシュボード（管理ツール）</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section id="capabilities" class="alt">
+    <div class="wrap">
+      <h2>できること</h2>
+      <p class="section-lead">「このフォルダの PDF から、図面番号と改訂日を一覧表にして Excel で出して」のように、普段の言葉で頼めます。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>分野</th><th>内容</th></tr></thead>
+          <tbody>
+            <tr><td>Excel</td><td>読み取り・新規作成・編集（書式・グラフ・画像・条件付き書式など）、数式の再計算、シートの画像化、VBA マクロの読み取り・編集・実行</td></tr>
+            <tr><td>Word</td><td>読み取り・新規作成・編集（検索置換・画像・変更履歴）、ページの画像化</td></tr>
+            <tr><td>PowerPoint</td><td>読み取り・新規作成・テンプレートの部分編集、スライドの画像化</td></tr>
+            <tr><td>PDF</td><td>テキスト抽出・ページの画像化・PDF 作成（日本語対応）</td></tr>
+            <tr><td>画像</td><td>画像の内容を見て説明・判断（画像に対応したモデルを使う場合）</td></tr>
+            <tr><td>3D CAD</td><td>STEP・IGES・BREP・DXF・STL や AI が CadQuery で作った形を 3D 表示し、クリックで選んだ箇所を AI に伝える</td></tr>
+            <tr><td>大量ファイル</td><td>フォルダ内の多数のファイルへ同じ処理を、複数の AI に分担させて並列実行</td></tr>
+            <tr><td>記憶</td><td>「覚えておいて」と伝えた内容を、別の会話でも思い出して活用（永続メモリー）</td></tr>
+            <tr><td>社内文書の検索</td><td>管理者が取り込んだ規程・手順書などから、質問に関係する箇所を意味で探して出典付きで回答（ベクター DB）</td></tr>
+            <tr><td>Web 検索</td><td>Tavily API キーを設定した場合のみ（既定では外部通信なし）</td></tr>
+            <tr><td>自分専用スキル</td><td>チャットで AI と相談しながら、自分専用の手順書（ドラフトスキル）を作成</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="start">
+    <div class="wrap">
+      <h2>はじめかた</h2>
+      <p class="section-lead">
+        必要なもの：Windows（Windows 11 で動作確認）、Python 3.11 の仮想環境、OpenAI 互換エンドポイントを提供する推論サーバー
+        （<a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a> の <code>llama-server</code>・vLLM・Strata などで確認済み）とモデルファイル。GPU 推奨
+        （開発者は RTX 5060 Ti 16GB + Qwen3.6-35B-A3B で確認）。
+      </p>
+      <div class="steps">
+        <div class="step">
+          <h3>Python 環境を指定して依存パッケージを入れる</h3>
+          <p><code>python_env.bat.example</code> を <code>python_env.bat</code> にコピーし、<code>PYTHON_DIR</code> を書き換えます。</p>
+<pre><code>call python_env.bat
+python -m pip install -r requirements.txt</code></pre>
+        </div>
+        <div class="step">
+          <h3>推論サーバーを起動する</h3>
+          <p>例：llama-server（<code>http://localhost:8080/v1</code> で待ち受け）</p>
+<pre><code>llama-server --model C:\path\to\model.gguf --alias local-model --host 127.0.0.1 --port 8080 -c 8192</code></pre>
+        </div>
+        <div class="step">
+          <h3>管理ツールのログイン情報を用意する</h3>
+          <p><code>.env.example</code> をコピーして <code>.env</code> を作り、<code>ADMIN_USERS</code> を設定します。</p>
+<pre><code>ADMIN_USERS=[["admin", "変更してください"]]</code></pre>
+        </div>
+        <div class="step">
+          <h3>起動する</h3>
+          <p><code>admin.bat</code> で管理ツール（<code>http://127.0.0.1:8001</code>）と Locohane 本体が起動します。初回は<strong>はじめてのチュートリアル</strong>が、AI の接続先の設定からチャット画面を開くまでを案内します。チャット画面は <code>http://127.0.0.1:8000</code> です。</p>
+        </div>
+      </div>
+      <p class="note">
+        動かすモデルのライセンスはモデルごとに異なります。商用利用する場合は必ず確認してください（迷ったら Apache 2.0 のモデルが安全です）。
+        詳しい手順は <a href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/README_DETAIL.md#セットアップと起動">README_DETAIL.md「セットアップと起動」</a>を参照してください。
+      </p>
+    </div>
+  </section>
+
+  <section id="docs" class="alt">
+    <div class="wrap">
+      <h2>ドキュメント</h2>
+      <div class="grid grid-3">
+        <a class="card" href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/README.md" style="text-decoration:none">
+          <h3>README</h3><p>概要と使い方（一般利用者向け）</p>
+        </a>
+        <a class="card" href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/README_DETAIL.md" style="text-decoration:none">
+          <h3>README_DETAIL</h3><p>設計・設定リファレンス・運用の詳細（管理者・開発者向け）</p>
+        </a>
+        <a class="card" href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/CHANGELOG.md" style="text-decoration:none">
+          <h3>CHANGELOG</h3><p>バージョンごとの変更点と移行手順</p>
+        </a>
+        <a class="card" href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/skills/SKILLS_README.md" style="text-decoration:none">
+          <h3>スキルの書き方</h3><p>SKILL.md の書き方・規約（スキル開発者向け）</p>
+        </a>
+        <a class="card" href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/mcp_server/MCP_README.md" style="text-decoration:none">
+          <h3>MCP サーバー</h3><p>Locohane のスキルを MCP サーバーとして配布する方法</p>
+        </a>
+        <a class="card" href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/THIRD_PARTY_LICENSES.md" style="text-decoration:none">
+          <h3>ライセンス</h3><p>MIT License。依存パッケージはすべて商用利用可能なライセンスです。</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© Locohane Agent — <a href="https://github.com/ytakamoto-0012/Locohane_Agent/blob/main/LICENSE">MIT License</a></span>
+    <span>本ソフトウェアは「現状のまま」（as-is）で提供され、いかなる保証もありません。</span>
+    <a href="en/">English</a>
+  </div>
+</footer>
+
+</body>
+</html>
