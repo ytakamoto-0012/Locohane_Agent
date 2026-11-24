@@ -1493,8 +1493,10 @@ DESCRIPTIONS: dict[str, str] = {
         'false makes the tool return an error.'
     ),
     'cad_viewer.max_triangles': (
-        'Upper limit of triangles sent to the viewer (default 5,000,000). A B-rep shape over it is tessellated again more coarsely, and it is an error if it is still over (an STL file is an error as soon as it is over).\n'
-        'The data sent to the browser is about 0.3 MB per 10,000 triangles (0.6 MB for STL), so using the whole default makes about 150 MB (300 MB for STL) and the display becomes heavy; lower the number if you want a light display. 0 or less means no limit.'
+        'Upper limit of triangles sent to the viewer (default 1,000,000). A B-rep shape over it is tessellated again more coarsely, and it is an error if it is still over (an STL file is an error as soon as it is over). 0 or less means no limit.\n'
+        'The viewer data is about 0.3 MB per 10,000 triangles for B-rep, 0.65 MB for an STL with many flat faces, and 5-7 MB for an STL with many curved surfaces '
+        '(such as scan data; almost every triangle becomes its own face). With the default 1,000,000, a curved STL makes about 500 MB of data, and its conversion takes about 40 seconds and 3-4 GB of memory.\n'
+        'If you raise it, also raise [scripts] timeout (default 300 seconds) so that the conversion (a subprocess) is not cut off, and make sure there is enough memory (3-4 GB per 1,000,000 triangles of a curved STL).'
     ),
     'cad_viewer.linear_deflection_ratio': (
         'Tolerance when splitting curved surfaces into triangles, as a ratio of the diagonal length of the shape. Smaller is smoother and makes more triangles.'

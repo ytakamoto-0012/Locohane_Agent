@@ -1947,8 +1947,10 @@ LLM へ返すツール `show_cad_viewer`（`src/tools/cad_viewer.py`）がある
 色付き STL は、バイナリ STL の三角形ごとの属性 2 バイトに入った色を読む。VisCAM / SolidView 方式（bit15=1 で色あり、赤が上位）と
 Materialise Magics 方式（ヘッダーの `COLOR=` が既定色、bit15=0 で色あり、赤が下位）の両方を扱う。
 STL は cadquery が無くても表示できる（それ以外の形式とコードの実行には cadquery が要る）。
-STL を選んだ結果の `id_note` には、三角形がいくら多くても読む方法は必ずあること、戻り値に無い値や情報は
-サブエージェント `explore` に委譲し、selection_file・viewer_data（`faces`・`edgeList`）を `json_query` で読んで（必要なら STL も）計算させることを書き、LLM が「読めない」と思い込んで断らないようにしている。
+STL を選んだ結果の `id_note` には、三角形がいくら多くても読む方法は必ずあること、依頼が戻り値に無い値や情報を要るときだけ
+サブエージェント `explore` に委譲させることを書き、LLM が「読めない」と思い込んで断らないようにしている。委譲先には、小さい selection_file は
+`json_query` で読み、数百 MB になりうる viewer_data（`faces`・`edgeList`）や STL は、`json_query` を何度も呼ばず（呼ぶたびにファイル全体を読み直す）
+`execute_python_code_readonly` で 1 回だけ読んで計算するよう伝えさせる。
 
 **LLM へ返す情報**: 確定した要素ごとに、種類（`PLANE`/`CYLINDER`/`LINE`/`CIRCLE` 等）・面積や長さ・中心・法線・半径・軸・バウンディングボックス・
 隣り合う要素の ID、部品（アセンブリ）のパスと色、単独のカーブ・点かどうか（`free`）、円筒等の継ぎ目か（`seam`）、
@@ -1968,7 +1970,13 @@ ID は CadQuery の `Workplane().add(shape).faces().vals()` の順（0 始まり
 three.js はビューアを開いたときだけ読み込む（`frontend/src/components/cad/CadScene.ts`、チャット画面の本体には含めない）。
 ビューアでは、ドラッグで回転・右ドラッグで移動・ホイールで拡大縮小、クリックで選択／解除、上部のボタンで選ぶ要素の種類を切り替え、
 「拡大」で画面いっぱいに広げる（Esc で戻る）。会話の切り替えをまたいでも、ほかの質問ツールと同じく戻ってきた画面で答えられる。
-ビューアの要素（props にビューア用データ全体を持ち、大きな CAD では数十 MB）は会話の履歴（`chat_threads.sqlite`・`elements/`）に保存しない
+ビューア用データは要素の props に入れない（曲面の多い STL では数百 MB になり、1 通のメッセージ・1 本の文字列として送ると
+ブラウザが扱える文字列の長さを超えるため）。ブラウザへ送る形のパッケージ（`src/cad/viewer_package.py`。三角形の座標・番号は
+バイト列のまま、面・エッジの一覧は 2 万件ずつの JSON に分ける）を `_tmp_` フォルダに書き、props には `data_id` だけを入れる。
+ブラウザは `GET /locohane/cad/data/{data_id}`（`app.py`）で取りに来て、`frontend/src/components/cad/cadData.ts` の `parseCadPackage` で読む
+（1 本の巨大な文字列は作らない）。返すのはビューアを出している間、同じ所有者が生成中のスレッドのものだけで、答えを受け取ったら
+パッケージは消す。ブラウザが読み込めなかったときは、その理由を LLM へ返す（自動保存はしない）。LLM が読む `viewer_data` の JSON はこれまでどおり。
+ビューアの要素は会話の履歴（`chat_threads.sqlite`・`elements/`）に保存しない
 （`src/thread_store.py` の `EPHEMERAL_CUSTOM_ELEMENTS`。前の版が残したものは起動時に `purge_ephemeral_elements` が消して VACUUM する）。
 「確定」「キャンセル」を押すとすぐに処理中の表示を出して操作を止め、backend は閉じる合図を先に送ってから、自動保存・選択結果の書き出しを別スレッドで行う。
 回転は three.js の `ArcballControls` で、CAD ソフトと同じく画面を基準に回す（縦のドラッグは画面の横軸まわりにだけ回り、真上・真下でも止まらない。
@@ -2250,7 +2258,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[user_response_timeouts]` | `ask_user_choice_seconds` | `ask_user_choice`（選択肢質問）でユーザー応答を待つ秒数。`0`で無期限待ち | `ASK_USER_CHOICE_TIMEOUT_SECONDS` |
 | `[user_response_timeouts]` | `show_cad_viewer_seconds` | `show_cad_viewer`（3D ビューアでの選択）でユーザーの確定を待つ秒数。`0`で無期限待ち（既定） | `SHOW_CAD_VIEWER_TIMEOUT_SECONDS` |
 | `[cad_viewer]` | `enabled` | 3D ビューア（`show_cad_viewer`）を使えるようにするか。`false` ならツールはエラーを返す | `CAD_VIEWER_ENABLED` |
-| `[cad_viewer]` | `max_triangles` | ビューアへ送る三角形の上限（既定 5000000）。B-rep は超えたら粗く作り直し、それでも超えれば（STL は超えた時点で）エラー。0 以下で無制限 | `CAD_VIEWER_MAX_TRIANGLES` |
+| `[cad_viewer]` | `max_triangles` | ビューアへ送る三角形の上限（既定 1000000）。B-rep は超えたら粗く作り直し、それでも超えれば（STL は超えた時点で）エラー。0 以下で無制限。曲面の多い STL は三角形 100 万個でデータ約 500MB・変換に約 40 秒・メモリ 3〜4GB を使う。増やす場合は `[scripts] timeout` も合わせて延ばし、メモリの余裕を確かめる | `CAD_VIEWER_MAX_TRIANGLES` |
 | `[cad_viewer]` | `linear_deflection_ratio` | 曲面を三角形に分けるときの許容差（形の対角線の長さに対する割合、既定 0.001） | `CAD_VIEWER_LINEAR_DEFLECTION_RATIO` |
 | `[cad_viewer]` | `angular_deflection_deg` | 曲面を三角形に分けるときの角度の許容差（度、既定 20） | `CAD_VIEWER_ANGULAR_DEFLECTION_DEG` |
 | `[cad_viewer]` | `stl_region_angle_deg` | STL の三角形を 1 つの面（平面領域）にまとめる法線の角度差の上限（度、既定 1） | `CAD_VIEWER_STL_REGION_ANGLE_DEG` |
@@ -2627,8 +2635,12 @@ AI が作業している間も入力欄に入力でき、送信すると作業�
   ユーザー発言として表示される（スレッドを再開しても残る）。ターンが終わりかけで受け付けられなかった指示は
   「作業の終了後に送ります」と表示され、ターンの終了後に通常のメッセージとして送られる。停止ボタンでターンを
   止めたときは、まだ伝わっていない指示を入力欄へ戻さず、停止の後始末の後に通常のメッセージとして送って続ける
-  （サブエージェントの実行中は指示が完了まで伝わらないので、停止すれば指示を先に伝えられる）。エラーでターンが
+  （サブエージェントの実行中は指示が完了まで伝わらないので、停止すれば指示を先に伝えられる）。停止の直後（送り直す前）に
+  自分で発言を送ったときは、伝わっていない指示をその発言の前に入れて一緒に送る。送り直した指示が受け付けられなかった
+  （後始末の待ちが `_STOP_WAIT_SECONDS` を過ぎた・別の会話が生成中）ときは、入力欄へ戻す（断った知らせの metadata に
+  断ったメッセージの ID が入る。`app.py` の `REJECTED_MESSAGE_METADATA_KEY`）。エラーでターンが
   中断して伝わらなかった指示と、通信エラーで受け付けられたか分からない指示は入力欄へ戻る。
+  伝わらずに捨てた指示の、受け付けた時点で作った添付のコピーは消す（`app.py` の `_discard_injection_files`）。
 - **送れるもの**: 本文と添付ファイル（添付だけでもよい）。長さの上限は `[ui] max_input_chars`（貼り付けテキストを含む）。
   添付は受け付けた時点で、通常の送信と同じスレッド専用フォルダ（`_tmp_<…>/uploads/<送信日時>/`）へコピーし、
   LLM へ渡す本文（保存先と `@N`・貼り付けテキストの展開）もその時点で組み立てる（`app.py` の `_build_injection`）。
@@ -2644,7 +2656,7 @@ AI が作業している間も入力欄に入力でき、送信すると作業�
   `stopWithPending`）。画面に出ないまま会話へ入っていた指示は取り除く。ループ検知・通信エラーでの
   再試行やターン内のコンテキスト圧縮では、既に入った指示は失われず、二重にもならない（`tests/test_user_injection_failures.py`）。
   同じ会話がまだ生成中の間に通常のメッセージが届いた場合は、処理せずにその旨を返す
-  （2本目のターンを並行して走らせない）。ただし停止ボタンの直後（入力欄へ戻った指示を再送した等）は、停止した古いターンと
+  （2本目のターンを並行して走らせない）。ただし停止ボタンの直後（伝わっていなかった指示を送り直した等）は、停止した古いターンと
   停止の後始末（サブエージェント・バックグラウンドジョブの強制終了、LLM 接続の強制クローズ、グラフの組み直し）が終わるのを
   最大120秒待ってから始める（「停止した処理の後始末が終わるのを待ってから始めます…」と出る。`app.py` の `_wait_for_stopped_turn`）。
   以前は後始末が新しいターンの LLM 接続・サブエージェントまで閉じて生成が失敗したり、古いターンの終わりの合図が新しいターンの

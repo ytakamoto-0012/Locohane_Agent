@@ -404,7 +404,7 @@ def _make_relayed_emit(session, thread_id: str, original_emit):
 
 # thread_id → 停止ボタンの後始末（on_stop / _stop_thread_generating）が終わったら set される Event。
 # 後始末（サブエージェント・バックグラウンドジョブの強制終了、LLM 接続の強制クローズ、グラフの組み直し）には
-# 数秒〜数十秒かかる。その間に次のメッセージ（停止で入力欄へ戻った追加指示の再送など）でターンが始まると、
+# 数秒〜数十秒かかる。その間に次のメッセージ（停止で伝わらなかった追加指示の送り直しなど）でターンが始まると、
 # 後始末の aclose_active_llm_clients(thread_id)・cancel_dispatch_agent_jobs_for_thread(thread_id) が新しいターンの
 # LLM 接続・サブエージェントまで閉じてしまい生成が失敗する、または古いターンの task_end が新しいターンの
 # task_start の後に届いて画面が「生成していない」状態になり、更新が止まったように見えていた（2026-11-19 ユーザー報告）。
@@ -482,6 +482,7 @@ def _close_user_injection_on_stop(thread_id: str) -> None:
     """
     dropped = user_injection.close_thread(thread_id)
     if dropped:
+        _discard_injection_files(dropped)
         logging.getLogger(__name__).info(
             "Dropped %d additional user instruction(s) because the turn was stopped thread_id=%s",
             len(dropped),
@@ -1438,6 +1439,45 @@ def _register_user_injection_route() -> None:
 
 _register_user_injection_route()
 
+
+def _register_cad_viewer_data_route() -> None:
+    """3D ビューアのデータの受け取り口（GET /locohane/cad/data/{data_id}）を登録する。
+
+    show_cad_viewer はビューア用データを要素の props に入れず（曲面の多い STL では数百 MB になり、1 通の
+    メッセージとして送るとブラウザが扱える文字列の長さを超える）、ブラウザへ送る形のパッケージ
+    （src/cad/viewer_package.py）をファイルに書いて、data_id だけを props で渡す。ブラウザ
+    （frontend/src/components/CadViewerBar.tsx）はここからそのファイルを取りに来る。
+
+    返すのはビューアを出している間（src/tools/cad_viewer.py の _VIEWER_PACKAGES にある間）だけ。
+    所有者の確認は追加指示の受付（_locohane_inject_into_thread）と同じく、「呼び出し元と同じ所有者が、
+    今そのスレッドを生成中か」で行う（ビューアの答えを待つ間、そのターンは生成中のまま）。
+    他の所有者のものでも、無いものと同じ 404 を返す（存在を漏らさない）。
+    """
+    from chainlit.auth import get_current_user as _cl_get_current_user
+    from chainlit.server import app as _chainlit_asgi_app
+    from fastapi import Depends, HTTPException
+    from starlette.responses import FileResponse
+
+    from src.tools import cad_viewer as _cad_viewer
+
+    routes_before = len(_chainlit_asgi_app.router.routes)
+
+    @_chainlit_asgi_app.get("/locohane/cad/data/{data_id}")
+    async def _locohane_cad_viewer_data(data_id: str, current_user=Depends(_cl_get_current_user)):
+        package = _cad_viewer.viewer_package(data_id)
+        owner = thread_store.resolve_owner(current_user)
+        if package is None or _generating_owner_threads.get(owner) != package.thread_id or not package.path.is_file():
+            raise HTTPException(status_code=404, detail="The 3D viewer data is not available.")
+        return FileResponse(package.path, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
+
+    routes = _chainlit_asgi_app.router.routes
+    added = routes[routes_before:]
+    del routes[routes_before:]
+    routes[0:0] = added
+
+
+_register_cad_viewer_data_route()
+
 _RUNTIME_STATUS_INTERVAL_SECONDS = 3.0
 _runtime_status_task: "asyncio.Task | None" = None
 
@@ -1860,6 +1900,10 @@ async def _send_interrupted_marker(reason: str) -> None:
 # 割り込み指示（src/user_injection.py）をチャット欄へ出すユーザー発言の metadata キー。
 # frontend/src/components/Composer.tsx がこの ID で「送信待ち」の表示を消す。
 INJECTION_ID_METADATA_KEY = "injection_id"
+# 通常のメッセージを処理せずに断ったとき（on_message: 同じ会話・同じ所有者の別の会話が生成中）、その知らせの
+# metadata に断ったメッセージの ID を入れるキー。Composer.tsx は、停止の後などに自動で送り直した追加指示が
+# 断られたと分かったら、入力欄へ戻す（自動の再送は、断られると指示が伝わらないまま消えてしまうため）。
+REJECTED_MESSAGE_METADATA_KEY = "rejected_message_id"
 
 
 class _TurnInjections:
@@ -1872,7 +1916,7 @@ class _TurnInjections:
     チェックポイントを見て表示し直す（sync_with_state）。チェックポイントへ確定する前の書き込み
     （pending write）にだけある指示は、aupdate_state で作る新しいチェックポイントには引き継がれない
     ため、書き換える前に回収する（pending_messages）。停止した場合は、画面に出ていない指示を
-    会話から取り除く（drop_undisplayed。フロントエンドはそれらを入力欄へ戻す）。
+    会話から取り除く（drop_undisplayed。フロントエンドはそれらを停止の後に通常のメッセージとして送り直す）。
 
     Attributes:
         token: このターンの受付のトークン（user_injection.open_thread）。None なら何もしない。
@@ -1967,6 +2011,7 @@ class _TurnInjections:
                 if m.id in pending_ids or any(i["id"] in self.displayed for i in items):
                     continue
                 await graph.aupdate_state(config, {"messages": [RemoveMessage(id=m.id)]}, as_node="tools")
+                _discard_injection_files(items)
                 logging.getLogger(__name__).info(
                     "Removed %d additional user instruction(s) that were not shown before the turn was stopped", len(items)
                 )
@@ -3523,6 +3568,38 @@ def _save_uploads(message: cl.Message) -> list[str]:
     if not elements:
         return []
     return _copy_uploads([(str(e.path), e.name) for e in elements], _resolve_exec_workdir())
+
+
+def _discard_injection_files(items) -> None:
+    """会話へ入らずに捨てた追加指示の、添付のコピー（受け付けた時点で作ったもの。_build_injection）を消す。
+
+    捨てた指示は、フロントエンドが元のアップロードを付けて送り直すか入力欄へ戻すので、コピーは使われない
+    （残すとスレッド専用フォルダに使われないファイルがたまり、送り直したときにもう一度コピーされる）。
+    コピーは指示ごとの `uploads/<送信日時>/` にあるので、空になったらそのフォルダも消す（ベストエフォート）。
+
+    Args:
+        items: user_injection.Injection か、injection_items の {"id", "text", "files"} の列。
+    """
+    for item in items:
+        files = item.files if isinstance(item, user_injection.Injection) else (item.get("files") or [])
+        folders: set[Path] = set()
+        for f in files:
+            raw = f.get("path") if isinstance(f, dict) else None
+            if not raw:
+                continue
+            path = Path(raw)
+            if path.parent.parent.name != "uploads":
+                continue  # 受け付けた時点のコピー（uploads/<送信日時>/）以外には触れない
+            try:
+                path.unlink(missing_ok=True)
+                folders.add(path.parent)
+            except OSError:
+                logging.getLogger(__name__).debug("Failed to remove an unused attachment copy %s", path, exc_info=True)
+        for folder in folders:
+            try:
+                folder.rmdir()
+            except OSError:
+                pass  # 空でない（他のファイルがある）・消せない
 
 
 def _build_injection(thread_id: str, text: str, sources: list[tuple[str, str | None]]) -> tuple[str, list[dict]]:
@@ -5524,7 +5601,7 @@ async def _on_message_impl(message: cl.Message) -> None:
                 state = await graph.aget_state(config)
                 repair, orphaned_count, recovered_count = _orphan_repair_messages(state, "Because the user stopped it (or similar), ")
                 # 画面に出した追加指示は、確定前の書き込みにだけあっても会話に残す（画面と揃える）。
-                # 出していない指示は残さない（フロントエンドが入力欄へ戻すため。下の drop_undisplayed）。
+                # 出していない指示は残さない（フロントエンドが停止の後に送り直すため。下の drop_undisplayed）。
                 repair += [
                     m
                     for m in turn_injections.pending_messages(state)
@@ -5884,7 +5961,7 @@ async def on_message(message: cl.Message) -> None:
     owner = thread_store.resolve_owner(session.user) if session is not None else None
 
     if thread_id is not None:
-        # 停止ボタンの直後の送信（入力欄へ戻った追加指示の再送など）は、停止した古いターンと後始末が
+        # 停止ボタンの直後の送信（停止で伝わらなかった追加指示の送り直しなど）は、停止した古いターンと後始末が
         # 終わるのを待ってから始める（_stop_cleanups 参照）。
         await _wait_for_stopped_turn(thread_id)
 
@@ -5900,6 +5977,7 @@ async def on_message(message: cl.Message) -> None:
             await cl.Message(
                 content=i18n.t("notice.other_thread_busy"),
                 type="system_message",
+                metadata={REJECTED_MESSAGE_METADATA_KEY: message.id},
             ).send()
             return
 
@@ -5912,7 +5990,11 @@ async def on_message(message: cl.Message) -> None:
             "on_message: rejected this message without running it because the same thread (thread_id=%s) is still generating",
             thread_id,
         )
-        await cl.Message(content=i18n.t("notice.this_thread_busy"), type="system_message").send()
+        await cl.Message(
+            content=i18n.t("notice.this_thread_busy"),
+            type="system_message",
+            metadata={REJECTED_MESSAGE_METADATA_KEY: message.id},
+        ).send()
         return
 
     original_emit = session.emit if session is not None else None
@@ -5928,11 +6010,13 @@ async def on_message(message: cl.Message) -> None:
         await _on_message_impl(message)
     finally:
         if thread_id is not None and session is not None:
-            # 停止・エラーで中断した場合に残っていた指示は捨てる（フロントエンドは反映されなかった
-            # 指示を入力欄へ戻す）。トークン付きなので、停止後に同じスレッドで始まった次のターンの
-            # 受付は閉じない。
+            # 停止・エラーで中断した場合に残っていた指示は捨てる（フロントエンドは、停止で伝わらなかった
+            # 指示は通常のメッセージとして送り直し、エラーで中断して伝わらなかった指示は入力欄へ戻す。
+            # どちらも元のアップロードを使うので、受け付けた時点で作った添付のコピーは消す）。トークン付きなので、
+            # 停止後に同じスレッドで始まった次のターンの受付は閉じない。
             dropped = user_injection.close_thread(thread_id, injection_token)
             if dropped:
+                _discard_injection_files(dropped)
                 logging.getLogger(__name__).info(
                     "Dropped %d additional user instruction(s) because the turn ended before applying them thread_id=%s",
                     len(dropped),

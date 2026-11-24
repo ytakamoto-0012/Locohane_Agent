@@ -187,10 +187,16 @@ export interface CadFeature {
   faces: number[];
 }
 
-/** 三角形の集まり（位置は float32、番号は uint32 の base64）。 */
+/**
+ * 数の配列。ビューア用データの JSON では base64 の文字列、ブラウザが受け取るパッケージ（parseCadPackage）では
+ * 復号済みのバイト列（パッケージの ArrayBuffer をそのまま指す）。
+ */
+export type CadBuffer = string | Uint8Array;
+
+/** 三角形の集まり（位置は float32、番号は uint32）。 */
 export interface CadTriangles {
-  positions: string;
-  indices: string;
+  positions: CadBuffer;
+  indices: CadBuffer;
 }
 
 export interface CadData {
@@ -198,9 +204,9 @@ export interface CadData {
   source: { kind: string; format?: string; path?: string };
   units: string;
   bbox: { min: number[]; max: number[]; size: number[] };
-  mesh: { positions: string; indices: string; colors: string | null; faceRanges: [number, number][] };
-  edges: { positions: string; ranges: [number, number][] };
-  vertices: { positions: string };
+  mesh: { positions: CadBuffer; indices: CadBuffer; colors: CadBuffer | null; faceRanges: [number, number][] };
+  edges: { positions: CadBuffer; ranges: [number, number][] };
+  vertices: { positions: CadBuffer };
   faces: CadItemInfo[];
   edgeList: CadItemInfo[];
   vertexList: CadItemInfo[];
@@ -247,6 +253,9 @@ export interface CadSavedHistory {
 export interface CadViewerProps {
   question?: string;
   select?: CadKind[];
+  /** ビューア用データの ID。本体は app.py の GET /locohane/cad/data/{data_id} で取りに行く（fetchCadPackage）。 */
+  data_id?: string;
+  /** 以前の形（props にビューア用データ全体を入れていた）。 */
   data?: CadData;
   /** 「保存」ボタンで app.py の action_callback "cad_viewer_save" に渡す ID。 */
   save_id?: string;
@@ -256,26 +265,93 @@ export interface CadViewerProps {
 
 export const CAD_DATA_FORMAT = 'locohane-cad-viewer/1';
 
-function decodeBytes(b64: string | null | undefined): Uint8Array {
-  if (!b64) return new Uint8Array(0);
-  const bin = atob(b64);
+function decodeBytes(value: CadBuffer | null | undefined): Uint8Array {
+  if (!value) return new Uint8Array(0);
+  if (typeof value !== 'string') return value;
+  const bin = atob(value);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 }
 
-export function decodeFloat32(b64: string | null | undefined): Float32Array {
-  const bytes = decodeBytes(b64);
-  return new Float32Array(bytes.buffer, 0, bytes.byteLength / 4);
+// パッケージのバイト列は 8 の倍数の位置から始まる（src/cad/viewer_package.py）ので、コピーせずにそのまま見る。
+// 位置がずれている（4 の倍数でない）ものだけコピーする。
+function aligned(bytes: Uint8Array): Uint8Array {
+  return bytes.byteOffset % 4 === 0 ? bytes : bytes.slice();
 }
 
-export function decodeUint32(b64: string | null | undefined): Uint32Array {
-  const bytes = decodeBytes(b64);
-  return new Uint32Array(bytes.buffer, 0, bytes.byteLength / 4);
+export function decodeFloat32(value: CadBuffer | null | undefined): Float32Array {
+  const bytes = aligned(decodeBytes(value));
+  return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
 }
 
-export function decodeUint8(b64: string | null | undefined): Uint8Array | null {
-  return b64 ? decodeBytes(b64) : null;
+export function decodeUint32(value: CadBuffer | null | undefined): Uint32Array {
+  const bytes = aligned(decodeBytes(value));
+  return new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+}
+
+/** 色（三角形の頂点ごとの RGB）。書き換えて使うことがあるので、パッケージのバイト列はコピーして返す。 */
+export function decodeUint8(value: CadBuffer | null | undefined): Uint8Array | null {
+  if (!value) return null;
+  return typeof value === 'string' ? decodeBytes(value) : value.slice();
+}
+
+const PACKAGE_MAGIC = 'LCVD';
+const PACKAGE_VERSION = 1;
+
+interface PackageBlob {
+  path: string[];
+  type: 'bytes' | 'json';
+  offset: number;
+  length: number;
+}
+
+/**
+ * ブラウザへ送る形のビューア用データ（src/cad/viewer_package.py の write_package）を読む。
+ * 一覧（faces 等）は塊ごとに文字列にして読むので、全体が大きくても 1 本の巨大な文字列は作らない。
+ */
+export function parseCadPackage(buffer: ArrayBuffer): CadData {
+  const view = new DataView(buffer);
+  const magic = String.fromCharCode(...new Uint8Array(buffer, 0, Math.min(4, buffer.byteLength)));
+  if (buffer.byteLength < 12 || magic !== PACKAGE_MAGIC) throw new Error('not a 3D viewer package');
+  const version = view.getUint32(4, true);
+  if (version !== PACKAGE_VERSION) throw new Error(`unsupported 3D viewer package version ${version}`);
+  const headerLength = view.getUint32(8, true);
+  const decoder = new TextDecoder();
+  const header = JSON.parse(decoder.decode(new Uint8Array(buffer, 12, headerLength))) as {
+    data: Record<string, unknown>;
+    blobs: PackageBlob[];
+  };
+  const data = header.data;
+  for (const blob of header.blobs) {
+    if (blob.offset + blob.length > buffer.byteLength) throw new Error('the 3D viewer package is truncated');
+    const bytes = new Uint8Array(buffer, blob.offset, blob.length);
+    let node = data;
+    for (const key of blob.path.slice(0, -1)) {
+      if (typeof node[key] !== 'object' || node[key] === null) node[key] = {};
+      node = node[key] as Record<string, unknown>;
+    }
+    const last = blob.path[blob.path.length - 1];
+    if (blob.type === 'bytes') {
+      node[last] = bytes;
+    } else {
+      const items = JSON.parse(decoder.decode(bytes)) as unknown[];
+      const list = Array.isArray(node[last]) ? (node[last] as unknown[]) : [];
+      for (const item of items) list.push(item);
+      node[last] = list;
+    }
+  }
+  return data as unknown as CadData;
+}
+
+/** ビューア用データを app.py の GET /locohane/cad/data/{dataId} から取ってきて読む。 */
+export async function fetchCadPackage(backendUrl: string, dataId: string, signal?: AbortSignal): Promise<CadData> {
+  const res = await fetch(`${backendUrl}/locohane/cad/data/${encodeURIComponent(dataId)}`, {
+    credentials: 'include',
+    signal
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return parseCadPackage(await res.arrayBuffer());
 }
 
 export function itemsOf(data: CadData, kind: CadKind): CadItemInfo[] {

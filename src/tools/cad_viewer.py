@@ -35,6 +35,7 @@ from ..cad.features import summarize_features
 from ..cad.step_summary import summarize_step
 from ..cad.mesh_data import FORMAT as VIEWER_FORMAT
 from ..cad.mesh_data import apply_view_edits, write_viewer_json
+from ..cad.viewer_package import write_package
 from ..cad import viewer_cache
 from ..i18n import t
 from ..images import image_ref, to_data_url
@@ -106,7 +107,7 @@ def _options(compare_with: str = "") -> dict[str, Any]:
     out: dict[str, Any] = {
         "linear_deflection_ratio": _setting("cad_viewer_linear_deflection_ratio", 0.001),
         "angular_deflection_deg": _setting("cad_viewer_angular_deflection_deg", 20.0),
-        "max_triangles": _setting("cad_viewer_max_triangles", 5_000_000),
+        "max_triangles": _setting("cad_viewer_max_triangles", 1_000_000),
         "stl_region_angle_deg": _setting("cad_viewer_stl_region_angle_deg", 1.0),
     }
     if compare_with:
@@ -241,9 +242,9 @@ async def show_cad_viewer(
       are free curves, POINTs are free points, layers are parts),
       .stl (ASCII or binary, including colored binary STL; STL has no B-rep, so faces are planar
       regions of triangles and edges are their borders, with no vertices. However many triangles
-      it has, an STL can always be read: for a value the result does not have, delegate to the
-      explore sub-agent, which reads selection_file / viewer_data with json_query, as id_note in
-      the result says, instead of assuming it cannot be read),
+      it has, an STL can always be read: when the request needs a value the result does not have,
+      delegate to the explore sub-agent as id_note in the result says, instead of assuming it
+      cannot be read),
       .json (viewer data this tool returned before; shows the same model again without rebuilding).
       Reading a file needs no plan approval.
 
@@ -355,11 +356,27 @@ async def _show_cad_viewer(
     data_token = _register_file(data_path, "3D viewer data (show_cad_viewer)")
     save_id = uuid.uuid4().hex
     thread_id = cl.user_session.get("thread_id") or "_no_session"
+    # ブラウザへ送るパッケージ（ビューア用データは props に入れず、ブラウザが HTTP で取りに来る）。
+    package_path = _new_data_path(_resolve_exec_workdir(), prefix="cad_package").with_suffix(".lcvd")
+    try:
+        await asyncio.to_thread(write_package, data, package_path)
+    except (OSError, ValueError) as e:
+        logger.warning("show_cad_viewer: could not write the viewer package", exc_info=True)
+        package_path.unlink(missing_ok=True)
+        return f"Error: could not prepare the 3D data for the viewer ({type(e).__name__}: {e})."
+    data_id = uuid.uuid4().hex
+    _VIEWER_PACKAGES[data_id] = ViewerPackage(path=package_path, thread_id=thread_id)
     _SAVE_TARGETS[save_id] = _SaveTarget(data=data, out_dir=_resolve_workdir(need_write=True), thread_id=thread_id)
     try:
-        answer = await _ask_selection(question, data, kinds, save_id)
+        answer = await _ask_selection(question, data, kinds, save_id, data_id)
     finally:
         target = _SAVE_TARGETS.pop(save_id, None)
+        _VIEWER_PACKAGES.pop(data_id, None)
+        # ビューアは答え（時間切れ・閉じたを含む）を受け取った時点で消えるので、パッケージも消す（大きいため）。
+        try:
+            package_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("show_cad_viewer: could not remove the viewer package %s", package_path, exc_info=True)
     if target is not None:
         # 「保存」の書き出しの途中で確定・閉じたときは、書き終わるのを待つ（待たないと書き出したことを LLM へ伝えられず、
         # 後からダウンロードボタンだけがチャットに出る）。もう新しい保存は受け付けない（_SAVE_TARGETS から外した）。
@@ -409,6 +426,19 @@ def _finish_answer_body(
 ) -> str:
     """ビューアの答えを受け取った後の処理（自動保存・画面の保存・選択結果の書き出し）。同期処理なのでスレッドで呼ぶ。"""
     res, picked, colors, message = answer
+    # ブラウザがビューア用データを読み込めなかった・読み込み中に閉じた（CadViewerBar.tsx の CadViewerLoader）。
+    # 表示の状態が無いので、自動保存はしない（しないと、隠していた部品を戻したと受け取ってしまう）。
+    load_error = res.get("load_error")
+    if isinstance(load_error, str) and load_error.strip():
+        return "\n".join(
+            [
+                f"Error: the user's browser could not load the 3D data for the viewer ({load_error.strip()[:300]}). "
+                "Tell the user. If the model is very large, a lower [cad_viewer] max_triangles (fewer triangles) may help.",
+                *extra,
+            ]
+        )
+    if res.get("load_cancelled"):
+        return "\n".join([_CANCEL_MESSAGE, *extra])
     attr_changes = _attribute_changes(data, _valid_attributes(data, res.get("attributes")))
     # 色・表示・属性を変えていれば、変更を反映したビューア用データを自動で保存し、それを viewer_data として返す。
     edited_token = _auto_save_view(data, res, colors)
@@ -493,6 +523,25 @@ class _SaveTarget:
 
 # ビューアに渡した save_id → 保存先。ブラウザから来る save_id はこれに無ければ受け付けない。
 _SAVE_TARGETS: dict[str, _SaveTarget] = {}
+
+
+@dataclass(frozen=True)
+class ViewerPackage:
+    """ブラウザへ送るビューア用データのパッケージ（src/cad/viewer_package.py）。ビューアを出している間だけ置く。"""
+
+    path: Path
+    thread_id: str
+
+
+# ビューアに渡した data_id → パッケージ。app.py の GET /locohane/cad/data/{id} が viewer_package で引く。
+# ビューア用データは props に入れない（曲面の多い STL では数百 MB になり、1 通のメッセージ・1 本の文字列として
+# ブラウザへ送ると、ブラウザが扱える文字列の長さを超える。会話の保存・ほかの画面への中継でも重い）。
+_VIEWER_PACKAGES: dict[str, ViewerPackage] = {}
+
+
+def viewer_package(data_id: str) -> ViewerPackage | None:
+    """ビューアを出している data_id のパッケージ（無ければ None）。"""
+    return _VIEWER_PACKAGES.get(data_id)
 
 
 def _model_path(target: _SaveTarget, suffix: str) -> Path:
@@ -868,7 +917,10 @@ async def _run(cmd: list[str], workdir: Path, stdout_sink: list[str] | None = No
     try:
         proc = await asyncio.to_thread(run_with_timeout, cmd, cwd=str(workdir), env=env, timeout=_state._SCRIPT_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return f"Error: making the 3D model timed out after {_state._SCRIPT_TIMEOUT} seconds."
+        return (
+            f"Error: making the 3D model timed out after {_state._SCRIPT_TIMEOUT} seconds "
+            "(for large models, raise [scripts] timeout in config.ini, or lower [cad_viewer] max_triangles)."
+        )
     except OSError as e:
         return f"Error: could not start making the 3D model: {e}"
     if proc.returncode == 0:
@@ -1173,7 +1225,7 @@ def _echo_text(
 
 
 async def _ask_selection(
-    question: str, data: dict, kinds: list[str], save_id: str = ""
+    question: str, data: dict, kinds: list[str], save_id: str = "", data_id: str = ""
 ) -> tuple[dict[str, Any], list[tuple[str, int]], list[dict[str, Any]], str] | str:
     timeout = _resolve_ask_timeout(_setting("show_cad_viewer_timeout_seconds", 0))
     thread_id = cl.user_session.get("thread_id") or "_no_session"
@@ -1185,7 +1237,8 @@ async def _ask_selection(
             props={
                 "question": question,
                 "select": kinds,
-                "data": data,
+                # ビューア用データの本体はブラウザが GET /locohane/cad/data/{data_id} で取りに来る（_VIEWER_PACKAGES）。
+                "data_id": data_id,
                 "save_id": save_id,
                 # 指示付きで確定したときに撮る画面の長辺（0 以下なら撮らない）。
                 "screenshot_long_side": _screenshot_long_side(),
@@ -1193,8 +1246,8 @@ async def _ask_selection(
         )
         ask_message = cl.AskElementMessage(content=question, element=element, timeout=timeout)
         res = await ask_message.send()
-        # Chainlit は要素（props にビューア用データ全体、数 MB になりうる）を会話の保存にも書く。ビューアは
-        # 回答待ちの間しか描かれず、後から見返す用途も無いので、答え（時間切れを含む）を受け取ったら消す。
+        # ビューアは回答待ちの間しか描かれず、後から見返す用途も無い（データ ID もこの後すぐ使えなくなる）ので、
+        # 答え（時間切れを含む）を受け取ったら消す。
         try:
             await element.remove()
         except Exception:  # noqa: BLE001 - 後片付けの失敗でツールの結果を失わせない
@@ -1272,16 +1325,19 @@ def _id_note(data: dict) -> str:
     if (data.get("source") or {}).get("format") == "STL":
         # メッシュの数が多い（数十万〜数百万）STL で、LLM が「データにアクセスできない」「数が多くて読めない」と
         # 思い込んで断ることがあった。実際には explore サブエージェントが selection_file・STL をコードで読んで
-        # 計算できるので、断らずに委譲させる。
+        # 計算できるので、断らずに委譲させる。委譲は依頼が戻り値に無い値を要るときだけ（指示欄が空のまま確定した
+        # ときの next_step「何もしない」と食い違わないように）。viewer_data は数百 MB になり、json_query は呼ぶたびに
+        # ファイル全体を読み直すので、多くの要素を引くときは execute_python_code_readonly で 1 回だけ読ませる。
         return (
             "IDs are planar regions of the STL mesh (no CadQuery equivalent); 'meshHints' only tell which region is outermost on an axis. "
             "However many triangles the STL has (even millions), there is always a way to read it and compute from it: never assume "
-            "otherwise, and never tell the user that the STL or its data cannot be read or accessed. When the task needs a value "
-            "or information that is not in this result, delegate it with dispatch_agent (agent_type explore), passing "
-            "selection_file, viewer_data, the STL path (model.source) and what the user asked. Tell it to read them with "
-            "json_query, querying only the elements it needs: selection_file has the selected elements under 'selected', and "
-            "viewer_data has every face under 'faces' and every edge under 'edgeList' (center, normal, area / length, bbox and "
-            "neighbouring elements), and to compute from them (or from the STL triangles) with execute_python_code_readonly."
+            "otherwise, and never tell the user that the STL or its data cannot be read or accessed. Only when the user's request needs "
+            "a value or information that is not in this result, delegate it with dispatch_agent (agent_type explore), passing "
+            "selection_file, viewer_data, the STL path (model.source) and what the user asked. Tell it: selection_file is small and has "
+            "the selected elements under 'selected' (read it with json_query); viewer_data has every face under 'faces' and every edge "
+            "under 'edgeList' (center, normal, area / length, bbox and neighbouring elements) but can be hundreds of MB, and json_query "
+            "reads the whole file again on every call, so to look up many elements, read viewer_data (or the STL triangles) once in one "
+            "execute_python_code_readonly run and compute everything there."
         )
     return (
         "IDs are 0-based in CadQuery order (face i = cq.Workplane().add(shape).faces().vals()[i]; same for edges/vertices), "

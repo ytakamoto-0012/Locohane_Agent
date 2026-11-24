@@ -302,12 +302,15 @@ function App() {
   // このセッションには生成中タスクへの参照（session.current_task）が無いため、
   // Chainlit純正の stopTask は機能しない。代わりにバックエンドへ「このスレッドの
   // 生成中タスクをcancel()して」と依頼する（app.pyの _stop_thread_generating参照）。
-  const stopRemoteGenerating = () => {
-    if (!currentThreadId) return;
-    fetch(`${BACKEND_URL}/locohane/threads/${currentThreadId}/stop`, {
+  // 停止を受け付けたら true（Composer.tsx は失敗したとき、停止で送り直す予定だった追加指示を元の扱いに戻す）。
+  const stopRemoteGenerating = (): Promise<boolean> => {
+    if (!currentThreadId) return Promise.resolve(false);
+    return fetch(`${BACKEND_URL}/locohane/threads/${currentThreadId}/stop`, {
       method: 'POST',
       credentials: 'include'
-    }).catch(() => {});
+    })
+      .then((res) => res.ok)
+      .catch(() => false);
   };
 
   // 同じ所有者（匿名モードでは全会話が"anonymous"に一元化）が別スレッドで

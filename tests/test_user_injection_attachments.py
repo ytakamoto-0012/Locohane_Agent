@@ -327,3 +327,28 @@ async def test_graph_passes_llm_text_and_event_carries_files(monkeypatch):
     assert user_injection.injection_items(injected)[0]["files"] == [{"name": "report.xlsx", "path": "C:/work/report.xlsx"}]
     assert events[0]["injections"][0]["text"] == "これも見て"
     assert events[0]["injections"][0]["files"][0]["name"] == "report.xlsx"
+
+
+def test_attachment_copies_of_dropped_instructions_are_removed(_reset, tmp_path):
+    # 停止で捨てた指示の添付のコピーは消す（フロントエンドは元のアップロードを付けて送り直すので使われない）。
+    _generating()
+    a = _upload(tmp_path, "report.xlsx")
+    _session("sid-1", "t1", [a])
+    assert _post({"text": "これも", "id": "inj-1", "files": [a["id"]], "session_id": "sid-1"}).status_code == 200
+    [copy] = [Path(f["path"]) for f in user_injection._queues["t1"].items[0].files]
+    assert copy.is_file()
+
+    app._close_user_injection_on_stop("t1")
+
+    assert not copy.exists() and not copy.parent.exists()
+    assert Path(a["path"]).is_file()  # 元のアップロードは残す
+    assert (_reset.workdir / "uploads").is_dir()
+
+
+def test_discard_leaves_files_outside_the_upload_copies(tmp_path):
+    # 受け付けた時点のコピー（uploads/<送信日時>/）以外のパスには触れない。
+    other = tmp_path / "data" / "keep.txt"
+    other.parent.mkdir(parents=True)
+    other.write_text("x", encoding="utf-8")
+    app._discard_injection_files([{"id": "i", "text": "", "files": [{"name": "keep.txt", "path": str(other)}]}])
+    assert other.is_file()

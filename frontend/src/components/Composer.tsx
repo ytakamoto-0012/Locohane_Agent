@@ -31,6 +31,10 @@ const CHAR_COUNTER_SHOW_RATIO = 0.8;
 const TURN_END_SETTLE_MS = 1500;
 // 追加指示の送信がこれより長くかかったら打ち切る（応答待ちのまま、ターン終了後の処理が止まらないように）。
 const INJECT_TIMEOUT_MS = 10000;
+// 自動で送り直した指示を、断られたときに戻せるよう覚えておく数（古いものから捨てる）。
+const RESENT_KEEP = 10;
+// 断られた通常のメッセージの ID を入れる、知らせの metadata のキー（app.py の REJECTED_MESSAGE_METADATA_KEY）。
+const REJECTED_MESSAGE_METADATA_KEY = 'rejected_message_id';
 
 /**
  * 生成中に送った追加指示（app.py の /locohane/threads/{id}/inject、src/user_injection.py）。
@@ -50,6 +54,14 @@ interface QueuedInstruction {
   status: 'sending' | 'queued' | 'deferred' | 'unknown';
 }
 
+/**
+ * ターンの終了後に通常のメッセージとして送る指示か。受け付けられなかった指示（deferred）と、停止ボタンを押した時点で
+ * 伝わっていなかった指示（stopped にある ID。停止で受付が閉じて捨てられたもの）。
+ */
+function isResendable(stopped: ReadonlySet<string>) {
+  return (q: QueuedInstruction) => q.status === 'deferred' || (stopped.has(q.id) && q.status === 'queued');
+}
+
 function countLines(text: string): number {
   let lines = 1;
   for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) lines++;
@@ -62,8 +74,8 @@ interface ComposerProps {
   remoteGenerating?: boolean;
   // /locohane/threads/{id}/stop を呼び、remoteGenerating中の停止ボタンから
   // 実際の生成タスクを cancel() させる（このセッションには
-  // session.current_task が無く、純正の stopTask は機能しないため）。
-  onStopRemote?: () => void;
+  // session.current_task が無く、純正の stopTask は機能しないため）。停止を受け付けたら true（失敗したら false）。
+  onStopRemote?: () => Promise<boolean>;
   // 今開いているスレッドは処理中ではないが、同じ所有者の別スレッドが処理中
   // （新規チャット・他スレッドからの並列送信を防ぐ。停止操作は提供しない —
   // 対象スレッドを開いてそちら側の停止ボタンを使ってもらう）。
@@ -169,59 +181,93 @@ export function Composer({
     }
   }, [messages, queued]);
 
-  // 停止ボタンを押した時点で、まだ会話へ入っていない追加指示があった（stopWithPending 参照）。
-  const stoppedWithPendingRef = useRef(false);
+  // 停止ボタンを押した時点で、まだ会話へ入っていなかった追加指示の ID（stopWithPending 参照）。
+  // 真偽値ではなく ID で持つのは、停止の後に送った別の指示や、次のターンの指示を巻き込まないため。
+  const stoppedIdsRef = useRef<Set<string>>(new Set());
+  // 自動で送り直した（ターンの終了後に通常のメッセージとして送った）指示。送ったメッセージの ID → 指示。
+  // バックエンドが処理せずに断ったら（app.py の REJECTED_MESSAGE_METADATA_KEY）、入力欄へ戻す。
+  const resentRef = useRef<Map<string, QueuedInstruction[]>>(new Map());
+
+  // 自動で送り直した指示が断られたら（同じ会話の停止の後始末が長引いた・別の会話が生成中など）、入力欄へ戻す。
+  useEffect(() => {
+    if (resentRef.current.size === 0) return;
+    for (const m of messages) {
+      const rejected = m.metadata?.[REJECTED_MESSAGE_METADATA_KEY];
+      if (typeof rejected !== 'string') continue;
+      const items = resentRef.current.get(rejected);
+      if (!items) continue;
+      resentRef.current.delete(rejected);
+      restoreToInput(items);
+      setPasteError(t('composer.resendRejected'));
+    }
+    // restoreToInput・t は毎回作り直されるが、判定には使わない
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages]);
+
+  // 指示を通常のメッセージとして送り、断られたときに戻せるよう覚えておく（古いものから捨て、数を抑える）。
+  const sendAsMessage = (items: QueuedInstruction[]) => {
+    const fileReferences = items.flatMap((q) => q.attachments.flatMap((a) => (a.fileRef ? [{ id: a.fileRef.id }] : [])));
+    const message = buildUserMessage(
+      items
+        .map((q) => q.text)
+        .filter((s) => s)
+        .join('\n\n')
+    );
+    resentRef.current.set(message.id, items);
+    while (resentRef.current.size > RESENT_KEEP) {
+      const oldest = resentRef.current.keys().next().value;
+      if (oldest === undefined) break;
+      resentRef.current.delete(oldest);
+    }
+    sendMessage(message, fileReferences);
+  };
 
   // ターンが終わったら、受け付けられなかった指示（deferred）は通常のメッセージとして送り、
   // 受け付けたのに反映されないまま終わった指示（エラーで中断した場合）・受け付けられたか分からない指示は入力欄へ戻す。
-  // 停止ボタンで止めた場合は、伝わっていない指示も入力欄へ戻さず、次の発言として送って続ける
+  // 停止ボタンで止めた場合は、そのとき伝わっていなかった指示も入力欄へ戻さず、次の発言として送って続ける
   // （サブエージェントの実行中は指示が完了まで伝わらないため、停止して指示を先に伝えたい、という使い方。
   // バックエンドは停止の時点で受付を閉じ、会話へ入っていない指示は捨て、画面に出ないまま入った指示は
-  // 取り除くので、ここで送っても二重にならない。後始末が終わるまでは app.py の _wait_for_stopped_turn が待つ）。
+  // 取り除くので、ここで送っても二重にならない。後始末が終わるまでは app.py の _wait_for_stopped_turn が待つ。
+  // それでも断られたら、上の効果で入力欄へ戻す）。
   useEffect(() => {
     if (turnRunning) return;
     if (queued.length === 0) {
-      stoppedWithPendingRef.current = false;
+      stoppedIdsRef.current.clear();
       return;
     }
     if (queued.some((q) => q.status === 'sending')) return;
     const timer = setTimeout(() => {
       const applied = selectAppliedInjectionIds(messagesRef.current);
       const pending = queued.filter((q) => !applied.has(q.id));
-      const stopped = stoppedWithPendingRef.current;
-      stoppedWithPendingRef.current = false;
+      const stopped = stoppedIdsRef.current;
+      stoppedIdsRef.current = new Set();
       setQueued([]);
       // unknown（受け付けられたか分からない）は、届くのが遅れて次のターンの受付に入ると二重になるため送らない。
-      const deferred = pending.filter((q) => q.status === 'deferred' || (stopped && q.status === 'queued'));
+      const deferred = pending.filter(isResendable(stopped));
       const restore = pending.filter((q) => !deferred.includes(q) || inputBlockedRef.current);
-      if (deferred.length > 0 && !inputBlockedRef.current) {
-        const fileReferences = deferred.flatMap((q) =>
-          q.attachments.flatMap((a) => (a.fileRef ? [{ id: a.fileRef.id }] : []))
-        );
-        sendMessage(
-          buildUserMessage(
-            deferred
-              .map((q) => q.text)
-              .filter((s) => s)
-              .join('\n\n')
-          ),
-          fileReferences
-        );
-      }
+      if (deferred.length > 0 && !inputBlockedRef.current) sendAsMessage(deferred);
       if (restore.length > 0) {
         restoreToInput(restore);
         setPasteError(t('composer.injectNotApplied'));
       }
     }, TURN_END_SETTLE_MS);
     return () => clearTimeout(timer);
-    // buildUserMessage・sendMessage・t は毎回作り直されるが、判定には使わない
+    // sendAsMessage・restoreToInput・t は毎回作り直されるが、判定には使わない
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turnRunning, queued]);
 
   // 停止ボタン: 伝わっていない追加指示があれば、ターンの終了後に入力欄へ戻さず送るよう覚えておく。
-  const stopWithPending = (stop: () => void) => () => {
-    if (queued.length > 0) stoppedWithPendingRef.current = true;
-    stop();
+  // 別の画面からの停止（onStopRemote）が失敗した（停止していない）ときは覚えたものを外す
+  // （そのターンが後でエラーで終わったときは、従来どおり入力欄へ戻すため）。
+  const stopWithPending = (stop: () => void | Promise<boolean>) => () => {
+    const ids = queued.map((q) => q.id);
+    for (const id of ids) stoppedIdsRef.current.add(id);
+    const result = stop();
+    if (result instanceof Promise) {
+      void result.then((ok) => {
+        if (!ok) for (const id of ids) stoppedIdsRef.current.delete(id);
+      });
+    }
   };
 
   const setQueuedStatus = (id: string, status: QueuedInstruction['status']) =>
@@ -356,8 +402,19 @@ export function Composer({
       if (pastedTexts.length > 0) message.output = [value, ...pastedTexts].filter((t) => t).join('\n\n');
       replyMessage(message);
     } else {
-      const fileReferences = attachments.filter((a) => a.fileRef).map((a) => ({ id: a.fileRef!.id }));
-      sendMessage(message, fileReferences);
+      // 停止の直後（ターンの終了後に送り直す前）に送った場合は、伝わっていない指示をこの発言の前に入れて一緒に送る
+      // （待たせると、指示が次のターンの後まで「送信待ち」に残り、発言との順序も逆になる）。
+      // 断られたときは、指示と今の発言の両方を入力欄へ戻す。
+      const applied = selectAppliedInjectionIds(messages);
+      const carried = queued.filter((q) => !applied.has(q.id) && isResendable(stoppedIdsRef.current)(q));
+      if (carried.length > 0) {
+        setQueued((prev) => prev.filter((q) => !carried.includes(q)));
+        for (const q of carried) stoppedIdsRef.current.delete(q.id);
+        sendAsMessage([...carried, { id: message.id, text: value, attachments, status: 'deferred' }]);
+      } else {
+        const fileReferences = attachments.filter((a) => a.fileRef).map((a) => ({ id: a.fileRef!.id }));
+        sendMessage(message, fileReferences);
+      }
     }
 
     setValue('');

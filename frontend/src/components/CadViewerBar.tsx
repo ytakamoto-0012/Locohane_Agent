@@ -1,11 +1,13 @@
-import { useCallback, useContext, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactElement } from 'react';
 import { useRecoilValue } from 'recoil';
 import { ChainlitContext, sessionIdState, useChatData, type IAction } from '@chainlit/react-client';
+import { BACKEND_URL } from '../chainlitClient';
 import { useI18n } from '../i18n';
 import type { MessageKey } from '../i18n/messages';
 import {
   CAD_DATA_FORMAT,
   attributeColor,
+  fetchCadPackage,
   dropUnchangedPartColors,
   effectiveColor,
   itemsOf,
@@ -148,13 +150,13 @@ export function CadViewerBar() {
       ? elements.find((e) => e.type === 'custom' && e.id === askUser.spec.element_id && e.name === 'CadViewer')
       : undefined;
   const props = element?.type === 'custom' ? (element.props as CadViewerProps) : undefined;
-  if (!askUser || !element || !props?.data || props.data.format !== CAD_DATA_FORMAT) return null;
-  return (
+  if (!askUser || !element || !props) return null;
+  const panel = (data: CadData) => (
     <CadViewerPanel
       key={element.id}
       question={props.question ?? ''}
       kinds={props.select?.length ? props.select : ['face']}
-      data={props.data}
+      data={data}
       saveId={props.save_id ?? ''}
       screenshotLongSide={props.screenshot_long_side ?? 0}
       onSubmit={(selected, colors, message, view, screenshot, measurements) =>
@@ -170,6 +172,75 @@ export function CadViewerBar() {
       }
       onCancel={(colors, view) => askUser.callback({ submitted: false, selected: [], colors, ...view })}
     />
+  );
+  if (props.data_id) {
+    // ビューア用データは props に入っておらず、HTTP で取りに行く（src/tools/cad_viewer.py の _VIEWER_PACKAGES）。
+    // 読み込めなかった・読み込み中に閉じたときは、表示の状態を返さない（backend は自動保存をせずに LLM へ伝える）。
+    return (
+      <CadViewerLoader
+        key={element.id}
+        dataId={props.data_id}
+        question={props.question ?? ''}
+        onClose={(loadError) =>
+          askUser.callback(
+            loadError ? { submitted: false, selected: [], load_error: loadError } : { submitted: false, selected: [], load_cancelled: true }
+          )
+        }
+      >
+        {panel}
+      </CadViewerLoader>
+    );
+  }
+  if (!props.data || props.data.format !== CAD_DATA_FORMAT) return null;
+  return panel(props.data);
+}
+
+type LoadState = { kind: 'loading' } | { kind: 'ready'; data: CadData } | { kind: 'error'; error: string };
+
+/** ビューア用データ（app.py の GET /locohane/cad/data/{id}）を取ってきてから、ビューアを出す。 */
+function CadViewerLoader({
+  dataId,
+  question,
+  onClose,
+  children
+}: {
+  dataId: string;
+  question: string;
+  /** loadError: 読み込めなかった理由（読み込み中にキャンセルしたときは null）。 */
+  onClose: (loadError: string | null) => void;
+  children: (data: CadData) => ReactElement;
+}) {
+  const { t } = useI18n();
+  const [state, setState] = useState<LoadState>({ kind: 'loading' });
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ kind: 'loading' });
+    fetchCadPackage(BACKEND_URL, dataId, controller.signal)
+      .then((data) => {
+        if (data.format !== CAD_DATA_FORMAT) throw new Error(`unexpected viewer data format ${String(data.format)}`);
+        setState({ kind: 'ready', data });
+      })
+      .catch((e: unknown) => {
+        if (controller.signal.aborted) return;
+        setState({ kind: 'error', error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) });
+      });
+    return () => controller.abort();
+  }, [dataId]);
+  if (state.kind === 'ready') return children(state.data);
+  return (
+    <div className="ask-form-bar cad-viewer-bar">
+      {question && <div className="ask-form-question">{question}</div>}
+      <div className="cad-viewer-host">
+        <div className="cad-viewer-overlay" role="status">
+          {state.kind === 'loading' ? t('cad.loadingData') : t('cad.loadFailed', { error: state.error })}
+        </div>
+      </div>
+      <div className="ask-form-actions">
+        <button type="button" className="ask-form-cancel" onClick={() => onClose(state.kind === 'error' ? state.error : null)}>
+          {t('cad.close')}
+        </button>
+      </div>
+    </div>
   );
 }
 

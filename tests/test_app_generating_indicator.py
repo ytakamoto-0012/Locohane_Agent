@@ -17,6 +17,7 @@ on_message を薄いラッパー（マーキング）＋ _on_message_impl（実�
 import asyncio
 
 import pytest
+from types import SimpleNamespace
 
 import app
 
@@ -120,10 +121,12 @@ async def test_on_message_rejects_when_owner_has_other_thread_generating(monkeyp
     monkeypatch.setattr(app.cl, "context", _FakeContext(_FakeEmitSession("t1")))
 
     sent_messages = []
+    sent_metadata = []
 
     class _FakeMessage:
-        def __init__(self, content=None, type=None):
+        def __init__(self, content=None, type=None, metadata=None):
             sent_messages.append(content)
+            sent_metadata.append(metadata)
 
         async def send(self):
             return None
@@ -137,10 +140,12 @@ async def test_on_message_rejects_when_owner_has_other_thread_generating(monkeyp
 
     monkeypatch.setattr(app, "_on_message_impl", fake_impl)
 
-    await app.on_message(object())
+    await app.on_message(SimpleNamespace(id="msg-1"))
 
     assert called == []
     assert sent_messages  # 拒否理由を伝えるメッセージを送っている
+    # 断ったメッセージの ID を知らせに付ける（Composer.tsx が、自動で送り直した追加指示を入力欄へ戻すため）。
+    assert sent_metadata == [{app.REJECTED_MESSAGE_METADATA_KEY: "msg-1"}]
     assert "t1" not in app._generating_thread_ids
     assert "t1" not in app._generating_thread_tasks
     # 競合先（other-thread側）の記録自体は書き換えない。
@@ -484,10 +489,12 @@ async def test_on_message_rejects_while_the_same_thread_is_still_generating(monk
     monkeypatch.setattr(app.cl, "user_session", _FakeUserSession("t1"))
     monkeypatch.setattr(app.cl, "context", _FakeContext(_FakeEmitSession("t1")))
     sent_messages = []
+    sent_metadata = []
 
     class _FakeMessage:
-        def __init__(self, content=None, type=None):
+        def __init__(self, content=None, type=None, metadata=None):
             sent_messages.append(content)
+            sent_metadata.append(metadata)
 
         async def send(self):
             return None
@@ -500,10 +507,11 @@ async def test_on_message_rejects_while_the_same_thread_is_still_generating(monk
 
     monkeypatch.setattr(app, "_on_message_impl", fake_impl)
 
-    await app.on_message(object())
+    await app.on_message(SimpleNamespace(id="msg-2"))
 
     assert called == []
     assert sent_messages
+    assert sent_metadata == [{app.REJECTED_MESSAGE_METADATA_KEY: "msg-2"}]
     assert "t1" in app._generating_thread_ids
     assert user_injection.current_token("t1") == running_token
     app._generating_thread_ids.clear()

@@ -1923,7 +1923,7 @@ and the resulting viewer data (JSON) is put in the session's `_tmp_` folder. The
 three.js is loaded only when a viewer opens (`frontend/src/components/cad/CadScene.ts`; it is not part of the main chat bundle).
 In the viewer, drag to rotate, right-drag to pan, use the wheel to zoom, click to select / deselect, switch the kind of element with the buttons at the top,
 and use "Expand" to fill the screen (Esc to restore). As with the other question tools, it can be answered on the screen you come back to after switching conversations.
-The viewer element (its props hold the whole viewer data, tens of MB for a large CAD model) is not saved in the conversation history (`chat_threads.sqlite`, `elements/`; `EPHEMERAL_CUSTOM_ELEMENTS` in `src/thread_store.py`; leftovers from earlier versions are removed by `purge_ephemeral_elements` at startup, followed by VACUUM). "Confirm" / "Cancel" show a busy indicator at once and stop further input, and the backend sends the close signal first and then does the auto-save and selection writing in a worker thread.
+The viewer data is not put in the element's props (for an STL with many curved surfaces it is hundreds of MB, and sending it as one message, one string, goes over the string length a browser can handle). The backend writes a package in the form sent to the browser (`src/cad/viewer_package.py`: triangle positions and indices as raw bytes, the face / edge lists split into JSON chunks of 20,000 items) to the `_tmp_` folder and puts only `data_id` in the props. The browser fetches it with `GET /locohane/cad/data/{data_id}` (`app.py`) and reads it with `parseCadPackage` in `frontend/src/components/cad/cadData.ts` (without making one huge string). It is returned only while the viewer is shown and only for a thread the same owner is generating, and the package is deleted once the answer arrives. If the browser cannot load it, the reason is returned to the LLM (no auto-save). The `viewer_data` JSON that the LLM reads is unchanged. The viewer element is not saved in the conversation history (`chat_threads.sqlite`, `elements/`; `EPHEMERAL_CUSTOM_ELEMENTS` in `src/thread_store.py`; leftovers from earlier versions are removed by `purge_ephemeral_elements` at startup, followed by VACUUM). "Confirm" / "Cancel" show a busy indicator at once and stop further input, and the backend sends the close signal first and then does the auto-save and selection writing in a worker thread.
 Rotation uses three.js `ArcballControls` and, as in CAD software, is relative to the screen (a vertical drag rotates only around the screen's horizontal axis
 and does not stop at the top or bottom; in exchange, the up direction is not kept, and dragging near the edge of the view also rolls around the screen's depth axis). Wheel zoom moves toward the cursor.
 
@@ -2221,7 +2221,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[user_response_timeouts]` | `ask_user_choice_seconds` | Seconds to wait for a user response to `ask_user_choice` (multiple-choice questions). `0` waits indefinitely | `ASK_USER_CHOICE_TIMEOUT_SECONDS` |
 | `[user_response_timeouts]` | `show_cad_viewer_seconds` | Seconds to wait for the user to confirm a selection in `show_cad_viewer` (3D viewer). `0` waits indefinitely (default) | `SHOW_CAD_VIEWER_TIMEOUT_SECONDS` |
 | `[cad_viewer]` | `enabled` | Whether the 3D viewer (`show_cad_viewer`) can be used. With `false` the tool returns an error | `CAD_VIEWER_ENABLED` |
-| `[cad_viewer]` | `max_triangles` | Upper limit of triangles sent to the viewer (default 5000000). A B-rep shape over it is tessellated again more coarsely, and it is an error if still over (STL is an error as soon as it is over). 0 or less means no limit | `CAD_VIEWER_MAX_TRIANGLES` |
+| `[cad_viewer]` | `max_triangles` | Upper limit of triangles sent to the viewer (default 1000000). A B-rep shape over it is tessellated again more coarsely, and it is an error if still over (STL is an error as soon as it is over). 0 or less means no limit. A curved STL with 1,000,000 triangles makes about 500 MB of data, and its conversion takes about 40 seconds and 3-4 GB of memory. If you raise it, also raise `[scripts] timeout` and make sure there is enough memory | `CAD_VIEWER_MAX_TRIANGLES` |
 | `[cad_viewer]` | `linear_deflection_ratio` | Tolerance when splitting curved surfaces into triangles (ratio to the diagonal length of the shape, default 0.001) | `CAD_VIEWER_LINEAR_DEFLECTION_RATIO` |
 | `[cad_viewer]` | `angular_deflection_deg` | Angular tolerance when splitting curved surfaces into triangles (degrees, default 20) | `CAD_VIEWER_ANGULAR_DEFLECTION_DEG` |
 | `[cad_viewer]` | `stl_region_angle_deg` | Upper limit of the angle between normals when grouping STL triangles into one face (planar region) (degrees, default 1) | `CAD_VIEWER_STL_REGION_ANGLE_DEG` |
@@ -2591,7 +2591,15 @@ an "Add instruction" button appears next to the stop button instead of the send 
 - **What you see**: after sending, "Will be passed at the next step" is shown above the input box, and once it enters the
   conversation it appears in the chat as your message (it remains when the thread is resumed). An instruction that could not be
   accepted because the turn was ending is shown as "Will be sent when the work ends" and is sent as a normal message after the
-  turn. If the turn is interrupted by the stop button or an error, instructions that were not passed on are put back in the input box.
+  turn. When you stop the turn with the stop button, instructions not passed on yet are not put back in the input box; they are sent
+  as a normal message after the stop cleanup and the work continues (while a sub-agent runs, instructions are not passed on until it
+  finishes, so stopping passes them on first). If you send a message yourself right after stopping (before they are resent), they are
+  put in front of your message and sent together. If a resent instruction is not accepted (the wait for the cleanup passed
+  `_STOP_WAIT_SECONDS`, or another conversation is generating), it is put back in the input box (the notice of the rejection has the
+  rejected message's ID in its metadata; `REJECTED_MESSAGE_METADATA_KEY` in `app.py`). Instructions not passed on because the turn
+  was interrupted by an error, and instructions not known to have been accepted because of a communication error, are put back in
+  the input box. For instructions discarded without being passed on, the attachment copies made on acceptance are deleted
+  (`_discard_injection_files` in `app.py`).
 - **What can be sent**: text and attachments (attachments alone are fine). The length limit is `[ui] max_input_chars`
   (including pasted text). Attachments are copied, when accepted, to the same per-thread folder as a normal send
   (`_tmp_<…>/uploads/<send time>/`), and the text for the LLM (saved locations with `@N`, expanded pasted text) is built at
@@ -2604,12 +2612,12 @@ an "Add instruction" button appears next to the stop button instead of the send 
 - **Relation to subagents**: only the main agent's graph takes instructions; they never enter the subagent loop
   (`src/subagent.py`). An instruction sent while `dispatch_agent` runs enters after its result has returned to the main agent.
 - **Stop and failures**: pressing the stop button (on your own screen or on a screen you came back to) closes the queue at once,
-  and instructions not yet in the conversation are discarded (put back in the input box on screen). Instructions that entered the
+  and instructions not yet in the conversation are discarded in the backend (the screen resends them as a normal message after the
+  turn ends; `stopWithPending` in `Composer.tsx`). Instructions that entered the
   conversation without being shown are removed. Retries after loop detection or communication errors and in-turn context
   compaction neither lose instructions that already entered nor duplicate them (`tests/test_user_injection_failures.py`).
   If a normal message arrives while the same conversation is still generating, it is not processed and a notice is returned
-  (a second turn is never run in parallel). Right after the stop button (e.g. resending the instructions returned to the input
-  box), the turn waits up to 120 seconds for the stopped turn and the stop cleanup (killing sub-agents and background jobs,
+  (a second turn is never run in parallel). Right after the stop button (e.g. resending the instructions that were not passed on), the turn waits up to 120 seconds for the stopped turn and the stop cleanup (killing sub-agents and background jobs,
   force-closing the LLM connections, rebuilding the graph) to finish ("Waiting for the stopped task to finish cleaning up..."
   is shown; `_wait_for_stopped_turn` in `app.py`). Before, the cleanup also closed the new turn's LLM connections and
   sub-agents so generation failed, or the end signal of the old turn arrived after the start of the new one and the screen

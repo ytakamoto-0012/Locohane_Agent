@@ -18,6 +18,7 @@ import pytest
 
 import src.tools as tools
 from src import ask_relay
+from src.cad.viewer_package import read_package
 from src.tools import cad_viewer
 from src.tools._ask_echo import ASK_TIMEOUT_MESSAGE
 
@@ -71,9 +72,16 @@ class _FakeAskElement:
         self.element = element
 
     async def send(self):
-        _viewer.shown.append({"name": self.element.name, **self.element.props})
+        # ビューア用データは props に入らず（data_id だけ）、ブラウザが HTTP でパッケージを取りに来る。
+        # ブラウザの代わりにパッケージを読み戻して "data" に入れる（パッケージの往復も確かめる）。
+        props = dict(self.element.props)
+        assert "data" not in props
+        package = cad_viewer.viewer_package(props["data_id"])
+        assert package is not None and package.thread_id == _THREAD
+        props["data"] = read_package(package.path)
+        _viewer.shown.append({"name": self.element.name, **props})
         if _viewer.on_show is not None:
-            _viewer.on_show_result = await _viewer.on_show(self.element.props)
+            _viewer.on_show_result = await _viewer.on_show(props)
         return _viewer.response
 
     async def update(self):
@@ -180,6 +188,9 @@ async def test_stl_selection_is_validated_and_returned_with_geometry(env, tmp_pa
     assert shown["select"] == ["face", "edge"]
     assert shown["data"]["stats"]["faces"] == 6
     assert out["status"] == "confirmed"
+    # ブラウザへ送ったパッケージは、答えを受け取ったら消え、データ ID も使えなくなる。
+    assert cad_viewer._VIEWER_PACKAGES == {}
+    assert list(tmp_path.rglob("*.lcvd")) == []
     assert out["selected_count"] == 2
     assert out["selected_by_kind"] == {"face": 1, "edge": 1}
     assert out["model"]["format"] == "STL"
@@ -631,6 +642,19 @@ async def test_echo_lists_counts_not_elements(env, tmp_path) -> None:
     assert echo.startswith(i18n.t("cad.selected_summary", items=i18n.t("list.separator").join([face, edge])))
     assert "#" not in echo and "PLANE" not in echo
     assert echo.endswith("選択した要素の色を赤に変更して")
+
+
+@pytest.mark.asyncio
+async def test_browser_load_failure_and_cancel_while_loading(env, tmp_path) -> None:
+    # ブラウザがビューア用データを読み込めなかった・読み込み中に閉じた（CadViewerBar.tsx の CadViewerLoader）。
+    # 表示の状態が無いので自動保存はせず、読み込めなかったことをそのまま伝える。
+    stl = _cube_stl(tmp_path)
+    _viewer.response = {"submitted": False, "selected": [], "load_error": "TypeError: Failed to fetch"}
+    out = await _call(file_path=str(stl))
+    assert out.startswith("Error: the user's browser could not load the 3D data") and "Failed to fetch" in out
+    _viewer.response = {"submitted": False, "selected": [], "load_cancelled": True}
+    assert await _call(file_path=str(stl)) == cad_viewer._CANCEL_MESSAGE
+    assert list(tmp_path.rglob("cad_view_edited_*.json")) == []
 
 
 @pytest.mark.asyncio
