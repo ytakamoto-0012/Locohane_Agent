@@ -1947,6 +1947,8 @@ LLM へ返すツール `show_cad_viewer`（`src/tools/cad_viewer.py`）がある
 色付き STL は、バイナリ STL の三角形ごとの属性 2 バイトに入った色を読む。VisCAM / SolidView 方式（bit15=1 で色あり、赤が上位）と
 Materialise Magics 方式（ヘッダーの `COLOR=` が既定色、bit15=0 で色あり、赤が下位）の両方を扱う。
 STL は cadquery が無くても表示できる（それ以外の形式とコードの実行には cadquery が要る）。
+STL を選んだ結果の `id_note` には、三角形がいくら多くても読む方法は必ずあること、戻り値に無い値や情報は
+サブエージェント `explore` に委譲し、selection_file・viewer_data（`faces`・`edgeList`）を `json_query` で読んで（必要なら STL も）計算させることを書き、LLM が「読めない」と思い込んで断らないようにしている。
 
 **LLM へ返す情報**: 確定した要素ごとに、種類（`PLANE`/`CYLINDER`/`LINE`/`CIRCLE` 等）・面積や長さ・中心・法線・半径・軸・バウンディングボックス・
 隣り合う要素の ID、部品（アセンブリ）のパスと色、単独のカーブ・点かどうか（`free`）、円筒等の継ぎ目か（`seam`）、

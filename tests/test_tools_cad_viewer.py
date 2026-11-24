@@ -185,6 +185,9 @@ async def test_stl_selection_is_validated_and_returned_with_geometry(env, tmp_pa
     assert out["model"]["format"] == "STL"
     assert out["model"]["counts"]["faces"] == 6
     assert "planar regions of the STL mesh" in out["id_note"]
+    # 三角形の数を理由に「読めない」と断らせず、戻り値に無い値は explore サブエージェントへ委譲させる。
+    assert "never tell the user that the STL or its data cannot be read" in out["id_note"]
+    assert "agent_type explore" in out["id_note"] and "json_query" in out["id_note"]
     # 選んだ要素の一覧（ID も）は戻り値に入れず、選択結果のファイル（@N）にだけ書く。
     assert "selected" not in out
     assert "PLANE" not in json.dumps(out)

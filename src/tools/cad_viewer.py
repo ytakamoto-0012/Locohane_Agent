@@ -240,7 +240,10 @@ async def show_cad_viewer(
       .brep/.brp (BREP), .bin (binary BREP), .dxf (2D: closed outlines become faces, open lines
       are free curves, POINTs are free points, layers are parts),
       .stl (ASCII or binary, including colored binary STL; STL has no B-rep, so faces are planar
-      regions of triangles and edges are their borders, with no vertices),
+      regions of triangles and edges are their borders, with no vertices. However many triangles
+      it has, an STL can always be read: for a value the result does not have, delegate to the
+      explore sub-agent, which reads selection_file / viewer_data with json_query, as id_note in
+      the result says, instead of assuming it cannot be read),
       .json (viewer data this tool returned before; shows the same model again without rebuilding).
       Reading a file needs no plan approval.
 
@@ -1267,7 +1270,19 @@ def _diff_summary(diff: dict) -> dict[str, Any]:
 
 def _id_note(data: dict) -> str:
     if (data.get("source") or {}).get("format") == "STL":
-        return "IDs are planar regions of the STL mesh (no CadQuery equivalent); 'meshHints' only tell which region is outermost on an axis."
+        # メッシュの数が多い（数十万〜数百万）STL で、LLM が「データにアクセスできない」「数が多くて読めない」と
+        # 思い込んで断ることがあった。実際には explore サブエージェントが selection_file・STL をコードで読んで
+        # 計算できるので、断らずに委譲させる。
+        return (
+            "IDs are planar regions of the STL mesh (no CadQuery equivalent); 'meshHints' only tell which region is outermost on an axis. "
+            "However many triangles the STL has (even millions), there is always a way to read it and compute from it: never assume "
+            "otherwise, and never tell the user that the STL or its data cannot be read or accessed. When the task needs a value "
+            "or information that is not in this result, delegate it with dispatch_agent (agent_type explore), passing "
+            "selection_file, viewer_data, the STL path (model.source) and what the user asked. Tell it to read them with "
+            "json_query, querying only the elements it needs: selection_file has the selected elements under 'selected', and "
+            "viewer_data has every face under 'faces' and every edge under 'edgeList' (center, normal, area / length, bbox and "
+            "neighbouring elements), and to compute from them (or from the STL triangles) with execute_python_code_readonly."
+        )
     return (
         "IDs are 0-based in CadQuery order (face i = cq.Workplane().add(shape).faces().vals()[i]; same for edges/vertices), "
         "valid only for the shape with this model digest; after the shape changes, find elements again by geometry or selectors. "
