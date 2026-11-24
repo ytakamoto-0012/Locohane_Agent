@@ -2248,7 +2248,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[user_response_timeouts]` | `ask_user_choice_seconds` | `ask_user_choice`（選択肢質問）でユーザー応答を待つ秒数。`0`で無期限待ち | `ASK_USER_CHOICE_TIMEOUT_SECONDS` |
 | `[user_response_timeouts]` | `show_cad_viewer_seconds` | `show_cad_viewer`（3D ビューアでの選択）でユーザーの確定を待つ秒数。`0`で無期限待ち（既定） | `SHOW_CAD_VIEWER_TIMEOUT_SECONDS` |
 | `[cad_viewer]` | `enabled` | 3D ビューア（`show_cad_viewer`）を使えるようにするか。`false` ならツールはエラーを返す | `CAD_VIEWER_ENABLED` |
-| `[cad_viewer]` | `max_triangles` | ビューアへ送る三角形の上限（既定 500000）。B-rep は超えたら粗く作り直し、それでも超えれば（STL は超えた時点で）エラー。0 以下で無制限 | `CAD_VIEWER_MAX_TRIANGLES` |
+| `[cad_viewer]` | `max_triangles` | ビューアへ送る三角形の上限（既定 5000000）。B-rep は超えたら粗く作り直し、それでも超えれば（STL は超えた時点で）エラー。0 以下で無制限 | `CAD_VIEWER_MAX_TRIANGLES` |
 | `[cad_viewer]` | `linear_deflection_ratio` | 曲面を三角形に分けるときの許容差（形の対角線の長さに対する割合、既定 0.001） | `CAD_VIEWER_LINEAR_DEFLECTION_RATIO` |
 | `[cad_viewer]` | `angular_deflection_deg` | 曲面を三角形に分けるときの角度の許容差（度、既定 20） | `CAD_VIEWER_ANGULAR_DEFLECTION_DEG` |
 | `[cad_viewer]` | `stl_region_angle_deg` | STL の三角形を 1 つの面（平面領域）にまとめる法線の角度差の上限（度、既定 1） | `CAD_VIEWER_STL_REGION_ANGLE_DEG` |

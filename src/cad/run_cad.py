@@ -55,7 +55,7 @@ def _options(raw: dict[str, Any]):
     return Options(
         linear_deflection_ratio=float(raw.get("linear_deflection_ratio", 0.001)),
         angular_deflection_deg=float(raw.get("angular_deflection_deg", 20.0)),
-        max_triangles=int(raw.get("max_triangles", 500_000)),
+        max_triangles=int(raw.get("max_triangles", 5_000_000)),
     )
 
 
@@ -71,7 +71,7 @@ def _attach_diff(data: dict[str, Any], shape: Any, raw: dict[str, Any]) -> None:
         from src.cad.compare import CompareError, compare, load_previous
 
         old, label = load_previous(prev)
-        diff = compare(old, shape, data, _options(raw), int(raw.get("max_triangles", 500_000)))
+        diff = compare(old, shape, data, _options(raw), int(raw.get("max_triangles", 5_000_000)))
         diff["previous"] = label
     except ImportError as e:
         diff = {"error": f"cadquery is not installed ({e})"}
@@ -186,7 +186,7 @@ def main(argv: list[str] | None = None) -> None:
         from src.cad.stl_reader import StlError
 
         try:
-            data = stl_to_viewer_data(path, max_triangles=int(raw.get("max_triangles", 500_000)), region_angle_deg=float(raw.get("stl_region_angle_deg", 1.0)))
+            data = stl_to_viewer_data(path, max_triangles=int(raw.get("max_triangles", 5_000_000)), region_angle_deg=float(raw.get("stl_region_angle_deg", 1.0)))
         except (StlError, TooManyTrianglesError, OSError) as e:
             _fail(f"Error: could not read the STL file: {e}")
             return

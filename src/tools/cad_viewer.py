@@ -106,7 +106,7 @@ def _options(compare_with: str = "") -> dict[str, Any]:
     out: dict[str, Any] = {
         "linear_deflection_ratio": _setting("cad_viewer_linear_deflection_ratio", 0.001),
         "angular_deflection_deg": _setting("cad_viewer_angular_deflection_deg", 20.0),
-        "max_triangles": _setting("cad_viewer_max_triangles", 500_000),
+        "max_triangles": _setting("cad_viewer_max_triangles", 5_000_000),
         "stl_region_angle_deg": _setting("cad_viewer_stl_region_angle_deg", 1.0),
     }
     if compare_with:

@@ -1665,7 +1665,7 @@ class Config:
     # --- 3D ビューア（[cad_viewer]、show_cad_viewer ツール） ---
     # 既定値付き（テスト等で Config を直接組み立てる箇所に影響させないため）。
     cad_viewer_enabled: bool = True
-    cad_viewer_max_triangles: int = 500_000
+    cad_viewer_max_triangles: int = 5_000_000
     cad_viewer_linear_deflection_ratio: float = 0.001
     cad_viewer_angular_deflection_deg: float = 20.0
     cad_viewer_stl_region_angle_deg: float = 1.0
@@ -4688,7 +4688,7 @@ def load_config(
             "[admin].assistant_reasoning_effort",
         ),
         cad_viewer_enabled=_as_bool(os.getenv("CAD_VIEWER_ENABLED", cad_viewer.get("enabled", True))),
-        cad_viewer_max_triangles=int(os.getenv("CAD_VIEWER_MAX_TRIANGLES", cad_viewer.get("max_triangles", 500_000))),
+        cad_viewer_max_triangles=int(os.getenv("CAD_VIEWER_MAX_TRIANGLES", cad_viewer.get("max_triangles", 5_000_000))),
         cad_viewer_linear_deflection_ratio=_positive_float(
             os.getenv("CAD_VIEWER_LINEAR_DEFLECTION_RATIO", cad_viewer.get("linear_deflection_ratio", 0.001)),
             "[cad_viewer].linear_deflection_ratio",

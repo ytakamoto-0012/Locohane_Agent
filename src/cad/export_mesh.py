@@ -72,7 +72,7 @@ class Part:
 class Options:
     linear_deflection_ratio: float = 0.001
     angular_deflection_deg: float = 20.0
-    max_triangles: int = 500_000
+    max_triangles: int = 5_000_000
     # CadQuery のセレクタの候補を求めるか（比べる前の形のように、選ばせない形では求めない）。
     selector_hints: bool = True
 
