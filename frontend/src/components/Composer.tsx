@@ -169,16 +169,31 @@ export function Composer({
     }
   }, [messages, queued]);
 
+  // 停止ボタンを押した時点で、まだ会話へ入っていない追加指示があった（stopWithPending 参照）。
+  const stoppedWithPendingRef = useRef(false);
+
   // ターンが終わったら、受け付けられなかった指示（deferred）は通常のメッセージとして送り、
-  // 受け付けたのに反映されないまま終わった指示（停止・エラーで中断した場合）は入力欄へ戻す。
+  // 受け付けたのに反映されないまま終わった指示（エラーで中断した場合）・受け付けられたか分からない指示は入力欄へ戻す。
+  // 停止ボタンで止めた場合は、伝わっていない指示も入力欄へ戻さず、次の発言として送って続ける
+  // （サブエージェントの実行中は指示が完了まで伝わらないため、停止して指示を先に伝えたい、という使い方。
+  // バックエンドは停止の時点で受付を閉じ、会話へ入っていない指示は捨て、画面に出ないまま入った指示は
+  // 取り除くので、ここで送っても二重にならない。後始末が終わるまでは app.py の _wait_for_stopped_turn が待つ）。
   useEffect(() => {
-    if (turnRunning || queued.length === 0 || queued.some((q) => q.status === 'sending')) return;
+    if (turnRunning) return;
+    if (queued.length === 0) {
+      stoppedWithPendingRef.current = false;
+      return;
+    }
+    if (queued.some((q) => q.status === 'sending')) return;
     const timer = setTimeout(() => {
       const applied = selectAppliedInjectionIds(messagesRef.current);
       const pending = queued.filter((q) => !applied.has(q.id));
+      const stopped = stoppedWithPendingRef.current;
+      stoppedWithPendingRef.current = false;
       setQueued([]);
-      const deferred = pending.filter((q) => q.status === 'deferred');
-      const restore = pending.filter((q) => q.status !== 'deferred' || inputBlockedRef.current);
+      // unknown（受け付けられたか分からない）は、届くのが遅れて次のターンの受付に入ると二重になるため送らない。
+      const deferred = pending.filter((q) => q.status === 'deferred' || (stopped && q.status === 'queued'));
+      const restore = pending.filter((q) => !deferred.includes(q) || inputBlockedRef.current);
       if (deferred.length > 0 && !inputBlockedRef.current) {
         const fileReferences = deferred.flatMap((q) =>
           q.attachments.flatMap((a) => (a.fileRef ? [{ id: a.fileRef.id }] : []))
@@ -202,6 +217,12 @@ export function Composer({
     // buildUserMessage・sendMessage・t は毎回作り直されるが、判定には使わない
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turnRunning, queued]);
+
+  // 停止ボタン: 伝わっていない追加指示があれば、ターンの終了後に入力欄へ戻さず送るよう覚えておく。
+  const stopWithPending = (stop: () => void) => () => {
+    if (queued.length > 0) stoppedWithPendingRef.current = true;
+    stop();
+  };
 
   const setQueuedStatus = (id: string, status: QueuedInstruction['status']) =>
     setQueued((prev) => prev.map((q) => (q.id === id ? { ...q, status } : q)));
@@ -514,11 +535,11 @@ export function Composer({
               </button>
             ) : null}
             {loading && !starting ? (
-              <button type="button" className="composer-stop-button" onClick={stopTask}>
+              <button type="button" className="composer-stop-button" onClick={stopWithPending(stopTask)}>
                 {t('common.stop')}
               </button>
             ) : remoteGenerating && onStopRemote ? (
-              <button type="button" className="composer-stop-button" onClick={onStopRemote}>
+              <button type="button" className="composer-stop-button" onClick={stopWithPending(onStopRemote)}>
                 {t('common.stop')}
               </button>
             ) : (

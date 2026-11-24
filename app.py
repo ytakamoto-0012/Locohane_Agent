@@ -477,8 +477,8 @@ def _close_user_injection_on_stop(thread_id: str) -> None:
     """停止ボタンで、生成中に送られたユーザーの追加指示の受付をその場で閉じる。
 
     タスクのキャンセルが実際に効くまで（後始末の await 中など）受付を開いたままにすると、
-    停止後に指示が会話へ入ってしまう。フロントエンドは停止の時点で、まだ会話へ入っていない
-    指示を入力欄へ戻すため、二重になる。
+    停止後に指示が会話へ入ってしまう。フロントエンドはターンの終了後、まだ会話へ入っていない
+    指示を通常のメッセージとして送り直す（Composer.tsx の stopWithPending）ため、二重になる。
     """
     dropped = user_injection.close_thread(thread_id)
     if dropped:
