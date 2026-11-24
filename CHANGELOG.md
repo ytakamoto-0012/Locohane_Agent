@@ -12,6 +12,8 @@
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-25
+
 ### 追加
 
 - Locohane の紹介サイト（GitHub Pages、`docs/`）を追加しました。日本語と英語のページがあります。
@@ -1797,7 +1799,8 @@ v0.1.1 の `config.ini`・データをそのまま使う場合は、以下を確
 
 - 最初の公開版です。
 
-[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.13...v0.8.0
 [0.7.13]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.12...v0.7.13
 [0.7.12]: https://github.com/ytakamoto-0012/Locohane_Agent/compare/v0.7.11...v0.7.12
