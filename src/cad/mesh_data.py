@@ -16,7 +16,8 @@
   "stats": {...},
   // 開いた形の面の中の穴とローカル AXIS（src/cad/topology.py。見つかったときだけ）。
   "holes": {"positions": <float32 base64、線分ごとに 2 点>, "ranges": [[先頭の線分, 線分数], ...], "tolerance": ...},
-  "holeList": [穴の情報, ...], "localAxes": [{"origin", "x", "y", "z", ...}, ...]
+  "holeList": [穴の情報, ...], "outers": {"positions", "ranges"}, "outerList": [外周の情報, ...],
+  "localAxes": [{"origin", "x", "y", "z", ...}, ...]
 }
 ```
 

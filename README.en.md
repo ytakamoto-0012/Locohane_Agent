@@ -239,6 +239,7 @@ Images are previewed right there.
 3D shapes (CAD files or shapes the AI made) appear above the input box in a **3D viewer**. Drag to rotate and use the wheel to zoom,
 switch between "Face", "Edge" and "Vertex" ("Part" for an assembly), click to select, and press "Confirm" to tell the AI what you selected.
 For an open surface or STL, "Hole" finds the holes inside the faces: hovering a hole highlights the holes facing the same way, and a click selects them together.
+"Outer boundary" shows and selects the outer boundary of each group of connected faces.
 When the model has lines of length 100, 200 and 300 at right angles from one point, "Coordinates" switches the view and the coordinates to that local system.
 For details, see "3D viewer (CAD)" in [README_DETAIL.en.md](README_DETAIL.en.md).
 

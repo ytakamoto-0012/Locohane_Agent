@@ -1996,6 +1996,11 @@ and does not stop at the top or bottom; in exchange, the up direction is not kep
   largest bounding box is the outer boundary and the others are holes (for a tube open at both ends one opening becomes the outer boundary).
   `model.holes` has the hole count, tolerance, number of outer boundaries and counts grouped by diameter and normal (up to 12 groups). In the viewer data
   they are `holeList` (hole info) and `holes` (border segments and `ranges`).
+- **Outer boundaries**: the borders found as outer boundaries above (one per group of connected faces) can be checked with the "Outer boundary" kind (next to
+  "Hole"). In that mode they are drawn in dark yellow; hovering near a line turns it light blue and a click selects / deselects one at a time (no grouping by
+  direction). Faces whose gap is within the topology tolerance are surrounded by one outer boundary, so you can see whether they were judged connected.
+  Selected ones are in the selection file as `kind: "outer"` with the same fields as holes (center, perimeter, faces around it, border edges for B-rep, etc.).
+  In the viewer data they are `outerList` and `outers`.
 - **Coordinates (local AXIS)**: when the model has straight lines of length 100, 200 and 300 (`[cad_viewer] local_axis_lengths`, in X, Y, Z order) running at
   right angles from one point, they are found as a local coordinate system (the shared end is the origin, the directions to the far ends are X', Y', Z'), and
   "Coordinates" in the toolbar switches between it and World. Lengths and the shared end are checked within `local_axis_length_tolerance` (default 0.1), and

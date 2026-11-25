@@ -64,6 +64,12 @@ def test_holes_in_an_open_stl_plate_have_center_normal_and_diameter(tmp_path) ->
     assert len(holes) == 3
     assert data["holes"]["outerLoops"] == 2  # 板ごとの外周は穴にしない
     assert data["stats"]["holes"] == 3
+    # 外周は別の一覧（選べる種類「外周」）に、穴と同じ形の情報と線分で入る。
+    outers = data["outerList"]
+    assert len(outers) == 2 and data["stats"]["outers"] == 2
+    assert {o["kind"] for o in outers} == {"outer"}
+    assert sorted(round(o["perimeter"]) for o in outers) == [400, 400]
+    assert len(data["outers"]["ranges"]) == 2
     a, b, c = holes
     assert a["center"][:2] == pytest.approx([20, 20], abs=0.5) and a["normal"] == pytest.approx([0, 0, 1])
     assert b["center"][:2] == pytest.approx([70, 30], abs=0.5)
@@ -82,6 +88,7 @@ def test_gaps_up_to_the_topology_tolerance_count_as_connected(tmp_path, gap, out
     # 0.1 以下の隙間は 1 つの面のまとまり（外周 1 つ）、それより広ければ 2 つ。どちらでも穴は 1 つだけ。
     assert len(data["holeList"]) == 1
     assert data["holes"]["outerLoops"] == outer
+    assert len(data["outerList"]) == outer
     assert data["holes"]["openChains"] == 0
 
 
@@ -155,6 +162,8 @@ def test_package_round_trips_the_holes(tmp_path) -> None:
     back = read_package(tmp_path / "p.lcvd")
     assert back["holeList"] == data["holeList"]
     assert back["holes"]["positions"] == data["holes"]["positions"]
+    assert back["outerList"] == data["outerList"]
+    assert back["outers"]["positions"] == data["outers"]["positions"]
 
 
 def test_selected_holes_and_measurements_get_local_values(tmp_path, monkeypatch) -> None:

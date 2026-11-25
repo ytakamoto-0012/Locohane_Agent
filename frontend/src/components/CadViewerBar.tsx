@@ -51,7 +51,8 @@ const KIND_LABEL: Record<CadKind, MessageKey> = {
   edge: 'cad.kind.edge',
   vertex: 'cad.kind.vertex',
   part: 'cad.kind.part',
-  hole: 'cad.kind.hole'
+  hole: 'cad.kind.hole',
+  outer: 'cad.kind.outer'
 };
 // 平面の 1 つめの軸が右・2 つめの軸が上。'+' は平面の法線（1 つめ × 2 つめ）の正の側から、'-' は裏側から見る。
 const VIEWS: ViewName[] = ['xy+', 'yz+', 'zx+', 'xy-', 'yz-', 'zx-'];
@@ -143,7 +144,12 @@ function describe(
   const parts = [label];
   const xyz = (v: number[]) => `(${v.map(fmt).join(', ')})`;
   if (item.kind === 'part') parts.push(item.path ?? item.name ?? '');
-  else if (item.geomType && item.kind !== 'hole') parts.push(item.geomType);
+  else if (item.geomType && item.kind !== 'hole' && item.kind !== 'outer') parts.push(item.geomType);
+  if (item.kind === 'outer') {
+    if (typeof item.perimeter === 'number') parts.push(`${t('cad.info.length')} ${fmt(item.perimeter)}`);
+    if (item.center) parts.push(xyz(toLocalPoint(axis, item.center)));
+    return parts.filter(Boolean).join('  ');
+  }
   if (item.kind === 'hole') {
     if (typeof item.diameter === 'number') parts.push(`${t('cad.info.diameter')}${fmt(item.diameter)}`);
     if (item.center) parts.push(xyz(toLocalPoint(axis, item.center)));
@@ -656,6 +662,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
       return item ? `${hint}  ${item}` : hint;
     }
     if (!item && mode === 'hole' && boxMode === 'off') return t('cad.hintHole', { deg: fmt(holeAngle) });
+    if (!item && mode === 'outer' && boxMode === 'off') return t('cad.hintOuter');
     return item || t(boxMode === 'off' ? 'cad.hint' : 'cad.hintBox');
   }, [hover, data, label, t, colors, boxMode, pivotPicking, measureTool, measureError, pending, localAxis, holeAngle, mode]);
 

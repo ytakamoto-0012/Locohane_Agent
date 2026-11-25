@@ -11,8 +11,8 @@ STL を同じ処理で扱う。run_cad.py が形をビューア用データに�
    許容差より細い切れ込み・小さい穴も同じ理由で消える。
 3. 残った境界の辺をループにつなぐ（途切れた端どうしが許容差以内なら橋渡しする）。平均の幅（2 × 面積 ÷ 周長）が
    許容差以下のループは隙間として除く。
-4. つながった面のまとまり（部分）ごとに、外接箱の最も大きいループを外周として除き、残りを穴とする
-   （両端の開いた筒では片方の口が外周、もう片方が穴になる）。
+4. つながった面のまとまり（部分）ごとに、外接箱の最も大きいループを外周（``outerList``・``outers``）とし、
+   残りを穴とする（両端の開いた筒では片方の口が外周、もう片方が穴になる）。
 5. 穴の法線はループの面積ベクトル（Newell の方法）を、穴の縁の三角形の向き（面の表側）に合わせたもの。
 
 ローカル AXIS（``localAxes``）: 直線のエッジのうち長さが X・Y・Z の長さ（既定 100・200・300）に許容差以内で合う 3 本が、
@@ -58,12 +58,13 @@ def attach_topology(data: dict[str, Any], options: dict[str, Any] | None = None)
     try:
         tol = float(options.get("hole_tolerance", DEFAULT_HOLE_TOLERANCE))
         if tol > 0:
-            holes = find_boundary_holes(data, tol)
-            if holes is not None:
-                items, geometry = holes
-                data["holeList"] = items
-                data["holes"] = geometry
-                data.setdefault("stats", {})["holes"] = len(items)
+            found = find_boundary_holes(data, tol)
+            if found is not None:
+                data["holeList"] = found["holeList"]
+                data["holes"] = found["holes"]
+                data["outerList"] = found["outerList"]
+                data["outers"] = found["outers"]
+                data.setdefault("stats", {}).update(holes=len(found["holeList"]), outers=len(found["outerList"]))
         lengths = _axis_lengths(options.get("local_axis_lengths"))
         if lengths:
             axes = find_local_axes(
@@ -104,8 +105,11 @@ def _decode(value: Any, dtype: str, width: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def find_boundary_holes(data: dict[str, Any], tolerance: float) -> tuple[list[dict], dict[str, Any]] | None:
-    """ビューア用データの三角形から、開いた形の穴を求める。境界が無い（閉じた形・三角形が無い）なら None。"""
+def find_boundary_holes(data: dict[str, Any], tolerance: float) -> dict[str, Any] | None:
+    """ビューア用データの三角形から、開いた形の穴と外周を求める。境界が無い（閉じた形・三角形が無い）なら None。
+
+    戻り値は {"holeList": 穴の情報, "holes": 穴の縁の線分, "outerList": 外周の情報, "outers": 外周の線分}。
+    """
     mesh = data.get("mesh") or {}
     positions = _decode(mesh.get("positions"), "f4", 3).astype(np.float64)
     indices = _decode(mesh.get("indices"), "u4", 3).astype(np.int64)
@@ -146,21 +150,29 @@ def find_boundary_holes(data: dict[str, Any], tolerance: float) -> tuple[list[di
             outer[key] = i
     outer_ids = set(outer.values())
     holes = [c for i, c in enumerate(candidates) if i not in outer_ids]
+    outers = [candidates[i] for i in sorted(outer_ids)]
 
     if is_brep:
-        _attach_brep_edges(holes, faces, edges, data.get("edges") or {})
+        _attach_brep_edges(holes + outers, faces, edges, data.get("edges") or {})
 
+    hole_items, hole_geometry = _loop_items(holes, "hole", faces)
+    outer_items, outer_geometry = _loop_items(outers, "outer", faces)
+    hole_geometry.update(tolerance=rnd(tolerance), outerLoops=len(outer_ids), openChains=open_chains, gapLoops=gaps)
+    return {"holeList": hole_items, "holes": hole_geometry, "outerList": outer_items, "outers": outer_geometry}
+
+
+def _loop_items(loops: list[dict[str, Any]], kind: str, faces: list[dict]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """ループ（穴・外周）の情報の一覧と、ビューアに描く縁の線分（線分ごとに 2 点。ループ i は ranges[i]）。"""
     items: list[dict[str, Any]] = []
     seg_chunks: list[np.ndarray] = []
     ranges: list[list[int]] = []
     seg_total = 0
-    for i, c in enumerate(holes):
-        pts = c.pop("_points")
-        segs = np.stack([pts, np.roll(pts, -1, axis=0)], axis=1).reshape(-1, 3)
-        seg_chunks.append(segs)
+    for i, c in enumerate(loops):
+        pts = c["_points"]
+        seg_chunks.append(np.stack([pts, np.roll(pts, -1, axis=0)], axis=1).reshape(-1, 3))
         ranges.append([seg_total, len(pts)])
         seg_total += len(pts)
-        item = {"id": i, "kind": "hole", "geomType": "BOUNDARY_LOOP"}
+        item = {"id": i, "kind": kind, "geomType": "BOUNDARY_LOOP"}
         item.update({k: v for k, v in c.items() if not k.startswith("_")})
         item["faces"] = c["_faces"]
         if "_edges" in c:
@@ -169,14 +181,7 @@ def find_boundary_holes(data: dict[str, Any], tolerance: float) -> tuple[list[di
         if len(parts) == 1:
             item["part"] = parts[0]
         items.append(item)
-    geometry = {
-        "positions": b64(np.concatenate(seg_chunks) if seg_chunks else np.zeros((0, 3)), "f4"),
-        "ranges": ranges,
-        "tolerance": rnd(tolerance),
-        "outerLoops": len(outer_ids),
-        "openChains": open_chains,
-        "gapLoops": gaps,
-    }
+    geometry = {"positions": b64(np.concatenate(seg_chunks) if seg_chunks else np.zeros((0, 3)), "f4"), "ranges": ranges}
     return items, geometry
 
 

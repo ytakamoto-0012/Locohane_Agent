@@ -1201,11 +1201,15 @@ async def test_viewer_offers_holes_of_an_open_stl(env, tmp_path) -> None:
         f.write(struct.pack("<I", len(tris)))
         for tri in tris:
             f.write(struct.pack("<3f", 0, 0, 0) + struct.pack("<9f", *np.ravel(tri)) + struct.pack("<H", 0))
-    _viewer.response = {"submitted": True, "selected": [{"kind": "hole", "id": 0}, {"kind": "hole", "id": 1}, {"kind": "hole", "id": 2}]}
+    _viewer.response = {
+        "submitted": True,
+        "selected": [{"kind": "hole", "id": 0}, {"kind": "hole", "id": 1}, {"kind": "hole", "id": 2}, {"kind": "outer", "id": 0}],
+    }
     out = json.loads(await _call(file_path=str(path)))
     shown = _viewer.shown[0]
-    assert "hole" in shown["select"]
+    assert "hole" in shown["select"] and "outer" in shown["select"]
     assert shown["hole_normal_angle_deg"] == 3.0
+    assert len(shown["data"]["outerList"]) == 1
     assert len(shown["data"]["holeList"]) == 2
-    assert out["selected_by_kind"] == {"hole": 2}
-    assert out["model"]["holes"]["count"] == 2
+    assert out["selected_by_kind"] == {"hole": 2, "outer": 1}
+    assert out["model"]["holes"]["count"] == 2 and out["model"]["holes"]["outer_boundaries"] == 1

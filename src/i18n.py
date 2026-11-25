@@ -273,6 +273,7 @@ MESSAGES: dict[str, dict[str, str]] = {
     "cad.kind.vertex": {"ja": "頂点", "en": "Vertex"},
     "cad.kind.part": {"ja": "部品", "en": "Part"},
     "cad.kind.hole": {"ja": "穴", "en": "Hole"},
+    "cad.kind.outer": {"ja": "外周", "en": "Outer boundary"},
     "cad.count": {"ja": "{kind} {count} 件", "en": "{count} {kind}(s)"},
     "cad.selected_summary": {"ja": "{items}を選択", "en": "Selected {items}"},
     "cad.color_changes": {"ja": "色の変更 {count} 件", "en": "{count} color change(s)"},

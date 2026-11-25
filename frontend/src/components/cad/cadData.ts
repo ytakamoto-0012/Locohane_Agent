@@ -3,8 +3,10 @@
  * ビューア用データの型と、base64 の配列の復号。形は src/cad/mesh_data.py の docstring と一致させる。
  */
 
-/** hole は開いたサーフェース・メッシュの面の中の穴（src/cad/topology.py）。 */
-export type CadKind = 'face' | 'edge' | 'vertex' | 'part' | 'hole';
+/** hole は開いたサーフェース・メッシュの面の中の穴、outer はつながった面のまとまりの外周（src/cad/topology.py）。 */
+export type CadKind = 'face' | 'edge' | 'vertex' | 'part' | 'hole' | 'outer';
+/** 縁のループとして描く種類（穴・外周）。 */
+export type CadLoopKind = 'hole' | 'outer';
 
 export interface CadSelection {
   kind: CadKind;
@@ -220,6 +222,9 @@ export interface CadData {
   /** 開いた形の面の中の穴（holeList）の縁の線（線分ごとに 2 点。穴 i は ranges[i] の範囲）。 */
   holes?: { positions: CadBuffer; ranges: [number, number][]; tolerance?: number; outerLoops?: number; openChains?: number };
   holeList?: CadItemInfo[];
+  /** つながった面のまとまりの外周（outerList）の線（holes と同じ形）。 */
+  outers?: { positions: CadBuffer; ranges: [number, number][] };
+  outerList?: CadItemInfo[];
   /** モデルの中の直交する 3 本の線で決まるローカル座標系（src/cad/topology.py の find_local_axes）。 */
   localAxes?: CadLocalAxis[];
   /** 前の版との比較（show_cad_viewer の compare_with）。added / removed は増えた・削った部分の三角形。 */
@@ -421,6 +426,8 @@ export function itemsOf(data: CadData, kind: CadKind): CadItemInfo[] {
       return data.parts ?? [];
     case 'hole':
       return data.holeList ?? [];
+    case 'outer':
+      return data.outerList ?? [];
   }
 }
 

@@ -53,10 +53,11 @@ from ._workdir import _resolve_exec_workdir, _resolve_workdir, _tmp_dir_parents
 
 logger = logging.getLogger(__name__)
 
-SelectKind = Literal["face", "edge", "vertex", "part", "hole"]
-_ALL_KINDS: tuple[str, ...] = ("face", "edge", "vertex", "part", "hole")
-# 選んだ要素の種類 → ビューア用データでの一覧のキー。hole は開いた形の面の中の穴（src/cad/topology.py）。
-_LIST_KEYS = {"face": "faces", "edge": "edgeList", "vertex": "vertexList", "part": "parts", "hole": "holeList"}
+SelectKind = Literal["face", "edge", "vertex", "part", "hole", "outer"]
+_ALL_KINDS: tuple[str, ...] = ("face", "edge", "vertex", "part", "hole", "outer")
+# 選んだ要素の種類 → ビューア用データでの一覧のキー。hole は開いた形の面の中の穴、outer はつながった面のまとまりの外周
+# （src/cad/topology.py）。
+_LIST_KEYS = {"face": "faces", "edge": "edgeList", "vertex": "vertexList", "part": "parts", "hole": "holeList", "outer": "outerList"}
 # ローカル座標に直して selection_file・計測に添える項目（点と向き）。
 _LOCAL_POINT_KEYS = ("center", "point", "start", "end", "axisOrigin", "circleCenter", "sphereCenter", "apex", "ellipseCenter")
 _LOCAL_VECTOR_KEYS = ("normal", "normalAtCenter", "direction", "axisDirection", "axis", "delta")
@@ -235,7 +236,7 @@ async def show_cad_viewer(
     """Show a 3D model in an interactive viewer in the chat, and return the elements the user selects.
 
     The user can rotate, zoom and pan the model, select faces / edges / vertices (or whole parts of an
-    assembly, or holes inside an open surface / mesh) by clicking, box selection, "select all" or "same color" / "same part / layer", hide parts / layers, change face and part
+    assembly, or holes and outer boundaries of an open surface / mesh) by clicking, box selection, "select all" or "same color" / "same part / layer", hide parts / layers, change face and part
     colors, type an instruction for you, and press "Confirm". This tool waits for that, writes the geometry of
     each selected element (type such as PLANE/CYLINDER/LINE/CIRCLE, area or length, center, normal,
     radius, bounding box, neighbouring elements, and CadQuery selectors that pick exactly that
@@ -291,8 +292,9 @@ async def show_cad_viewer(
         file_path: The CAD file to show (see above). Leave empty when using code.
         code: CadQuery code that makes the shape (see above). Leave empty when using file_path.
         select: Which kinds of elements the user may select: any of "face", "edge", "vertex",
-            "part", "hole". Default: all kinds the model has ("part" only for an assembly with 2 or more
-            parts, "vertex" not for STL, "hole" only for an open surface or mesh with holes in it).
+            "part", "hole", "outer". Default: all kinds the model has ("part" only for an assembly with 2 or more
+            parts, "vertex" not for STL, "hole" only for an open surface or mesh with holes in it, "outer"
+            only for an open surface or mesh).
         compare_with: The previous version of the model to compare with (see above). Leave empty
             for no comparison.
 
@@ -967,6 +969,7 @@ def _available_kinds(data: dict, select: list[str] | None) -> list[str]:
         "vertex": bool(data.get("vertexList")),
         "part": len(data.get("parts") or []) >= 2,
         "hole": bool(data.get("holeList")),
+        "outer": bool(data.get("outerList")),
     }
     return [k for k in _ALL_KINDS if k in wanted and has[k]]
 
@@ -1367,12 +1370,13 @@ def _holes_summary(data: dict) -> dict[str, Any]:
     out: dict[str, Any] = {
         "count": len(holes),
         "topology_tolerance": geom.get("tolerance"),
-        "outer_boundaries": geom.get("outerLoops"),
+        "outer_boundaries": len(data.get("outerList") or []) or geom.get("outerLoops"),
         "groups": rows,
         "note": (
             "Holes inside the open surface / mesh: closed borders other than the outer boundary of each connected group of faces "
             "(gaps up to topology_tolerance count as connected). Each hole (kind 'hole' in the selection) has center, normal "
-            "(facing the same way as the surface), diameter (mean), area, perimeter, the faces around it and, for B-rep, its border edges."
+            "(facing the same way as the surface), diameter (mean), area, perimeter, the faces around it and, for B-rep, its border edges. "
+            "The outer boundaries (kind 'outer', one per connected group of faces) can be selected too and have the same fields."
         ),
     }
     if len(groups) > len(rows):
@@ -1400,7 +1404,7 @@ def _model_summary(data: dict) -> dict[str, Any]:
         out["features"] = summarize_features(data["features"])
     if data.get("step"):
         out["step"] = summarize_step(data["step"])
-    if data.get("holeList"):
+    if data.get("holeList") or data.get("outerList"):
         out["holes"] = _holes_summary(data)
     if data.get("localAxes"):
         out["local_axes"] = [{k: a.get(k) for k in ("id", "origin", "x", "y", "z", "rightHanded")} for a in (data.get("localAxes") or [])[:5]]
