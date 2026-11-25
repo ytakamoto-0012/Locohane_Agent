@@ -241,17 +241,21 @@ class _Boundary:
         direction = np.divide(seg, length[:, None], out=np.zeros_like(seg), where=length[:, None] > 0)
         cell = max(tol * 4, float(np.median(length)))
         grid: dict[tuple[int, int, int], list[int]] = {}
-        lo = np.floor((np.minimum(pa, pb) - tol) / cell).astype(np.int64)
-        hi = np.floor((np.maximum(pa, pb) + tol) / cell).astype(np.int64)
         for i in range(n):
-            x0, y0, z0 = lo[i].tolist()
-            x1, y1, z1 = hi[i].tolist()
-            # 許容差に比べて非常に長い辺（大きな平面の縁など）は、入れる升目を始点の側に限る。
-            x1, y1, z1 = min(x1, x0 + 15), min(y1, y0 + 15), min(z1, z0 + 15)
-            for x in range(x0, x1 + 1):
-                for y in range(y0, y1 + 1):
-                    for z in range(z0, z1 + 1):
-                        grid.setdefault((x, y, z), []).append(i)
+            # 辺に沿って升目の大きさごとに点を取り、各点の許容差の範囲に掛かる升目に入れる（升目に比べて長い辺
+            # 〔大きな平面の縁など〕でも、外接箱の升目すべてではなく辺の近くの升目だけになる）。
+            steps = max(1, int(math.ceil(float(length[i]) / cell)))
+            cells: set[tuple[int, int, int]] = set()
+            for t in np.linspace(0.0, 1.0, steps + 1):
+                p = pa[i] + seg[i] * t
+                x0, y0, z0 = np.floor((p - tol) / cell).astype(np.int64).tolist()
+                x1, y1, z1 = np.floor((p + tol) / cell).astype(np.int64).tolist()
+                for x in range(x0, x1 + 1):
+                    for y in range(y0, y1 + 1):
+                        for z in range(z0, z1 + 1):
+                            cells.add((x, y, z))
+            for c in cells:
+                grid.setdefault(c, []).append(i)
         tol2 = tol * tol
 
         def covering(i: int, p: np.ndarray) -> int:

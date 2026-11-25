@@ -85,6 +85,15 @@ def test_gaps_up_to_the_topology_tolerance_count_as_connected(tmp_path, gap, out
     assert data["holes"]["openChains"] == 0
 
 
+def test_long_border_edge_is_matched_along_its_whole_length(tmp_path) -> None:
+    # 左の板は三角形 2 つ（境目は長さ 50 の辺 1 本）、右の板は細かい升目。長い辺の中ほどでも向かいの辺と突き合わせる。
+    left = [np.array([[0, 0, 0], [50, 0, 0], [50, 50, 0]], float), np.array([[0, 0, 0], [50, 50, 0], [0, 50, 0]], float)]
+    right = _plate(50, 50, x0=50.05, holes=[(75, 25, 5)])
+    data = _stl_data(tmp_path, left + right, hole_tolerance=0.1)
+    assert len(data["holeList"]) == 1
+    assert data["holes"]["outerLoops"] == 1
+
+
 def test_hole_smaller_than_the_tolerance_is_not_a_hole(tmp_path) -> None:
     # 升目 0.02 の板に、0.06 角の穴（許容差 0.1 より小さい）。
     data = _stl_data(tmp_path, _plate(50, 1, holes=[(0.5, 0.5, 0.03)]), hole_tolerance=0.1)
