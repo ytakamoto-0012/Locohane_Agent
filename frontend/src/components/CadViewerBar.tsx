@@ -89,6 +89,8 @@ function sceneColors(): CadSceneColors {
   const dark = document.documentElement.dataset.theme === 'dark';
   return {
     background: dark ? '#17171a' : '#f7f7f9',
+    // 非表示領域は青みのある背景にして、ふだんの画面と見分けられるようにする。
+    hiddenBackground: dark ? '#14202e' : '#e3ecf7',
     face: dark ? '#8d93a0' : '#b9bfcb',
     edge: dark ? '#e4e4ea' : '#2b2c31',
     vertex: dark ? '#f0f0f4' : '#1f2023',
@@ -341,10 +343,10 @@ function useEditHistory(state: EditSnapshot, apply: (s: EditSnapshot) => void, i
   const applyRef = useRef(apply);
   applyRef.current = apply;
   const [, setVersion] = useState(0);
-  const { selection, colors, hiddenParts, kindVisible, attributeEdits } = state;
+  const { selection, colors, hiddenParts, hiddenItems, kindVisible, attributeEdits } = state;
 
   useEffect(() => {
-    const cur: EditSnapshot = { selection, colors, hiddenParts, kindVisible, attributeEdits };
+    const cur: EditSnapshot = { selection, colors, hiddenParts, hiddenItems, kindVisible, attributeEdits };
     const keys = changedKeys(cur, last.current);
     // 変更なし、または undo / redo で戻した状態そのもの（last を先に書き換えてある）。
     if (!keys) return;
@@ -358,7 +360,7 @@ function useEditHistory(state: EditSnapshot, apply: (s: EditSnapshot) => void, i
     last.current = cur;
     lastChange.current = { keys, at: now };
     setVersion((v) => v + 1);
-  }, [selection, colors, hiddenParts, kindVisible, attributeEdits]);
+  }, [selection, colors, hiddenParts, hiddenItems, kindVisible, attributeEdits]);
 
   const step = useCallback((from: MutableRefObject<EditSnapshot[]>, to: MutableRefObject<EditSnapshot[]>) => {
     const target = from.current.pop();
@@ -426,13 +428,19 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
   const [diffVisible, setDiffVisible] = useState(true);
   const [kindVisible, setKindVisible] = useState({ face: true, edge: true, vertex: true, ...data.viewState?.visible });
   const [hiddenParts, setHiddenParts] = useState<Set<number>>(() => initialHiddenParts(data));
+  // 「非表示」で 1 つずつ隠した面・エッジ・頂点・穴・外周（selectionKey の集合）。部品は hiddenParts に入れる。
+  const [hiddenItems, setHiddenItems] = useState<Set<string>>(() => new Set());
+  // 非表示領域: 隠したものだけを映す画面（CAD の「表示/非表示空間の切り替え」）。入る前の選択は取っておき、戻るときに戻す。
+  const [hiddenSpace, setHiddenSpace] = useState(false);
+  const stashedSelection = useRef<CadSelection[]>([]);
   const [colors, setColors] = useState<CadColorOverrides>({ faces: new Map(), parts: new Map() });
   const history = useEditHistory(
-    { selection, colors, hiddenParts, kindVisible, attributeEdits },
+    { selection, colors, hiddenParts, hiddenItems, kindVisible, attributeEdits },
     (s) => {
       setSelection(s.selection);
       setColors(s.colors);
       setHiddenParts(s.hiddenParts);
+      setHiddenItems(s.hiddenItems);
       setKindVisible(s.kindVisible);
       setAttributeEdits(s.attributeEdits);
     },
@@ -595,8 +603,8 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
     sceneRef.current?.setLocalAxis(localAxis);
   }, [localAxis, status]);
   useEffect(() => {
-    sceneRef.current?.setVisibility({ ...kindVisible, hiddenParts });
-  }, [kindVisible, hiddenParts, status]);
+    sceneRef.current?.setVisibility({ ...kindVisible, hiddenParts, hiddenItems, swapped: hiddenSpace });
+  }, [kindVisible, hiddenParts, hiddenItems, hiddenSpace, status]);
   useEffect(() => {
     sceneRef.current?.setColorOverrides(colors);
   }, [colors, status]);
@@ -638,16 +646,6 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'style', 'class'] });
     return () => observer.disconnect();
   }, []);
-
-  // 全画面表示中は Esc で戻す。
-  useEffect(() => {
-    if (!expanded) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setExpanded(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [expanded]);
 
   const hoverText = useMemo(() => {
     if (pivotPicking) return t('cad.hintPivot');
@@ -704,6 +702,102 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
     );
   };
 
+  // 表示・非表示（CAD の「表示/非表示」と「表示/非表示空間の切り替え」）。
+  const hiddenCount = hiddenItems.size + hiddenParts.size;
+  /** 選んでいる要素を隠す（部品は部品ごと、ほかは要素ごと）。隠したものは選択から外す。 */
+  const hideSelected = () => {
+    if (!selection.length) return;
+    const parts = new Set(hiddenParts);
+    const items = new Set(hiddenItems);
+    for (const s of selection) {
+      if (s.kind === 'part') parts.add(s.id);
+      else items.add(selectionKey(s.kind, s.id));
+    }
+    if (parts.size !== hiddenParts.size) setHiddenParts(parts);
+    if (items.size !== hiddenItems.size) setHiddenItems(items);
+    setSelection([]);
+  };
+  const enterHiddenSpace = () => {
+    stashedSelection.current = selection;
+    setSelection([]);
+    setHiddenSpace(true);
+    setMeasureOpen(false);
+    chooseMeasureTool(null);
+    setPivotPicking(false);
+  };
+  /** 元の画面に戻る。入る前の選択に、表示に戻した要素（shown）を加えて選ぶ。 */
+  const leaveHiddenSpace = (shown: CadSelection[] = []) => {
+    const keep = stashedSelection.current;
+    stashedSelection.current = [];
+    const have = new Set(keep.map((s) => selectionKey(s.kind, s.id)));
+    setSelection([...keep, ...shown.filter((s) => !have.has(selectionKey(s.kind, s.id)))]);
+    setHiddenSpace(false);
+  };
+  /**
+   * 非表示領域で選んだ要素を表示に戻して、元の画面に戻る。部品ごと隠した要素は、その部品ごと表示に戻す。
+   * 穴・外周は周りの面がすべて隠れていると隠れるので、周りの面も戻す。
+   */
+  const showSelected = () => {
+    const parts = new Set(hiddenParts);
+    const items = new Set(hiddenItems);
+    const unhide = (s: CadSelection) => {
+      if (s.kind === 'part') {
+        parts.delete(s.id);
+        return;
+      }
+      items.delete(selectionKey(s.kind, s.id));
+      const p = partOf(data, s);
+      if (p !== null) parts.delete(p);
+      const info = itemsOf(data, s.kind)[s.id];
+      if ((s.kind === 'hole' || s.kind === 'outer') && Array.isArray(info?.faces))
+        for (const f of info.faces as number[]) unhide({ kind: 'face', id: f });
+      // 部品の番号を持たない頂点は、つながるエッジの部品で隠れる。
+      if (s.kind === 'vertex' && p === null && Array.isArray(info?.edges))
+        for (const e of info.edges as number[]) {
+          const ep = partOf(data, { kind: 'edge', id: e });
+          if (ep !== null) parts.delete(ep);
+        }
+    };
+    selection.forEach(unhide);
+    if (parts.size !== hiddenParts.size) setHiddenParts(parts);
+    if (items.size !== hiddenItems.size) setHiddenItems(items);
+    leaveHiddenSpace(selection);
+  };
+  const showAll = () => {
+    if (hiddenParts.size) setHiddenParts(new Set());
+    if (hiddenItems.size) setHiddenItems(new Set());
+    leaveHiddenSpace();
+  };
+
+  // Esc: 通常以外のモード（非表示領域・計測・回転中心・範囲選択）なら通常に戻し、通常のときは全選択解除。
+  // 何も選んでいなければ拡大表示を戻す。ポインタがビューアの上にあるか、ビューアの中にフォーカスがあるとき
+  // （拡大表示中はいつでも）だけ効き、文字の入力欄の中では何もしない。計測の途中の点を捨てる Esc は先に効く（上の capture）。
+  const onEscape = useRef<(e: KeyboardEvent) => void>(() => {});
+  onEscape.current = (e: KeyboardEvent) => {
+    const bar = barRef.current;
+    const target = e.target as HTMLElement | null;
+    if (!bar || closing) return;
+    if (!(expanded || pointerInside.current || (target && bar.contains(target)))) return;
+    if (target && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
+    if (hiddenSpace) leaveHiddenSpace();
+    else if (measureOpen || measureTool) {
+      setMeasureOpen(false);
+      chooseMeasureTool(null);
+    } else if (pivotPicking) setPivotPicking(false);
+    else if (boxMode !== 'off') setBoxMode('off');
+    else if (selection.length) setSelection([]);
+    else if (expanded) setExpanded(false);
+    else return;
+    e.preventDefault();
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.isComposing) onEscape.current(e);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const colorChanges = (): CadColorChanges => {
     const changes: CadColorChanges = { faces: {}, parts: {} };
     colors.faces.forEach((hex, id) => (changes.faces[String(id)] = hex));
@@ -712,7 +806,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
   };
   const viewState = (): CadViewState => {
     const h = history.entries();
-    const saved = serializeHistory(data, h.past, h.future, { selection, colors, hiddenParts, kindVisible, attributeEdits });
+    const saved = serializeHistory(data, h.past, h.future, { selection, colors, hiddenParts, hiddenItems, kindVisible, attributeEdits });
     return {
       hidden_parts: [...hiddenParts],
       visible: kindVisible,
@@ -866,6 +960,35 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
             >
               {t('cad.samePart')}
             </button>
+          )}
+          <span className="cad-viewer-sep" />
+          {hiddenSpace ? (
+            <>
+              <button
+                type="button"
+                className="cad-viewer-chip active"
+                title={t('cad.showSelectedTitle')}
+                disabled={selection.length === 0}
+                onClick={showSelected}
+              >
+                {t('cad.show')}
+              </button>
+              <button type="button" className="cad-viewer-chip" title={t('cad.showAllTitle')} disabled={hiddenCount === 0} onClick={showAll}>
+                {t('cad.showAll')}
+              </button>
+              <button type="button" className="cad-viewer-chip" title={t('cad.showBackTitle')} onClick={() => leaveHiddenSpace()}>
+                {t('cad.showBack')}
+              </button>
+            </>
+          ) : (
+            <>
+              <button type="button" className="cad-viewer-chip" title={t('cad.hideTitle')} disabled={selection.length === 0} onClick={hideSelected}>
+                {t('cad.hide')}
+              </button>
+              <button type="button" className="cad-viewer-chip" title={t('cad.showTitle')} disabled={hiddenCount === 0} onClick={enterHiddenSpace}>
+                {t('cad.show')}
+              </button>
+            </>
           )}
           {mode === 'hole' && (
             <label className="cad-viewer-chip cad-viewer-hole-angle" title={t('cad.holeAngleTitle')}>
@@ -1034,7 +1157,12 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
             }}
           />
         )}
-        <div className="cad-viewer-host" ref={hostRef}>
+        <div className={`cad-viewer-host${hiddenSpace ? ' cad-viewer-hidden-space' : ''}`} ref={hostRef}>
+          {hiddenSpace && status === 'ready' && (
+            <div className="cad-viewer-hidden-banner" role="status">
+              {hiddenCount ? t('cad.hiddenSpace', { count: hiddenCount }) : t('cad.hiddenSpaceEmpty')}
+            </div>
+          )}
           {status === 'loading' && <div className="cad-viewer-overlay">{t('cad.loading')}</div>}
           {status === 'error' && <div className="cad-viewer-overlay">{t('cad.webglError')}</div>}
           {closing && (
@@ -1091,7 +1219,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
       </div>
       <textarea
         className="cad-viewer-message"
-        rows={2}
+        rows={1}
         value={message}
         placeholder={t('cad.messagePlaceholder')}
         aria-label={t('cad.message')}

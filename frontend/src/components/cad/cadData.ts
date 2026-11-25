@@ -50,12 +50,16 @@ export interface CadLayerSettings {
 /** 範囲選択のしかた。window = 枠の中に完全に入るもの、crossing = 枠の中に入るものと枠に掛かるもの。 */
 export type BoxMode = 'off' | 'window' | 'crossing';
 
-/** 表示の設定（種類ごとの表示と、隠す部品）。 */
+/** 表示の設定（種類ごとの表示と、隠す部品・要素）。 */
 export interface CadVisibility {
   face: boolean;
   edge: boolean;
   vertex: boolean;
   hiddenParts: ReadonlySet<number>;
+  /** 「非表示」で 1 つずつ隠した面・エッジ・頂点・穴・外周（selectionKey の集合）。省くと無し。 */
+  hiddenItems?: ReadonlySet<string>;
+  /** 非表示領域: true なら隠したものだけを映し、見えていたものを隠す（CAD の「表示/非表示空間の切り替え」）。 */
+  swapped?: boolean;
 }
 
 /**

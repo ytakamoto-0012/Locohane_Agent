@@ -32,6 +32,8 @@ import { asVec3, onCircle, onSphere, unit, type MeasureDraw, type MeasurePick, t
 
 export interface CadSceneColors {
   background: string;
+  /** 非表示領域（隠したものだけを映す画面）の背景。省くと background と同じ。 */
+  hiddenBackground?: string;
   face: string;
   edge: string;
   vertex: string;
@@ -676,7 +678,7 @@ export class CadScene {
   applyTheme(colors: CadSceneColors): void {
     this.colors = colors;
     (this.measureHoverMarker?.material as THREE.PointsMaterial | undefined)?.color.set(colors.hover);
-    this.renderer.setClearColor(new THREE.Color(colors.background));
+    this.applyBackground();
     this.refreshColors();
   }
 
@@ -686,7 +688,10 @@ export class CadScene {
     this.refreshColors();
   }
 
-  /** 種類ごとの表示と、隠す部品を変える。隠したものは当たり判定・範囲選択の対象にもしない。 */
+  /**
+   * 種類ごとの表示と、隠す部品・要素、非表示領域かを変える。映さないものは当たり判定・範囲選択の対象にもしない。
+   * 非表示領域（swapped）では隠したものだけを映し、背景の色も変えて今どちらを見ているか分かるようにする。
+   */
   setVisibility(visibility: CadVisibility): void {
     this.visibility = visibility;
     if (this.mesh) {
@@ -695,8 +700,9 @@ export class CadScene {
       if (index && this.baseIndices) {
         const arr = index.array as Uint32Array;
         arr.set(this.baseIndices);
+        // 映さない面の三角形は、3 点とも同じ頂点にして潰す（描かれず、光線にも当たらない）。
         this.data.mesh.faceRanges.forEach(([s, c], id) => {
-          if (c && this.partHidden(this.data.faces[id]?.part)) arr.fill(this.baseIndices![s * 3], s * 3, (s + c) * 3);
+          if (c && !this.shown('face', id)) arr.fill(this.baseIndices![s * 3], s * 3, (s + c) * 3);
         });
         index.needsUpdate = true;
       }
@@ -707,16 +713,22 @@ export class CadScene {
       const arr = attr.array as Float32Array;
       arr.set(this.edgePositions);
       this.data.edges.ranges.forEach(([s, n], id) => {
-        if (!n || !this.partHidden(this.data.edgeList[id]?.part)) return;
+        if (!n || this.shown('edge', id)) return;
         for (let v = s * 2; v < (s + n) * 2; v++) arr.copyWithin(v * 3, s * 6, s * 6 + 3);
       });
       attr.needsUpdate = true;
       this.lines.geometry.computeBoundingSphere();
     }
     if (this.points) this.points.visible = visibility.vertex;
+    this.applyBackground();
     this.hover = null;
     this.hoverHoles = new Set();
     this.refreshColors();
+  }
+
+  private applyBackground(): void {
+    const c = this.visibility.swapped ? (this.colors.hiddenBackground ?? this.colors.background) : this.colors.background;
+    this.renderer.setClearColor(new THREE.Color(c));
   }
 
   /** 範囲選択のしかたを変える。'off' 以外では左ドラッグが回転でなく範囲選択になる。 */
@@ -804,10 +816,11 @@ export class CadScene {
     return true;
   }
 
-  /** 見えている部品のバウンディングボックス（部品が無い・全部見えているならモデル全体）。 */
+  /** 見えている部品・要素のバウンディングボックス（何も隠していないならモデル全体）。 */
   private visibleBox(): { min: number[]; max: number[] } {
     const parts = this.data.parts ?? [];
     const hidden = this.visibility.hiddenParts;
+    if (this.visibility.swapped || this.visibility.hiddenItems?.size) return this.shownBox() ?? this.data.bbox;
     if (!parts.length || !hidden.size) return this.data.bbox;
     const min = [Infinity, Infinity, Infinity];
     const max = [-Infinity, -Infinity, -Infinity];
@@ -820,6 +833,25 @@ export class CadScene {
       }
     }
     return min[0] === Infinity ? this.data.bbox : { min, max };
+  }
+
+  /** 今映している面・エッジ・頂点（種類の表示によらない）の頂点から求めた箱。何も映していなければ null。 */
+  private shownBox(): { min: number[]; max: number[] } | null {
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+    const add = (arr: ArrayLike<number> | null, lo: number, hi: number) => {
+      if (!arr) return;
+      for (let v = lo; v < hi && v * 3 + 2 < arr.length; v++)
+        for (let k = 0; k < 3; k++) {
+          const x = arr[v * 3 + k];
+          if (x < min[k]) min[k] = x;
+          if (x > max[k]) max[k] = x;
+        }
+    };
+    this.faceVertexRanges.forEach(([lo, hi], id) => this.shown('face', id) && add(this.meshPositions, lo, hi));
+    this.data.edges.ranges.forEach(([s, n], id) => n && this.shown('edge', id) && add(this.edgePositions, s * 2, (s + n) * 2));
+    this.data.vertexList.forEach((_, id) => this.shown('vertex', id) && add(this.vertexPositions, id, id + 1));
+    return min[0] === Infinity ? null : { min, max };
   }
 
   /** dir の向き（中心からカメラへ）から、min〜max の箱がちょうど収まる位置にカメラを置き、回転の中心を箱の中心にする。 */
@@ -1068,31 +1100,42 @@ export class CadScene {
     return part !== undefined && this.visibility.hiddenParts.has(part);
   }
 
-  /** 要素が今見えているか（種類の表示と、部品を隠す設定）。 */
-  private visible(kind: CadKind, id: number): boolean {
-    const v = this.visibility;
+  /** 要素を隠してあるか（その要素を「非表示」にしたか、属する部品を隠したか）。種類ごとの表示・非表示領域は見ない。 */
+  private itemHidden(kind: CadKind, id: number): boolean {
+    if (this.visibility.hiddenItems?.has(selectionKey(kind, id))) return true;
     switch (kind) {
       case 'face':
-        return v.face && !this.partHidden(this.data.faces[id]?.part);
+        return this.partHidden(this.data.faces[id]?.part);
       case 'edge':
-        return v.edge && !this.partHidden(this.data.edgeList[id]?.part);
+        return this.partHidden(this.data.edgeList[id]?.part);
       case 'vertex': {
-        if (!v.vertex) return false;
         const info = this.data.vertexList[id];
-        if (info?.part !== undefined) return !this.partHidden(info.part);
+        if (info?.part !== undefined) return this.partHidden(info.part);
         // 部品の番号を持たない（前の版の）データは、つながるエッジがすべて隠れていれば隠す。
         const edges = info?.edges ?? [];
-        return !edges.length || edges.some((e) => !this.partHidden(this.data.edgeList[e]?.part));
+        return edges.length > 0 && edges.every((e) => this.partHidden(this.data.edgeList[e]?.part));
       }
       case 'part':
-        return !this.partHidden(id);
+        return this.partHidden(id);
       case 'hole':
       case 'outer': {
-        // 縁の周りの面がすべて隠した部品に属するなら隠す。
+        // 縁の周りの面がすべて隠れているなら隠す。
         const faces = this.loopItems(kind)[id]?.faces ?? [];
-        return !faces.length || faces.some((f) => !this.partHidden(this.data.faces[f]?.part));
+        return faces.length > 0 && faces.every((f) => this.itemHidden('face', f));
       }
     }
+  }
+
+  /** 要素を今映すか（非表示領域では隠したものだけを映す）。種類ごとの表示は見ない。 */
+  private shown(kind: CadKind, id: number): boolean {
+    return this.itemHidden(kind, id) === !!this.visibility.swapped;
+  }
+
+  /** 要素が今見えているか（種類の表示と、部品・要素を隠す設定、非表示領域か）。 */
+  private visible(kind: CadKind, id: number): boolean {
+    const v = this.visibility;
+    if ((kind === 'face' && !v.face) || (kind === 'edge' && !v.edge) || (kind === 'vertex' && !v.vertex)) return false;
+    return this.shown(kind, id);
   }
 
   private refreshColors(): void {
@@ -1611,7 +1654,7 @@ export class CadScene {
         const add = (items: { part?: number }[], hits: Uint8Array, counted: (id: number) => boolean) => {
           items.forEach((info, id) => {
             const pi = info.part;
-            if (pi === undefined || pi >= parts.length || this.partHidden(pi) || !counted(id)) return;
+            if (pi === undefined || pi >= parts.length || !this.shown('part', pi) || !counted(id)) return;
             has[pi] = true;
             if (ok(hits[id])) any[pi] = true;
             if (hits[id] !== 2) all[pi] = false;

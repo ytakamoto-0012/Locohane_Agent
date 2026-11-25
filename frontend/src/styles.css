@@ -715,6 +715,10 @@
   max-width: 960px;
   max-height: calc(100vh - 120px);
   gap: 8px;
+  /* メッセージ欄の上端に固定表示するユーザー指示（.pinned-user-message、z-index 10）は、ビューアに押されて
+     低くなったメッセージ欄からはみ出してビューアの上部に重なるので、ビューアを前に出す。ポップオーバー（20）よりは下。 */
+  position: relative;
+  z-index: 15;
 }
 
 .cad-viewer-bar > * {
@@ -861,6 +865,26 @@
   background: rgba(62, 99, 221, 0.12);
 }
 
+/* 非表示領域（隠した要素だけを映す画面）の目印: 3D 表示の枠を破線のアクセント色にし、上端に説明を重ねる。 */
+.cad-viewer-host.cad-viewer-hidden-space {
+  border: 2px dashed var(--accent);
+}
+
+.cad-viewer-hidden-banner {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 24px);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: white;
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 1;
+}
+
 .cad-viewer-box.crossing {
   border: 1.5px dashed #30a46c;
   background: rgba(48, 164, 108, 0.12);
@@ -869,8 +893,8 @@
 .cad-viewer-message {
   width: 100%;
   box-sizing: border-box;
+  /* 既定は 1 行（rows=1）。長く書くときは角をドラッグして広げられる。 */
   resize: vertical;
-  min-height: 2.6em;
   max-height: 160px;
   padding: 6px 8px;
   border: 1px solid var(--border);

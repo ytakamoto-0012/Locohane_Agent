@@ -9,11 +9,13 @@
  */
 import type { CadAttribute, CadColorOverrides, CadData, CadSavedEdit, CadSavedHistory, CadSelection } from './cadData';
 
-/** 元に戻す・やり直すの対象（選択・変えた色・隠した部品・種類ごとの表示・属性の編集）。 */
+/** 元に戻す・やり直すの対象（選択・変えた色・隠した部品・要素・種類ごとの表示・属性の編集）。 */
 export interface EditSnapshot {
   selection: CadSelection[];
   colors: CadColorOverrides;
   hiddenParts: Set<number>;
+  /** 「非表示」で 1 つずつ隠した要素（selectionKey）。ビューアを開いている間だけのもので、保存する履歴には入れない。 */
+  hiddenItems: Set<string>;
   kindVisible: { face: boolean; edge: boolean; vertex: boolean };
   attributeEdits: Record<string, CadAttribute[]>;
 }
@@ -108,6 +110,7 @@ function fromSaved(data: CadData, saved: CadSavedEdit, base: CadSavedHistory['ba
     selection: [],
     colors: { faces, parts },
     hiddenParts: new Set(saved.hiddenParts.filter((p) => p >= 0 && p < nParts)),
+    hiddenItems: new Set(),
     kindVisible: { ...saved.visible },
     attributeEdits
   };
