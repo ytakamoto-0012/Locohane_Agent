@@ -1527,6 +1527,25 @@ DESCRIPTIONS: dict[str, str] = {
     'cad_viewer.cache_max_mb': (
         'Upper limit of the total size of that cache (MB). When it is exceeded, the least recently used entries are deleted. 0 or less disables the cache (the cached data is deleted when the app starts).'
     ),
+    'cad_viewer.hole_topology_tolerance': (
+        'Topology tolerance (model units, mm) for finding holes inside an open surface (a shape whose faces are not closed) or an open mesh (STL).\n'
+        'Borders with a gap up to this value are treated as connected, and slits narrower than it and holes smaller than it are not holes.\n'
+        'For each group of connected faces the largest border is the outer boundary, and the other closed borders are holes. 0 or less does not look for holes.'
+    ),
+    'cad_viewer.hole_normal_angle_deg': (
+        'When the mouse is over a hole in the viewer, the holes whose normal differs from it by up to this angle (degrees) are highlighted together, and a click selects them together.\n'
+        'It can be changed in the viewer (this is the value when the viewer opens).'
+    ),
+    'cad_viewer.local_axis_lengths': (
+        'Lengths of the three straight lines that run at right angles from one point and are recognized as a local AXIS (local coordinate system), in X, Y, Z order (model units).\n'
+        'When found, the viewer\'s "Coordinates" switches to it, and confirming also returns local coordinates to the AI. Empty or off does not look for it.'
+    ),
+    'cad_viewer.local_axis_length_tolerance': (
+        'Tolerance (model units) for the lengths of those three lines and for their ends meeting at one point.'
+    ),
+    'cad_viewer.local_axis_angle_tolerance_deg': (
+        'Tolerance (degrees) for treating those three lines as perpendicular.'
+    ),
     'plan.allow_badge_unlock': (
         'Behavior when clicking the Plan Mode / Edit Automatically badge shown near the send button.\n'
         'true : can switch both ways (including Plan Mode -> Edit Automatically).\n'

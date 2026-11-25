@@ -3,7 +3,8 @@
  * ビューア用データの型と、base64 の配列の復号。形は src/cad/mesh_data.py の docstring と一致させる。
  */
 
-export type CadKind = 'face' | 'edge' | 'vertex' | 'part';
+/** hole は開いたサーフェース・メッシュの面の中の穴（src/cad/topology.py）。 */
+export type CadKind = 'face' | 'edge' | 'vertex' | 'part' | 'hole';
 
 export interface CadSelection {
   kind: CadKind;
@@ -216,6 +217,11 @@ export interface CadData {
   step?: CadStepInfo;
   /** 穴・ボスの一覧（B-rep のときだけ）。 */
   features?: CadFeature[];
+  /** 開いた形の面の中の穴（holeList）の縁の線（線分ごとに 2 点。穴 i は ranges[i] の範囲）。 */
+  holes?: { positions: CadBuffer; ranges: [number, number][]; tolerance?: number; outerLoops?: number; openChains?: number };
+  holeList?: CadItemInfo[];
+  /** モデルの中の直交する 3 本の線で決まるローカル座標系（src/cad/topology.py の find_local_axes）。 */
+  localAxes?: CadLocalAxis[];
   /** 前の版との比較（show_cad_viewer の compare_with）。added / removed は増えた・削った部分の三角形。 */
   diff?: { added?: CadTriangles; removed?: CadTriangles; error?: string; [key: string]: unknown };
   /** 「保存」で書いたデータにある、保存したときの表示（隠した部品・種類ごとの表示）。 */
@@ -261,6 +267,55 @@ export interface CadViewerProps {
   save_id?: string;
   /** 指示付きで確定したときに撮る画面の長辺（ピクセル、[cad_viewer].screenshot_long_side_pixels）。0 以下・無しなら撮らない。 */
   screenshot_long_side?: number;
+  /** 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差の既定値（度、[cad_viewer].hole_normal_angle_deg）。 */
+  hole_normal_angle_deg?: number;
+}
+
+/** ローカル座標系。origin と単位ベクトル x・y・z はワールド座標（右手系でなければ rightHanded が false）。 */
+export interface CadLocalAxis {
+  id: number;
+  origin: number[];
+  x: number[];
+  y: number[];
+  z: number[];
+  edges?: number[];
+  rightHanded?: boolean;
+  orthogonalityErrorDeg?: number;
+}
+
+function dot3(a: ArrayLike<number>, b: ArrayLike<number>): number {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+/** ワールド座標の点をローカル座標にする（local = [x·(p−o), y·(p−o), z·(p−o)]）。axis が null ならそのまま。 */
+export function toLocalPoint(axis: CadLocalAxis | null, p: ArrayLike<number>): number[] {
+  if (!axis) return [p[0], p[1], p[2]];
+  const d = [p[0] - axis.origin[0], p[1] - axis.origin[1], p[2] - axis.origin[2]];
+  return [dot3(axis.x, d), dot3(axis.y, d), dot3(axis.z, d)];
+}
+
+/** ワールド座標の向き（法線・差）をローカル座標にする。axis が null ならそのまま。 */
+export function toLocalVector(axis: CadLocalAxis | null, v: ArrayLike<number>): number[] {
+  if (!axis) return [v[0], v[1], v[2]];
+  return [dot3(axis.x, v), dot3(axis.y, v), dot3(axis.z, v)];
+}
+
+/**
+ * 穴 id と同じ向き（法線のなす角が deg 度以内。裏向きは含めない）の穴の ID（id 自身を含む、昇順）。
+ * 法線は面の表側を向く（src/cad/topology.py）。
+ */
+export function holeGroup(data: CadData, id: number, deg: number): number[] {
+  const holes = data.holeList ?? [];
+  const base = holes[id]?.normal;
+  if (!base) return holes[id] ? [id] : [];
+  const cos = Math.cos((Math.max(0, Math.min(180, deg)) * Math.PI) / 180);
+  const out: number[] = [];
+  holes.forEach((h, i) => {
+    const n = h.normal;
+    // 丸めた単位ベクトルなので、内積を 1 で切ってから比べる（0° のとき自身が外れないように少し甘くする）。
+    if (i === id || (n && Math.min(1, dot3(base, n)) >= cos - 1e-9)) out.push(i);
+  });
+  return out;
 }
 
 export const CAD_DATA_FORMAT = 'locohane-cad-viewer/1';
@@ -364,6 +419,8 @@ export function itemsOf(data: CadData, kind: CadKind): CadItemInfo[] {
       return data.vertexList;
     case 'part':
       return data.parts ?? [];
+    case 'hole':
+      return data.holeList ?? [];
   }
 }
 

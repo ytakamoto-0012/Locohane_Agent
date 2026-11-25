@@ -7,9 +7,9 @@
     b"LCVD" | u32 版 | u32 ヘッダーの長さ | ヘッダー（UTF-8 の JSON） | 塊…
 
 - ヘッダー: {"data": 大きな項目を除いたビューア用データ, "blobs": [{"path", "type", "offset", "length"}, ...]}
-- type "bytes": base64 だった配列（三角形の座標・番号・色、エッジ・頂点の座標、比較の重ね表示）を
+- type "bytes": base64 だった配列（三角形の座標・番号・色、エッジ・頂点・穴の縁の座標、比較の重ね表示）を
   復号したそのままのバイト列。offset は 8 の倍数（ブラウザで Float32Array 等として直接見るため）。
-- type "json": 要素の一覧（faces・edgeList・vertexList・parts）を JSON_CHUNK_ITEMS 件ずつに分けた JSON の配列。
+- type "json": 要素の一覧（faces・edgeList・vertexList・parts・holeList）を JSON_CHUNK_ITEMS 件ずつに分けた JSON の配列。
   同じ path の塊を順につなげると元の一覧になる。
 
 LLM が読む viewer_data（`json_query` で読む JSON ファイル）はこれまでどおりで、このパッケージは
@@ -32,7 +32,7 @@ _ALIGN = 8
 # 1 つの JSON の塊に入れる要素の数（1 要素は数百バイト〜数 KB なので、塊は数 MB〜数十 MB に収まる）。
 JSON_CHUNK_ITEMS = 20000
 # 一覧（JSON の塊に分ける）のキー。
-LIST_KEYS = ("faces", "edgeList", "vertexList", "parts")
+LIST_KEYS = ("faces", "edgeList", "vertexList", "parts", "holeList")
 # base64 の配列（バイト列にする）の場所。
 BYTES_PATHS = (
     ("mesh", "positions"),
@@ -40,6 +40,7 @@ BYTES_PATHS = (
     ("mesh", "colors"),
     ("edges", "positions"),
     ("vertices", "positions"),
+    ("holes", "positions"),
     ("diff", "added", "positions"),
     ("diff", "added", "indices"),
     ("diff", "removed", "positions"),

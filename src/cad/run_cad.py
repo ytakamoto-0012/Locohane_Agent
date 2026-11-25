@@ -87,7 +87,11 @@ def _fail(message: str) -> None:
     sys.exit(EXIT_FAILED)
 
 
-def _done(data: dict[str, Any], out_path: str) -> None:
+def _done(data: dict[str, Any], out_path: str, raw: dict[str, Any] | None = None) -> None:
+    from src.cad.topology import attach_topology
+
+    # 開いた形の穴（トポロジートレランス）とローカル AXIS（100・200・300 の直交する 3 本の線）を足す。
+    attach_topology(data, raw)
     write_viewer_json(data, out_path)
     print(f"{OK_MARKER} {json.dumps(data['stats'])}")
 
@@ -142,7 +146,7 @@ class CodeCollector:
             _fail(f"Error: could not make the viewer data from the shape ({type(e).__name__}: {e})")
             return
         _attach_diff(data, shape, raw_options)
-        _done(data, out_path)
+        _done(data, out_path, raw_options)
 
 
 def _export(data_path: str, out_path: str) -> None:
@@ -190,7 +194,7 @@ def main(argv: list[str] | None = None) -> None:
         except (StlError, TooManyTrianglesError, OSError) as e:
             _fail(f"Error: could not read the STL file: {e}")
             return
-        _done(data, args.out)
+        _done(data, args.out, raw)
         return
     try:
         import cadquery as cq
@@ -212,7 +216,7 @@ def main(argv: list[str] | None = None) -> None:
     except Exception as e:  # noqa: BLE001 - OCP の C++ 例外は Python の別の型で来る
         _fail(f"Error: could not read the {fmt} file ({type(e).__name__}: {e})")
         return
-    _done(data, args.out)
+    _done(data, args.out, raw)
 
 
 if __name__ == "__main__":

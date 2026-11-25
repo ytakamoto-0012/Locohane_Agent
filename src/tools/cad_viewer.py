@@ -33,6 +33,7 @@ from ..ask_relay import ask_turn
 from ..cad.formats import format_of, supported_extensions_text
 from ..cad.features import summarize_features
 from ..cad.step_summary import summarize_step
+from ..cad.topology import to_local_point, to_local_vector
 from ..cad.mesh_data import FORMAT as VIEWER_FORMAT
 from ..cad.mesh_data import apply_view_edits, write_viewer_json
 from ..cad.viewer_package import write_package
@@ -52,10 +53,13 @@ from ._workdir import _resolve_exec_workdir, _resolve_workdir, _tmp_dir_parents
 
 logger = logging.getLogger(__name__)
 
-SelectKind = Literal["face", "edge", "vertex", "part"]
-_ALL_KINDS: tuple[str, ...] = ("face", "edge", "vertex", "part")
-# 選んだ要素の種類 → ビューア用データでの一覧のキー。
-_LIST_KEYS = {"face": "faces", "edge": "edgeList", "vertex": "vertexList", "part": "parts"}
+SelectKind = Literal["face", "edge", "vertex", "part", "hole"]
+_ALL_KINDS: tuple[str, ...] = ("face", "edge", "vertex", "part", "hole")
+# 選んだ要素の種類 → ビューア用データでの一覧のキー。hole は開いた形の面の中の穴（src/cad/topology.py）。
+_LIST_KEYS = {"face": "faces", "edge": "edgeList", "vertex": "vertexList", "part": "parts", "hole": "holeList"}
+# ローカル座標に直して selection_file・計測に添える項目（点と向き）。
+_LOCAL_POINT_KEYS = ("center", "point", "start", "end", "axisOrigin", "circleCenter", "sphereCenter", "apex", "ellipseCenter")
+_LOCAL_VECTOR_KEYS = ("normal", "normalAtCenter", "direction", "axisDirection", "axis", "delta")
 
 _CANCEL_MESSAGE = "Error: the user closed the 3D viewer without confirming a selection."
 _RUN_CAD = Path(__file__).resolve().parent.parent / "cad" / "run_cad.py"
@@ -109,6 +113,11 @@ def _options(compare_with: str = "") -> dict[str, Any]:
         "angular_deflection_deg": _setting("cad_viewer_angular_deflection_deg", 20.0),
         "max_triangles": _setting("cad_viewer_max_triangles", 1_000_000),
         "stl_region_angle_deg": _setting("cad_viewer_stl_region_angle_deg", 1.0),
+        # 開いた形の穴とローカル AXIS（src/cad/topology.py）。キャッシュのキーにも入る。
+        "hole_tolerance": _setting("cad_viewer_hole_topology_tolerance", 0.1),
+        "local_axis_lengths": list(_setting("cad_viewer_local_axis_lengths", (100.0, 200.0, 300.0)) or []) or "off",
+        "local_axis_length_tolerance": _setting("cad_viewer_local_axis_length_tolerance", 0.1),
+        "local_axis_angle_tolerance_deg": _setting("cad_viewer_local_axis_angle_tolerance_deg", 0.5),
     }
     if compare_with:
         out["compare_with"] = compare_with
@@ -226,7 +235,7 @@ async def show_cad_viewer(
     """Show a 3D model in an interactive viewer in the chat, and return the elements the user selects.
 
     The user can rotate, zoom and pan the model, select faces / edges / vertices (or whole parts of an
-    assembly) by clicking, box selection, "select all" or "same color" / "same part / layer", hide parts / layers, change face and part
+    assembly, or holes inside an open surface / mesh) by clicking, box selection, "select all" or "same color" / "same part / layer", hide parts / layers, change face and part
     colors, type an instruction for you, and press "Confirm". This tool waits for that, writes the geometry of
     each selected element (type such as PLANE/CYLINDER/LINE/CIRCLE, area or length, center, normal,
     radius, bounding box, neighbouring elements, and CadQuery selectors that pick exactly that
@@ -282,8 +291,8 @@ async def show_cad_viewer(
         file_path: The CAD file to show (see above). Leave empty when using code.
         code: CadQuery code that makes the shape (see above). Leave empty when using file_path.
         select: Which kinds of elements the user may select: any of "face", "edge", "vertex",
-            "part". Default: all kinds the model has ("part" only for an assembly with 2 or more
-            parts, "vertex" not for STL).
+            "part", "hole". Default: all kinds the model has ("part" only for an assembly with 2 or more
+            parts, "vertex" not for STL, "hole" only for an open surface or mesh with holes in it).
         compare_with: The previous version of the model to compare with (see above). Leave empty
             for no comparison.
 
@@ -292,8 +301,12 @@ async def show_cad_viewer(
         selected_count, selected_by_kind, selection_file (@N of a JSON with every selected element
         and its geometry under "selected", and the color changes under "color_changes"; it can be
         very large, so read only the fields you need with json_query), model (format, units, size,
-        element counts, digest, check = solids / valid / open edges / volume / warnings, and features =
-        holes and bosses grouped by diameter and depth), diff when compare_with was given, and
+        element counts, digest, check = solids / valid / open edges / volume / warnings, features =
+        holes and bosses grouped by diameter and depth, holes = holes inside an open surface or mesh
+        grouped by diameter and normal, and local_axes = local coordinate systems found as three
+        perpendicular lines), diff when compare_with was given, local_axis when the user viewed the
+        model in a local coordinate system (then selected elements and measurements also have
+        'local' values), and
         viewer_data (@N of the viewer data). If the user changed face / part
         colors in the viewer, also color_change_count (the original model file itself is not changed).
         If the user measured in the viewer (R / diameter, point distance, plane distance or angle,
@@ -459,7 +472,10 @@ def _finish_answer_body(
                 "ref": image_ref(saved, screenshot_token if screenshot_token != str(saved) else None),
             }
     measurements = _valid_measurements(data, res.get("measurements"))
-    return _format_result(data, picked, data_token, [*notes, *extra], colors, message, screenshot_token, attr_changes, measurements)
+    local_axis = _valid_local_axis(data, res.get("local_axis"))
+    return _format_result(
+        data, picked, data_token, [*notes, *extra], colors, message, screenshot_token, attr_changes, measurements, local_axis
+    )
 
 
 def _screenshot_long_side() -> int:
@@ -950,6 +966,7 @@ def _available_kinds(data: dict, select: list[str] | None) -> list[str]:
         "edge": bool(data.get("edgeList")),
         "vertex": bool(data.get("vertexList")),
         "part": len(data.get("parts") or []) >= 2,
+        "hole": bool(data.get("holeList")),
     }
     return [k for k in _ALL_KINDS if k in wanted and has[k]]
 
@@ -1196,6 +1213,52 @@ def _valid_measurements(data: dict, raw: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _valid_local_axis(data: dict, raw: Any) -> dict[str, Any] | None:
+    """ビューアで「座標系」に選んでいたローカル AXIS（ビューア用データの localAxes の ID）。選んでいなければ None。"""
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    axes = data.get("localAxes") or []
+    axis = axes[raw] if 0 <= raw < len(axes) else None
+    if not isinstance(axis, dict) or not all(isinstance(axis.get(k), list) and len(axis[k]) == 3 for k in ("origin", "x", "y", "z")):
+        return None
+    return axis
+
+
+def _with_local(item: dict[str, Any], axis: dict[str, Any] | None) -> dict[str, Any]:
+    """item の点・向き（_LOCAL_POINT_KEYS・_LOCAL_VECTOR_KEYS）をローカル座標にしたものを item["local"] に添える。"""
+    if axis is None:
+        return item
+
+    def is_vec(v: Any) -> bool:
+        return isinstance(v, list) and len(v) == 3 and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)
+
+    local: dict[str, Any] = {}
+    for k in _LOCAL_POINT_KEYS:
+        if is_vec(item.get(k)):
+            local[k] = to_local_point(axis, item[k])
+    for k in _LOCAL_VECTOR_KEYS:
+        if is_vec(item.get(k)):
+            local[k] = to_local_vector(axis, item[k])
+    pts = item.get("points")
+    if isinstance(pts, list) and pts and all(is_vec(p) for p in pts):
+        local["points"] = [to_local_point(axis, p) for p in pts]
+    return {**item, "local": local} if local else item
+
+
+def _local_axis_summary(axis: dict[str, Any]) -> dict[str, Any]:
+    out = {k: axis.get(k) for k in ("id", "origin", "x", "y", "z", "rightHanded", "orthogonalityErrorDeg", "edges")}
+    out["note"] = (
+        "The user viewed the model in this local coordinate system (local AXIS: three perpendicular lines found in the model; "
+        "origin and the unit vectors x, y, z are in world coordinates). local = [x·(p - origin), y·(p - origin), z·(p - origin)] "
+        "for a point p, and [x·v, y·v, z·v] for a direction v. Selected elements and measurements also carry 'local' with "
+        "their points and directions in this system. Use the local values when the user speaks in local coordinates; CadQuery "
+        "code still works in world coordinates."
+    )
+    if axis.get("rightHanded") is False:
+        out["warning"] = "The three lines form a left-handed system (z = -(x × y)). Check the line lengths with the user."
+    return out
+
+
 def _echo_text(
     data: dict,
     picked: list[tuple[str, int]],
@@ -1242,6 +1305,8 @@ async def _ask_selection(
                 "save_id": save_id,
                 # 指示付きで確定したときに撮る画面の長辺（0 以下なら撮らない）。
                 "screenshot_long_side": _screenshot_long_side(),
+                # 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差の既定値（度。ビューアで変えられる）。
+                "hole_normal_angle_deg": float(_setting("cad_viewer_hole_normal_angle_deg", 3.0)),
             },
         )
         ask_message = cl.AskElementMessage(content=question, element=element, timeout=timeout)
@@ -1290,6 +1355,33 @@ async def _ask_selection(
         return f"Error: could not process the viewer's answer ({type(e).__name__}: {e}). The selection was lost."
 
 
+def _holes_summary(data: dict) -> dict[str, Any]:
+    """開いた形の面の中の穴（src/cad/topology.py）の要約（大きさは穴の数によらず一定）。"""
+    holes = data.get("holeList") or []
+    geom = data.get("holes") or {}
+    groups: dict[tuple, int] = {}
+    for h in holes:
+        key = (round(float(h.get("diameter") or 0), 2), tuple(round(float(c), 2) + 0.0 for c in h.get("normal") or []))
+        groups[key] = groups.get(key, 0) + 1
+    rows = [{"diameter": d, "normal": list(n), "count": c} for (d, n), c in sorted(groups.items(), key=lambda kv: (-kv[1], kv[0][0]))[:12]]
+    out: dict[str, Any] = {
+        "count": len(holes),
+        "topology_tolerance": geom.get("tolerance"),
+        "outer_boundaries": geom.get("outerLoops"),
+        "groups": rows,
+        "note": (
+            "Holes inside the open surface / mesh: closed borders other than the outer boundary of each connected group of faces "
+            "(gaps up to topology_tolerance count as connected). Each hole (kind 'hole' in the selection) has center, normal "
+            "(facing the same way as the surface), diameter (mean), area, perimeter, the faces around it and, for B-rep, its border edges."
+        ),
+    }
+    if len(groups) > len(rows):
+        out["more_groups"] = len(groups) - len(rows)
+    if geom.get("openChains"):
+        out["open_borders"] = geom["openChains"]
+    return out
+
+
 def _model_summary(data: dict) -> dict[str, Any]:
     src = data.get("source") or {}
     stats = data.get("stats") or {}
@@ -1308,6 +1400,12 @@ def _model_summary(data: dict) -> dict[str, Any]:
         out["features"] = summarize_features(data["features"])
     if data.get("step"):
         out["step"] = summarize_step(data["step"])
+    if data.get("holeList"):
+        out["holes"] = _holes_summary(data)
+    if data.get("localAxes"):
+        out["local_axes"] = [{k: a.get(k) for k in ("id", "origin", "x", "y", "z", "rightHanded")} for a in (data.get("localAxes") or [])[:5]]
+        if len(data["localAxes"]) > 5:
+            out["more_local_axes"] = len(data["localAxes"]) - 5
     return out
 
 
@@ -1350,7 +1448,12 @@ def _id_note(data: dict) -> str:
 
 
 def _write_selection(
-    data: dict, picked: list[tuple[str, int]], data_token: str, colors: list[dict[str, Any]], attr_changes: list[dict[str, Any]] | None = None
+    data: dict,
+    picked: list[tuple[str, int]],
+    data_token: str,
+    colors: list[dict[str, Any]],
+    attr_changes: list[dict[str, Any]] | None = None,
+    local_axis: dict[str, Any] | None = None,
 ) -> Path:
     """選んだ要素の詳しい情報（ジオメトリ全部）と色の変更を、そのセッションの `_tmp_` フォルダの JSON に書く。"""
     path = _new_data_path(_resolve_exec_workdir(), prefix="cad_selection")
@@ -1358,9 +1461,11 @@ def _write_selection(
         "model": _model_summary(data),
         "viewer_data": data_token,
         "id_note": _id_note(data),
-        "selected": [{"kind": kind, "id": eid, **data[_LIST_KEYS[kind]][eid]} for kind, eid in picked],
+        "selected": [_with_local({"kind": kind, "id": eid, **data[_LIST_KEYS[kind]][eid]}, local_axis) for kind, eid in picked],
         "color_changes": colors,
     }
+    if local_axis is not None:
+        body["local_axis"] = _local_axis_summary(local_axis)
     if attr_changes:
         body["attribute_changes"] = attr_changes
     # 選んだ面が属する穴・ボス（直径・深さ・通しかどうか・軸）。
@@ -1386,6 +1491,7 @@ def _format_result(
     screenshot_token: str = "",
     attr_changes: list[dict[str, Any]] | None = None,
     measurements: list[dict[str, Any]] | None = None,
+    local_axis: dict[str, Any] | None = None,
 ) -> str:
     """LLM へ返す概要（JSON 文字列）。
 
@@ -1425,7 +1531,7 @@ def _format_result(
     }
     if measurements:
         # 利用者がビューアで測った結果（最大 _MEASUREMENTS_MAX 件、1 件は小さいので戻り値に入れる）。
-        result["measurements"] = measurements
+        result["measurements"] = [_with_local(m, local_axis) for m in measurements]
         units = data.get("units", "unknown")
         result["measurement_note"] = (
             f"The user measured these in the viewer (lengths in the model units: {units}). "
@@ -1446,7 +1552,9 @@ def _format_result(
         )
     if picked or colors or attr_changes:
         try:
-            sel_token = _register_file(_write_selection(data, picked, data_token, colors, attr_changes), "3D viewer selection (show_cad_viewer)")
+            sel_token = _register_file(
+                _write_selection(data, picked, data_token, colors, attr_changes, local_axis), "3D viewer selection (show_cad_viewer)"
+            )
         except OSError as e:
             logger.warning("show_cad_viewer: could not write the selection file", exc_info=True)
             result["selection_file_error"] = f"could not write the selection details: {e}. Ask the user to select again."
@@ -1464,6 +1572,8 @@ def _format_result(
             "The user changed colors in the viewer. The original model file is not changed; the user can export a model "
             "with the colors applied with the viewer's Save button."
         )
+    if local_axis is not None:
+        result["local_axis"] = _local_axis_summary(local_axis)
     result["model"] = _model_summary(data)
     if data.get("diff"):
         result["diff"] = _diff_summary(data["diff"])

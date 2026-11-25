@@ -16,12 +16,14 @@ import {
   decodeFloat32,
   decodeUint32,
   decodeUint8,
+  holeGroup,
   overrideOf,
   selectionKey,
   type BoxMode,
   type CadColorOverrides,
   type CadData,
   type CadKind,
+  type CadLocalAxis,
   type CadSelection,
   type CadVisibility
 } from './cadData';
@@ -39,6 +41,8 @@ export interface CadSceneColors {
 export interface CadSceneCallbacks {
   onHover: (item: CadSelection | null) => void;
   onPick: (item: CadSelection) => void;
+  /** 穴のモードでのクリック: その穴と同じ向き（法線の角度差がしきい値以内）の穴をまとめて選ぶ・外す。 */
+  onPickGroup?: (items: CadSelection[]) => void;
   /** 範囲選択で囲んだ要素。remove は Ctrl（⌘）を押しながら囲んだとき（選択から外す）。 */
   onBoxPick: (items: CadSelection[], remove: boolean) => void;
   /** 「回転中心」でクリックした点を回転の中心にしたとき（ビューアは指定のモードを終える）。 */
@@ -46,6 +50,12 @@ export interface CadSceneCallbacks {
   /** 計測のモード（setMeasureTool）でクリックした点・要素。選択はしない。 */
   onMeasurePick?: (pick: MeasurePick) => void;
 }
+
+// 開いた形の面の中の穴の縁の色（穴のモードのとき。選択・ホバーはそれぞれの色）と線の幅（ピクセル）。
+const HOLE_COLOR = '#d6409f';
+const HOLE_LINE_WIDTH = 2;
+// ローカル座標系の軸のラベル（ワールドの X・Y・Z と見分ける）。
+const LOCAL_AXIS_LABELS = ["X'", "Y'", "Z'"];
 
 // 計測の線・印の色（選択のオレンジ・ホバーの水色と見分けられる紫）。
 const MEASURE_COLOR = '#8e4ec6';
@@ -153,6 +163,19 @@ export class CadScene {
   // 空間の原点 (0, 0, 0) に描く XYZ 軸（X 赤・Y 緑・Z 青、ラベル付き）。
   private originAxes: THREE.Group | null = null;
   private originAxesLine: LineSegments2 | null = null;
+  // 開いた形の面の中の穴の縁（穴 i の線分は holes.ranges[i]）。穴のモードではすべて、ほかのモードでは選んだ穴だけ描く。
+  private holePositions: Float32Array | null = null;
+  private holeLines: LineSegments2 | null = null;
+  private holeHighlight: LineSegments2 | null = null;
+  // 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差（度）と、今まとめて浮かせている穴。
+  private holeAngle = 3;
+  private hoverHoles: Set<number> = new Set();
+  // ローカル座標系（null ならワールド）。視点のボタン・左下の軸がこの向きになる。
+  private localAxis: CadLocalAxis | null = null;
+  private localAxes: THREE.Group | null = null;
+  private localAxesLine: LineSegments2 | null = null;
+  // 左下の XYZ 軸（ローカル座標系のときはその向きに回す）。
+  private readonly gizmoAxes = new THREE.Group();
   // 前の版からの変化（緑 = 増えた部分、赤 = 削った部分）。選択・当たり判定の対象にはしない。
   private diffOverlay: THREE.Group | null = null;
   // 計測のモード（null なら計測しない）。クリックは選択でなく onMeasurePick になる。
@@ -202,6 +225,7 @@ export class CadScene {
     this.buildMesh();
     this.buildLines();
     this.buildPoints();
+    this.buildHoles();
     this.buildPivotMarker();
     this.buildOriginAxes();
     this.buildDiffOverlay();
@@ -323,6 +347,97 @@ export class CadScene {
     this.scene.add(this.points);
   }
 
+  /** 開いた形の面の中の穴の縁を作る（色と中身は refreshColors で入れる）。 */
+  private buildHoles(): void {
+    const positions = decodeFloat32(this.data.holes?.positions);
+    if (!positions.length || !(this.data.holeList ?? []).length) return;
+    this.holePositions = positions;
+    const make = (depthTest: boolean, width: number, order: number) => {
+      const line = new LineSegments2(new LineSegmentsGeometry(), new LineMaterial({ linewidth: width, vertexColors: true, depthTest }));
+      line.renderOrder = order;
+      line.visible = false;
+      this.scene.add(line);
+      return line;
+    };
+    // 縁はふつうに奥行きを見て描き、選択・ホバー中の穴は形に隠れないよう手前に重ねる。
+    this.holeLines = make(true, HOLE_LINE_WIDTH, 2);
+    this.holeHighlight = make(false, HIGHLIGHT_LINE_WIDTH, 3);
+  }
+
+  /** 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差（度）。 */
+  setHoleAngle(deg: number): void {
+    this.holeAngle = Number.isFinite(deg) ? Math.max(0, deg) : 3;
+    this.updateHoverHoles();
+    this.refreshColors();
+  }
+
+  /** 穴 id と同じ向きの穴（隠しているものを除く）。 */
+  holeGroupOf(id: number): number[] {
+    return holeGroup(this.data, id, this.holeAngle).filter((i) => this.visible('hole', i));
+  }
+
+  private updateHoverHoles(): void {
+    const h = this.hover;
+    this.hoverHoles = h && h.kind === 'hole' ? new Set(this.holeGroupOf(h.id)) : new Set();
+  }
+
+  /**
+   * ローカル座標系にする（null でワールドに戻す）。視点のボタン・左下の軸がその向きになり、原点に X'・Y'・Z' の軸を描く。
+   */
+  setLocalAxis(axis: CadLocalAxis | null): void {
+    this.localAxis = axis;
+    if (this.localAxes) {
+      this.scene.remove(this.localAxes);
+      this.localAxes.traverse((o) => {
+        const m = o as THREE.Mesh;
+        m.geometry?.dispose();
+        const mat = m.material as THREE.Material | undefined;
+        (mat as THREE.SpriteMaterial | undefined)?.map?.dispose();
+        mat?.dispose();
+      });
+      this.localAxes = null;
+      this.localAxesLine = null;
+    }
+    this.gizmoAxes.matrixAutoUpdate = false;
+    this.gizmoAxes.matrix.copy(this.basis());
+    this.gizmoAxes.matrixWorldNeedsUpdate = true;
+    if (axis) {
+      const len = this.radius * 0.5;
+      const o = new THREE.Vector3(...axis.origin);
+      const dirs = [axis.x, axis.y, axis.z].map((d) => new THREE.Vector3(...d));
+      const group = new THREE.Group();
+      const geometry = new LineSegmentsGeometry();
+      geometry.setPositions(dirs.flatMap((d) => [o.x, o.y, o.z, o.x + d.x * len, o.y + d.y * len, o.z + d.z * len]));
+      const rgb = AXIS_COLORS.map((c) => new THREE.Color(c));
+      geometry.setColors(rgb.flatMap((c) => [c.r, c.g, c.b, c.r, c.g, c.b]));
+      const material = new LineMaterial({ linewidth: 3, vertexColors: true, depthTest: false, transparent: true, opacity: 0.95 });
+      material.resolution.set(Math.max(this.container.clientWidth, 1), Math.max(this.container.clientHeight, 1));
+      const line = new LineSegments2(geometry, material);
+      line.renderOrder = 2;
+      group.add(line);
+      LOCAL_AXIS_LABELS.forEach((text, i) => {
+        const sprite = axisLabel(text, AXIS_COLORS[i], false);
+        if (!sprite) return;
+        sprite.position.copy(o).addScaledVector(dirs[i], len * 1.1);
+        sprite.scale.set(0.04, 0.04, 1);
+        sprite.renderOrder = 2;
+        group.add(sprite);
+      });
+      this.localAxes = group;
+      this.localAxesLine = line;
+      this.scene.add(group);
+    }
+    this.requestRender();
+  }
+
+  /** 今の座標系の向き（列がローカルの X・Y・Z のワールドでの向き）。ワールドなら単位行列。 */
+  private basis(): THREE.Matrix4 {
+    const a = this.localAxis;
+    const m = new THREE.Matrix4();
+    if (a) m.makeBasis(new THREE.Vector3(...a.x), new THREE.Vector3(...a.y), new THREE.Vector3(...a.z));
+    return m;
+  }
+
   private buildPivotMarker(): void {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3), 3));
@@ -435,6 +550,7 @@ export class CadScene {
     this.renderer.domElement.classList.toggle('cad-viewer-measuring', tool !== null);
     if (tool !== null) this.setBoxMode('off');
     this.hover = null;
+    this.hoverHoles = new Set();
     this.setHoverMarker(null);
     this.refreshColors();
   }
@@ -498,14 +614,15 @@ export class CadScene {
 
   /** 左下の XYZ 軸（X 赤・Y 緑・Z 青、ラベル付き）を作る。 */
   private addAxes(): void {
-    this.gizmoScene.add(new THREE.AxesHelper(1));
+    this.gizmoScene.add(this.gizmoAxes);
+    this.gizmoAxes.add(new THREE.AxesHelper(1));
     const pos = [new THREE.Vector3(1.3, 0, 0), new THREE.Vector3(0, 1.3, 0), new THREE.Vector3(0, 0, 1.3)];
     AXIS_LABELS.forEach((text, i) => {
       const sprite = axisLabel(text, AXIS_COLORS[i], true);
       if (!sprite) return;
       sprite.position.copy(pos[i]);
       sprite.scale.set(0.55, 0.55, 1);
-      this.gizmoScene.add(sprite);
+      this.gizmoAxes.add(sprite);
     });
   }
 
@@ -533,6 +650,7 @@ export class CadScene {
   setMode(mode: CadKind): void {
     this.mode = mode;
     this.hover = null;
+    this.hoverHoles = new Set();
     this.refreshColors();
   }
 
@@ -584,6 +702,7 @@ export class CadScene {
     }
     if (this.points) this.points.visible = visibility.vertex;
     this.hover = null;
+    this.hoverHoles = new Set();
     this.refreshColors();
   }
 
@@ -601,10 +720,12 @@ export class CadScene {
     this.boxEl.classList.toggle('crossing', mode === 'crossing');
   }
 
+  /** 視点を変える。ローカル座標系のときは、その座標系の平面を見る（XY+ はローカルの +Z' 側から X' が右・Y' が上）。 */
   setView(view: ViewName): void {
     const { dir: d, up } = VIEW_DIRS[view];
-    this.camera.up.set(...up);
-    this.fitAlong(new THREE.Vector3(...d).normalize(), this.data.bbox.min, this.data.bbox.max);
+    const basis = this.basis();
+    this.camera.up.set(...up).transformDirection(basis);
+    this.fitAlong(new THREE.Vector3(...d).transformDirection(basis).normalize(), this.data.bbox.min, this.data.bbox.max);
   }
 
   /**
@@ -645,6 +766,9 @@ export class CadScene {
         for (let v = start * 2; v < (start + n) * 2; v++) add(this.edgePositions, v);
       } else if (s.kind === 'vertex') {
         add(this.vertexPositions, s.id);
+      } else if (s.kind === 'hole') {
+        const [start, n] = this.data.holes?.ranges[s.id] ?? [0, 0];
+        for (let v = start * 2; v < (start + n) * 2; v++) add(this.holePositions, v);
       } else {
         const bb = this.data.parts?.[s.id]?.bbox as { min: number[]; max: number[] } | undefined;
         if (bb) for (const p of [bb.min, bb.max]) add(p, 0);
@@ -834,6 +958,9 @@ export class CadScene {
     (this.edgeHighlight?.material as LineMaterial | undefined)?.resolution.set(w, h);
     (this.originAxesLine?.material as LineMaterial | undefined)?.resolution.set(w, h);
     (this.measureLines?.material as LineMaterial | undefined)?.resolution.set(w, h);
+    (this.holeLines?.material as LineMaterial | undefined)?.resolution.set(w, h);
+    (this.holeHighlight?.material as LineMaterial | undefined)?.resolution.set(w, h);
+    (this.localAxesLine?.material as LineMaterial | undefined)?.resolution.set(w, h);
     this.requestRender();
   }
 
@@ -869,6 +996,7 @@ export class CadScene {
   /** 選択・ホバーの状態から、その要素が今どの色か。 */
   private stateOf(kind: CadKind, id: number): 'hover' | 'selected' | null {
     const hit = (s: CadSelection | null) => !!s && this.covers(s, kind, id);
+    if (kind === 'hole' && this.hoverHoles.has(id)) return 'hover';
     if (hit(this.hover) || hit(this.externalHover)) return 'hover';
     // 選択は集合で引く（refreshColors は全要素について呼ぶので、選択の配列を探すと「要素数 × 選択数」になり、
     // 全選択した大きなモデルではホバーのたびに固まっていた）。
@@ -903,7 +1031,9 @@ export class CadScene {
           ? this.data.edgeList.length
           : kind === 'vertex'
             ? this.data.vertexList.length
-            : (this.data.parts ?? []).length;
+            : kind === 'hole'
+              ? (this.data.holeList ?? []).length
+              : (this.data.parts ?? []).length;
     const ids: number[] = [];
     for (let id = 0; id < n; id++) {
       if (kind === 'face' && !(this.data.mesh.faceRanges[id]?.[1] ?? 0)) continue;
@@ -940,6 +1070,11 @@ export class CadScene {
       }
       case 'part':
         return !this.partHidden(id);
+      case 'hole': {
+        // 穴の周りの面がすべて隠した部品に属するなら隠す。
+        const faces = this.data.holeList?.[id]?.faces ?? [];
+        return !faces.length || faces.some((f) => !this.partHidden(this.data.faces[f]?.part));
+      }
     }
   }
 
@@ -1036,7 +1171,97 @@ export class CadScene {
       });
       attr.needsUpdate = true;
     }
+    this.refreshHoles(hover, selected);
     this.requestRender();
+  }
+
+  /** 穴の縁を描き直す。穴のモードではすべての穴、ほかのモードでは選んだ穴だけ（選択・ホバー中は手前に太く重ねる）。 */
+  private refreshHoles(hover: THREE.Color, selected: THREE.Color): void {
+    const base = this.holeLines;
+    const top = this.holeHighlight;
+    const pos = this.holePositions;
+    const ranges = this.data.holes?.ranges;
+    if (!base || !top || !pos || !ranges) return;
+    const plain = new THREE.Color(HOLE_COLOR);
+    const showAll = this.mode === 'hole' && !this.measureTool;
+    const bp: number[] = [];
+    const bc: number[] = [];
+    const hp: number[] = [];
+    const hc: number[] = [];
+    ranges.forEach(([s, n], id) => {
+      if (!n || !this.visible('hole', id)) return;
+      const state = this.stateOf('hole', id);
+      if (!showAll && state === null) return;
+      const c = state === 'hover' ? hover : state === 'selected' ? selected : plain;
+      const P = state === null ? bp : hp;
+      const C = state === null ? bc : hc;
+      for (let v = s * 2; v < (s + n) * 2; v++) {
+        P.push(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]);
+        C.push(c.r, c.g, c.b);
+      }
+    });
+    const fill = (line: LineSegments2, P: number[], C: number[]) => {
+      line.geometry.dispose();
+      const g = new LineSegmentsGeometry();
+      if (P.length) {
+        g.setPositions(P);
+        g.setColors(C);
+      }
+      line.geometry = g;
+      line.visible = P.length > 0;
+    };
+    fill(base, bp, bc);
+    fill(top, hp, hc);
+  }
+
+  /**
+   * 画面の位置（clientX, clientY）にある穴。縁で囲まれた中（画面上）か、縁の線の近くにあり、手前の面に隠れていないもの。
+   * 中に入る穴が複数あれば画面上で小さいもの。無ければ null。
+   */
+  private holeAt(clientX: number, clientY: number, meshDistance: number): number | null {
+    const pos = this.holePositions;
+    const ranges = this.data.holes?.ranges;
+    const holes = this.data.holeList ?? [];
+    if (!pos || !ranges) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const p = this.project(pos);
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    const tol2 = PICK_PIXELS_LINE * PICK_PIXELS_LINE;
+    let bestId = -1;
+    let bestScore = Infinity;
+    ranges.forEach(([s, n], id) => {
+      if (!n || !this.visible('hole', id)) return;
+      // 手前の面に隠れている穴は当てない（穴の中を通る光線は奥の面に当たるので、穴の中心の方が手前になる）。
+      const c = holes[id]?.center;
+      if (c && meshDistance < Infinity) {
+        const depth = new THREE.Vector3(c[0], c[1], c[2]).sub(this.camera.position).dot(forward);
+        const size = typeof holes[id]?.diameter === 'number' ? (holes[id].diameter as number) : 0;
+        if (depth > meshDistance + Math.max(this.radius * 0.004, size * 0.5)) return;
+      }
+      let inside = false;
+      let near = Infinity;
+      let area = 0;
+      for (let v = s * 2; v < (s + n) * 2; v += 2) {
+        const ax = p[v * 2];
+        const ay = p[v * 2 + 1];
+        const bx = p[v * 2 + 2];
+        const by = p[v * 2 + 3];
+        if (Number.isNaN(ax) || Number.isNaN(bx)) continue;
+        if (ay > y !== by > y && x < ((bx - ax) * (y - ay)) / (by - ay) + ax) inside = !inside;
+        near = Math.min(near, segmentDistance2(x, y, ax, ay, bx, by));
+        area += ax * by - bx * ay;
+      }
+      if (!inside && near > tol2) return;
+      // 中に入る穴は画面上で小さい順、線の近くだけの穴はその後（大きな値）。
+      const score = inside ? Math.abs(area) / 2 : Number.MAX_VALUE;
+      if (bestId < 0 || score < bestScore) {
+        bestId = id;
+        bestScore = score;
+      }
+    });
+    return bestId >= 0 ? bestId : null;
   }
 
   // ---------------------------------------------------------------------------
@@ -1195,6 +1420,10 @@ export class CadScene {
       const id = vertexAt();
       return id === null ? null : { kind: 'vertex', id };
     }
+    if (mode === 'hole') {
+      const id = this.holeAt(clientX, clientY, meshDistance);
+      return id === null ? null : { kind: 'hole', id };
+    }
     const faceId = meshHit?.faceIndex != null ? rangeIndex(this.faceTriStarts, meshHit.faceIndex) : null;
     if (mode === 'part') {
       // 面が無い部品（DXF の線だけのレイヤー等）も選べるよう、面に当たらなければエッジ・点で探す。
@@ -1315,6 +1544,32 @@ export class CadScene {
       });
       return out;
     };
+    const holeHits = (): Uint8Array => {
+      const out = new Uint8Array((this.data.holeList ?? []).length);
+      const ranges = this.data.holes?.ranges;
+      if (!this.holePositions || !ranges) return out;
+      const p = this.project(this.holePositions);
+      ranges.forEach(([s, n], id) => {
+        if (!n || !this.visible('hole', id)) return;
+        let all = true;
+        let any = false;
+        for (let v = s * 2; v < (s + n) * 2; v++) {
+          if (inside(p, v)) any = true;
+          else all = false;
+        }
+        if (all) out[id] = 2;
+        else if (any) out[id] = 1;
+        else if (crossing) {
+          for (let v = s * 2; v < (s + n) * 2; v += 2) {
+            if (segmentCrossesRect(p[v * 2], p[v * 2 + 1], p[v * 2 + 2], p[v * 2 + 3], r)) {
+              out[id] = 1;
+              break;
+            }
+          }
+        }
+      });
+      return out;
+    };
     const ok = (hit: number) => (crossing ? hit > 0 : hit === 2);
     const pickIds = (hits: Uint8Array) => Array.from(hits.keys()).filter((i) => ok(hits[i]));
 
@@ -1325,6 +1580,8 @@ export class CadScene {
         return pickIds(edgeHits()).map((id) => ({ kind: 'edge' as const, id }));
       case 'vertex':
         return pickIds(vertexHits()).map((id) => ({ kind: 'vertex' as const, id }));
+      case 'hole':
+        return pickIds(holeHits()).map((id) => ({ kind: 'hole' as const, id }));
       case 'part': {
         // 部品は、見えている面・エッジ・単独の点をまとめて判定する（window はすべて中、crossing はどれか 1 つ）。
         const parts = this.data.parts ?? [];
@@ -1396,6 +1653,10 @@ export class CadScene {
       return;
     }
     const item = this.pickAt(e.clientX, e.clientY);
+    if (item?.kind === 'hole' && this.callbacks.onPickGroup) {
+      this.callbacks.onPickGroup(this.holeGroupOf(item.id).map((id) => ({ kind: 'hole' as const, id })));
+      return;
+    }
     if (item) this.callbacks.onPick(item);
   };
 
@@ -1422,6 +1683,7 @@ export class CadScene {
     const same = item && this.hover ? item.kind === this.hover.kind && item.id === this.hover.id : item === this.hover;
     if (same) return;
     this.hover = item;
+    this.updateHoverHoles();
     this.callbacks.onHover(item);
     this.refreshColors();
   };
@@ -1430,6 +1692,7 @@ export class CadScene {
     this.setHoverMarker(null);
     if (!this.hover) return;
     this.hover = null;
+    this.hoverHoles = new Set();
     this.callbacks.onHover(null);
     this.refreshColors();
   };
@@ -1459,6 +1722,17 @@ interface Rect {
 
 function pointInRect(x: number, y: number, r: Rect): boolean {
   return x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1;
+}
+
+/** 点 (x, y) から線分 ab までの距離の 2 乗（画面上）。 */
+function segmentDistance2(x: number, y: number, ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const ll = dx * dx + dy * dy;
+  const t = ll > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / ll)) : 0;
+  const qx = ax + dx * t - x;
+  const qy = ay + dy * t - y;
+  return qx * qx + qy * qy;
 }
 
 /** 線分 ab と線分 cd が交わるか。 */

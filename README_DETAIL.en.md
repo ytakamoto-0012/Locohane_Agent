@@ -1982,6 +1982,29 @@ and does not stop at the top or bottom; in exchange, the up direction is not kep
   and the side panel starts closed ("Panel" opens it) and appears below the 3D view. Rotate, pan and zoom with one- and two-finger touch.
 - **Origin axes**: draws XYZ axes (X red, Y green, Z blue, labeled) at the origin (0, 0, 0) of the space (shown by default; the button shows / hides them).
   They are half the model size long and drawn on top so that the shape does not hide them. The small axes at the bottom left show only the direction; these show where the origin is.
+- **Holes (open surfaces / meshes)**: for a shape whose faces are not closed (an open shell, an IGES of faces only, DXF faces, an open STL), the viewer looks for
+  holes inside the faces and offers "Hole" as a kind to select (not shown when there are none). In the "Hole" mode hole borders are drawn in pink; moving the
+  mouse over a hole (near its border or inside it) highlights in light blue the holes whose normal differs from it by up to the "Normal ±" angle
+  (default `[cad_viewer] hole_normal_angle_deg` = 3 degrees), and a click selects them together (or deselects them together when all are selected). The normal
+  faces the front side of the surface, so holes facing the opposite way are not grouped. Box selection and select all work too, and selected hole borders stay
+  orange in other modes. Selected holes are in `selected` of the selection file (`kind: "hole"`) with center, normal, mean diameter, area, perimeter,
+  `circularity` (1 for a circle), `planarity` (distance from a plane), the faces around it and, for B-rep, its border edge IDs (`edges`).
+  Detection (`src/cad/topology.py`, called by the `run_cad.py` subprocess after making the viewer data) works on the display triangles: edges that belong to
+  only one triangle are borders, and parallel borders facing each other within the topology tolerance (`[cad_viewer] hole_topology_tolerance`, default 0.1 mm)
+  are treated as connected and removed (seams of unsewn faces, seams split differently on each side; slits narrower than the tolerance and smaller holes are not
+  holes either). The remaining borders are joined into loops (ends within the tolerance are bridged); for each group of connected faces the loop with the
+  largest bounding box is the outer boundary and the others are holes (for a tube open at both ends one opening becomes the outer boundary).
+  `model.holes` has the hole count, tolerance, number of outer boundaries and counts grouped by diameter and normal (up to 12 groups). In the viewer data
+  they are `holeList` (hole info) and `holes` (border segments and `ranges`).
+- **Coordinates (local AXIS)**: when the model has straight lines of length 100, 200 and 300 (`[cad_viewer] local_axis_lengths`, in X, Y, Z order) running at
+  right angles from one point, they are found as a local coordinate system (the shared end is the origin, the directions to the far ends are X', Y', Z'), and
+  "Coordinates" in the toolbar switches between it and World. Lengths and the shared end are checked within `local_axis_length_tolerance` (default 0.1), and
+  right angles within `local_axis_angle_tolerance_deg` (default 0.5 degrees). It looks at straight edges, so it works for B-rep (STEP, IGES, BREP, DXF, CadQuery
+  code; STL has no lines). In local coordinates the viewer draws X', Y', Z' axes at the origin, and the view buttons (`XY+'` etc.), the axes at the bottom left,
+  the coordinates shown on hover / for the selection and the ΔX', ΔY', ΔZ' of measurements use that system. On confirm the result has `local_axis` (origin,
+  unit vectors and the formula local = [x·(p−o), y·(p−o), z·(p−o)]), and each element in the selection file and each measurement gets `local` with its points
+  and directions in local coordinates (the world values stay as they are). A left-handed set is marked "(left-handed)" and the AI is warned. The systems found
+  are also in `model.local_axes` (up to 5).
 - **Save (💾)**: exports the 3D model with the changed colors and hidden parts applied to `<original file name>_edited_<date time>.<ext>` in the
   working folder (or this thread's `_tmp_` folder if it is not writable), registers it as an `@N`, and posts its download button in the chat
   (without waiting for the LLM's `provide_download`; a `cl.File` keeps the content at the time it is sent, so it is posted again after each overwrite).
@@ -2071,7 +2094,7 @@ PMI can only be written in AP242; when writing AP203 / AP214, or when OCCT canno
 the file is written without PMI and `notes` says so (the original file keeps its PMI). Saving from other sources (IGES, BREP, CadQuery code) follows the
 same schema setting.
 
-**Settings**: `[cad_viewer]` (`enabled`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`, `screenshot_enabled`, `screenshot_long_side_pixels`, `step_write_schema`, `cache_dir`, `cache_max_mb`) and
+**Settings**: `[cad_viewer]` (`enabled`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`, `screenshot_enabled`, `screenshot_long_side_pixels`, `step_write_schema`, `cache_dir`, `cache_max_mb`, `hole_topology_tolerance`, `hole_normal_angle_deg`, `local_axis_lengths`, `local_axis_length_tolerance`, `local_axis_angle_tolerance_deg`) and
 `[user_response_timeouts] show_cad_viewer_seconds` (default 0 = no limit). It is registered in `[main_agent_tool_guard] allow_entries` so the main agent can call it directly.
 It is not given to sub-agents (it shows something on the screen).
 

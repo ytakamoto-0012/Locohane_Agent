@@ -10,17 +10,21 @@ import {
   fetchCadPackage,
   dropUnchangedPartColors,
   effectiveColor,
+  holeGroup,
   itemsOf,
   partOf,
   pmiById,
   rgbText,
   sameSelection,
   selectionKey,
+  toLocalPoint,
+  toLocalVector,
   type BoxMode,
   type CadColorOverrides,
   type CadData,
   type CadItemInfo,
   type CadKind,
+  type CadLocalAxis,
   type CadSavedHistory,
   type CadSelection,
   type CadViewerProps
@@ -46,7 +50,8 @@ const KIND_LABEL: Record<CadKind, MessageKey> = {
   face: 'cad.kind.face',
   edge: 'cad.kind.edge',
   vertex: 'cad.kind.vertex',
-  part: 'cad.kind.part'
+  part: 'cad.kind.part',
+  hole: 'cad.kind.hole'
 };
 // 平面の 1 つめの軸が右・2 つめの軸が上。'+' は平面の法線（1 つめ × 2 つめ）の正の側から、'-' は裏側から見る。
 const VIEWS: ViewName[] = ['xy+', 'yz+', 'zx+', 'xy-', 'yz-', 'zx-'];
@@ -59,11 +64,15 @@ const BOX_MODES: { id: BoxMode; label: MessageKey; title: MessageKey }[] = [
 // 覚えておく計測の数の上限（古いものから消す。src/tools/cad_viewer.py の _MEASUREMENTS_MAX と同じ）。
 const MEASUREMENTS_MAX = 50;
 
-/** 計測の一覧に出す説明（ツールチップ。距離は各軸の成分も）。 */
-function measureTitle(m: CadMeasurement, t: (k: MessageKey) => string): string {
+/** 計測の一覧に出す説明（ツールチップ。距離は各軸の成分も。ローカル座標系のときはその軸の成分）。 */
+function measureTitle(m: CadMeasurement, t: (k: MessageKey) => string, axis: CadLocalAxis | null): string {
   const parts = [`${t(`cad.measure.tool.${m.tool}` as MessageKey)}  ${m.draw.label}`];
   const delta = m.result.delta;
-  if (Array.isArray(delta)) parts.push(['ΔX', 'ΔY', 'ΔZ'].map((k, i) => `${k} ${fmtNum(Number(delta[i]))}`).join('  '));
+  if (Array.isArray(delta)) {
+    const d = toLocalVector(axis, delta.map(Number));
+    const names = axis ? ["ΔX'", "ΔY'", "ΔZ'"] : ['ΔX', 'ΔY', 'ΔZ'];
+    parts.push(names.map((k, i) => `${k} ${fmtNum(d[i])}`).join('  '));
+  }
   if (m.approximate) parts.push(t('cad.measure.approx'));
   return parts.join('\n');
 }
@@ -118,16 +127,33 @@ function extraInfo(item: CadItemInfo, data: CadData | undefined, t: (k: MessageK
   return out;
 }
 
-/** ホバー中・選択中の要素の短い説明（例: 「面 #3 PLANE 面積 600 RGB(200, 0, 0) >Z」）。 */
-function describe(item: CadItemInfo | undefined, label: string, color: string | null, t: (k: MessageKey) => string, data?: CadData): string {
+/**
+ * ホバー中・選択中の要素の短い説明（例: 「面 #3 PLANE 面積 600 RGB(200, 0, 0) >Z」）。
+ * axis（ローカル座標系）を渡すと、点・穴の中心と法線をその座標系で出す。
+ */
+function describe(
+  item: CadItemInfo | undefined,
+  label: string,
+  color: string | null,
+  t: (k: MessageKey) => string,
+  data?: CadData,
+  axis: CadLocalAxis | null = null
+): string {
   if (!item) return label;
   const parts = [label];
+  const xyz = (v: number[]) => `(${v.map(fmt).join(', ')})`;
   if (item.kind === 'part') parts.push(item.path ?? item.name ?? '');
-  else if (item.geomType) parts.push(item.geomType);
+  else if (item.geomType && item.kind !== 'hole') parts.push(item.geomType);
+  if (item.kind === 'hole') {
+    if (typeof item.diameter === 'number') parts.push(`${t('cad.info.diameter')}${fmt(item.diameter)}`);
+    if (item.center) parts.push(xyz(toLocalPoint(axis, item.center)));
+    if (item.normal) parts.push(`${t('cad.info.normal')} ${xyz(toLocalVector(axis, item.normal))}`);
+    return parts.filter(Boolean).join('  ');
+  }
   if (item.area !== undefined) parts.push(`${t('cad.info.area')} ${fmt(item.area)}`);
   if (item.length !== undefined) parts.push(`${t('cad.info.length')} ${fmt(item.length)}`);
   if (item.radius !== undefined) parts.push(`R ${fmt(item.radius)}`);
-  if (item.point) parts.push(`(${item.point.map(fmt).join(', ')})`);
+  if (item.point) parts.push(xyz(toLocalPoint(axis, item.point)));
   if (item.free) parts.push(t('cad.info.free'));
   if (color) parts.push(rgbText(color));
   const sel = item.selectors?.[0] ?? item.meshHints?.[0];
@@ -159,6 +185,7 @@ export function CadViewerBar() {
       data={data}
       saveId={props.save_id ?? ''}
       screenshotLongSide={props.screenshot_long_side ?? 0}
+      holeAngleDefault={props.hole_normal_angle_deg ?? 3}
       onSubmit={(selected, colors, message, view, screenshot, measurements) =>
         askUser.callback({
           submitted: true,
@@ -250,6 +277,8 @@ interface PanelProps {
   data: CadData;
   saveId: string;
   screenshotLongSide: number;
+  /** 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差の初めの値（度）。 */
+  holeAngleDefault: number;
   /** screenshot: 指示があるときだけ撮った今の画面（PNG の data URL）。measurements: ビューアで測った結果。 */
   onSubmit: (
     selected: CadSelection[],
@@ -270,6 +299,8 @@ interface CadViewState {
   attributes?: CadAttributeEdits;
   /** 元に戻す・やり直すの履歴（backend はビューア用データの viewState.history に入れる）。戻れる時点が無ければ入れない。 */
   history?: CadSavedHistory;
+  /** 「座標系」で選んでいたローカル座標系（data.localAxes の ID）。ワールドなら入れない。 */
+  local_axis?: number;
 }
 
 function initialHiddenParts(data: CadData): Set<number> {
@@ -343,7 +374,7 @@ function useEditHistory(state: EditSnapshot, apply: (s: EditSnapshot) => void, i
 
 type SaveState ={ kind: 'idle' } | { kind: 'saving' } | { kind: 'saved'; path: string; notes: string[] } | { kind: 'error'; message: string };
 
-function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onSubmit, onCancel }: PanelProps) {
+function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, holeAngleDefault, onSubmit, onCancel }: PanelProps) {
   const { t } = useI18n();
   const client = useContext(ChainlitContext);
   const sessionId = useRecoilValue(sessionIdState);
@@ -364,6 +395,12 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   const [pivotPicking, setPivotPicking] = useState(false);
   // 空間の原点 (0, 0, 0) の XYZ 軸の表示。
   const [originAxes, setOriginAxes] = useState(true);
+  // 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差（度）。
+  const [holeAngle, setHoleAngle] = useState(holeAngleDefault);
+  // 「座標系」で選んだローカル座標系（null ならワールド）。
+  const localAxes = data.localAxes ?? [];
+  const [localAxisId, setLocalAxisId] = useState<number | null>(null);
+  const localAxis = localAxisId === null ? null : (localAxes[localAxisId] ?? null);
   // 計測: 計測の行を開いているか、今の計測の種類（null なら計測しない = クリックで選択）、途中で拾った点、測った結果。
   const [measureOpen, setMeasureOpen] = useState(false);
   const [measureTool, setMeasureTool] = useState<MeasureTool | null>(null);
@@ -429,6 +466,18 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   const toggle = useCallback((item: CadSelection) => {
     setSelection((cur) => (cur.some((s) => sameSelection(s, item)) ? cur.filter((s) => !sameSelection(s, item)) : [...cur, item]));
   }, []);
+  // 穴のクリック: 同じ向きの穴をまとめて選ぶ（すべて選んであれば、まとめて外す）。
+  const pickGroup = useCallback((items: CadSelection[]) => {
+    if (!items.length) return;
+    setSelection((cur) => {
+      const have = new Set(cur.map((s) => selectionKey(s.kind, s.id)));
+      if (items.every((i) => have.has(selectionKey(i.kind, i.id)))) {
+        const drop = new Set(items.map((i) => selectionKey(i.kind, i.id)));
+        return cur.filter((s) => !drop.has(selectionKey(s.kind, s.id)));
+      }
+      return [...cur, ...items.filter((i) => !have.has(selectionKey(i.kind, i.id)))];
+    });
+  }, []);
   const boxPick = useCallback((items: CadSelection[], remove: boolean) => {
     // 枠で囲んだ要素・今の選択はどちらも数万件になりうるので、集合で引く（配列どうしを探すと 2 乗の時間がかかる）。
     setSelection((cur) => {
@@ -493,7 +542,14 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
         sceneRef.current = new CadScene(
           host,
           data,
-          { onHover: setHover, onPick: toggle, onBoxPick: boxPick, onPivotSet: () => setPivotPicking(false), onMeasurePick: measurePick },
+          {
+            onHover: setHover,
+            onPick: toggle,
+            onPickGroup: pickGroup,
+            onBoxPick: boxPick,
+            onPivotSet: () => setPivotPicking(false),
+            onMeasurePick: measurePick
+          },
           sceneColors()
         );
         sceneRef.current.setMode(kinds[0]);
@@ -509,7 +565,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
       sceneRef.current = null;
     };
     // data・kinds は要素ごとに固定（key={element.id} で作り直す）。
-  }, [data, kinds, toggle, boxPick, measurePick]);
+  }, [data, kinds, toggle, pickGroup, boxPick, measurePick]);
 
   useEffect(() => {
     sceneRef.current?.setMode(mode);
@@ -526,6 +582,12 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
   useEffect(() => {
     sceneRef.current?.setOriginAxesVisible(originAxes);
   }, [originAxes, status]);
+  useEffect(() => {
+    sceneRef.current?.setHoleAngle(holeAngle);
+  }, [holeAngle, status]);
+  useEffect(() => {
+    sceneRef.current?.setLocalAxis(localAxis);
+  }, [localAxis, status]);
   useEffect(() => {
     sceneRef.current?.setVisibility({ ...kindVisible, hiddenParts });
   }, [kindVisible, hiddenParts, status]);
@@ -583,14 +645,19 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
 
   const hoverText = useMemo(() => {
     if (pivotPicking) return t('cad.hintPivot');
-    const item = hover ? describe(itemsOf(data, hover.kind)[hover.id], label(hover), effectiveColor(data, colors, hover), t, data) : '';
+    let item = hover ? describe(itemsOf(data, hover.kind)[hover.id], label(hover), effectiveColor(data, colors, hover), t, data, localAxis) : '';
+    if (hover?.kind === 'hole') {
+      const n = sceneRef.current?.holeGroupOf(hover.id).length ?? holeGroup(data, hover.id, holeAngle).length;
+      item += `  ${t('cad.holeGroup', { count: n, deg: fmt(holeAngle) })}`;
+    }
     if (measureTool) {
       if (measureError) return t(`cad.measure.error.${measureError}` as MessageKey);
       const hint = t(`cad.measure.hint.${measureTool}` as MessageKey, { n: pending.length + 1 });
       return item ? `${hint}  ${item}` : hint;
     }
+    if (!item && mode === 'hole' && boxMode === 'off') return t('cad.hintHole', { deg: fmt(holeAngle) });
     return item || t(boxMode === 'off' ? 'cad.hint' : 'cad.hintBox');
-  }, [hover, data, label, t, colors, boxMode, pivotPicking, measureTool, measureError, pending]);
+  }, [hover, data, label, t, colors, boxMode, pivotPicking, measureTool, measureError, pending, localAxis, holeAngle, mode]);
 
   const selectAll = () => {
     const ids = sceneRef.current?.selectableIds(mode) ?? [];
@@ -643,7 +710,8 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
       hidden_parts: [...hiddenParts],
       visible: kindVisible,
       ...(Object.keys(attributeEdits).length ? { attributes: attributeEdits } : {}),
-      ...(saved ? { history: saved } : {})
+      ...(saved ? { history: saved } : {}),
+      ...(localAxis ? { local_axis: localAxis.id } : {})
     };
   };
   const cancel = () => {
@@ -792,17 +860,60 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
               {t('cad.samePart')}
             </button>
           )}
+          {mode === 'hole' && (
+            <label className="cad-viewer-chip cad-viewer-hole-angle" title={t('cad.holeAngleTitle')}>
+              {t('cad.holeAngle')}
+              <input
+                type="number"
+                min={0}
+                max={180}
+                step={0.5}
+                value={holeAngle}
+                aria-label={t('cad.holeAngleTitle')}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (Number.isFinite(v) && v >= 0) setHoleAngle(Math.min(v, 180));
+                }}
+              />
+              °
+            </label>
+          )}
         </div>
         <div className="cad-viewer-views">
+          {localAxes.length > 0 && (
+            <label className="cad-viewer-chip cad-viewer-coords" title={t('cad.coordsTitle')}>
+              {t('cad.coords')}
+              <select
+                value={localAxisId === null ? '' : String(localAxisId)}
+                aria-label={t('cad.coords')}
+                onChange={(e) => {
+                  const id = e.target.value === '' ? null : Number(e.target.value);
+                  setLocalAxisId(id);
+                  // 切り替えたら、その座標系の斜めの向きから見る（視点のボタンもその座標系になる）。
+                  const axis = id === null ? null : (localAxes[id] ?? null);
+                  sceneRef.current?.setLocalAxis(axis);
+                  sceneRef.current?.setView('iso');
+                }}
+              >
+                <option value="">{t('cad.coords.world')}</option>
+                {localAxes.map((a) => (
+                  <option key={a.id} value={String(a.id)}>
+                    {t('cad.coords.local', { id: a.id + 1 })}
+                    {a.rightHanded === false ? t('cad.coords.leftHanded') : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {VIEWS.map((v) => (
             <button
               key={v}
               type="button"
               className="cad-viewer-chip cad-viewer-view"
-              title={t(`cad.view.${v}` as MessageKey)}
+              title={t(`cad.view.${v}` as MessageKey) + (localAxis ? " (X' Y' Z')" : '')}
               onClick={() => sceneRef.current?.setView(v)}
             >
-              {v.toUpperCase()}
+              {localAxis ? `${v.toUpperCase()}'` : v.toUpperCase()}
             </button>
           ))}
           <button type="button" className="cad-viewer-chip" title={t('cad.fitTitle')} onClick={() => sceneRef.current?.fitAll()}>
@@ -935,7 +1046,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
       {measurements.length > 0 && (
         <div className="cad-viewer-measures">
           {measurements.map((m, i) => (
-            <span key={i} className="cad-viewer-measure-tag" title={measureTitle(m, t)}>
+            <span key={i} className="cad-viewer-measure-tag" title={measureTitle(m, t, localAxis)}>
               {`${i + 1}: ${m.tool === 'planes' && m.result.type === 'plane_angle' ? t('cad.measure.angle') : t(`cad.measure.tool.${m.tool}` as MessageKey)} ${m.draw.label}`}
               <button
                 type="button"
@@ -956,7 +1067,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, onS
             <span
               key={`${s.kind}-${s.id}`}
               className="cad-viewer-tag"
-              title={describe(itemsOf(data, s.kind)[s.id], label(s), effectiveColor(data, colors, s), t, data)}
+              title={describe(itemsOf(data, s.kind)[s.id], label(s), effectiveColor(data, colors, s), t, data, localAxis)}
             >
               {label(s)}
               <button type="button" aria-label={t('cad.remove')} onClick={() => toggle(s)}>

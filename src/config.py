@@ -1151,6 +1151,16 @@ class Config:
             auto（元の STEP と同じ、元が STEP でなければ AP242）・AP203・AP214・AP242。PMI（GD&T）は AP242 でだけ書ける。
         cad_viewer_cache_dir: CAD ファイルから作ったビューア用データのキャッシュの置き場（[cad_viewer].cache_dir。
             既定 ${common_data_dir}/cad_cache。src/cad/viewer_cache.py）。
+        cad_viewer_hole_topology_tolerance: 開いたサーフェース・メッシュの穴を探すときのトポロジートレランス
+            （モデルの単位。[cad_viewer].hole_topology_tolerance）。隙間がこれ以下の境目はつながっているとみなす。0 以下で探さない。
+        cad_viewer_hole_normal_angle_deg: ビューアで穴にマウスを乗せたとき、同じ向きとしてまとめて強調・選択する
+            法線の角度差の既定値（度。[cad_viewer].hole_normal_angle_deg）。ビューアで変えられる。
+        cad_viewer_local_axis_lengths: ローカル AXIS とみなす直交する 3 本の線の長さ（X, Y, Z の順。
+            [cad_viewer].local_axis_lengths）。None（空・off）で探さない。
+        cad_viewer_local_axis_length_tolerance: その線の長さと、3 本の端点が 1 点で会うかの許容差
+            （モデルの単位。[cad_viewer].local_axis_length_tolerance）。
+        cad_viewer_local_axis_angle_tolerance_deg: その 3 本を直交とみなす角度の許容差（度。
+            [cad_viewer].local_axis_angle_tolerance_deg）。
         cad_viewer_cache_max_mb: そのキャッシュの合計の上限（MB。[cad_viewer].cache_max_mb）。超えたら使った時刻の古いものから消す。
             0 以下でキャッシュを使わない。
         show_cad_viewer_timeout_seconds: 3D ビューアで利用者が選択を確定するのを待つ秒数
@@ -1674,6 +1684,11 @@ class Config:
     cad_viewer_step_write_schema: str = "auto"
     cad_viewer_cache_dir: Path | None = None
     cad_viewer_cache_max_mb: int = 2048
+    cad_viewer_hole_topology_tolerance: float = 0.1
+    cad_viewer_hole_normal_angle_deg: float = 3.0
+    cad_viewer_local_axis_lengths: tuple[float, float, float] | None = (100.0, 200.0, 300.0)
+    cad_viewer_local_axis_length_tolerance: float = 0.1
+    cad_viewer_local_axis_angle_tolerance_deg: float = 0.5
     show_cad_viewer_timeout_seconds: int = 0
 
 
@@ -1900,6 +1915,20 @@ def _sub_common_data_dir(value: str, common_data_dir: Path, instance_name: str) 
     if "${common_data_dir}" not in value:
         return value
     return value.replace("${common_data_dir}", str(common_data_dir))
+
+
+def _cad_axis_lengths(value: Any) -> tuple[float, float, float] | None:
+    """[cad_viewer].local_axis_lengths（"100, 200, 300"）を 3 つの正の数にする。空・off・none なら None（探さない）。"""
+    text = str(value if value is not None else "").strip()
+    if not text or text.lower() in ("off", "none", "false"):
+        return None
+    try:
+        vals = tuple(float(x) for x in text.replace(";", ",").split(",") if x.strip())
+    except ValueError as e:
+        raise ValueError(f"[cad_viewer].local_axis_lengths must be 3 positive numbers such as 100, 200, 300 (got {text!r})") from e
+    if len(vals) != 3 or any(v <= 0 for v in vals):
+        raise ValueError(f"[cad_viewer].local_axis_lengths must be 3 positive numbers such as 100, 200, 300 (got {text!r})")
+    return vals  # type: ignore[return-value]
 
 
 def _cad_step_schema(value: Any) -> str:
@@ -4716,6 +4745,24 @@ def load_config(
             ),
         ),
         cad_viewer_cache_max_mb=int(os.getenv("CAD_VIEWER_CACHE_MAX_MB", cad_viewer.get("cache_max_mb", 2048))),
+        cad_viewer_hole_topology_tolerance=float(
+            os.getenv("CAD_VIEWER_HOLE_TOPOLOGY_TOLERANCE", cad_viewer.get("hole_topology_tolerance", 0.1))
+        ),
+        cad_viewer_hole_normal_angle_deg=_positive_float(
+            os.getenv("CAD_VIEWER_HOLE_NORMAL_ANGLE_DEG", cad_viewer.get("hole_normal_angle_deg", 3)),
+            "[cad_viewer].hole_normal_angle_deg",
+        ),
+        cad_viewer_local_axis_lengths=_cad_axis_lengths(
+            os.getenv("CAD_VIEWER_LOCAL_AXIS_LENGTHS", cad_viewer.get("local_axis_lengths", "100, 200, 300"))
+        ),
+        cad_viewer_local_axis_length_tolerance=_positive_float(
+            os.getenv("CAD_VIEWER_LOCAL_AXIS_LENGTH_TOLERANCE", cad_viewer.get("local_axis_length_tolerance", 0.1)),
+            "[cad_viewer].local_axis_length_tolerance",
+        ),
+        cad_viewer_local_axis_angle_tolerance_deg=_positive_float(
+            os.getenv("CAD_VIEWER_LOCAL_AXIS_ANGLE_TOLERANCE_DEG", cad_viewer.get("local_axis_angle_tolerance_deg", 0.5)),
+            "[cad_viewer].local_axis_angle_tolerance_deg",
+        ),
         show_cad_viewer_timeout_seconds=int(os.getenv("SHOW_CAD_VIEWER_TIMEOUT_SECONDS", timeouts.get("show_cad_viewer_seconds", 0))),
     )
 

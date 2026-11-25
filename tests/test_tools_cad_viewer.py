@@ -1180,3 +1180,32 @@ def test_history_size_counts_japanese_as_one_character_each() -> None:
     raw = {"past": [edit], "future": [], "base": {"faces": {}, "parts": {}}, "note": "属" * (cad_viewer._HISTORY_MAX_CHARS // 2)}
     assert len(json.dumps(raw)) > cad_viewer._HISTORY_MAX_CHARS
     assert cad_viewer._valid_history(data, raw) is not None
+
+
+@pytest.mark.asyncio
+async def test_viewer_offers_holes_of_an_open_stl(env, tmp_path) -> None:
+    """開いたメッシュの面の中の穴を「穴」として選ばせ、穴の数と要約を返す（src/cad/topology.py）。"""
+    # 90 角の板（升目 3）に 2 つの穴。
+    h = 3.0
+    tris = []
+    for i in range(30):
+        for j in range(30):
+            cx, cy = (i + 0.5) * h, (j + 0.5) * h
+            if any((cx - x) ** 2 + (cy - y) ** 2 < 36 for x, y in ((30, 30), (60, 60))):
+                continue
+            p = lambda a, b: [a * h, b * h, 0.0]  # noqa: E731
+            tris += [[p(i, j), p(i + 1, j), p(i + 1, j + 1)], [p(i, j), p(i + 1, j + 1), p(i, j + 1)]]
+    path = tmp_path / "plate.stl"
+    with path.open("wb") as f:
+        f.write(b" " * 80)
+        f.write(struct.pack("<I", len(tris)))
+        for tri in tris:
+            f.write(struct.pack("<3f", 0, 0, 0) + struct.pack("<9f", *np.ravel(tri)) + struct.pack("<H", 0))
+    _viewer.response = {"submitted": True, "selected": [{"kind": "hole", "id": 0}, {"kind": "hole", "id": 1}, {"kind": "hole", "id": 2}]}
+    out = json.loads(await _call(file_path=str(path)))
+    shown = _viewer.shown[0]
+    assert "hole" in shown["select"]
+    assert shown["hole_normal_angle_deg"] == 3.0
+    assert len(shown["data"]["holeList"]) == 2
+    assert out["selected_by_kind"] == {"hole": 2}
+    assert out["model"]["holes"]["count"] == 2

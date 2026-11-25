@@ -13,7 +13,10 @@
   "edges":    {"positions": <float32 base64、線分ごとに 2 点>, "ranges": [[先頭の線分, 線分数], ...]},
   "vertices": {"positions": <float32 base64>},
   "faces": [面の情報, ...], "edgeList": [エッジの情報, ...], "vertexList": [頂点の情報, ...],
-  "stats": {...}
+  "stats": {...},
+  // 開いた形の面の中の穴とローカル AXIS（src/cad/topology.py。見つかったときだけ）。
+  "holes": {"positions": <float32 base64、線分ごとに 2 点>, "ranges": [[先頭の線分, 線分数], ...], "tolerance": ...},
+  "holeList": [穴の情報, ...], "localAxes": [{"origin", "x", "y", "z", ...}, ...]
 }
 ```
 

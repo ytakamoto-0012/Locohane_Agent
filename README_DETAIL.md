@@ -2032,6 +2032,26 @@ three.js はビューアを開いたときだけ読み込む（`frontend/src/com
   最初は閉じて（「パネル」で開ける）3D 表示の下に出す。回転・移動・拡大縮小は 1 本指・2 本指のタッチ操作で行う。
 - **原点の軸**: 空間の原点 (0, 0, 0) に XYZ 軸（X 赤・Y 緑・Z 青、ラベル付き）を描く（既定で表示。ボタンで表示／非表示）。長さはモデルの大きさの半分で、
   形に隠れないよう手前に重ねる。左下の小さな軸は向きだけを示すもので、こちらは原点の位置を示す。
+- **穴（開いたサーフェース・メッシュ）**: 面が閉じていない形（開いたシェル・面だけの IGES・DXF の面・開いた STL）では、面の中の穴を探し、
+  選ぶ種類に「穴」を出す（穴が 1 つも無ければ出さない）。「穴」のモードでは穴の縁をピンクで描き、穴（縁の線の近くか、縁で囲まれた中）に
+  マウスを乗せると、その穴と法線の向きの差が「法線 ±」の欄の角度（既定 `[cad_viewer] hole_normal_angle_deg` = 3 度）以内の穴をまとめて水色にし、
+  クリックでまとめて選ぶ（すべて選んであればまとめて外す）。法線は面の表側の向きなので、裏向きの穴はまとまらない。範囲選択・全選択も使え、
+  ほかのモードに切り替えても選んだ穴の縁はオレンジで残す。選んだ穴は選択結果ファイルの `selected`（`kind: "hole"`）に中心・法線・直径（平均）・
+  面積・周長・円らしさ（`circularity`、円で 1）・平面からのずれ（`planarity`）・周りの面と、B-rep では縁のエッジの ID（`edges`）で入る。
+  検出（`src/cad/topology.py`、サブプロセスの `run_cad.py` が形をビューア用データにした後に呼ぶ）は表示用の三角形から行う:
+  三角形 1 つにしか属さない辺を境界とし、トポロジートレランス（`[cad_viewer] hole_topology_tolerance`、既定 0.1mm）以内で
+  平行に向かい合う境界の辺どうしは「つながっている」とみなして除く（縫い合わせていない面の境目・分け方の違う境目。許容差より細い切れ込み・
+  小さい穴も穴にしない）。残った境界をループにつなぎ（途切れた端が許容差以内なら橋渡し）、つながった面のまとまりごとに外接箱の最も大きい
+  ループを外周として除き、残りを穴とする（両端の開いた筒では片方の口が外周になる）。`model.holes` に穴の数・許容差・外周の数と、
+  直径・法線でまとめた件数（12 グループまで）を返す。ビューア用データでは `holeList`（穴の情報）と `holes`（縁の線分・`ranges`）。
+- **座標系（ローカル AXIS）**: モデルの中に、1 点から互いに直交して伸びる長さ 100・200・300 の直線（`[cad_viewer] local_axis_lengths`。X・Y・Z の順）が
+  あれば、それをローカル座標系として見つけ（共有する端点が原点、各線の先への向きが X'・Y'・Z'）、ツールバーの「座標系」でワールドと切り替えられる。
+  長さと端点の一致は `local_axis_length_tolerance`（既定 0.1）、直交は `local_axis_angle_tolerance_deg`（既定 0.5 度）以内で見る。直線のエッジから
+  探すので B-rep（STEP・IGES・BREP・DXF・CadQuery コード）で使える（STL には線が無い）。ローカルにすると、原点に X'・Y'・Z' の軸を描き、
+  視点のボタン（`XY+'` 等）・左下の軸・ホバーや選択中の座標・計測の ΔX'・ΔY'・ΔZ' がその座標系になる。確定すると戻り値に `local_axis`
+  （原点と単位ベクトル、変換式 local = [x·(p−o), y·(p−o), z·(p−o)]）が入り、選択結果ファイルの各要素と計測に、点・向きをローカル座標にした
+  `local` を添える（元のワールド座標の値はそのまま）。3 本が左手系なら選択肢に「（左手系）」と出し、AI へも注意を返す。見つかった座標系は
+  `model.local_axes`（5 件まで）にも入る。
 - **保存（💾）**: 変えた色・隠した部品を反映した 3D モデルを、作業フォルダ（書き込めなければこのスレッドの `_tmp_` フォルダ）の
   `<元のファイル名>_edited_<日時>.<拡張子>` に書き出して `@N` に登録し、チャットにそのダウンロードボタンを出す
   （LLM の `provide_download` を待たない。`cl.File` は送った時点の中身を持つため、上書きのたびに出し直す）。ビューアは閉じず、同じビューアで何度押しても同じファイルを上書きする。
@@ -2110,7 +2130,7 @@ ASCII 以外の文字は `\X2\` で書き、本文を ASCII だけにする。�
 PMI は AP242 でだけ書け、AP203・AP214 で書くときや、OCCT が PMI を書けなかったとき（NIST の CTC-01 等、実際の CAD が書いた PMI の一部）は、
 PMI を除いて書きその旨を `notes` で伝える（元のファイルの PMI はそのまま）。STEP 以外（IGES・BREP・CadQuery コード）の保存も同じスキーマの設定に従う。
 
-**設定**: `[cad_viewer]`（`enabled`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`・`screenshot_enabled`・`screenshot_long_side_pixels`・`step_write_schema`・`cache_dir`・`cache_max_mb`）と
+**設定**: `[cad_viewer]`（`enabled`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`・`screenshot_enabled`・`screenshot_long_side_pixels`・`step_write_schema`・`cache_dir`・`cache_max_mb`・`hole_topology_tolerance`・`hole_normal_angle_deg`・`local_axis_lengths`・`local_axis_length_tolerance`・`local_axis_angle_tolerance_deg`）と
 `[user_response_timeouts] show_cad_viewer_seconds`（既定 0 = 無期限）。メインエージェントから直接呼べるよう `[main_agent_tool_guard] allow_entries` に登録済み。
 サブエージェントには渡さない（画面に出すツールのため）。
 
