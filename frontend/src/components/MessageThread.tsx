@@ -1,4 +1,4 @@
-import { memo, useContext, useEffect, useState } from 'react';
+import { memo, useContext, useEffect, useState, type ReactNode } from 'react';
 import { useRecoilValue } from 'recoil';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -18,6 +18,7 @@ import { useI18n } from '../i18n';
 import { FileLink } from './FileLink';
 import { stepDisplayLabel } from '../utils/stepLabel';
 import { SUBAGENT_MESSAGE_AUTHOR } from '../utils/messageTree';
+import { useAssistantName } from '../utils/uiConfig';
 
 function MessageElements({ messageId }: { messageId: string }) {
   const elements = useRecoilValue(elementState);
@@ -84,9 +85,12 @@ const markdownSanitizeSchema = {
 // ストリーミング中は1トークンごとに会話全体が描き直され、表示中の全メッセージの Markdown を毎回
 // 解析し直していた。@chainlit/react-client は変わったメッセージだけを新しいオブジェクトにするため、
 // step が同じなら描き直さない（memo）。
-const MessageBubble = memo(function MessageBubble({ step }: { step: IStep }) {
+// assistantName: メインエージェントの回答の上に出す AI の名前（config.ini [persona] name）。未設定のとき・
+// /locohane/ui-config が取れるまでは空で、名前の行を出さない（従来の見た目のまま）。
+const MessageBubble = memo(function MessageBubble({ step, assistantName }: { step: IStep; assistantName: string }) {
   const category = messageCategory(step);
   const isUser = category === 'user';
+  const author = category === 'assistant' ? assistantName : '';
   return (
     <div
       className={`message-row ${isUser ? 'message-row--user' : 'message-row--assistant'}`}
@@ -95,7 +99,12 @@ const MessageBubble = memo(function MessageBubble({ step }: { step: IStep }) {
       // 前の会話を上に読み足したとき、読んでいた位置を保つ目印（MessagePane）。
       data-message-id={step.id}
     >
-      {!isUser ? <div className={`avatar avatar--${category}`}>{AVATAR_LABEL[category]}</div> : null}
+      {!isUser ? (
+        <div className={`avatar avatar--${category}`} title={author || undefined}>
+          {AVATAR_LABEL[category]}
+        </div>
+      ) : null}
+      <MessageAuthor name={author}>
       <div className={`message-bubble ${isUser ? 'message-bubble--user' : `message-bubble--${category}`}`}>
         <div className="message-bubble-content">
           <ReactMarkdown
@@ -111,14 +120,26 @@ const MessageBubble = memo(function MessageBubble({ step }: { step: IStep }) {
         </div>
         <MessageElements messageId={step.id} />
       </div>
+      </MessageAuthor>
       {isUser ? <div className="avatar avatar--user">You</div> : null}
     </div>
   );
 });
 
+/** 名前があれば吹き出しの上に名前の行を足す（無ければ吹き出しをそのまま置き、従来の並びを変えない）。 */
+function MessageAuthor({ name, children }: { name: string; children: ReactNode }) {
+  if (!name) return <>{children}</>;
+  return (
+    <div className="message-body">
+      <div className="message-author">{name}</div>
+      {children}
+    </div>
+  );
+}
+
 /** 応答待ちの「...」。横に今している処理（サイドパネルの実行中Stepと同じ表記）を出す。
  *  サブエージェント実行中は「SUB: explore › ツール: Read」のように外側と一番内側の処理を並べる。 */
-function TypingIndicator({ runningSteps }: { runningSteps: IStep[] }) {
+function TypingIndicator({ runningSteps, assistantName }: { runningSteps: IStep[]; assistantName: string }) {
   const { t } = useI18n();
   const outer = runningSteps[0];
   const inner = runningSteps[runningSteps.length - 1];
@@ -129,7 +150,10 @@ function TypingIndicator({ runningSteps }: { runningSteps: IStep[] }) {
     : '';
   return (
     <div className="message-row message-row--assistant">
-      <div className="avatar avatar--assistant">AI</div>
+      <div className="avatar avatar--assistant" title={assistantName || undefined}>
+        AI
+      </div>
+      <MessageAuthor name={assistantName}>
       <div className="message-bubble message-bubble--assistant message-bubble--typing">
         <span className="typing-dots">
           <span />
@@ -142,6 +166,7 @@ function TypingIndicator({ runningSteps }: { runningSteps: IStep[] }) {
           </span>
         ) : null}
       </div>
+      </MessageAuthor>
     </div>
   );
 }
@@ -185,6 +210,7 @@ export function MessageThread({
 }) {
   const { t } = useI18n();
   const resuming = useResumingThread();
+  const assistantName = useAssistantName();
   if (messages.length === 0 && !showTyping) {
     return <div className="message-thread-empty">{t(resuming ? 'messages.resuming' : 'messages.empty')}</div>;
   }
@@ -201,9 +227,9 @@ export function MessageThread({
         </div>
       ) : null}
       {messages.map((step) => (
-        <MessageBubble key={step.id} step={step} />
+        <MessageBubble key={step.id} step={step} assistantName={assistantName} />
       ))}
-      {showTyping ? <TypingIndicator runningSteps={runningSteps} /> : null}
+      {showTyping ? <TypingIndicator runningSteps={runningSteps} assistantName={assistantName} /> : null}
     </div>
   );
 }

@@ -2581,6 +2581,9 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[ui]` | `max_input_chars` | 1回の送信の最大文字数（入力欄＋貼り付けテキストの合計）。超過中は送信不可、バックエンドも拒否する（`0`以下で無制限） | `UI_MAX_INPUT_CHARS` |
 | `[ui]` | `token_usage_warn_threshold` | トークン使用量カードの「リクエスト1回あたり」行（メインと実行中のサブエージェント/一括委譲のグループごとに1行。コンテキスト圧縮の要約呼び出しは「圧縮処理（直近1回）」行として出し、会話累計にも加算する。行ごとに判定）の合計トークン数がこの値以上でオレンジ太字表示（`0`以下で無効） | `UI_TOKEN_USAGE_WARN_THRESHOLD` |
 | `[ui]` | `token_usage_alert_threshold` | 同上、この値以上で赤太字表示（`token_usage_warn_threshold`より優先、`0`以下で無効） | `UI_TOKEN_USAGE_ALERT_THRESHOLD` |
+| `[persona]` | `name` | このインスタンスの AI の名前。システムプロンプトの Identity（`system_prompt.md` の `{{persona}}`、`src/config.py` の `render_persona_block`）に差し込み、名乗るときに使わせる。空欄なら差し込まない（3つとも空欄の既定では従来どおり Locohane として振る舞う）。設定ダッシュボードのインスタンスの「表示設定」タブでも変えられる（「表示設定（共通 + インスタンス別）」節）。変更は再起動後に効く | `PERSONA_NAME` |
+| `[persona]` | `gender` | 同上、AI の性別（空欄なら差し込まない） | `PERSONA_GENDER` |
+| `[persona]` | `personality` | 同上、AI の性格・話し方（複数行可）。口調・言葉づかいにだけ反映させ、手順・委譲ルール・承認フローより優先させない旨も一緒に差し込む | `PERSONA_PERSONALITY` |
 | `[websocket]` | `ping_interval_seconds` | ブラウザ⇔サーバー間WebSocket（Socket.IO）の生存確認ping送信間隔秒数。`[llm].stream_chunk_timeout_seconds`（LLMサーバーとの通信）とは別レイヤー | `WEBSOCKET_PING_INTERVAL_SECONDS` |
 | `[websocket]` | `ping_timeout_seconds` | 直近pingへの応答をこの秒数待っても受信できない場合に切断とみなす。LLM応答待ちでイベントループがブロッキング気味の時間帯（`dispatch_agent`の長時間実行中等）に短すぎると誤切断しやすい | `WEBSOCKET_PING_TIMEOUT_SECONDS` |
 
@@ -3109,6 +3112,28 @@ header.md・tab_title.md・welcome.md・icon・favicon は、トップの「表�
 `app.py` が `/public/settings/{ファイル名}` を Chainlit 標準の静的配信より
 手前で処理して、この優先順位で返す。変更は **再起動不要** で、ブラウザの
 再読み込み（welcome.md は次のチャット開始）で反映される。
+
+welcome.md には次の差し込み口を書ける（`src/config.py` の `fill_welcome_template`。これ以外の `{ }` はそのまま表示する）。
+
+| 差し込み口 | 置き換わる内容 |
+|---|---|
+| `{skills}` | 起動時に読み込んだスキルの一覧 |
+| `{ai_name}` | AI の名前（`[persona] name`。空欄なら `Locohane`） |
+| `{ai_gender}` | AI の性別（`[persona] gender`。空欄なら空文字） |
+| `{ai_personality}` | AI の性格・話し方（`[persona] personality`。空欄なら空文字） |
+
+インスタンスの「表示設定」サブタブの先頭には **AI の人物設定**（名前・性別・性格・話し方）の欄もある。
+これは上のファイルとは違い config.ini の `[persona]` セクション（`name`・`gender`・`personality`）の値で、
+保存すると config.ini タブと同じく `instances/<name>/config_overrides.json` に記録する（同じ
+`PUT /api/instances/{name}/config` を使うため、検証・バックアップ・変更履歴も同じ）。config.ini の既定値と同じ値に
+すると上書きを消し、「config.ini の既定値に戻す」で3つまとめて消せる。環境変数（`PERSONA_NAME` 等）で指定している項目は
+変更できない。値はシステムプロンプトの Identity に差し込む（`system_prompt.md` の `{{persona}}`。空欄の項目は差し込まず、
+3つとも空欄なら何も足さない）。名前を設定すると、チャット画面の AI の回答（と応答待ちの表示）の上にも名前を出す
+（`/locohane/ui-config` の `assistant_name` を `frontend/src/components/MessageThread.tsx` が読む。空欄なら名前の行を出さず
+従来の見た目のまま。サブエージェント・システムのメッセージには出さない）。上の表の `{ai_name}` 等でウェルカムメッセージにも
+差し込める。どれも起動時の値を使うため、反映には **インスタンスの再起動が要る**（画面はその後のブラウザの再読み込み）。トップの「表示設定」タブ（共通）には
+置き場が無い（管理ツールは config.ini を書き換えない）ので、案内だけを出す。`[paths] system_prompt_path` で
+独自のシステムプロンプトを使っている場合は、そのファイルに `{{persona}}` を書いた所にだけ差し込まれる。
 
 ### モニター（稼働状況・会話閲覧・トークン推移・ログ）
 
