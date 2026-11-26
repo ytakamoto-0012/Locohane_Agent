@@ -11,13 +11,16 @@ import type { CadItemInfo, CadSelection } from './cadData';
 
 export type Vec3 = [number, number, number];
 
-/** 計測の種類。radius = 面・エッジの R と ⌀、distance = 2 点間、planes = 平面どうし、arc3 = 3 点を通る円弧。 */
-export type MeasureTool = 'radius' | 'distance' | 'planes' | 'arc3';
+/**
+ * 計測の種類。radius = 面・エッジの R と ⌀、distance = 2 点間、pointEdge = 点とエッジの法線距離、planes = 平面どうし、
+ * arc3 = 3 点を通る円弧。
+ */
+export type MeasureTool = 'radius' | 'distance' | 'pointEdge' | 'planes' | 'arc3';
 
-export const MEASURE_TOOLS: MeasureTool[] = ['radius', 'distance', 'planes', 'arc3'];
+export const MEASURE_TOOLS: MeasureTool[] = ['radius', 'distance', 'pointEdge', 'planes', 'arc3'];
 
 /** 1 つの計測に要るクリックの数。 */
-export const PICKS_NEEDED: Record<MeasureTool, number> = { radius: 1, distance: 2, planes: 2, arc3: 3 };
+export const PICKS_NEEDED: Record<MeasureTool, number> = { radius: 1, distance: 2, pointEdge: 2, planes: 2, arc3: 3 };
 
 /** クリックで拾った点。item はその点が乗る要素（面・エッジ・頂点）、exact は形の上の正確な点か。 */
 export interface MeasurePick {
@@ -36,7 +39,7 @@ export interface MeasureDraw {
 
 /** 確定時に AI へ返す計測の結果（src/tools/cad_viewer.py の _valid_measurements が受ける形）。 */
 export interface MeasureResult {
-  type: 'radius' | 'distance' | 'plane_distance' | 'plane_angle' | 'arc3';
+  type: 'radius' | 'distance' | 'point_edge_distance' | 'plane_distance' | 'plane_angle' | 'arc3';
   [key: string]: unknown;
 }
 
@@ -49,7 +52,7 @@ export interface CadMeasurement {
 }
 
 /** 計測できなかった理由（文言は i18n の cad.measure.error.<key>）。 */
-export type MeasureError = 'noRadius' | 'notPlane' | 'samePick' | 'collinear' | 'samePlane';
+export type MeasureError = 'noRadius' | 'notPlane' | 'notEdge' | 'samePick' | 'collinear' | 'samePlane';
 
 export type MeasureOutcome = { ok: CadMeasurement } | { error: MeasureError };
 
@@ -202,6 +205,93 @@ export function measureDistance(a: MeasurePick, b: MeasurePick): MeasureOutcome 
   };
 }
 
+/** 折れ線（points の隣どうしを結ぶ線分）の上で p に一番近い点と、そこまでの距離。点が無ければ null。 */
+export function nearestOnPolyline(p: Vec3, points: Vec3[]): { point: Vec3; distance: number } | null {
+  if (!points.length) return null;
+  let best: { point: Vec3; distance: number } = { point: points[0], distance: norm(sub(p, points[0])) };
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const d = sub(points[i], a);
+    const dd = dot(d, d);
+    const t = dd > 0 ? Math.max(0, Math.min(1, dot(sub(p, a), d) / dd)) : 0;
+    const q = add(a, scale(d, t));
+    const dist = norm(sub(p, q));
+    if (dist < best.distance) best = { point: q, distance: dist };
+  }
+  return best;
+}
+
+/**
+ * 点 a.point からエッジ（edge.item）への法線距離（垂線の長さ）。
+ * 直線は B-rep の始点・終点を通る直線へ下ろした垂線（足が線分の外なら on_extension）、円・円弧は円へ下ろした垂線
+ * （足が円弧の外なら on_extension）で、どちらも正確。それ以外の曲線は表示用の折れ線の上で一番近い点（概算）。
+ * polyline はそのエッジの表示用の折れ線の点。
+ */
+export function measurePointEdge(info: CadItemInfo | undefined, a: MeasurePick, edge: MeasurePick, polyline: Vec3[]): MeasureOutcome {
+  if (!info || !edge.item || edge.item.kind !== 'edge') return { error: 'notEdge' };
+  if (a.item && a.item.kind === 'edge' && a.item.id === edge.item.id) return { error: 'samePick' };
+  const p = a.point;
+  const g = typeof info.geomType === 'string' ? info.geomType : 'OTHER';
+  // 表示用の折れ線は B-rep の線からトポロジーの細かさ程度ずれるので、足がエッジの上かはその程度の幅で見る。
+  const along = polyline.length > 1 ? norm(sub(polyline[polyline.length - 1], polyline[0])) : 0;
+  const slack = Math.max(1e-6, along * 1e-4);
+  let foot: Vec3 | null = null;
+  let exact = false;
+  let onExtension = false;
+  const s = asVec3(info.start);
+  const e = asVec3(info.end);
+  if (g === 'LINE' && s && e) {
+    const d = unit(sub(e, s));
+    if (d) {
+      const t = dot(sub(p, s), d);
+      foot = add(s, scale(d, t));
+      exact = true;
+      onExtension = t < -slack || t > norm(sub(e, s)) + slack;
+    }
+  } else if (g === 'CIRCLE') {
+    const c = asVec3(info.circleCenter);
+    const axis = unit(asVec3(info.axisDirection) ?? [0, 0, 0]);
+    const r = num(info.radius);
+    if (c && axis && r) {
+      // 円の平面へ写した向きの円の上の点（onCircle は円筒用で点の高さを残すので使わない）。
+      // 点が円の軸の上なら、円のどの点までも同じ距離（円の最初の点を足にする）。
+      const radial = unit(sub(sub(p, c), scale(axis, dot(sub(p, c), axis))));
+      foot = radial ? add(c, scale(radial, r)) : (polyline[0] ?? null);
+      exact = !!foot;
+      const near = foot ? nearestOnPolyline(foot, polyline) : null;
+      onExtension = !!near && near.distance > Math.max(slack, r * 1e-3);
+    }
+  }
+  if (!foot) {
+    const near = nearestOnPolyline(p, polyline);
+    if (!near) return { error: 'notEdge' };
+    foot = near.point;
+  }
+  const d = sub(p, foot);
+  const dist = norm(d);
+  if (dist < 1e-12) return { error: 'samePick' };
+  const approximate = !a.exact || !exact;
+  const label = `${approximate ? '≈' : ''}⊥${fmtNum(dist)}`;
+  return {
+    ok: {
+      tool: 'pointEdge',
+      approximate,
+      draw: { segments: [p, foot], points: [p, foot], labelAt: scale(add(p, foot), 0.5), label },
+      result: {
+        type: 'point_edge_distance',
+        distance: dist,
+        foot: vecOut(foot),
+        delta: vecOut(scale(d, -1)),
+        points: [vecOut(p), vecOut(foot)],
+        items: [ref(a.item), ref(edge.item)],
+        geomType: g,
+        approximate,
+        on_extension: onExtension
+      }
+    }
+  };
+}
+
 /** 平面の面か（PLANE で法線と中心を持つ）。 */
 export function isPlane(info: CadItemInfo | undefined): boolean {
   return !!info && info.kind === 'face' && info.geomType === 'PLANE' && !!asVec3(info.normal) && !!asVec3(info.center);
@@ -301,13 +391,25 @@ export function measureArc3(a: MeasurePick, b: MeasurePick, c: MeasurePick): Mea
   };
 }
 
-/** 集めたクリック（PICKS_NEEDED[tool] 個）から計測する。info は要素の情報を引く関数。 */
-export function measure(tool: MeasureTool, picks: MeasurePick[], info: (s: CadSelection | null) => CadItemInfo | undefined): MeasureOutcome {
+/**
+ * 集めたクリック（PICKS_NEEDED[tool] 個）から計測する。info は要素の情報を引く関数、edgePoints はエッジの
+ * 表示用の折れ線の点を返す関数（点とエッジの法線距離に使う）。
+ */
+export function measure(
+  tool: MeasureTool,
+  picks: MeasurePick[],
+  info: (s: CadSelection | null) => CadItemInfo | undefined,
+  edgePoints: (id: number) => Vec3[] = () => []
+): MeasureOutcome {
   switch (tool) {
     case 'radius':
       return measureRadius(info(picks[0].item), picks[0]);
     case 'distance':
       return measureDistance(picks[0], picks[1]);
+    case 'pointEdge': {
+      const edge = picks[1].item;
+      return measurePointEdge(info(edge), picks[0], picks[1], edge?.kind === 'edge' ? edgePoints(edge.id) : []);
+    }
     case 'planes':
       return measurePlanes(info(picks[0].item), info(picks[1].item), picks[0], picks[1]);
     case 'arc3':

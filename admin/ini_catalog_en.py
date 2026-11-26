@@ -1483,14 +1483,18 @@ DESCRIPTIONS: dict[str, str] = {
     'user_response_timeouts.ask_user_choice_seconds': (
         'Waiting time for ask_user_choice (multiple-choice questions). 0 waits indefinitely.'
     ),
-    'user_response_timeouts.show_cad_viewer_seconds': (
-        'Waiting time for show_cad_viewer (the user selects faces, edges, vertices or parts in the 3D viewer). Turning the model around takes time, so the default is no limit. 0 waits indefinitely.'
-    ),
     'cad_viewer.enabled': (
         'Settings of the 3D viewer in the chat (the show_cad_viewer tool; src/tools/cad_viewer.py, src/cad/).\n'
         'It shows the shape of CadQuery code or of a STEP/IGES/BREP/BIN/DXF/STL file, lets the user rotate and zoom it, and returns the information of the elements the user selected to the LLM.\n'
         'Reading files other than STL needs cadquery (requirements.txt). Running CadQuery code needs [scripts] code_execution_enabled and an approved plan, like execute_python_code (showing a file does not).\n'
         'false makes the tool return an error.'
+    ),
+    'cad_viewer.timeout_seconds': (
+        'Seconds to wait for "Confirm" or "Close" after the viewer is shown (a timeout only for the 3D viewer). After it the viewer closes and the AI is told the time ran out '
+        '(color and display changes are not saved automatically). If the user closes the browser without closing the viewer, the waiting work (the reply being generated) stays until this many seconds, '
+        'so do not make it unlimited (0 or less). The viewer shows the remaining time when less than 5 minutes are left.\n'
+        'When the viewer is shown again on a screen the user comes back to after switching conversations, it waits at most this many seconds once more from then.\n'
+        'The old [user_response_timeouts] show_cad_viewer_seconds is used only when this setting is missing.'
     ),
     'cad_viewer.max_triangles': (
         'Upper limit of triangles sent to the viewer (default 1,000,000). A B-rep shape over it is tessellated again more coarsely, and it is an error if it is still over (an STL file is an error as soon as it is over). 0 or less means no limit.\n'
@@ -1530,11 +1534,25 @@ DESCRIPTIONS: dict[str, str] = {
     'cad_viewer.hole_topology_tolerance': (
         'Topology tolerance (model units, mm) for finding holes inside an open surface (a shape whose faces are not closed) or an open mesh (STL).\n'
         'Borders with a gap up to this value are treated as connected, and slits narrower than it and holes smaller than it are not holes.\n'
-        'For each group of connected faces the largest border is the outer boundary, and the other closed borders are holes. 0 or less does not look for holes.'
+        'For each group of connected faces the largest border that runs around the ends of the shape is the outer boundary, and the other closed borders are holes. 0 or less does not look for holes.'
+    ),
+    'cad_viewer.sew_tolerance': (
+        'Sewing tolerance (model units, mm) for sewing faces. When the borders of two different faces run side by side within this distance, they are sewn together, '
+        'so gaps between faces are not found as holes or outer boundaries (a hole inside one face is kept even when it is smaller). This is the first value of the viewer\'s "Sew" field.'
+    ),
+    'cad_viewer.sew_on_open': (
+        'Whether to sew with the tolerance above when the viewer opens. With false it sews only when the user presses "Sew" in the viewer.\n'
+        'The shape file itself is not changed (only how holes, outer boundaries and connected faces are found).'
     ),
     'cad_viewer.hole_normal_angle_deg': (
         'When the mouse is over a hole in the viewer, the holes whose normal differs from it by up to this angle (degrees) are highlighted together, and a click selects them together.\n'
+        'The direction is compared regardless of front or back (faces that are not sewn may not agree on which side is the front). '
         'It can be changed in the viewer (this is the value when the viewer opens).'
+    ),
+    'cad_viewer.hole_size_tolerance': (
+        'Hole size tolerance (model units) for grouping holes. Only holes whose border, seen along the normal of the hole under the mouse, stays within this range (±) of the border seen '
+        'along the hole\'s own normal are grouped (the more a hole is tilted and the larger it is, the more its apparent border shifts).\n'
+        'It can be changed or turned off in the viewer\'s "Size ±" field (this is the value when the viewer opens). 0 or less starts with it turned off.'
     ),
     'cad_viewer.local_axis_lengths': (
         'Lengths of the three straight lines that run at right angles from one point and are recognized as a local AXIS (local coordinate system), in X, Y, Z order (model units).\n'

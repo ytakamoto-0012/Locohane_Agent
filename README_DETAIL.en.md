@@ -1963,9 +1963,12 @@ and does not stop at the top or bottom; in exchange, the up direction is not kep
   center when you pan with the right button or zoom with the wheel (ArcballControls moves its internal gizmo, the rotation center, together with the
   camera in these operations, so it is put back on the chosen point after each one: `CadScene.restoreFixedPivot`). "Fit all" and the view buttons
   return it to the model center.
-- **Measure (📏)**: opens a row of measuring tools; while one is on, clicks measure instead of selecting (math in `frontend/src/components/cad/measure.ts`).
+- **Measure (📏)**: opens a row of five measuring tools; while one is on, clicks measure instead of selecting (math in `frontend/src/components/cad/measure.ts`).
   - **R / ⌀**: click a cylindrical, spherical, conical (radius at the clicked height) or fillet (torus, the tube radius) face, or a circle / arc edge.
   - **Point distance**: click 2 points; shows the distance and ΔX / ΔY / ΔZ.
+  - **Point-edge distance**: click a point and then an edge; shows the normal (perpendicular) distance from the point to the edge. Lines use the straight line
+    through the B-rep start and end, circles and arcs the full circle, so the value is exact (`on_extension: true` when the foot is outside the segment or arc).
+    Other curves and STL borders use the nearest point on the display polyline ("≈"). The AI gets it as `point_edge_distance` (distance, `foot`, `delta`).
   - **Plane distance**: click 2 planar faces; shows the distance if they are parallel (along the first face's normal), otherwise the angle between them (0-90°).
   - **3-point arc**: click 3 points on an arc; shows the radius and diameter of the circle through them (works for STL and DXF arcs, which have no B-rep radius).
 
@@ -1985,22 +1988,49 @@ and does not stop at the top or bottom; in exchange, the up direction is not kep
 - **Holes (open surfaces / meshes)**: for a shape whose faces are not closed (an open shell, an IGES of faces only, DXF faces, an open STL), the viewer looks for
   holes inside the faces and offers "Hole" as a kind to select (not shown when there are none). In the "Hole" mode hole borders are drawn in pink; moving the
   mouse over a hole (near its border or inside it) highlights in light blue the holes whose normal differs from it by up to the "Normal ±" angle
-  (default `[cad_viewer] hole_normal_angle_deg` = 3 degrees), and a click selects them together (or deselects them together when all are selected). The normal
-  faces the front side of the surface, so holes facing the opposite way are not grouped. Box selection and select all work too, and selected hole borders stay
+  (default `[cad_viewer] hole_normal_angle_deg` = 3 degrees, at most 90), and a click selects them together (or deselects them together when all are selected). The normal
+  faces the front side of the surface around the hole, but faces that are not sewn may disagree on which side is the front, so directions are compared regardless
+  of front or back (`holeGroup` in `cadData.ts`; holes that looked the same way used not to group because their normals were 180° apart).
+  With "Size ±" (hole size tolerance, default ±0.3, `[cad_viewer] hole_size_tolerance`; the checkbox turns it off) only holes whose border, seen along the normal of
+  the hole under the mouse, stays within that range of the border seen along their own normal are grouped (the largest difference of the distance from the center;
+  a hole of radius R tilted by θ shifts by R(1 − cos θ), so large holes drop out at smaller tilts). Box selection and select all work too, and selected hole borders stay
   orange in other modes. Selected holes are in `selected` of the selection file (`kind: "hole"`) with center, normal, mean diameter, area, perimeter,
   `circularity` (1 for a circle), `planarity` (distance from a plane), the faces around it and, for B-rep, its border edge IDs (`edges`).
-  Detection (`src/cad/topology.py`, called by the `run_cad.py` subprocess after making the viewer data) works on the display triangles: edges that belong to
-  only one triangle are borders, and parallel borders facing each other within the topology tolerance (`[cad_viewer] hole_topology_tolerance`, default 0.1 mm)
-  are treated as connected and removed (seams of unsewn faces, seams split differently on each side; slits narrower than the tolerance and smaller holes are not
-  holes either). The remaining borders are joined into loops (ends within the tolerance are bridged); for each group of connected faces the loop with the
-  largest bounding box is the outer boundary and the others are holes (for a tube open at both ends one opening becomes the outer boundary).
-  `model.holes` has the hole count, tolerance, number of outer boundaries and counts grouped by diameter and normal (up to 12 groups). In the viewer data
-  they are `holeList` (hole info) and `holes` (border segments and `ranges`).
+  Detection (`src/cad/topology.py`, called by the `run_cad.py` subprocess after making the viewer data) works on the display triangles: the two triangles on
+  each edge are paired (by vertex numbers inside a face, and across faces by edges at the same position whose triangles lie on opposite sides), and unpaired
+  edges are borders. Where two nearly identical faces overlap (such as data without fillets lying on the filleted data) the triangles lie on the same side,
+  so they are not paired and each overlapping face keeps its own borders (before, everything looked connected and neither outer boundaries nor holes were found).
+  Parallel borders facing each other within the topology tolerance (`[cad_viewer] hole_topology_tolerance`, default 0.1 mm) with faces on opposite sides are
+  treated as connected and removed (seams of unsewn faces, seams split differently on each side; slits narrower than the tolerance and smaller holes are not
+  holes either). The remaining borders are joined into loops (ends within the tolerance are bridged; where several borders leave one point, the one of the same
+  face is followed first). For each group of connected faces (from the pairing and matching above; shared B-rep edges are not used) the loop that reaches the
+  most ends of the group's bounding box (at least 2 on axes with thickness) and has the largest bounding box is the outer boundary, and the others are holes
+  (for a tube open at both ends one opening becomes the outer boundary; when the outer border does not close, or a box has only one hole in one face, no outer
+  boundary is made rather than turning a hole into one). `model.holes` has the hole count, tolerance, number of outer boundaries and counts grouped by diameter
+  and normal (up to 12 groups). In the viewer data they are `holeList` (hole info), `holes` (border segments and `ranges`) and `faceComponents` (the group
+  number of each face; also for closed shapes, used by "Connected faces").
 - **Outer boundaries**: the borders found as outer boundaries above (one per group of connected faces) can be checked with the "Outer boundary" kind (next to
   "Hole"). In that mode they are drawn in dark yellow; hovering near a line turns it light blue and a click selects / deselects one at a time (no grouping by
   direction). Faces whose gap is within the topology tolerance are surrounded by one outer boundary, so you can see whether they were judged connected.
   Selected ones are in the selection file as `kind: "outer"` with the same fields as holes (center, perimeter, faces around it, border edges for B-rep, etc.).
   In the viewer data they are `outerList` and `outers`.
+- **Sew**: in the "Hole" and "Outer boundary" modes, enter a sewing tolerance in "Sew ±" (default `[cad_viewer] sew_tolerance` = 0.5 mm) and press "Sew" to find
+  holes, outer boundaries and face groups again with the matching above widened up to the sewing tolerance, only between borders of different faces (gaps between
+  unsewn faces stop being holes or outer boundaries; holes and slits inside one face are kept even when smaller; loops left across several faces no wider than the
+  sewing tolerance are dropped as gaps). The model file itself is not sewn (face / edge IDs and the shape written by "Save" do not change). The app's
+  action_callback `cad_viewer_sew` (`sew_viewer_data` in `src/tools/cad_viewer.py`) runs it in the subprocess (`src/cad/run_cad.py --topology`) on the viewer data
+  from when the viewer opened and sends only the new holes, outer boundaries and face groups to the browser. Hole and outer IDs change, so selected or hidden
+  holes and outer boundaries are dropped (also from the undo history). "Unsew" goes back to tolerance 0. After sewing, confirming or closing saves the viewer data
+  automatically (`viewer_data`) and `model.holes` has `sew_tolerance`. The tolerance is limited to 1/10 of the model diagonal.
+  With `[cad_viewer] sew_on_open = true` it sews when the viewer opens (part of the cache key).
+- **Connected faces**: in the face mode, "Connected faces" selects every visible face connected to the selected faces (or to the faces around selected holes /
+  outer boundaries, or of selected parts): faces with the same `faceComponents`, connected through edges, the topology tolerance or sewing. Older viewer data
+  without `faceComponents` follows faces sharing edges.
+- **Show PMI**: when the STEP has PMI, "Show PMI" shows dimensions, geometric tolerances and datums as 3D labels (dimensions blue, tolerances green, datums brown).
+  Each label sits on a leader line out from the average of the face centers, edge middles or part face centers it points to, away from the model center, and
+  follows rotation and zoom (`CadScene.setPmiLabels`; HTML text and SVG lines on top). Labels whose elements are all hidden are not shown. Clicking a label
+  selects and zooms to its elements like the PMI list in the panel. They are also in the screenshot taken when confirming with an instruction. The dimension
+  lines, arrows and frames (the presentation geometry of the PMI) are not drawn.
 - **Coordinates (local AXIS)**: when the model has straight lines of length 100, 200 and 300 (`[cad_viewer] local_axis_lengths`, in X, Y, Z order) running at
   right angles from one point, they are found as a local coordinate system (the shared end is the origin, the directions to the far ends are X', Y', Z'), and
   "Coordinates" in the toolbar switches between it and World. Lengths and the shared end are checked within `local_axis_length_tolerance` (default 0.1), and
@@ -2099,13 +2129,19 @@ PMI can only be written in AP242; when writing AP203 / AP214, or when OCCT canno
 the file is written without PMI and `notes` says so (the original file keeps its PMI). Saving from other sources (IGES, BREP, CadQuery code) follows the
 same schema setting.
 
-**Settings**: `[cad_viewer]` (`enabled`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`, `screenshot_enabled`, `screenshot_long_side_pixels`, `step_write_schema`, `cache_dir`, `cache_max_mb`, `hole_topology_tolerance`, `hole_normal_angle_deg`, `local_axis_lengths`, `local_axis_length_tolerance`, `local_axis_angle_tolerance_deg`) and
-`[user_response_timeouts] show_cad_viewer_seconds` (default 0 = no limit). It is registered in `[main_agent_tool_guard] allow_entries` so the main agent can call it directly.
+**Settings**: `[cad_viewer]` (`enabled`, `timeout_seconds`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`, `screenshot_enabled`, `screenshot_long_side_pixels`, `step_write_schema`, `cache_dir`, `cache_max_mb`, `hole_topology_tolerance`, `sew_tolerance`, `sew_on_open`, `hole_normal_angle_deg`, `hole_size_tolerance`, `local_axis_lengths`, `local_axis_length_tolerance`, `local_axis_angle_tolerance_deg`).
+It is registered in `[main_agent_tool_guard] allow_entries` so the main agent can call it directly.
+
+**Timeout**: the viewer waits for "Confirm" or "Close" for `[cad_viewer] timeout_seconds` (a timeout only for the 3D viewer, default 3600 seconds); after it the viewer
+closes and the AI is told the time ran out (color and display changes are not saved automatically). If the user closes the browser without closing the viewer,
+the reply being generated keeps waiting this long, so no limit (0 or less) is not recommended (the old default was no limit, and waiting work piled up). The viewer
+shows the remaining time when less than 5 minutes are left. When it is shown again on a screen the user comes back to after switching conversations, it waits
+at most this long once more from then (`_ask_relay_helper.py`). The old `[user_response_timeouts] show_cad_viewer_seconds` is used only when `timeout_seconds` is missing.
 It is not given to sub-agents (it shows something on the screen).
 
 **Out of scope**: CadQuery's own assembly files (`.xml`, `.xbf`), other mesh formats such as OBJ, glTF, PLY and 3MF, selecting vertices of STL,
 the STEP AP242 XML format (ISO 10303-3001; the JAMA standard attributes are defined in it, and OCCT cannot read it), compressed STEP (`.stpZ`),
-drawing PMI in the viewer (dimension lines, notes) and editing PMI, user-defined attributes on faces (shape aspects), and per-instance face colors in an
+drawing the dimension lines, arrows and note frames of PMI (its presentation geometry; the viewer shows text labels only) and editing PMI, user-defined attributes on faces (shape aspects), and per-instance face colors in an
 assembly that uses the same part several times (they go on the definition, so they apply to every copy).
 
 ## Automatic tuning loop for prompt assets (evals/)
@@ -2247,7 +2283,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[user_response_timeouts]` | `approval_seconds` | Seconds to wait for a user response to `approve_plan` / the individual confirmation of `run_script`/`execute_python_code`. `0` waits indefinitely | `APPROVAL_TIMEOUT_SECONDS` |
 | `[user_response_timeouts]` | `ask_user_question_seconds` | Seconds to wait for a user response to `AskUserQuestion` (free-text questions; a single input when `labels` is omitted, a multi-item form when given). `0` waits indefinitely | `ASK_USER_QUESTION_TIMEOUT_SECONDS` |
 | `[user_response_timeouts]` | `ask_user_choice_seconds` | Seconds to wait for a user response to `ask_user_choice` (multiple-choice questions). `0` waits indefinitely | `ASK_USER_CHOICE_TIMEOUT_SECONDS` |
-| `[user_response_timeouts]` | `show_cad_viewer_seconds` | Seconds to wait for the user to confirm a selection in `show_cad_viewer` (3D viewer). `0` waits indefinitely (default) | `SHOW_CAD_VIEWER_TIMEOUT_SECONDS` |
+| `[user_response_timeouts]` | `show_cad_viewer_seconds` | The old waiting time of the 3D viewer. Used only when `[cad_viewer] timeout_seconds` is missing (removed from config.ini) | `SHOW_CAD_VIEWER_TIMEOUT_SECONDS` |
 | `[cad_viewer]` | `enabled` | Whether the 3D viewer (`show_cad_viewer`) can be used. With `false` the tool returns an error | `CAD_VIEWER_ENABLED` |
 | `[cad_viewer]` | `max_triangles` | Upper limit of triangles sent to the viewer (default 1000000). A B-rep shape over it is tessellated again more coarsely, and it is an error if still over (STL is an error as soon as it is over). 0 or less means no limit. A curved STL with 1,000,000 triangles makes about 500 MB of data, and its conversion takes about 40 seconds and 3-4 GB of memory. If you raise it, also raise `[scripts] timeout` and make sure there is enough memory | `CAD_VIEWER_MAX_TRIANGLES` |
 | `[cad_viewer]` | `linear_deflection_ratio` | Tolerance when splitting curved surfaces into triangles (ratio to the diagonal length of the shape, default 0.001) | `CAD_VIEWER_LINEAR_DEFLECTION_RATIO` |
@@ -2258,6 +2294,12 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[cad_viewer]` | `step_write_schema` | Schema of the STEP file written by "Save": `auto` (the same as the original STEP, AP242 when the original is not STEP; default), `AP203`, `AP214` or `AP242`. PMI can only be written in AP242 | `CAD_VIEWER_STEP_WRITE_SCHEMA` |
 | `[cad_viewer]` | `cache_dir` | Folder for the cache of viewer data made from CAD files (default `${common_data_dir}/cad_cache`). The same file with the same settings is shown without reading the shape again | `CAD_VIEWER_CACHE_DIR` |
 | `[cad_viewer]` | `cache_max_mb` | Upper limit of the cache's total size (MB, default 2048). Least recently used entries are deleted beyond it. 0 or less disables it | `CAD_VIEWER_CACHE_MAX_MB` |
+| `[cad_viewer]` | `timeout_seconds` | Timeout only for the 3D viewer: seconds to wait for "Confirm" or "Close" (default 3600). After it the viewer closes. No limit (0 or less) is not recommended, so that work does not keep waiting after the browser is closed | `CAD_VIEWER_TIMEOUT_SECONDS` |
+| `[cad_viewer]` | `hole_topology_tolerance` | Topology tolerance for finding holes in open surfaces / meshes (model units, default 0.1). Borders with a gap up to it count as connected. 0 or less does not look for holes | `CAD_VIEWER_HOLE_TOPOLOGY_TOLERANCE` |
+| `[cad_viewer]` | `sew_tolerance` | Sewing tolerance for sewing faces (model units, default 0.5). Borders of different faces within it are sewn together. First value of the viewer's "Sew" field | `CAD_VIEWER_SEW_TOLERANCE` |
+| `[cad_viewer]` | `sew_on_open` | Whether to sew with `sew_tolerance` when the viewer opens (default `false`; "Sew" in the viewer can do it later) | `CAD_VIEWER_SEW_ON_OPEN` |
+| `[cad_viewer]` | `hole_normal_angle_deg` | Angle between normals for grouping holes as facing the same way (degrees, default 3; front or back alike; can be changed in the viewer) | `CAD_VIEWER_HOLE_NORMAL_ANGLE_DEG` |
+| `[cad_viewer]` | `hole_size_tolerance` | Hole size tolerance for grouping holes (model units, default 0.3; 0 or less starts with it off; the viewer's "Size ±" changes it) | `CAD_VIEWER_HOLE_SIZE_TOLERANCE` |
 | `[plan]` | `allow_badge_unlock` | Whether to allow switching the Plan Mode badge both ways | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | Whether to reset `plan_approved` unconditionally back to Plan Mode when `create_plan` is called again in the approved (Edit Automatically) state. If `false`, only the steps are replaced while keeping the approval | `PLAN_RESET_APPROVAL_ON_RECREATE` |
 | `[plan]` | `reset_approval_on_new_message` | Whether to reset `plan_approved` unconditionally back to Plan Mode on every new user message. If `false`, the approval is kept across messages (after `thinking_loop_guard` reaches its retry limit, re-approval is not needed even when the user sends a message to continue) | `PLAN_RESET_APPROVAL_ON_NEW_MESSAGE` |

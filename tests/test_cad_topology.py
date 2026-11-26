@@ -117,6 +117,118 @@ def test_closed_mesh_has_no_holes(tmp_path) -> None:
     assert "holeList" not in data and "holes" not in data
 
 
+def _faces_data(face_tris: list[list[np.ndarray]], **options) -> dict:
+    """面ごとの三角形から、B-rep と同じ形（面ごとに頂点を持ち、面の中では頂点を共有する）のビューア用データを作る。
+
+    B-rep のエッジの共有（edgeList の faces）は入れない（縫い合わせていない面どうし）。
+    """
+    from src.cad.mesh_data import b64
+
+    positions, indices, ranges, faces = [], [], [], []
+    base = tri_start = 0
+    for fid, tris in enumerate(face_tris):
+        pts = np.asarray(tris, float).reshape(-1, 3)
+        uniq, inv = np.unique(np.round(pts, 9), axis=0, return_inverse=True)
+        positions.append(uniq)
+        indices.append(inv.reshape(-1, 3) + base)
+        ranges.append([tri_start, len(tris)])
+        faces.append({"id": fid, "kind": "face", "geomType": "PLANE"})
+        base += len(uniq)
+        tri_start += len(tris)
+    data = {
+        "source": {"kind": "file", "format": "STEP"},
+        "mesh": {
+            "positions": b64(np.concatenate(positions), "f4"),
+            "indices": b64(np.concatenate(indices), "u4"),
+            "colors": None,
+            "faceRanges": ranges,
+        },
+        "edges": {"positions": b64(np.zeros((0, 3)), "f4"), "ranges": []},
+        "faces": faces,
+        "edgeList": [],
+        "stats": {},
+    }
+    attach_topology(data, options)
+    assert "topologyError" not in data
+    return data
+
+
+def _tile(i: int, j: int, size: float = 10.0, n: int = 10, holes=()) -> list[np.ndarray]:
+    """(i, j) 番目の size 角の板（升目 n×n）。"""
+    return [t + [i * size, j * size, 0] for t in _plate(n, size, holes=holes)]
+
+
+def test_hole_in_a_face_joined_only_by_shared_points_stays_a_hole() -> None:
+    # 3×3 の面（縫い合わせていないが、境目の点は同じ位置）の真ん中の面に穴。以前は真ん中の面だけで 1 つのまとまりになり、
+    # その穴が「まとまりの外周」になっていた。
+    faces = [_tile(i, j, holes=[(5, 5, 2)] if (i, j) == (1, 1) else ()) for i in range(3) for j in range(3)]
+    data = _faces_data(faces)
+    assert len(data["holeList"]) == 1 and len(data["outerList"]) == 1
+    assert data["holeList"][0]["center"][:2] == pytest.approx([15, 15], abs=0.5)
+    assert round(data["outerList"][0]["perimeter"]) == 120
+    # 9 つの面は 1 つのまとまり（「連続する面」の選択に使う）。
+    assert data["faceComponents"] == [0] * 9
+
+
+def test_outer_that_does_not_close_does_not_turn_a_hole_into_the_outer() -> None:
+    # 6 面の箱の上の面に穴が 1 つだけある形（外周が無い）。以前は境界のループが穴 1 つだけなので、それが外周になっていた。
+    sq = _plate(10, 10, holes=[(5, 5, 2)])
+    def place(tris, f):
+        return [np.array([f(p) for p in t]) for t in tris]
+    full = _plate(10, 10)
+    faces = [
+        place(sq, lambda p: [p[0], p[1], 10]),
+        place(full, lambda p: [p[1], p[0], 0]),
+        place(full, lambda p: [p[0], 0, p[1]]),
+        place(full, lambda p: [p[1], 10, p[0]]),
+        place(full, lambda p: [0, p[1], p[0]]),
+        place(full, lambda p: [10, p[0], p[1]]),
+    ]
+    data = _faces_data(faces)
+    assert len(data["holeList"]) == 1
+    assert not data["outerList"]
+    assert data["holeList"][0]["center"] == pytest.approx([5, 5, 10], abs=0.5)
+
+
+@pytest.mark.parametrize("offset", [0.0, 0.02])
+def test_two_overlapping_copies_of_a_surface_each_keep_outer_and_holes(offset) -> None:
+    # フィレット無しのデータとフィレット後のデータが重なっているような、ほぼ同じ面が 2 枚ある開いたサーフェース。
+    # 以前は縁がすべて突き合わされて、外周も穴も見つからなかった。
+    a = _plate(20, 40, holes=[(10, 10, 3), (30, 25, 4)])
+    b = [t + [offset, 0, 0] for t in _plate(16, 40, holes=[(10, 10, 3), (30, 25, 4)])]
+    data = _faces_data([a, b])
+    assert len(data["outerList"]) == 2
+    assert len(data["holeList"]) == 4
+    assert data["faceComponents"] == [0, 1]
+
+
+def test_sewing_closes_gaps_between_faces_but_keeps_small_holes_in_a_face() -> None:
+    # 左右の板の間に 0.3 の面離れ。左の板には ⌀0.6 ほどの小さい穴。
+    left = _plate(50, 5, holes=[(2.5, 2.5, 0.3)])
+    right = [t + [5.3, 0, 0] for t in _plate(40, 5)]
+    plain = _faces_data([left, right], hole_tolerance=0.1)
+    assert len(plain["outerList"]) == 2 and len(plain["holeList"]) == 1
+    assert plain["faceComponents"] == [0, 1]
+    sewn = _faces_data([left, right], hole_tolerance=0.1, sew_tolerance=0.5)
+    assert len(sewn["outerList"]) == 1 and len(sewn["holeList"]) == 1
+    assert sewn["faceComponents"] == [0, 0]
+    assert sewn["holes"]["sewTolerance"] == 0.5 and sewn["holes"]["sewnEdges"] > 0
+    # 縫合トレランスを変えて求め直せる（前の結果は消える）。
+    from src.cad.topology import apply_holes
+
+    apply_holes(sewn, 0.1, 0.0)
+    assert len(sewn["outerList"]) == 2 and sewn["holes"]["sewTolerance"] == 0
+
+
+def test_closed_shape_still_has_face_components(tmp_path) -> None:
+    v = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]], float) * 10
+    quads = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [2, 3, 7, 6], [1, 2, 6, 5], [3, 0, 4, 7]]
+    faces = [[v[[q[0], q[1], q[2]]], v[[q[0], q[2], q[3]]]] for q in quads]
+    data = _faces_data(faces)
+    assert "holeList" not in data
+    assert data["faceComponents"] == [0] * 6
+
+
 def _lines(origin, x, y, z, lengths=(100, 200, 300), reverse_y=False):
     o = np.asarray(origin, float)
     edges = []

@@ -952,6 +952,7 @@ _NON_CHAT_ACTION_NAMES = frozenset(
         "set_language",
         "reasoning_effort_info",
         "cad_viewer_save",
+        "cad_viewer_sew",
     }
 )
 
@@ -3471,6 +3472,24 @@ async def on_cad_viewer_save(action: cl.Action) -> dict:
     from src.tools.cad_viewer import save_viewer_edits
 
     return await save_viewer_edits(dict(action.payload or {}))
+
+
+@cl.action_callback("cad_viewer_sew")
+async def on_cad_viewer_sew(action: cl.Action) -> dict:
+    """3D ビューア（CadViewerBar.tsx）の「縫合」ボタンから呼ばれる action_callback。
+
+    縫合トレランスで穴・外周・面のまとまりを求め直す（src/tools/cad_viewer.py の sew_viewer_data）。
+    ビューアは回答待ちのまま（閉じない）。
+
+    Args:
+        action: payload に save_id・tolerance が入る。
+
+    Returns:
+        {"ok": True, "holeList", "holes", "outerList", "outers", "faceComponents", "stats"} か {"ok": False, "error"}。
+    """
+    from src.tools.cad_viewer import sew_viewer_data
+
+    return await sew_viewer_data(dict(action.payload or {}))
 
 
 @cl.action_callback("work_dir_server_info")

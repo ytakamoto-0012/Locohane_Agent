@@ -52,7 +52,30 @@ export interface CadSceneCallbacks {
   onPivotSet?: () => void;
   /** 計測のモード（setMeasureTool）でクリックした点・要素。選択はしない。 */
   onMeasurePick?: (pick: MeasurePick) => void;
+  /** PMI の 3D ラベル（setPmiLabels）をクリックした。id は PMI の ID。 */
+  onPmiClick?: (id: string) => void;
 }
+
+/** PMI の 3D ラベル（寸法・幾何公差・データム）。targets はそれが指す要素。 */
+export interface PmiLabel {
+  id: string;
+  kind: 'dimension' | 'tolerance' | 'datum';
+  text: string;
+  targets: CadSelection[];
+}
+
+interface PmiLabelView extends PmiLabel {
+  el: HTMLDivElement;
+  line: SVGLineElement;
+  anchor: THREE.Vector3;
+  /** 指す点から文字までの長さ（画面上のピクセル）。 */
+  reach: number;
+}
+
+// PMI のラベルの色（寸法は青、幾何公差は緑、データムは茶。styles.css の .cad-viewer-pmi-* と同じ）と引き出し線の長さ（ピクセル）。
+const PMI_COLORS: Record<PmiLabel['kind'], string> = { dimension: '#1d6fd1', tolerance: '#18794e', datum: '#a35200' };
+const PMI_LEADER_PIXELS = 36;
+const PMI_LEADER_STEP_PIXELS = 18;
 
 // 開いた形の面の中の穴・外周の縁の色（そのモードのとき。選択・ホバーはそれぞれの色）と線の幅（ピクセル）。
 const LOOP_COLORS: Record<CadLoopKind, string> = { hole: '#d6409f', outer: '#b08800' };
@@ -179,6 +202,8 @@ export class CadScene {
   private loops: Partial<Record<CadLoopKind, LoopLayer>> = {};
   // 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差（度）と、今まとめて浮かせている穴。
   private holeAngle = 3;
+  // 穴をまとめるときの穴サイズ誤差（モデルの単位。null で使わない）。
+  private holeSizeTol: number | null = null;
   private hoverHoles: Set<number> = new Set();
   // ローカル座標系（null ならワールド）。視点のボタン・左下の軸がこの向きになる。
   private localAxis: CadLocalAxis | null = null;
@@ -190,6 +215,8 @@ export class CadScene {
   private diffOverlay: THREE.Group | null = null;
   // 計測のモード（null なら計測しない）。クリックは選択でなく onMeasurePick になる。
   private measureTool: MeasureTool | null = null;
+  // 今の計測で、これまでに拾った点の数（点とエッジの法線距離は、1 つめが点、2 つめがエッジ）。
+  private measureStep = 0;
   // 計測の線（寸法線・半径・円）と点の印。選択・当たり判定の対象にはしない。
   private measureLines: LineSegments2 | null = null;
   private measurePoints: THREE.Points | null = null;
@@ -198,6 +225,11 @@ export class CadScene {
   // 計測の値の文字（HTML。画面上で同じ大きさ・くっきり出すため、描くたびに位置を合わせる）。
   private readonly labelLayer: HTMLDivElement;
   private measureLabels: { el: HTMLDivElement; at: THREE.Vector3; text: string }[] = [];
+  // PMI（寸法・幾何公差・データム）の 3D ラベル。指す要素の上の点（anchor）から引き出し線を引き、少し離して文字を出す。
+  private readonly pmiLayer: HTMLDivElement;
+  private readonly pmiSvg: SVGSVGElement;
+  private pmiLabels: PmiLabelView[] = [];
+  private pmiInput: PmiLabel[] = [];
 
   constructor(container: HTMLElement, data: CadData, callbacks: CadSceneCallbacks, colors: CadSceneColors) {
     this.container = container;
@@ -213,6 +245,12 @@ export class CadScene {
     this.boxEl.className = 'cad-viewer-box';
     this.boxEl.hidden = true;
     container.appendChild(this.boxEl);
+    this.pmiLayer = document.createElement('div');
+    this.pmiLayer.className = 'cad-viewer-pmi-labels';
+    this.pmiSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    this.pmiSvg.setAttribute('class', 'cad-viewer-pmi-leaders');
+    this.pmiLayer.appendChild(this.pmiSvg);
+    container.appendChild(this.pmiLayer);
     this.labelLayer = document.createElement('div');
     this.labelLayer.className = 'cad-viewer-measure-labels';
     container.appendChild(this.labelLayer);
@@ -357,6 +395,29 @@ export class CadScene {
     this.scene.add(this.points);
   }
 
+  /**
+   * 穴・外周・面のまとまりが変わった（「縫合」で求め直した。cadData の replaceTopology で data を書き換えた後に呼ぶ）
+   * ときに、縁の線を作り直す。穴・外周の ID が変わるので、ホバーはやめる。
+   */
+  reloadTopology(): void {
+    for (const layer of Object.values(this.loops)) {
+      for (const line of [layer.lines, layer.highlight]) {
+        this.scene.remove(line);
+        line.geometry.dispose();
+        (line.material as LineMaterial).dispose();
+      }
+    }
+    this.loops = {};
+    this.buildHoles();
+    if (this.hover?.kind === 'hole' || this.hover?.kind === 'outer') {
+      this.hover = null;
+      this.callbacks.onHover(null);
+    }
+    this.hoverHoles = new Set();
+    this.resize();
+    this.refreshColors();
+  }
+
   /** 開いた形の面の中の穴・外周の縁を作る（色と中身は refreshColors で入れる）。 */
   private buildHoles(): void {
     const make = (depthTest: boolean, width: number, order: number) => {
@@ -386,9 +447,33 @@ export class CadScene {
     this.refreshColors();
   }
 
-  /** 穴 id と同じ向きの穴（隠しているものを除く）。 */
+  /** 穴をまとめるときの穴サイズ誤差（モデルの単位。null で使わない。cadData の holeGroup）。 */
+  setHoleSizeTolerance(tol: number | null): void {
+    this.holeSizeTol = tol !== null && Number.isFinite(tol) && tol >= 0 ? tol : null;
+    this.updateHoverHoles();
+    this.refreshColors();
+  }
+
+  /** 穴 id と同じ向き（・穴サイズ誤差の範囲）の穴（隠しているものを除く）。 */
   holeGroupOf(id: number): number[] {
-    return holeGroup(this.data, id, this.holeAngle).filter((i) => this.visible('hole', i));
+    return holeGroup(this.data, id, this.holeAngle, this.holeSizeTol).filter((i) => this.visible('hole', i));
+  }
+
+  /** エッジ id の表示用の折れ線の点（点とエッジの法線距離に使う）。 */
+  edgePoints(id: number): Vec3[] {
+    const range = this.data.edges.ranges[id];
+    const pos = this.edgePositions;
+    if (!range || !pos) return [];
+    const [s, n] = range;
+    const out: Vec3[] = [];
+    for (let k = 0; k < n; k++) {
+      const a = (s + k) * 6;
+      const p: Vec3 = [pos[a], pos[a + 1], pos[a + 2]];
+      const last = out[out.length - 1];
+      if (!last || last[0] !== p[0] || last[1] !== p[1] || last[2] !== p[2]) out.push(p);
+      out.push([pos[a + 3], pos[a + 4], pos[a + 5]]);
+    }
+    return out;
   }
 
   private updateHoverHoles(): void {
@@ -560,6 +645,17 @@ export class CadScene {
    * 計測のモードにする（null でやめる）。計測の間は、クリックで選択せずに点・要素を onMeasurePick で返し、
    * 範囲選択もしない（左ドラッグは回転）。
    */
+  /** 今の計測でこれまでに拾った点の数（何を拾うかが点ごとに違う計測のため。CadViewerBar が pending の数を渡す）。 */
+  setMeasureStep(n: number): void {
+    this.measureStep = Math.max(0, n);
+  }
+
+  /** 計測で、今の位置で拾うのが（要素でなく）点か。マウスを乗せた点に印を出すかに使う。 */
+  private measureWantsPoint(): boolean {
+    const tool = this.measureTool;
+    return tool === 'distance' || tool === 'arc3' || (tool === 'pointEdge' && this.measureStep === 0);
+  }
+
   setMeasureTool(tool: MeasureTool | null): void {
     this.measureTool = tool;
     this.renderer.domElement.classList.toggle('cad-viewer-measuring', tool !== null);
@@ -624,6 +720,138 @@ export class CadScene {
     for (const l of this.measureLabels) {
       v.copy(l.at).project(this.camera);
       l.el.style.transform = `translate(${((v.x + 1) / 2) * w}px, ${((1 - v.y) / 2) * h}px) translate(-50%, -50%)`;
+    }
+  }
+
+  /**
+   * PMI の 3D ラベルを出す（空の配列で消す）。ラベルは指す要素（面の中心・エッジの中ほど・部品の面の中心）の
+   * 平均の点から、モデルの中心から外へ向かう向きに少し離して出し、引き出し線でつなぐ。指す要素がすべて隠れて
+   * いるラベルは出さない。クリックすると onPmiClick（指す要素を選ぶ）。
+   */
+  setPmiLabels(labels: PmiLabel[]): void {
+    this.pmiInput = labels;
+    for (const l of this.pmiLabels) {
+      l.el.remove();
+      l.line.remove();
+    }
+    this.pmiLabels = [];
+    labels.forEach((label, i) => {
+      const anchor = this.anchorOf(label.targets);
+      if (!anchor) return;
+      const el = document.createElement('div');
+      el.className = `cad-viewer-pmi-label cad-viewer-pmi-${label.kind}`;
+      el.textContent = label.text;
+      el.title = label.text;
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.callbacks.onPmiClick?.(label.id);
+      });
+      el.addEventListener('pointerdown', (e) => e.stopPropagation());
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('class', `cad-viewer-pmi-leader cad-viewer-pmi-${label.kind}`);
+      this.pmiSvg.appendChild(line);
+      this.pmiLayer.appendChild(el);
+      // 近くのラベルが重なりにくいよう、引き出しの長さを 3 段に分ける。
+      this.pmiLabels.push({ ...label, el, line, anchor, reach: PMI_LEADER_PIXELS + (i % 3) * PMI_LEADER_STEP_PIXELS });
+    });
+    this.requestRender();
+  }
+
+  /** 要素の並びの上の代表の点（面は中心、エッジは折れ線の中ほど、部品はその面の中心の平均）。見えている要素だけ。 */
+  private anchorOf(targets: CadSelection[]): THREE.Vector3 | null {
+    const sum = new THREE.Vector3();
+    let n = 0;
+    const addFace = (id: number) => {
+      const c = this.data.faces[id]?.center;
+      if (Array.isArray(c) && c.length === 3) {
+        sum.add(new THREE.Vector3(c[0], c[1], c[2]));
+        n++;
+      }
+    };
+    for (const t of targets) {
+      if (t.kind !== 'part' && !this.shown(t.kind, t.id)) continue;
+      if (t.kind === 'face') addFace(t.id);
+      else if (t.kind === 'edge') {
+        const pts = this.edgePoints(t.id);
+        if (pts.length) {
+          const m = pts[Math.floor(pts.length / 2)];
+          sum.add(new THREE.Vector3(m[0], m[1], m[2]));
+          n++;
+        }
+      } else if (t.kind === 'part' && !this.partHidden(t.id)) {
+        this.data.faces.forEach((f, id) => {
+          if (f.part === t.id) addFace(id);
+        });
+      }
+    }
+    return n ? sum.multiplyScalar(1 / n) : null;
+  }
+
+  /** PMI のラベルと引き出し線を、今の画面上の位置へ動かす（描くたびに呼ぶ）。 */
+  private placePmiLabels(): void {
+    if (!this.pmiLabels.length) return;
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    this.pmiSvg.setAttribute('width', String(w));
+    this.pmiSvg.setAttribute('height', String(h));
+    for (const l of this.pmiLayout(w, h)) {
+      l.label.el.style.transform = `translate(${l.x}px, ${l.y}px) translate(-50%, -50%)`;
+      l.label.line.setAttribute('x1', String(l.ax));
+      l.label.line.setAttribute('y1', String(l.ay));
+      l.label.line.setAttribute('x2', String(l.x));
+      l.label.line.setAttribute('y2', String(l.y));
+    }
+  }
+
+  /** PMI のラベルの画面上の位置（CSS ピクセル）。ax, ay は指す点、x, y は文字の中心。 */
+  private pmiLayout(w: number, h: number): { label: PmiLabelView; ax: number; ay: number; x: number; y: number }[] {
+    const v = new THREE.Vector3();
+    const c = new THREE.Vector3().copy(this.center).project(this.camera);
+    const cx = ((c.x + 1) / 2) * w;
+    const cy = ((1 - c.y) / 2) * h;
+    return this.pmiLabels.map((label, i) => {
+      v.copy(label.anchor).project(this.camera);
+      const ax = ((v.x + 1) / 2) * w;
+      const ay = ((1 - v.y) / 2) * h;
+      let dx = ax - cx;
+      let dy = ay - cy;
+      const len = Math.hypot(dx, dy);
+      if (len < 1) {
+        // モデルの中心に重なる点は、番号ごとに向きを変えて引き出す。
+        const a = (i * 2.4) % (Math.PI * 2);
+        dx = Math.cos(a);
+        dy = Math.sin(a);
+      } else {
+        dx /= len;
+        dy /= len;
+      }
+      return { label, ax, ay, x: ax + dx * label.reach, y: ay + dy * label.reach };
+    });
+  }
+
+  /** PMI のラベル（HTML で重ねているので WebGL の画面には入らない）を、撮った画面にも描く。k は CSS ピクセルからの倍率。 */
+  private drawPmiLabels(ctx: CanvasRenderingContext2D, k: number): void {
+    if (!this.pmiLabels.length) return;
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    const size = Math.max(9, Math.round(11 * Math.max(k, 0.75)));
+    ctx.font = `600 ${size}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const l of this.pmiLayout(w, h)) {
+      const color = PMI_COLORS[l.label.kind];
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(1, k);
+      ctx.beginPath();
+      ctx.moveTo(l.ax * k, l.ay * k);
+      ctx.lineTo(l.x * k, l.y * k);
+      ctx.stroke();
+      const tw = ctx.measureText(l.label.text).width + size * 0.8;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+      ctx.fillRect(l.x * k - tw / 2, l.y * k - size * 0.75, tw, size * 1.5);
+      ctx.strokeRect(l.x * k - tw / 2, l.y * k - size * 0.75, tw, size * 1.5);
+      ctx.fillStyle = color;
+      ctx.fillText(l.label.text, l.x * k, l.y * k);
     }
   }
 
@@ -723,6 +951,8 @@ export class CadScene {
     this.applyBackground();
     this.hover = null;
     this.hoverHoles = new Set();
+    // 隠した要素を指す PMI のラベルを出し直す（すべて隠れたものは出さない）。
+    if (this.pmiInput.length) this.setPmiLabels(this.pmiInput);
     this.refreshColors();
   }
 
@@ -960,6 +1190,7 @@ export class CadScene {
       if (!ctx) return null;
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+      this.drawPmiLabels(ctx, canvas.width / Math.max(this.container.clientWidth, 1));
       this.drawMeasureLabels(ctx, canvas.width / Math.max(this.container.clientWidth, 1));
       return canvas.toDataURL('image/png');
     } catch (err) {
@@ -1022,6 +1253,7 @@ export class CadScene {
     el.removeEventListener('pointerleave', this.handlePointerLeave);
     this.boxEl.remove();
     this.labelLayer.remove();
+    this.pmiLayer.remove();
     const disposeObject = (obj: THREE.Object3D) => {
       const o = obj as THREE.Mesh;
       o.geometry?.dispose();
@@ -1430,10 +1662,19 @@ export class CadScene {
     return null;
   }
 
-  /** 計測のモードで、今の位置で拾うもの。R・⌀ はエッジ（無ければ面）、平面どうしは面、それ以外は点。 */
+  /**
+   * 計測のモードで、今の位置で拾うもの。R・⌀ はエッジ（無ければ面）、平面どうしは面、点とエッジの法線距離は
+   * 1 つめが点・2 つめがエッジ、それ以外は点。
+   */
   private measurePickAt(clientX: number, clientY: number): MeasurePick | null {
     const tool = this.measureTool;
-    if (tool === 'distance' || tool === 'arc3') return this.measurePointAt(clientX, clientY);
+    if (this.measureWantsPoint()) return this.measurePointAt(clientX, clientY);
+    if (tool === 'pointEdge') {
+      const edge = this.pickAt(clientX, clientY, 'edge');
+      if (!edge) return null;
+      const p = this.pointAt(clientX, clientY);
+      return { point: p ? [p.x, p.y, p.z] : [0, 0, 0], item: edge, exact: true };
+    }
     const item = (tool === 'radius' ? this.pickAt(clientX, clientY, 'edge') : null) ?? this.pickAt(clientX, clientY, 'face');
     if (!item) return null;
     const p = this.pointAt(clientX, clientY);
@@ -1739,7 +1980,7 @@ export class CadScene {
       // 計測では、拾う要素を浮かせ、点を使う計測は拾う点（角・円の上などに合わせた点）に印を出す。
       const pick = this.measurePickAt(e.clientX, e.clientY);
       item = pick?.item ?? null;
-      this.setHoverMarker(pick && (this.measureTool === 'distance' || this.measureTool === 'arc3') ? pick.point : null);
+      this.setHoverMarker(pick && this.measureWantsPoint() ? pick.point : null);
     } else {
       item = this.pickAt(e.clientX, e.clientY);
     }
@@ -1773,6 +2014,7 @@ export class CadScene {
     this.renderer.render(this.scene, this.camera);
     this.renderGizmo();
     this.placeMeasureLabels();
+    this.placePmiLabels();
   }
 }
 

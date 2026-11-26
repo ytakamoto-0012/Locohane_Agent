@@ -1209,7 +1209,81 @@ async def test_viewer_offers_holes_of_an_open_stl(env, tmp_path) -> None:
     shown = _viewer.shown[0]
     assert "hole" in shown["select"] and "outer" in shown["select"]
     assert shown["hole_normal_angle_deg"] == 3.0
+    # 穴サイズ誤差・縫合トレランスの初めの値と、3D ビューア専用のタイムアウト（既定 1 時間）も渡す。
+    assert shown["hole_size_tolerance"] == 0.3 and shown["sew_tolerance"] == 0.5
+    assert shown["timeout_seconds"] == 3600
     assert len(shown["data"]["outerList"]) == 1
     assert len(shown["data"]["holeList"]) == 2
+    # 面のまとまり（「連続する面」の選択に使う）。
+    assert set(shown["data"]["faceComponents"]) == {0}
     assert out["selected_by_kind"] == {"hole": 2, "outer": 1}
     assert out["model"]["holes"]["count"] == 2 and out["model"]["holes"]["outer_boundaries"] == 1
+
+
+def _two_plates_stl(path, gap: float) -> None:
+    """60×30 の板 2 枚を X 方向に gap だけ離して並べた開いた STL（右の板には ⌀10 ほどの穴）。"""
+    h = 3.0
+    tris = []
+    for x0, hole in ((0.0, None), (60.0 + gap, (75.0 + gap, 15.0))):
+        for i in range(20):
+            for j in range(10):
+                cx, cy = x0 + (i + 0.5) * h, (j + 0.5) * h
+                if hole and (cx - hole[0]) ** 2 + (cy - hole[1]) ** 2 < 25:
+                    continue
+                p = lambda a, b: [x0 + a * h, b * h, 0.0]  # noqa: E731
+                tris += [[p(i, j), p(i + 1, j), p(i + 1, j + 1)], [p(i, j), p(i + 1, j + 1), p(i, j + 1)]]
+    with path.open("wb") as f:
+        f.write(b" " * 80)
+        f.write(struct.pack("<I", len(tris)))
+        for tri in tris:
+            f.write(struct.pack("<3f", 0, 0, 0) + struct.pack("<9f", *np.ravel(tri)) + struct.pack("<H", 0))
+
+
+@pytest.mark.asyncio
+async def test_sew_in_the_viewer_closes_gaps_between_faces(env, tmp_path) -> None:
+    """ビューアの「縫合」で、面と面の離れ（許容差 0.1 より広い 0.3）を閉じて穴・外周を求め直し、
+    確定するとその結果のビューア用データを自動で保存して返す。"""
+    path = tmp_path / "plates.stl"
+    _two_plates_stl(path, 0.3)
+
+    async def press_sew(props):
+        sewn = await cad_viewer.sew_viewer_data({"save_id": props["save_id"], "tolerance": 0.5})
+        bad = await cad_viewer.sew_viewer_data({"save_id": props["save_id"], "tolerance": -1})
+        huge = await cad_viewer.sew_viewer_data({"save_id": props["save_id"], "tolerance": 1000})
+        return sewn, bad, huge
+
+    _viewer.on_show = press_sew
+    _viewer.response = {"submitted": True, "selected": [{"kind": "outer", "id": 0}], "sewn": True}
+    out = json.loads(await _call(file_path=str(path)))
+    before = _viewer.shown[0]["data"]
+    assert len(before["outerList"]) == 2
+    sewn, bad, huge = _viewer.on_show_result
+    assert sewn["ok"], sewn
+    assert len(sewn["outerList"]) == 1 and len(sewn["holeList"]) == 1
+    assert sewn["holes"]["sewTolerance"] == 0.5 and sewn["stats"] == {"holes": 1, "outers": 1}
+    assert not bad["ok"] and not huge["ok"] and "too large" in huge["error"]
+    assert out["model"]["holes"]["outer_boundaries"] == 1 and out["model"]["holes"]["sew_tolerance"] == 0.5
+    saved = json.loads(open(out["viewer_data"], encoding="utf-8").read())
+    assert len(saved["outerList"]) == 1 and saved["holes"]["sewTolerance"] == 0.5
+    # 求め直しの一時ファイルは残さない。閉じた後の縫合は受け付けない。
+    assert not list(tools._state._DEFAULT_WORKDIR.glob("_tmp_*/cad_topology_*"))
+    assert not (await cad_viewer.sew_viewer_data({"save_id": _viewer.shown[0]["save_id"], "tolerance": 0.5}))["ok"]
+
+
+def test_point_to_edge_measurement_is_accepted() -> None:
+    data = {"faces": [{"id": 0}], "edgeList": [{"id": 0, "kind": "edge"}], "vertexList": []}
+    raw = [
+        {
+            "type": "point_edge_distance",
+            "distance": 3.0,
+            "foot": [0, 0, 0],
+            "delta": [0, 3, 0],
+            "points": [[0, 3, 0], [0, 0, 0]],
+            "items": [{"kind": "face", "id": 0}, {"kind": "edge", "id": 0}],
+            "geomType": "LINE",
+            "approximate": False,
+            "on_extension": True,
+        }
+    ]
+    (m,) = cad_viewer._valid_measurements(data, raw)
+    assert m["distance"] == 3.0 and m["foot"] == [0, 0, 0] and m["on_extension"] is True and m["geomType"] == "LINE"

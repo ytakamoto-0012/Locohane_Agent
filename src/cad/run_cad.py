@@ -4,6 +4,9 @@
 
     python run_cad.py --file <CADファイル> --out <JSON> --options '<JSON>'
 
+ビューアの「保存」は ``--export <ビューア用データ> --out <CADファイル>``、「縫合」は
+``--topology <ビューア用データ> --out <JSON> --options '{"hole_tolerance": .., "sew_tolerance": ..}'``。
+
 CadQuery コードの場合は、ツールが「書き込みガード + CODE_PROLOGUE + 利用者のコード + CODE_EPILOGUE」を 1 つの
 スクリプトにして実行する。コードは ``result`` 変数に形を入れるか、``show_object(形)`` を呼ぶ
 （CQ-editor・cq-server と同じ書き方）。
@@ -168,16 +171,38 @@ def _export(data_path: str, out_path: str) -> None:
     print(f"{OK_MARKER} {json.dumps({'notes': notes}, ensure_ascii=False)}")
 
 
+def _topology(data_path: str, out_path: str, raw: dict[str, Any]) -> None:
+    """3D ビューアの「縫合」: ビューア用データの穴・外周・面のまとまりを、options の許容差・縫合トレランスで求め直し、
+    その部分（src/cad/topology.py の TOPOLOGY_KEYS と穴・外周の数）だけを --out に書く。numpy だけで動く。"""
+    from src.cad.topology import DEFAULT_HOLE_TOLERANCE, TOPOLOGY_KEYS, apply_holes
+
+    try:
+        data = json.loads(Path(data_path).read_text(encoding="utf-8"))
+        apply_holes(data, float(raw.get("hole_tolerance", DEFAULT_HOLE_TOLERANCE)), float(raw.get("sew_tolerance", 0.0) or 0.0))
+        stats = data.get("stats") or {}
+        out = {k: data[k] for k in TOPOLOGY_KEYS if k in data}
+        out["stats"] = {k: stats[k] for k in ("holes", "outers") if k in stats}
+        Path(out_path).write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+    except (OSError, ValueError) as e:
+        _fail(f"Error: could not sew the faces: {e}")
+        return
+    print(f"{OK_MARKER} {json.dumps(out['stats'])}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--file")
     group.add_argument("--export", help="変更を反映したビューア用データの JSON。--out に 3D モデルを書き出す。")
+    group.add_argument("--topology", help="ビューア用データの JSON。穴・外周・面のまとまりを求め直して --out に書く（縫合）。")
     parser.add_argument("--out", required=True)
     parser.add_argument("--options", default="{}")
     args = parser.parse_args(argv)
     if args.export:
         _export(args.export, args.out)
+        return
+    if args.topology:
+        _topology(args.topology, args.out, json.loads(args.options))
         return
     raw = json.loads(args.options)
     path = Path(args.file)

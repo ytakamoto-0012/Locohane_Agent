@@ -1192,6 +1192,114 @@
   white-space: nowrap;
 }
 
+/* PMI（寸法・幾何公差・データム）の 3D ラベル（CadScene.setPmiLabels）。色は CadScene.ts の PMI_COLORS と同じ。 */
+.cad-viewer-pmi-labels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.cad-viewer-pmi-leaders {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+}
+
+.cad-viewer-pmi-leader {
+  stroke-width: 1;
+}
+
+.cad-viewer-pmi-leader.cad-viewer-pmi-dimension {
+  stroke: #1d6fd1;
+}
+
+.cad-viewer-pmi-leader.cad-viewer-pmi-tolerance {
+  stroke: #18794e;
+}
+
+.cad-viewer-pmi-leader.cad-viewer-pmi-datum {
+  stroke: #a35200;
+}
+
+.cad-viewer-pmi-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.9);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.cad-viewer-pmi-label:hover {
+  background: #fff;
+  box-shadow: 0 0 0 2px rgba(31, 182, 212, 0.6);
+}
+
+.cad-viewer-pmi-label.cad-viewer-pmi-dimension {
+  color: #1d6fd1;
+}
+
+.cad-viewer-pmi-label.cad-viewer-pmi-tolerance {
+  color: #18794e;
+}
+
+.cad-viewer-pmi-label.cad-viewer-pmi-datum {
+  color: #a35200;
+}
+
+/* 3D ビューア専用のタイムアウトの残り時間（残りが 5 分を切ったら出す）。 */
+.cad-viewer-timeout {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: #fff4d6;
+  color: #7a4b00;
+  font-size: 12px;
+}
+
+[data-theme='dark'] .cad-viewer-timeout {
+  background: #3a2c0a;
+  color: #ffd98a;
+}
+
+.cad-viewer-sew input {
+  width: 4.2em;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: inherit;
+  font-size: 12px;
+}
+
+.cad-viewer-sew,
+.cad-viewer-hole-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: default;
+}
+
+.cad-viewer-hole-size input[type='number'] {
+  width: 4.2em;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: inherit;
+  font-size: 12px;
+}
+
 .cad-viewer-measures {
   display: flex;
   flex-wrap: wrap;

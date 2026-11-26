@@ -15,6 +15,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -33,7 +34,7 @@ from ..ask_relay import ask_turn
 from ..cad.formats import format_of, supported_extensions_text
 from ..cad.features import summarize_features
 from ..cad.step_summary import summarize_step
-from ..cad.topology import to_local_point, to_local_vector
+from ..cad.topology import TOPOLOGY_KEYS, to_local_point, to_local_vector
 from ..cad.mesh_data import FORMAT as VIEWER_FORMAT
 from ..cad.mesh_data import apply_view_edits, write_viewer_json
 from ..cad.viewer_package import write_package
@@ -91,6 +92,16 @@ _MEASURE_FIELDS: dict[str, dict[str, tuple[str, ...]]] = {
         "flag": ("approximate",),
     },
     "distance": {"value": ("distance",), "num": ("distance",), "vec": ("delta",), "points": ("points",), "items": ("items",), "flag": ("approximate",)},
+    # 点からエッジへの法線距離（垂線の足 foot。直線は延長線、円は円全体の上の足なら on_extension）。
+    "point_edge_distance": {
+        "value": ("distance",),
+        "num": ("distance",),
+        "vec": ("foot", "delta"),
+        "points": ("points",),
+        "items": ("items",),
+        "text": ("geomType",),
+        "flag": ("approximate", "on_extension"),
+    },
     "plane_distance": {"value": ("distance",), "num": ("distance",), "vec": ("direction",), "items": ("items",)},
     "plane_angle": {"value": ("angle_deg",), "num": ("angle_deg",), "items": ("items",)},
     "arc3": {
@@ -116,6 +127,8 @@ def _options(compare_with: str = "") -> dict[str, Any]:
         "stl_region_angle_deg": _setting("cad_viewer_stl_region_angle_deg", 1.0),
         # 開いた形の穴とローカル AXIS（src/cad/topology.py）。キャッシュのキーにも入る。
         "hole_tolerance": _setting("cad_viewer_hole_topology_tolerance", 0.1),
+        # 開いたときに縫合しておくか（しなければ 0。ビューアの「縫合」で後から縫合できる）。
+        "sew_tolerance": float(_setting("cad_viewer_sew_tolerance", 0.5)) if _setting("cad_viewer_sew_on_open", False) else 0.0,
         "local_axis_lengths": list(_setting("cad_viewer_local_axis_lengths", (100.0, 200.0, 300.0)) or []) or "off",
         "local_axis_length_tolerance": _setting("cad_viewer_local_axis_length_tolerance", 0.1),
         "local_axis_angle_tolerance_deg": _setting("cad_viewer_local_axis_angle_tolerance_deg", 0.5),
@@ -311,8 +324,8 @@ async def show_cad_viewer(
         'local' values), and
         viewer_data (@N of the viewer data). If the user changed face / part
         colors in the viewer, also color_change_count (the original model file itself is not changed).
-        If the user measured in the viewer (R / diameter, point distance, plane distance or angle,
-        3-point arc), also measurements: one small entry per measurement with its values.
+        If the user measured in the viewer (R / diameter, point distance, point-to-edge normal distance,
+        plane distance or angle, 3-point arc), also measurements: one small entry per measurement with its values.
         If the user typed an instruction in the viewer, it comes first as user_instruction: treat it
         as the user's next request about the selected elements. Then a small screenshot of the viewer
         as the user saw it when confirming (selected elements highlighted) is also shown to you as an
@@ -381,7 +394,7 @@ async def _show_cad_viewer(
         return f"Error: could not prepare the 3D data for the viewer ({type(e).__name__}: {e})."
     data_id = uuid.uuid4().hex
     _VIEWER_PACKAGES[data_id] = ViewerPackage(path=package_path, thread_id=thread_id)
-    _SAVE_TARGETS[save_id] = _SaveTarget(data=data, out_dir=_resolve_workdir(need_write=True), thread_id=thread_id)
+    _SAVE_TARGETS[save_id] = _SaveTarget(data=data, out_dir=_resolve_workdir(need_write=True), thread_id=thread_id, data_path=data_path)
     try:
         answer = await _ask_selection(question, data, kinds, save_id, data_id)
     finally:
@@ -531,6 +544,8 @@ class _SaveTarget:
     data: dict
     out_dir: Path
     thread_id: str
+    # 開いたときのビューア用データの JSON（「縫合」のサブプロセスが読む。穴・外周は色・表示の変更によらない）。
+    data_path: Path | None = None
     saved: Path | None = None
     saved_token: str = ""
     # 最後に保存したときの書き出しの注意書き（確定したときに LLM にも伝える）。
@@ -609,7 +624,8 @@ def _view_edits(data: dict, payload: dict[str, Any], colors: list[dict[str, Any]
     before_visible = {"face": True, "edge": True, "vertex": True, **((data.get("viewState") or {}).get("visible") or {})}
     changed = bool(colors) or set(hidden_parts) != _initial_hidden(data) or any(before_visible.get(k) != v for k, v in visible.items())
     attrs = _valid_attributes(data, payload.get("attributes"))
-    changed = changed or bool(attrs)
+    # ビューアで「縫合」をした（data の穴・外周・面のまとまりは sew_viewer_data が求め直してある）。
+    changed = changed or bool(attrs) or payload.get("sewn") is True
     edited = apply_view_edits(
         data,
         face_colors={c["id"]: c["to"] for c in colors if c["kind"] == "face"},
@@ -644,6 +660,77 @@ def _auto_save_view(data: dict, res: dict[str, Any], colors: list[dict[str, Any]
         logger.warning("show_cad_viewer: could not save the edited viewer data to %s", path, exc_info=True)
         return ""
     return _register_file(path, "3D viewer data with the user's edits (show_cad_viewer)")
+
+
+# 縫合トレランスの上限（モデルの対角線の長さに対する割合。これより大きいと形全体がつながってしまう）。
+_SEW_MAX_RATIO = 0.1
+
+
+async def sew_viewer_data(payload: dict[str, Any]) -> dict[str, Any]:
+    """ビューアの「縫合」（app.py の action_callback "cad_viewer_sew"）。
+
+    payload の tolerance（縫合トレランス。0 で縫合をやめる）で、ビューア用データの穴・外周・面のまとまりを
+    サブプロセス（src/cad/run_cad.py --topology）で求め直し、ビューアを出している間のデータ（target.data）を
+    書き換える。穴・外周の ID は変わる。形のファイルは変えない。
+
+    Returns:
+        {"ok": True, "holeList", "holes", "outerList", "outers", "faceComponents", "stats"} か {"ok": False, "error"}。
+    """
+    save_id = str(payload.get("save_id") or "")
+    target = _SAVE_TARGETS.get(save_id)
+    if target is None:
+        return {"ok": False, "error": "This viewer is no longer waiting for an answer."}
+    if (cl.user_session.get("thread_id") or "_no_session") != target.thread_id:
+        return {"ok": False, "error": "This viewer belongs to another conversation."}
+    raw = payload.get("tolerance")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or raw < 0:
+        return {"ok": False, "error": "The sewing tolerance must be 0 or a positive number."}
+    diag = float(math.hypot(*((target.data.get("bbox") or {}).get("size") or [0.0, 0.0, 0.0])))
+    if diag > 0 and raw > diag * _SEW_MAX_RATIO:
+        return {"ok": False, "error": f"The sewing tolerance is too large for this model (at most {diag * _SEW_MAX_RATIO:.4g})."}
+    hole_tol = float(_setting("cad_viewer_hole_topology_tolerance", 0.1))
+    if hole_tol <= 0:
+        return {"ok": False, "error": "Holes are not searched ([cad_viewer] hole_topology_tolerance is 0 or less)."}
+    if target.data_path is None or not Path(target.data_path).is_file():
+        return {"ok": False, "error": "The viewer data is no longer available."}
+    if target.lock.locked():
+        return {"ok": False, "error": "The model is being saved or sewn. Wait until it finishes."}
+    async with target.lock:
+        workdir = _resolve_exec_workdir()
+        out = _new_data_path(workdir, prefix="cad_topology")
+        try:
+            cmd = [
+                _state._SCRIPT_PYTHON,
+                str(_RUN_CAD),
+                "--topology",
+                str(target.data_path),
+                "--out",
+                str(out),
+                "--options",
+                json.dumps({"hole_tolerance": hole_tol, "sew_tolerance": float(raw)}),
+            ]
+            failed = await _run(cmd, workdir)
+            if failed:
+                logger.warning("show_cad_viewer: could not sew the faces: %s", failed)
+                reason = failed.split("[stderr]\n", 1)[-1].split("\n[stdout]", 1)[0].strip()
+                return {"ok": False, "error": reason.removeprefix("Error: ")}
+            topo = await asyncio.to_thread(lambda: json.loads(out.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as e:
+            logger.warning("show_cad_viewer: could not sew the faces", exc_info=True)
+            return {"ok": False, "error": str(e)}
+        finally:
+            out.unlink(missing_ok=True)
+        data = target.data
+        for key in TOPOLOGY_KEYS:
+            data.pop(key, None)
+        stats = data.setdefault("stats", {})
+        stats.pop("holes", None)
+        stats.pop("outers", None)
+        for key in TOPOLOGY_KEYS:
+            if key in topo:
+                data[key] = topo[key]
+        stats.update(topo.get("stats") or {})
+    return {"ok": True, **{k: topo[k] for k in TOPOLOGY_KEYS if k in topo}, "stats": topo.get("stats") or {}}
 
 
 async def save_viewer_edits(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1293,7 +1380,10 @@ def _echo_text(
 async def _ask_selection(
     question: str, data: dict, kinds: list[str], save_id: str = "", data_id: str = ""
 ) -> tuple[dict[str, Any], list[tuple[str, int]], list[dict[str, Any]], str] | str:
-    timeout = _resolve_ask_timeout(_setting("show_cad_viewer_timeout_seconds", 0))
+    # 3D ビューア専用のタイムアウト（[cad_viewer] timeout_seconds）。ビューアを閉じずにブラウザを閉じると、
+    # 会話の生成がこの秒数まで待ち続けるので、既定は有限にしてある。
+    seconds = int(_setting("show_cad_viewer_timeout_seconds", 3600))
+    timeout = _resolve_ask_timeout(seconds)
     thread_id = cl.user_session.get("thread_id") or "_no_session"
 
     async def _factory():
@@ -1310,6 +1400,12 @@ async def _ask_selection(
                 "screenshot_long_side": _screenshot_long_side(),
                 # 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差の既定値（度。ビューアで変えられる）。
                 "hole_normal_angle_deg": float(_setting("cad_viewer_hole_normal_angle_deg", 3.0)),
+                # 穴をまとめるときの穴サイズ誤差の既定値（モデルの単位。0 以下なら初めは条件を外す）。
+                "hole_size_tolerance": float(_setting("cad_viewer_hole_size_tolerance", 0.3)),
+                # 「縫合」の欄の初めの値（モデルの単位）。
+                "sew_tolerance": float(_setting("cad_viewer_sew_tolerance", 0.5)),
+                # 待つ秒数（0 = 無期限）。ビューアは残りが少なくなったら残り時間を出す（出し直したときはそこから数える）。
+                "timeout_seconds": max(0, seconds),
             },
         )
         ask_message = cl.AskElementMessage(content=question, element=element, timeout=timeout)
@@ -1375,10 +1471,18 @@ def _holes_summary(data: dict) -> dict[str, Any]:
         "note": (
             "Holes inside the open surface / mesh: closed borders other than the outer boundary of each connected group of faces "
             "(gaps up to topology_tolerance count as connected). Each hole (kind 'hole' in the selection) has center, normal "
-            "(facing the same way as the surface), diameter (mean), area, perimeter, the faces around it and, for B-rep, its border edges. "
+            "(facing the same way as the surface; faces that are not sewn may disagree on which side is the front, so treat "
+            "opposite normals as the same direction), diameter (mean), area, perimeter, the faces around it and, for B-rep, its border edges. "
             "The outer boundaries (kind 'outer', one per connected group of faces) can be selected too and have the same fields."
         ),
     }
+    if geom.get("sewTolerance"):
+        # ビューアの「縫合」（または [cad_viewer] sew_on_open）で、別の面どうしの離れを縫合トレランスまで閉じた。
+        out["sew_tolerance"] = geom["sewTolerance"]
+        out["sew_note"] = (
+            "Gaps between different faces up to sew_tolerance were treated as sewn when finding holes and outer boundaries "
+            "(the model file itself is not changed or sewn)."
+        )
     if len(groups) > len(rows):
         out["more_groups"] = len(groups) - len(rows)
     if geom.get("openChains"):
@@ -1540,7 +1644,9 @@ def _format_result(
         result["measurement_note"] = (
             f"The user measured these in the viewer (lengths in the model units: {units}). "
             "radius = R of a cylinder / sphere / cone (at the clicked point) / fillet torus face or circle edge; "
-            "distance = between 2 points (delta = x, y, z components); plane_distance / plane_angle = between 2 planar faces; "
+            "distance = between 2 points (delta = x, y, z components); point_edge_distance = perpendicular (normal) distance "
+            "from a clicked point to an edge (foot = the foot of the perpendicular on the edge; on_extension: true means the foot "
+            "is on the extension of a line or on the full circle of an arc, outside the edge itself); plane_distance / plane_angle = between 2 planar faces; "
             "arc3 = circle through 3 clicked points. items are the elements the points were on (null = none). "
             "approximate: true means a point was on the display triangles of a curved surface, so the value can be off "
             "by the tessellation tolerance (this includes a cone radius taken at a clicked point). The other radii and "

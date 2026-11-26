@@ -1155,6 +1155,12 @@ class Config:
             （モデルの単位。[cad_viewer].hole_topology_tolerance）。隙間がこれ以下の境目はつながっているとみなす。0 以下で探さない。
         cad_viewer_hole_normal_angle_deg: ビューアで穴にマウスを乗せたとき、同じ向きとしてまとめて強調・選択する
             法線の角度差の既定値（度。[cad_viewer].hole_normal_angle_deg）。ビューアで変えられる。
+        cad_viewer_hole_size_tolerance: 穴をまとめるときの穴サイズ誤差の既定値（モデルの単位。[cad_viewer].hole_size_tolerance）。
+            基準の穴の法線の向きから見た周りの穴の縁と、その穴自身の法線の向きから見た縁のずれがこれ以内の穴だけをまとめる。
+            0 以下なら開いたときは条件を外しておく。ビューアで変えられる。
+        cad_viewer_sew_tolerance: 面の縫合の縫合トレランス（モデルの単位。[cad_viewer].sew_tolerance）。別の面どうしの縁が
+            これ以下の距離で並んでいれば縫い合わせる（ビューアの「縫合」の初めの値）。
+        cad_viewer_sew_on_open: 開いたときに cad_viewer_sew_tolerance で縫合しておくか（[cad_viewer].sew_on_open）。
         cad_viewer_local_axis_lengths: ローカル AXIS とみなす直交する 3 本の線の長さ（X, Y, Z の順。
             [cad_viewer].local_axis_lengths）。None（空・off）で探さない。
         cad_viewer_local_axis_length_tolerance: その線の長さと、3 本の端点が 1 点で会うかの許容差
@@ -1163,8 +1169,9 @@ class Config:
             [cad_viewer].local_axis_angle_tolerance_deg）。
         cad_viewer_cache_max_mb: そのキャッシュの合計の上限（MB。[cad_viewer].cache_max_mb）。超えたら使った時刻の古いものから消す。
             0 以下でキャッシュを使わない。
-        show_cad_viewer_timeout_seconds: 3D ビューアで利用者が選択を確定するのを待つ秒数
-            （[user_response_timeouts].show_cad_viewer_seconds）。0 以下は無期限待ち。
+        show_cad_viewer_timeout_seconds: 3D ビューアで利用者が確定・閉じるのを待つ秒数（3D ビューア専用。
+            [cad_viewer].timeout_seconds、既定 3600。無ければ以前の [user_response_timeouts].show_cad_viewer_seconds）。
+            0 以下は無期限待ち。ブラウザを閉じたまま待ち続けないよう、既定は有限。
     """
 
     # --- LLM (llama.cpp server / OpenAI 互換) ---
@@ -1686,10 +1693,13 @@ class Config:
     cad_viewer_cache_max_mb: int = 2048
     cad_viewer_hole_topology_tolerance: float = 0.1
     cad_viewer_hole_normal_angle_deg: float = 3.0
+    cad_viewer_hole_size_tolerance: float = 0.3
+    cad_viewer_sew_tolerance: float = 0.5
+    cad_viewer_sew_on_open: bool = False
     cad_viewer_local_axis_lengths: tuple[float, float, float] | None = (100.0, 200.0, 300.0)
     cad_viewer_local_axis_length_tolerance: float = 0.1
     cad_viewer_local_axis_angle_tolerance_deg: float = 0.5
-    show_cad_viewer_timeout_seconds: int = 0
+    show_cad_viewer_timeout_seconds: int = 3600
 
 
 def _resolve(base: Path, value: str) -> Path:
@@ -4752,6 +4762,9 @@ def load_config(
             os.getenv("CAD_VIEWER_HOLE_NORMAL_ANGLE_DEG", cad_viewer.get("hole_normal_angle_deg", 3)),
             "[cad_viewer].hole_normal_angle_deg",
         ),
+        cad_viewer_hole_size_tolerance=float(os.getenv("CAD_VIEWER_HOLE_SIZE_TOLERANCE", cad_viewer.get("hole_size_tolerance", 0.3))),
+        cad_viewer_sew_tolerance=max(0.0, float(os.getenv("CAD_VIEWER_SEW_TOLERANCE", cad_viewer.get("sew_tolerance", 0.5)))),
+        cad_viewer_sew_on_open=_as_bool(os.getenv("CAD_VIEWER_SEW_ON_OPEN", cad_viewer.get("sew_on_open", False))),
         cad_viewer_local_axis_lengths=_cad_axis_lengths(
             os.getenv("CAD_VIEWER_LOCAL_AXIS_LENGTHS", cad_viewer.get("local_axis_lengths", "100, 200, 300"))
         ),
@@ -4763,7 +4776,17 @@ def load_config(
             os.getenv("CAD_VIEWER_LOCAL_AXIS_ANGLE_TOLERANCE_DEG", cad_viewer.get("local_axis_angle_tolerance_deg", 0.5)),
             "[cad_viewer].local_axis_angle_tolerance_deg",
         ),
-        show_cad_viewer_timeout_seconds=int(os.getenv("SHOW_CAD_VIEWER_TIMEOUT_SECONDS", timeouts.get("show_cad_viewer_seconds", 0))),
+        # 3D ビューア専用のタイムアウト。以前の [user_response_timeouts] show_cad_viewer_seconds（環境変数
+        # SHOW_CAD_VIEWER_TIMEOUT_SECONDS）は、[cad_viewer] timeout_seconds が無いときだけ使う。
+        show_cad_viewer_timeout_seconds=int(
+            os.getenv(
+                "CAD_VIEWER_TIMEOUT_SECONDS",
+                cad_viewer.get(
+                    "timeout_seconds",
+                    os.getenv("SHOW_CAD_VIEWER_TIMEOUT_SECONDS", timeouts.get("show_cad_viewer_seconds", 3600)),
+                ),
+            )
+        ),
     )
 
     # .locohane/settings.json の "mcp" ブロックがあれば、config.ini/環境変数由来の

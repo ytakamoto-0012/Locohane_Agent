@@ -7,6 +7,7 @@ import type { MessageKey } from '../i18n/messages';
 import {
   CAD_DATA_FORMAT,
   attributeColor,
+  connectedFaces,
   fetchCadPackage,
   dropUnchangedPartColors,
   effectiveColor,
@@ -14,6 +15,8 @@ import {
   itemsOf,
   partOf,
   pmiById,
+  pmiTargets,
+  replaceTopology,
   rgbText,
   sameSelection,
   selectionKey,
@@ -27,6 +30,7 @@ import {
   type CadLocalAxis,
   type CadSavedHistory,
   type CadSelection,
+  type CadTopology,
   type CadViewerProps
 } from './cad/cadData';
 import type { CadScene, CadSceneColors, ViewName } from './cad/CadScene';
@@ -194,6 +198,9 @@ export function CadViewerBar() {
       saveId={props.save_id ?? ''}
       screenshotLongSide={props.screenshot_long_side ?? 0}
       holeAngleDefault={props.hole_normal_angle_deg ?? 3}
+      holeSizeDefault={props.hole_size_tolerance ?? 0.3}
+      sewDefault={props.sew_tolerance ?? 0.5}
+      timeoutSeconds={props.timeout_seconds ?? 0}
       onSubmit={(selected, colors, message, view, screenshot, measurements) =>
         askUser.callback({
           submitted: true,
@@ -287,6 +294,12 @@ interface PanelProps {
   screenshotLongSide: number;
   /** 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差の初めの値（度）。 */
   holeAngleDefault: number;
+  /** 穴をまとめるときの穴サイズ誤差の初めの値（モデルの単位。0 以下なら初めは条件を外す）。 */
+  holeSizeDefault: number;
+  /** 「縫合」の欄の初めの値（モデルの単位）。 */
+  sewDefault: number;
+  /** backend が答えを待つ秒数（0 = 無期限）。残りが少なくなったら残り時間を出す。 */
+  timeoutSeconds: number;
   /** screenshot: 指示があるときだけ撮った今の画面（PNG の data URL）。measurements: ビューアで測った結果。 */
   onSubmit: (
     selected: CadSelection[],
@@ -309,7 +322,12 @@ interface CadViewState {
   history?: CadSavedHistory;
   /** 「座標系」で選んでいたローカル座標系（data.localAxes の ID）。ワールドなら入れない。 */
   local_axis?: number;
+  /** 「縫合」で穴・外周を求め直した（backend は求め直したデータを自動で保存する）。 */
+  sewn?: boolean;
 }
+
+// 残り時間を出し始める秒数（3D ビューア専用のタイムアウトの残りがこれを切ったら出す）。
+const TIMEOUT_WARN_SECONDS = 300;
 
 function initialHiddenParts(data: CadData): Set<number> {
   // 「保存」したデータは保存したときの表示に戻す。それ以外は、DXF で非表示・フリーズのレイヤーを
@@ -375,14 +393,44 @@ function useEditHistory(state: EditSnapshot, apply: (s: EditSnapshot) => void, i
   const redo = useCallback(() => step(future, past), [step]);
   // 保存するときに履歴を読む（ビューア用データの viewState.history に入れる）。
   const entries = useCallback(() => ({ past: past.current, future: future.current, current: last.current }), []);
+  // 履歴の各時点を書き換える（「縫合」で穴・外周の ID が変わったとき、古い ID の穴・外周を外す）。
+  // 今の状態（last）も書き換えるので、呼んだ側は state を同じ fn で書き換えること（変更として積まないため）。
+  const rewrite = useCallback((fn: (s: EditSnapshot) => EditSnapshot) => {
+    past.current = past.current.map(fn);
+    future.current = future.current.map(fn);
+    last.current = fn(last.current);
+    return last.current;
+  }, []);
   const canUndo = past.current.length > 0;
   const canRedo = future.current.length > 0;
-  return useMemo(() => ({ undo, redo, canUndo, canRedo, entries }), [undo, redo, canUndo, canRedo, entries]);
+  return useMemo(() => ({ undo, redo, canUndo, canRedo, entries, rewrite }), [undo, redo, canUndo, canRedo, entries, rewrite]);
+}
+
+/** 穴・外周（ID が「縫合」で変わる）を選択・隠した要素から外した時点。 */
+function withoutLoops(s: EditSnapshot): EditSnapshot {
+  const loop = (k: string) => k === 'hole' || k === 'outer';
+  const selection = s.selection.some((x) => loop(x.kind)) ? s.selection.filter((x) => !loop(x.kind)) : s.selection;
+  const hiddenItems = [...s.hiddenItems].some((k) => loop(k.split(':')[0]))
+    ? new Set([...s.hiddenItems].filter((k) => !loop(k.split(':')[0])))
+    : s.hiddenItems;
+  return selection === s.selection && hiddenItems === s.hiddenItems ? s : { ...s, selection, hiddenItems };
 }
 
 type SaveState ={ kind: 'idle' } | { kind: 'saving' } | { kind: 'saved'; path: string; notes: string[] } | { kind: 'error'; message: string };
 
-function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, holeAngleDefault, onSubmit, onCancel }: PanelProps) {
+function CadViewerPanel({
+  question,
+  kinds,
+  data,
+  saveId,
+  screenshotLongSide,
+  holeAngleDefault,
+  holeSizeDefault,
+  sewDefault,
+  timeoutSeconds,
+  onSubmit,
+  onCancel
+}: PanelProps) {
   const { t } = useI18n();
   const client = useContext(ChainlitContext);
   const sessionId = useRecoilValue(sessionIdState);
@@ -404,7 +452,26 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
   // 空間の原点 (0, 0, 0) の XYZ 軸の表示。
   const [originAxes, setOriginAxes] = useState(true);
   // 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差（度）。
-  const [holeAngle, setHoleAngle] = useState(holeAngleDefault);
+  const [holeAngle, setHoleAngle] = useState(Math.min(holeAngleDefault, 90));
+  // 穴をまとめるときの穴サイズ誤差（使うか・値）。
+  const [holeSizeOn, setHoleSizeOn] = useState(holeSizeDefault > 0);
+  const [holeSize, setHoleSize] = useState(holeSizeDefault > 0 ? holeSizeDefault : 0.3);
+  const holeSizeTol = holeSizeOn ? holeSize : null;
+  // 「縫合」: 縫合トレランス、求め直しの状態、このビューアで縫合したか（確定・閉じるときに backend へ伝える）。
+  // 縫合で穴・外周が無くなっても欄は残す（縫合をやめて戻せるように）。
+  const [canSew] = useState(() => !!saveId && !!(data.holes || data.holeList?.length || data.outerList?.length));
+  const [sewTol, setSewTol] = useState(data.holes?.sewTolerance || sewDefault);
+  const [sewState, setSewState] = useState<{ kind: 'idle' } | { kind: 'sewing' } | { kind: 'error'; message: string }>({ kind: 'idle' });
+  const [appliedSew, setAppliedSew] = useState(data.holes?.sewTolerance ?? 0);
+  const sewnRef = useRef(false);
+  // 縫合で data の穴・外周を書き換えたら増やす（穴・外周の一覧を使う表示を描き直すため）。
+  const [topologyVersion, setTopologyVersion] = useState(0);
+  // PMI の 3D ラベルを出すか。
+  const pmiItems = useMemo(() => [...pmiById(data).values()], [data]);
+  const [pmiLabels, setPmiLabels] = useState(false);
+  // 3D ビューア専用のタイムアウト（[cad_viewer] timeout_seconds）の残り秒数。
+  const deadline = useRef(timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : 0);
+  const [remaining, setRemaining] = useState<number | null>(null);
   // 「座標系」で選んだローカル座標系（null ならワールド）。
   const localAxes = data.localAxes ?? [];
   const [localAxisId, setLocalAxisId] = useState<number | null>(null);
@@ -529,12 +596,24 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
         return;
       }
       setPending([]);
-      const out = measure(tool, picks, infoOf);
+      const out = measure(tool, picks, infoOf, (id) => sceneRef.current?.edgePoints(id) ?? []);
       if ('error' in out) setMeasureError(out.error);
       else setMeasurements((list) => [...list, out.ok].slice(-MEASUREMENTS_MAX));
     },
     [infoOf]
   );
+  // PMI（3D ラベル・パネルの一覧）のクリック: 指す要素を選び、そこへ寄せる（選べない種類の要素も、寄せる範囲には含める）。
+  const selectPmiRef = useRef<(id: string) => void>(() => {});
+  selectPmiRef.current = (id: string) => {
+    const item = pmiById(data).get(id);
+    if (!item) return;
+    const items = pmiTargets(item);
+    boxPick(
+      items.filter((s) => kinds.includes(s.kind)),
+      false
+    );
+    sceneRef.current?.fitItems(items);
+  };
   const chooseMeasureTool = (tool: MeasureTool | null) => {
     setMeasureTool(tool);
     setPending([]);
@@ -562,7 +641,8 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
             onPickGroup: pickGroup,
             onBoxPick: boxPick,
             onPivotSet: () => setPivotPicking(false),
-            onMeasurePick: measurePick
+            onMeasurePick: measurePick,
+            onPmiClick: (id) => selectPmiRef.current(id)
           },
           sceneColors()
         );
@@ -599,6 +679,28 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
   useEffect(() => {
     sceneRef.current?.setHoleAngle(holeAngle);
   }, [holeAngle, status]);
+  useEffect(() => {
+    sceneRef.current?.setHoleSizeTolerance(holeSizeTol);
+  }, [holeSizeTol, status]);
+  useEffect(() => {
+    sceneRef.current?.setMeasureStep(pending.length);
+  }, [pending, status]);
+  useEffect(() => {
+    sceneRef.current?.setPmiLabels(
+      pmiLabels ? pmiItems.map((p) => ({ id: p.id, kind: p.kind, text: p.text, targets: pmiTargets(p) })) : []
+    );
+  }, [pmiLabels, pmiItems, status]);
+  // タイムアウトの残り（残りが TIMEOUT_WARN_SECONDS を切ったら出す。過ぎると backend がビューアを閉じる）。
+  useEffect(() => {
+    if (!deadline.current) return;
+    const tick = () => {
+      const left = Math.max(0, Math.round((deadline.current - Date.now()) / 1000));
+      setRemaining(left <= TIMEOUT_WARN_SECONDS ? left : null);
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
   useEffect(() => {
     sceneRef.current?.setLocalAxis(localAxis);
   }, [localAxis, status]);
@@ -648,11 +750,16 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
   }, []);
 
   const hoverText = useMemo(() => {
+    // 縫合で穴・外周の一覧が変わったら（topologyVersion）描き直す。
+    void topologyVersion;
     if (pivotPicking) return t('cad.hintPivot');
     let item = hover ? describe(itemsOf(data, hover.kind)[hover.id], label(hover), effectiveColor(data, colors, hover), t, data, localAxis) : '';
     if (hover?.kind === 'hole') {
-      const n = sceneRef.current?.holeGroupOf(hover.id).length ?? holeGroup(data, hover.id, holeAngle).length;
-      item += `  ${t('cad.holeGroup', { count: n, deg: fmt(holeAngle) })}`;
+      const n = sceneRef.current?.holeGroupOf(hover.id).length ?? holeGroup(data, hover.id, holeAngle, holeSizeTol).length;
+      item +=
+        holeSizeTol === null
+          ? `  ${t('cad.holeGroup', { count: n, deg: fmt(holeAngle) })}`
+          : `  ${t('cad.holeGroupSize', { count: n, deg: fmt(holeAngle), size: fmt(holeSizeTol) })}`;
     }
     if (measureTool) {
       if (measureError) return t(`cad.measure.error.${measureError}` as MessageKey);
@@ -662,7 +769,7 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
     if (!item && mode === 'hole' && boxMode === 'off') return t('cad.hintHole', { deg: fmt(holeAngle) });
     if (!item && mode === 'outer' && boxMode === 'off') return t('cad.hintOuter');
     return item || t(boxMode === 'off' ? 'cad.hint' : 'cad.hintBox');
-  }, [hover, data, label, t, colors, boxMode, pivotPicking, measureTool, measureError, pending, localAxis, holeAngle, mode]);
+  }, [hover, data, label, t, colors, boxMode, pivotPicking, measureTool, measureError, pending, localAxis, holeAngle, holeSizeTol, mode, topologyVersion]);
 
   const selectAll = () => {
     const ids = sceneRef.current?.selectableIds(mode) ?? [];
@@ -701,6 +808,77 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
       false
     );
   };
+
+  // 連続する面: 選んでいる面（穴・外周を選んでいればその周りの面、部品ならその面）とつながった面（面のまとまり。
+  // 縫合・トポロジートレランスでの突き合わせを含む）の、見えている面をすべて選ぶ。
+  const startFaces = useMemo(() => {
+    // 縫合で穴・外周の周りの面が変わったら（topologyVersion）求め直す。
+    void topologyVersion;
+    const out = new Set<number>();
+    for (const s of selection) {
+      if (s.kind === 'face') out.add(s.id);
+      else if (s.kind === 'hole' || s.kind === 'outer') {
+        const fs = itemsOf(data, s.kind)[s.id]?.faces;
+        if (Array.isArray(fs)) for (const f of fs as number[]) out.add(f);
+      } else if (s.kind === 'part') data.faces.forEach((f, i) => f.part === s.id && out.add(i));
+    }
+    return out;
+  }, [selection, data, topologyVersion]);
+  const canConnected = mode === 'face' && startFaces.size > 0;
+  const selectConnected = () => {
+    const visible = new Set(sceneRef.current?.selectableIds('face') ?? []);
+    boxPick(
+      connectedFaces(data, startFaces)
+        .filter((id) => visible.has(id))
+        .map((id) => ({ kind: 'face' as const, id })),
+      false
+    );
+  };
+
+  // 縫合: 縫合トレランスで穴・外周・面のまとまりを求め直す（app.py の cad_viewer_sew）。穴・外周の ID が変わるので、
+  // 選んでいた・隠していた穴・外周は外す（元に戻すの履歴からも）。
+  const sew = async (tolerance: number) => {
+    if (!saveId || sewState.kind === 'sewing' || !Number.isFinite(tolerance) || tolerance < 0) return;
+    setSewState({ kind: 'sewing' });
+    const action: IAction = {
+      id: '',
+      name: 'cad_viewer_sew',
+      payload: { save_id: saveId, tolerance },
+      label: '',
+      tooltip: '',
+      forId: '',
+      onClick: () => {}
+    };
+    try {
+      const res = await client.callAction(action, sessionId);
+      const r = res?.response;
+      if (!r?.ok) {
+        setSewState({ kind: 'error', message: String(r?.error ?? t('cad.sewFailed')) });
+        return;
+      }
+      replaceTopology(data, r as CadTopology);
+      const cur = history.rewrite(withoutLoops);
+      setSelection(cur.selection);
+      setHiddenItems(cur.hiddenItems);
+      sceneRef.current?.reloadTopology();
+      sewnRef.current = true;
+      setAppliedSew(data.holes?.sewTolerance ?? 0);
+      setTopologyVersion((v) => v + 1);
+      setSewState({ kind: 'idle' });
+      if ((mode === 'hole' && !data.holeList?.length) || (mode === 'outer' && !data.outerList?.length))
+        setMode(kinds.includes('face') ? 'face' : kinds[0]);
+    } catch (err) {
+      setSewState({ kind: 'error', message: err instanceof Error ? err.message : t('cad.sewFailed') });
+    }
+  };
+  const sewText =
+    sewState.kind === 'sewing'
+      ? t('cad.sewing')
+      : sewState.kind === 'error'
+        ? `${t('cad.sewFailed')} ${sewState.message}`
+        : appliedSew > 0
+          ? t('cad.sewn', { tol: fmt(appliedSew), holes: data.holeList?.length ?? 0, outers: data.outerList?.length ?? 0 })
+          : '';
 
   // 表示・非表示（CAD の「表示/非表示」と「表示/非表示空間の切り替え」）。
   const hiddenCount = hiddenItems.size + hiddenParts.size;
@@ -812,7 +990,8 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
       visible: kindVisible,
       ...(Object.keys(attributeEdits).length ? { attributes: attributeEdits } : {}),
       ...(saved ? { history: saved } : {}),
-      ...(localAxis ? { local_axis: localAxis.id } : {})
+      ...(localAxis ? { local_axis: localAxis.id } : {}),
+      ...(sewnRef.current ? { sewn: true } : {})
     };
   };
   const cancel = () => {
@@ -961,6 +1140,17 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
               {t('cad.samePart')}
             </button>
           )}
+          {kinds.includes('face') && (
+            <button
+              type="button"
+              className="cad-viewer-chip"
+              title={t('cad.connectedFacesTitle')}
+              disabled={!canConnected}
+              onClick={selectConnected}
+            >
+              {t('cad.connectedFaces')}
+            </button>
+          )}
           <span className="cad-viewer-sep" />
           {hiddenSpace ? (
             <>
@@ -996,17 +1186,68 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
               <input
                 type="number"
                 min={0}
-                max={180}
+                max={90}
                 step={0.5}
                 value={holeAngle}
                 aria-label={t('cad.holeAngleTitle')}
                 onChange={(e) => {
                   const v = Number(e.target.value);
-                  if (Number.isFinite(v) && v >= 0) setHoleAngle(Math.min(v, 180));
+                  if (Number.isFinite(v) && v >= 0) setHoleAngle(Math.min(v, 90));
                 }}
               />
               °
             </label>
+          )}
+          {mode === 'hole' && (
+            <label className="cad-viewer-chip cad-viewer-hole-size" title={t('cad.holeSizeTitle')}>
+              <input
+                type="checkbox"
+                checked={holeSizeOn}
+                aria-label={t('cad.holeSizeToggle')}
+                onChange={(e) => setHoleSizeOn(e.target.checked)}
+              />
+              {t('cad.holeSize')}
+              <input
+                type="number"
+                min={0}
+                step={0.1}
+                value={holeSize}
+                disabled={!holeSizeOn}
+                aria-label={t('cad.holeSizeTitle')}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (Number.isFinite(v) && v >= 0) setHoleSize(v);
+                }}
+              />
+            </label>
+          )}
+          {canSew && (mode === 'hole' || mode === 'outer') && (
+            <span className="cad-viewer-chip cad-viewer-sew" title={sewText || t('cad.sewTitle')}>
+              {t('cad.sewTol')}
+              <input
+                type="number"
+                min={0}
+                step={0.1}
+                value={sewTol}
+                aria-label={t('cad.sewTitle')}
+                disabled={sewState.kind === 'sewing' || !!closing}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (Number.isFinite(v) && v >= 0) setSewTol(v);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void sew(sewTol);
+                }}
+              />
+              <button type="button" className="cad-viewer-chip" disabled={sewState.kind === 'sewing' || !!closing} onClick={() => void sew(sewTol)}>
+                {sewState.kind === 'sewing' ? t('cad.sewing') : t('cad.sew')}
+              </button>
+              {appliedSew > 0 && (
+                <button type="button" className="cad-viewer-chip" title={t('cad.unsewTitle')} disabled={sewState.kind === 'sewing' || !!closing} onClick={() => void sew(0)}>
+                  {t('cad.unsew')}
+                </button>
+              )}
+            </span>
           )}
         </div>
         <div className="cad-viewer-views">
@@ -1080,6 +1321,17 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
           >
             {t('cad.measure')}
           </button>
+          {pmiItems.length > 0 && (
+            <button
+              type="button"
+              className={`cad-viewer-chip${pmiLabels ? ' active' : ''}`}
+              aria-pressed={pmiLabels}
+              title={t('cad.pmiLabelsTitle')}
+              onClick={() => setPmiLabels((x) => !x)}
+            >
+              {t('cad.pmiLabels')}
+            </button>
+          )}
           {hasDiff && (
             <button
               type="button"
@@ -1174,6 +1426,12 @@ function CadViewerPanel({ question, kinds, data, saveId, screenshotLongSide, hol
         </div>
       </div>
       <div className="cad-viewer-status">
+        {remaining !== null && !closing && (
+          <span className="cad-viewer-timeout" role="status">
+            {t('cad.timeoutLeft', { min: Math.floor(remaining / 60), sec: String(remaining % 60).padStart(2, '0') })}
+          </span>
+        )}
+        {sewText && (mode === 'hole' || mode === 'outer') && <span className="cad-viewer-legend">{sewText}</span>}
         <span className="cad-viewer-hover">{hoverText}</span>
         {hasDiff && diffVisible && <span className="cad-viewer-legend">{t('cad.diffLegend')}</span>}
         <span className="cad-viewer-summary">{summary}</span>

@@ -2025,9 +2025,12 @@ three.js はビューアを開いたときだけ読み込む（`frontend/src/com
 - **回転中心**: 押した後にクリックした面・エッジ・頂点の上の点を回転の中心にする（1 回だけ。もう一度押すとやめる）。向きは変えずに平行移動して
   その点を画面の中央に寄せ、赤い点で示す。右ドラッグの移動・ホイールの拡大縮小をしても中心はその点のまま残る（ArcballControls はこれらの操作で
   内部のギズモ＝回転の中心もカメラと一緒に動かすので、操作が終わるたびに指定した点へ戻す。`CadScene.restoreFixedPivot`）。「全体表示」・視点のボタンでモデルの中心に戻る。
-- **計測（📏）**: 押すと計測の行が開き、クリックで選択する代わりに次の 4 つを測る（計算は `frontend/src/components/cad/measure.ts`）。
+- **計測（📏）**: 押すと計測の行が開き、クリックで選択する代わりに次の 5 つを測る（計算は `frontend/src/components/cad/measure.ts`）。
   - **R / ⌀**: 円筒面・球面・円錐面（クリックした点の高さの半径）・丸め（トーラス面。管の半径）か、円・円弧のエッジを 1 回クリック。
   - **2点間距離**: 2 点をクリックし、距離と ΔX・ΔY・ΔZ を出す。
+  - **点-エッジ距離**: 点をクリックしてからエッジをクリックし、点からエッジへの法線距離（垂線の長さ）を出す。直線は B-rep の始点・終点を通る直線、
+    円・円弧は円へ下ろした垂線で正確な値（足が線分・円弧の外なら `on_extension: true`。延長線・円の上の足）。それ以外の曲線と STL の境目は
+    表示用の折れ線の上で一番近い点（「≈」）。AI へは `point_edge_distance`（距離・垂線の足 `foot`・`delta`）で返す。
   - **面間距離**: 平面を 2 つクリックし、平行なら距離（1 つめの面の法線の向き）、平行でなければなす角（0〜90°）を出す。
   - **3点円弧**: 円弧の上の 3 点をクリックし、3 点を通る円の半径・直径を出す（B-rep の半径を持たない STL や DXF の円弧にも使える）。
 
@@ -2045,21 +2048,47 @@ three.js はビューアを開いたときだけ読み込む（`frontend/src/com
   形に隠れないよう手前に重ねる。左下の小さな軸は向きだけを示すもので、こちらは原点の位置を示す。
 - **穴（開いたサーフェース・メッシュ）**: 面が閉じていない形（開いたシェル・面だけの IGES・DXF の面・開いた STL）では、面の中の穴を探し、
   選ぶ種類に「穴」を出す（穴が 1 つも無ければ出さない）。「穴」のモードでは穴の縁をピンクで描き、穴（縁の線の近くか、縁で囲まれた中）に
-  マウスを乗せると、その穴と法線の向きの差が「法線 ±」の欄の角度（既定 `[cad_viewer] hole_normal_angle_deg` = 3 度）以内の穴をまとめて水色にし、
-  クリックでまとめて選ぶ（すべて選んであればまとめて外す）。法線は面の表側の向きなので、裏向きの穴はまとまらない。範囲選択・全選択も使え、
+  マウスを乗せると、その穴と法線の向きの差が「法線 ±」の欄の角度（既定 `[cad_viewer] hole_normal_angle_deg` = 3 度、上限 90 度）以内の穴をまとめて水色にし、
+  クリックでまとめて選ぶ（すべて選んであればまとめて外す）。法線は穴の縁の面の表側を向くが、縫い合わせていない面は面ごとに表裏がそろって
+  いないことがあるので、向きは表裏を問わずに比べる（`cadData.ts` の `holeGroup`。見た目は同じ向きなのに 180° 逆の法線でまとまらないことがあった）。
+  「サイズ ±」（穴サイズ誤差。既定 ±0.3、`[cad_viewer] hole_size_tolerance`。チェックで外せる）を使うと、マウスを乗せた穴の法線の向きから見た
+  周りの穴の縁が、その穴自身の法線の向きから見た縁と比べてその範囲に収まる穴だけをまとめる（縁の各点の、中心からの距離の差の最大。
+  半径 R の穴が角度 θ 傾いていると R(1 − cos θ) ずれるので、大きい穴ほど小さい傾きで外れる）。範囲選択・全選択も使え、
   ほかのモードに切り替えても選んだ穴の縁はオレンジで残す。選んだ穴は選択結果ファイルの `selected`（`kind: "hole"`）に中心・法線・直径（平均）・
   面積・周長・円らしさ（`circularity`、円で 1）・平面からのずれ（`planarity`）・周りの面と、B-rep では縁のエッジの ID（`edges`）で入る。
   検出（`src/cad/topology.py`、サブプロセスの `run_cad.py` が形をビューア用データにした後に呼ぶ）は表示用の三角形から行う:
-  三角形 1 つにしか属さない辺を境界とし、トポロジートレランス（`[cad_viewer] hole_topology_tolerance`、既定 0.1mm）以内で
-  平行に向かい合う境界の辺どうしは「つながっている」とみなして除く（縫い合わせていない面の境目・分け方の違う境目。許容差より細い切れ込み・
-  小さい穴も穴にしない）。残った境界をループにつなぎ（途切れた端が許容差以内なら橋渡し）、つながった面のまとまりごとに外接箱の最も大きい
-  ループを外周として除き、残りを穴とする（両端の開いた筒では片方の口が外周になる）。`model.holes` に穴の数・許容差・外周の数と、
-  直径・法線でまとめた件数（12 グループまで）を返す。ビューア用データでは `holeList`（穴の情報）と `holes`（縁の線分・`ranges`）。
+  辺ごとに両側の三角形を組にし（同じ面の中は頂点の番号で、面をまたぐところは同じ位置の辺で、三角形が辺の反対側にあるものだけ）、
+  組にならない辺を境界とする。ほぼ同じ面が 2 枚重なっている（フィレット無しのデータとフィレット後のデータが重なっている等）ところは三角形が
+  辺の同じ側にあるので組にせず、重なった面はそれぞれの縁を持つ（以前はすべてつながったとみなされ、外周も穴も見つからなかった）。
+  トポロジートレランス（`[cad_viewer] hole_topology_tolerance`、既定 0.1mm）以内で平行に向かい合い、面が反対側にある境界の辺どうしは
+  「つながっている」とみなして除く（縫い合わせていない面の境目・分け方の違う境目。許容差より細い切れ込み・小さい穴も穴にしない）。
+  残った境界をループにつなぎ（途切れた端が許容差以内なら橋渡し。同じ点から何本も出るときは同じ面の辺を先にたどる）、
+  面のまとまり（上の組と突き合わせでつながった面。B-rep のエッジの共有は使わない）ごとに、まとまりの外接箱の端（厚みのある向きの 2 か所以上）に
+  届くループのうち、届く端が多く外接箱の大きいものを外周として除き、残りを穴とする（両端の開いた筒では片方の口が外周になる。
+  外周の線が途切れて閉じないとき・箱の 1 面に穴があるだけの形では外周を作らず、穴を外周にしない）。`model.holes` に穴の数・許容差・外周の数と、
+  直径・法線でまとめた件数（12 グループまで）を返す。ビューア用データでは `holeList`（穴の情報）と `holes`（縁の線分・`ranges`）、
+  面ごとのまとまりの番号 `faceComponents`（閉じた形にも入る。「連続面」に使う）。
 - **外周**: 上の検出で外周とした縁（つながった面のまとまりごとに 1 本）は、選ぶ種類「外周」（「穴」の隣）で確かめられる。
   「外周」のモードでは外周を濃い黄色で描き、線の近くにマウスを乗せると水色、クリックで 1 本ずつ選ぶ・外す（向きでまとめる動きは無い）。
   隙間がトポロジートレランス以下の面どうしは 1 本の外周で囲まれるので、つながったと判定されたかを目で確かめられる。選んだ外周は
   選択結果ファイルに `kind: "outer"` で、穴と同じ項目（中心・周長・周りの面・B-rep では縁のエッジ等）で入る。ビューア用データでは
   `outerList` と `outers`。
+- **縫合**: 「穴」「外周」のモードの「縫合 ±」に縫合トレランス（既定 `[cad_viewer] sew_tolerance` = 0.5mm）を入れて「縫合」を押すと、
+  上の突き合わせを、別の面の境界の辺どうしに限って縫合トレランス以内まで広げて穴・外周・面のまとまりを求め直す（縫い合わせていない面の
+  離れが穴・外周になるのを防ぐ。1 つの面の中の穴・細い切れ込みは縫合トレランスより小さくても消さない。複数の面にまたがり幅が縫合トレランス
+  以下で残ったループは隙間として除く）。形のファイル自体は縫い合わせない（面・エッジの ID と「保存」で書き出す形は変わらない）。
+  求め直しはアプリの action_callback `cad_viewer_sew`（`src/tools/cad_viewer.py` の `sew_viewer_data`）が、開いたときのビューア用データを
+  サブプロセス（`src/cad/run_cad.py --topology`）に渡して行い、結果の穴・外周・面のまとまりだけをブラウザへ返す。穴・外周の ID が変わるので、
+  選んでいた・隠していた穴・外周は外す（元に戻すの履歴からも）。「縫合を解除」で縫合トレランス 0 に戻す。縫合すると確定・閉じるときに
+  ビューア用データを自動で保存し（`viewer_data`）、`model.holes` に `sew_tolerance` が入る。トレランスはモデルの対角線の 1/10 まで。
+  `[cad_viewer] sew_on_open = true` なら開いたときに縫合しておく（キャッシュのキーにも入る）。
+- **連続面**: 面のモードで「連続面」を押すと、選んでいる面（穴・外周・部品を選んでいればその周りの面・その部品の面）とつながっている面
+  （`faceComponents` が同じ面。エッジ・トポロジートレランス・縫合でつながる面）の、見えている面をすべて選ぶ。`faceComponents` の無い
+  前の版のビューア用データでは、エッジを共有する面をたどる。
+- **PMI 表示**: STEP の PMI があるとき「PMI 表示」で、寸法・幾何公差・データムを 3D のラベル（寸法は青、幾何公差は緑、データムは茶）で出す。
+  ラベルは指す面の中心・エッジの中ほど・部品の面の中心の平均の点から、モデルの中心から外へ向かう向きに引き出し線で離して出し、回転・拡大に
+  ついていく（`CadScene.setPmiLabels`。HTML の文字と SVG の線を重ねる）。指す要素がすべて隠れているラベルは出さない。ラベルのクリックで
+  パネルの PMI の一覧と同じく指す要素を選んで寄せる。指示付きで確定したときの画面にも入る。寸法線・矢印の形（PMI の表示用の形状）は描かない。
 - **座標系（ローカル AXIS）**: モデルの中に、1 点から互いに直交して伸びる長さ 100・200・300 の直線（`[cad_viewer] local_axis_lengths`。X・Y・Z の順）が
   あれば、それをローカル座標系として見つけ（共有する端点が原点、各線の先への向きが X'・Y'・Z'）、ツールバーの「座標系」でワールドと切り替えられる。
   長さと端点の一致は `local_axis_length_tolerance`（既定 0.1）、直交は `local_axis_angle_tolerance_deg`（既定 0.5 度）以内で見る。直線のエッジから
@@ -2146,13 +2175,19 @@ ASCII 以外の文字は `\X2\` で書き、本文を ASCII だけにする。�
 PMI は AP242 でだけ書け、AP203・AP214 で書くときや、OCCT が PMI を書けなかったとき（NIST の CTC-01 等、実際の CAD が書いた PMI の一部）は、
 PMI を除いて書きその旨を `notes` で伝える（元のファイルの PMI はそのまま）。STEP 以外（IGES・BREP・CadQuery コード）の保存も同じスキーマの設定に従う。
 
-**設定**: `[cad_viewer]`（`enabled`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`・`screenshot_enabled`・`screenshot_long_side_pixels`・`step_write_schema`・`cache_dir`・`cache_max_mb`・`hole_topology_tolerance`・`hole_normal_angle_deg`・`local_axis_lengths`・`local_axis_length_tolerance`・`local_axis_angle_tolerance_deg`）と
-`[user_response_timeouts] show_cad_viewer_seconds`（既定 0 = 無期限）。メインエージェントから直接呼べるよう `[main_agent_tool_guard] allow_entries` に登録済み。
+**設定**: `[cad_viewer]`（`enabled`・`timeout_seconds`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`・`screenshot_enabled`・`screenshot_long_side_pixels`・`step_write_schema`・`cache_dir`・`cache_max_mb`・`hole_topology_tolerance`・`sew_tolerance`・`sew_on_open`・`hole_normal_angle_deg`・`hole_size_tolerance`・`local_axis_lengths`・`local_axis_length_tolerance`・`local_axis_angle_tolerance_deg`）。
+メインエージェントから直接呼べるよう `[main_agent_tool_guard] allow_entries` に登録済み。
+
+**タイムアウト**: 3D ビューア専用の `[cad_viewer] timeout_seconds`（既定 3600 秒）だけ「確定」「閉じる」を待ち、過ぎるとビューアを閉じて AI へ時間切れを返す
+（色・表示の変更は自動で保存しない）。ビューアを閉じずにブラウザを閉じると、待っている会話の生成がこの秒数まで残るため、無期限（0 以下）は勧めない
+（以前の既定は無期限で、待機中の処理が溜まっていた）。ビューアは残りが 5 分を切ると下に残り時間を出す。会話を切り替えて戻ってきた画面へ出し直したときは、
+出し直した時点から最大でもう一度この秒数だけ待つ（`_ask_relay_helper.py`）。以前の `[user_response_timeouts] show_cad_viewer_seconds` は、
+`timeout_seconds` が無いときだけ使う。
 サブエージェントには渡さない（画面に出すツールのため）。
 
 **対象外**: CadQuery 独自のアセンブリファイル（`.xml`・`.xbf`）、OBJ・glTF・PLY・3MF 等のほかのメッシュ形式、STL の頂点の選択、
 STEP AP242 の XML 形式（ISO 10303-3001。JAMA の標準属性はこの形式で定義されている。OCCT が読めない）、圧縮した STEP（`.stpZ`）、
-PMI の表示（ビューアに寸法線・注記を描くこと）と PMI の編集、面（形状の一部）に付いたユーザー定義属性、同じ部品を何度も使うアセンブリでの
+PMI の寸法線・矢印・注記の枠の形（STEP の PMI の表示用の形状。ビューアは文字のラベルだけを出す）と PMI の編集、面（形状の一部）に付いたユーザー定義属性、同じ部品を何度も使うアセンブリでの
 インスタンスごとの面の色（定義に付くので全部の配置に効く）。
 
 ## プロンプト資産の自動チューニングループ（evals/）
@@ -2292,8 +2327,9 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[user_response_timeouts]` | `approval_seconds` | `approve_plan`／`run_script`・`execute_python_code`の個別実行確認でユーザー応答を待つ秒数。`0`で無期限待ち | `APPROVAL_TIMEOUT_SECONDS` |
 | `[user_response_timeouts]` | `ask_user_question_seconds` | `AskUserQuestion`（自由記述質問。`labels`省略時は単一入力、指定時は複数項目フォーム）でユーザー応答を待つ秒数。`0`で無期限待ち | `ASK_USER_QUESTION_TIMEOUT_SECONDS` |
 | `[user_response_timeouts]` | `ask_user_choice_seconds` | `ask_user_choice`（選択肢質問）でユーザー応答を待つ秒数。`0`で無期限待ち | `ASK_USER_CHOICE_TIMEOUT_SECONDS` |
-| `[user_response_timeouts]` | `show_cad_viewer_seconds` | `show_cad_viewer`（3D ビューアでの選択）でユーザーの確定を待つ秒数。`0`で無期限待ち（既定） | `SHOW_CAD_VIEWER_TIMEOUT_SECONDS` |
+| `[user_response_timeouts]` | `show_cad_viewer_seconds` | 以前の 3D ビューアの待ち時間。`[cad_viewer] timeout_seconds` が無いときだけ使う（config.ini からは外した） | `SHOW_CAD_VIEWER_TIMEOUT_SECONDS` |
 | `[cad_viewer]` | `enabled` | 3D ビューア（`show_cad_viewer`）を使えるようにするか。`false` ならツールはエラーを返す | `CAD_VIEWER_ENABLED` |
+| `[cad_viewer]` | `timeout_seconds` | 3D ビューア専用のタイムアウト。ビューアの「確定」「閉じる」を待つ秒数（既定 3600）。過ぎるとビューアを閉じる。ブラウザを閉じたまま待ち続けないよう、0 以下（無期限）は勧めない | `CAD_VIEWER_TIMEOUT_SECONDS` |
 | `[cad_viewer]` | `max_triangles` | ビューアへ送る三角形の上限（既定 1000000）。B-rep は超えたら粗く作り直し、それでも超えれば（STL は超えた時点で）エラー。0 以下で無制限。曲面の多い STL は三角形 100 万個でデータ約 500MB・変換に約 40 秒・メモリ 3〜4GB を使う。増やす場合は `[scripts] timeout` も合わせて延ばし、メモリの余裕を確かめる | `CAD_VIEWER_MAX_TRIANGLES` |
 | `[cad_viewer]` | `linear_deflection_ratio` | 曲面を三角形に分けるときの許容差（形の対角線の長さに対する割合、既定 0.001） | `CAD_VIEWER_LINEAR_DEFLECTION_RATIO` |
 | `[cad_viewer]` | `angular_deflection_deg` | 曲面を三角形に分けるときの角度の許容差（度、既定 20） | `CAD_VIEWER_ANGULAR_DEFLECTION_DEG` |
@@ -2303,6 +2339,11 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[cad_viewer]` | `step_write_schema` | 「保存」で書く STEP のスキーマ。`auto`（元の STEP と同じ、元が STEP でなければ AP242・既定）・`AP203`・`AP214`・`AP242`。PMI は AP242 でだけ書ける | `CAD_VIEWER_STEP_WRITE_SCHEMA` |
 | `[cad_viewer]` | `cache_dir` | CAD ファイルから作ったビューア用データのキャッシュの置き場（既定 `${common_data_dir}/cad_cache`）。同じファイル・同じ設定なら形を読み直さずに使う | `CAD_VIEWER_CACHE_DIR` |
 | `[cad_viewer]` | `cache_max_mb` | そのキャッシュの合計の上限（MB、既定 2048）。超えたら使った時刻の古いものから消す。0 以下で使わない（溜まっていた分は本体の起動時に消す） | `CAD_VIEWER_CACHE_MAX_MB` |
+| `[cad_viewer]` | `hole_topology_tolerance` | 開いたサーフェース・メッシュの穴を探すトポロジートレランス（モデルの単位、既定 0.1）。隙間がこれ以下の境目はつながっているとみなす。0 以下で探さない | `CAD_VIEWER_HOLE_TOPOLOGY_TOLERANCE` |
+| `[cad_viewer]` | `sew_tolerance` | 面の縫合の縫合トレランス（モデルの単位、既定 0.5）。別の面どうしの縁がこれ以下で並んでいれば縫い合わせる。ビューアの「縫合」の初めの値 | `CAD_VIEWER_SEW_TOLERANCE` |
+| `[cad_viewer]` | `sew_on_open` | 開いたときに `sew_tolerance` で縫合しておくか（既定 `false`。ビューアの「縫合」で後から縫合できる） | `CAD_VIEWER_SEW_ON_OPEN` |
+| `[cad_viewer]` | `hole_normal_angle_deg` | 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差（度、既定 3。表裏は問わない。ビューアで変えられる） | `CAD_VIEWER_HOLE_NORMAL_ANGLE_DEG` |
+| `[cad_viewer]` | `hole_size_tolerance` | 穴をまとめるときの穴サイズ誤差（モデルの単位、既定 0.3。0 以下なら初めは外す。ビューアの「サイズ ±」で変えられる） | `CAD_VIEWER_HOLE_SIZE_TOLERANCE` |
 | `[plan]` | `allow_badge_unlock` | Plan Mode バッジの双方向切り替えを許可するか | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | 承認済み（Edit Automatically）状態で`create_plan`を再度呼んだ際、`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態を維持したままstepsだけ差し替える | `PLAN_RESET_APPROVAL_ON_RECREATE` |
 | `[plan]` | `reset_approval_on_new_message` | 新しいユーザーメッセージを受け取るたびに`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態をメッセージをまたいで維持する（`thinking_loop_guard`のリトライ上限到達後、ユーザーが続行メッセージを送っても再承認が不要になる） | `PLAN_RESET_APPROVAL_ON_NEW_MESSAGE` |

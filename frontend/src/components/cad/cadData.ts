@@ -224,11 +224,22 @@ export interface CadData {
   /** 穴・ボスの一覧（B-rep のときだけ）。 */
   features?: CadFeature[];
   /** 開いた形の面の中の穴（holeList）の縁の線（線分ごとに 2 点。穴 i は ranges[i] の範囲）。 */
-  holes?: { positions: CadBuffer; ranges: [number, number][]; tolerance?: number; outerLoops?: number; openChains?: number };
+  holes?: {
+    positions: CadBuffer;
+    ranges: [number, number][];
+    tolerance?: number;
+    /** 縫合トレランス（0 なら縫合していない）と、縫い合わせた境界の辺の数。 */
+    sewTolerance?: number;
+    sewnEdges?: number;
+    outerLoops?: number;
+    openChains?: number;
+  };
   holeList?: CadItemInfo[];
   /** つながった面のまとまりの外周（outerList）の線（holes と同じ形）。 */
   outers?: { positions: CadBuffer; ranges: [number, number][] };
   outerList?: CadItemInfo[];
+  /** 面ごとの、つながった面のまとまりの番号（src/cad/topology.py。縫合・許容差での突き合わせを含む）。 */
+  faceComponents?: number[];
   /** モデルの中の直交する 3 本の線で決まるローカル座標系（src/cad/topology.py の find_local_axes）。 */
   localAxes?: CadLocalAxis[];
   /** 前の版との比較（show_cad_viewer の compare_with）。added / removed は増えた・削った部分の三角形。 */
@@ -278,6 +289,30 @@ export interface CadViewerProps {
   screenshot_long_side?: number;
   /** 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差の既定値（度、[cad_viewer].hole_normal_angle_deg）。 */
   hole_normal_angle_deg?: number;
+  /** 穴をまとめるときの穴サイズ誤差の既定値（モデルの単位、[cad_viewer].hole_size_tolerance。0 以下なら初めは外す）。 */
+  hole_size_tolerance?: number;
+  /** 「縫合」の欄の初めの値（モデルの単位、[cad_viewer].sew_tolerance）。 */
+  sew_tolerance?: number;
+  /** backend が答えを待つ秒数（[cad_viewer].timeout_seconds。0 = 無期限）。残りが少なくなったら残り時間を出す。 */
+  timeout_seconds?: number;
+}
+
+/** 「縫合」（app.py の action_callback "cad_viewer_sew"）が返す、求め直した穴・外周・面のまとまり。 */
+export type CadTopology = Pick<CadData, 'holeList' | 'holes' | 'outerList' | 'outers' | 'faceComponents'> & {
+  stats?: Record<string, number>;
+};
+
+/** data の穴・外周・面のまとまりを topology に置き換える（無い項目は消す）。data そのものを書き換える。 */
+export function replaceTopology(data: CadData, topology: CadTopology): void {
+  for (const key of ['holeList', 'holes', 'outerList', 'outers', 'faceComponents'] as const) {
+    if (topology[key] === undefined) delete data[key];
+    else (data as unknown as Record<string, unknown>)[key] = topology[key];
+  }
+  const stats = { ...data.stats };
+  delete stats.holes;
+  delete stats.outers;
+  data.stats = { ...stats, ...(topology.stats ?? {}) };
+  loopPointCache.delete(data);
 }
 
 /** ローカル座標系。origin と単位ベクトル x・y・z はワールド座標（右手系でなければ rightHanded が false）。 */
@@ -309,22 +344,108 @@ export function toLocalVector(axis: CadLocalAxis | null, v: ArrayLike<number>): 
   return [dot3(axis.x, v), dot3(axis.y, v), dot3(axis.z, v)];
 }
 
+// 穴の縁の点（holes.positions の線分の始点。穴 i は ranges[i]）。データごとに 1 回だけ読む。
+const loopPointCache = new WeakMap<CadData, Float32Array>();
+
+function holeLoopPositions(data: CadData): Float32Array {
+  let p = loopPointCache.get(data);
+  if (!p) {
+    p = decodeFloat32(data.holes?.positions);
+    loopPointCache.set(data, p);
+  }
+  return p;
+}
+
 /**
- * 穴 id と同じ向き（法線のなす角が deg 度以内。裏向きは含めない）の穴の ID（id 自身を含む、昇順）。
- * 法線は面の表側を向く（src/cad/topology.py）。
+ * 穴の縁を、基準の向き base（単位ベクトル）から見たときと、穴自身の法線の向きから見たときの、縁の線のずれの最大
+ * （中心からの距離の差。傾いた穴ほど・大きい穴ほど見かけの縁が内側へずれる）。縁の点が無ければ null。
  */
-export function holeGroup(data: CadData, id: number, deg: number): number[] {
+export function holeOutlineDeviation(data: CadData, id: number, base: ArrayLike<number>): number | null {
+  const hole = data.holeList?.[id];
+  const range = data.holes?.ranges?.[id];
+  const c = hole?.center;
+  const n = hole?.normal;
+  if (!range || !c || !n) return null;
+  const pos = holeLoopPositions(data);
+  const [start, count] = range;
+  let worst = 0;
+  for (let k = 0; k < count; k++) {
+    // 線分ごとに 2 点並ぶ（src/cad/topology.py の _loop_items）。始点だけ見れば縁の点を 1 回ずつ見る。
+    const o = (start + k) * 6;
+    if (o + 2 >= pos.length) return null;
+    const r = [pos[o] - c[0], pos[o + 1] - c[1], pos[o + 2] - c[2]];
+    const rr = dot3(r, r);
+    const along = dot3(r, n);
+    const own = Math.sqrt(Math.max(0, rr - along * along));
+    const across = dot3(r, base);
+    const seen = Math.sqrt(Math.max(0, rr - across * across));
+    worst = Math.max(worst, Math.abs(own - seen));
+  }
+  return count ? worst : null;
+}
+
+/**
+ * 穴 id と同じ向き（法線のなす角が deg 度以内）の穴の ID（id 自身を含む、昇順）。
+ * 法線は穴の縁の面の表側を向く（src/cad/topology.py）が、縫い合わせていない面は面ごとに表裏がそろっていないことが
+ * あるので、向きは表裏を問わずに比べる（見た目は同じ向きの穴が、表裏が逆なだけで外れないように）。
+ * sizeTol（モデルの単位。null で使わない）を渡すと、穴 id の法線の向きから見た縁が、その穴自身の法線の向きから
+ * 見た縁と比べて ±sizeTol に収まる穴だけにする（holeOutlineDeviation）。
+ */
+export function holeGroup(data: CadData, id: number, deg: number, sizeTol: number | null = null): number[] {
   const holes = data.holeList ?? [];
   const base = holes[id]?.normal;
   if (!base) return holes[id] ? [id] : [];
-  const cos = Math.cos((Math.max(0, Math.min(180, deg)) * Math.PI) / 180);
+  const cos = Math.cos((Math.max(0, Math.min(90, deg)) * Math.PI) / 180);
   const out: number[] = [];
   holes.forEach((h, i) => {
+    if (i === id) {
+      out.push(i);
+      return;
+    }
     const n = h.normal;
-    // 丸めた単位ベクトルなので、内積を 1 で切ってから比べる（0° のとき自身が外れないように少し甘くする）。
-    if (i === id || (n && Math.min(1, dot3(base, n)) >= cos - 1e-9)) out.push(i);
+    // 丸めた単位ベクトルなので、内積を 1 で切ってから比べる（0° のとき同じ向きの穴が外れないように少し甘くする）。
+    if (!n || Math.min(1, Math.abs(dot3(base, n))) < cos - 1e-9) return;
+    if (sizeTol !== null && sizeTol >= 0) {
+      const dev = holeOutlineDeviation(data, i, base);
+      if (dev === null || dev > sizeTol + 1e-9) return;
+    }
+    out.push(i);
   });
   return out;
+}
+
+/**
+ * 面 ids とつながった面（同じ面のまとまり。faceComponents）すべての ID（昇順）。まとまりが無いデータ（古い
+ * ビューア用データ）では、エッジを共有する面をたどる。
+ */
+export function connectedFaces(data: CadData, ids: Iterable<number>): number[] {
+  const comps = data.faceComponents;
+  const start = [...ids].filter((i) => i >= 0 && i < data.faces.length);
+  if (comps && comps.length === data.faces.length) {
+    const want = new Set(start.map((i) => comps[i]));
+    const out: number[] = [];
+    comps.forEach((c, i) => {
+      if (want.has(c)) out.push(i);
+    });
+    return out;
+  }
+  const byFace = new Map<number, number[]>();
+  for (const e of data.edgeList) {
+    const fs = Array.isArray(e.faces) ? (e.faces as number[]) : [];
+    for (const f of fs) for (const g of fs) if (f !== g) (byFace.get(f) ?? byFace.set(f, []).get(f)!).push(g);
+  }
+  const seen = new Set(start);
+  const stack = [...start];
+  while (stack.length) {
+    const f = stack.pop()!;
+    for (const g of byFace.get(f) ?? []) {
+      if (!seen.has(g)) {
+        seen.add(g);
+        stack.push(g);
+      }
+    }
+  }
+  return [...seen].sort((a, b) => a - b);
 }
 
 export const CAD_DATA_FORMAT = 'locohane-cad-viewer/1';

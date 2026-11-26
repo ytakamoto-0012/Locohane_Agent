@@ -5,15 +5,26 @@ STL を同じ処理で扱う。run_cad.py が形をビューア用データに�
 
 穴（``holeList``・``holes``）:
 
-1. 表示用の三角形の頂点を同じ座標で 1 つにまとめ（許容差の 1/1000 の刻み）、三角形 1 つにしか属さない辺を境界の辺とする。
-   B-rep は面ごとに三角形を作るが、隣り合う面のエッジの点は同じ位置なので、つながった面の境目は境界にならない。
-2. トポロジートレランス（既定 0.1mm）: 境界の辺のうち、平行に近い別の境界の辺から許容差以内に並ぶものは、隙間が許容差以下の「つながった」境目として除く（縫い合わせていない面どうし等）。
+1. 表示用の三角形の頂点を同じ座標で 1 つにまとめ（許容差の 1/1000 の刻み）、辺ごとに両側の三角形を組にする。
+   同じ面の三角形どうし（元の頂点の番号が同じ辺）は先に組にし、残りは同じ位置の辺どうしで、三角形が辺の
+   反対側にあるもの（「辺から三角形の残りの頂点への向き」〔面の側〕がなす角が 60° を超える）だけを組にする。
+   組にならない辺が境界の辺。B-rep は面ごとに三角形を作るが、隣り合う面のエッジの点は同じ位置なので、
+   つながった面の境目は境界にならない。同じ側に面がある辺（フィレット前と後の面が重なっている等、ほぼ同じ面が
+   2 枚重なっているところ）は組にしないので、重なった面はそれぞれの縁を持つ。
+2. トポロジートレランス（既定 0.1mm）: 境界の辺のうち、平行に近い別の境界の辺から許容差以内に並び、面が反対側に
+   あるものは、隙間が許容差以下の「つながった」境目として除く（縫い合わせていない面どうし等）。
    許容差より細い切れ込み・小さい穴も同じ理由で消える。
-3. 残った境界の辺をループにつなぐ（途切れた端どうしが許容差以内なら橋渡しする）。平均の幅（2 × 面積 ÷ 周長）が
-   許容差以下のループは隙間として除く。
-4. つながった面のまとまり（部分）ごとに、外接箱の最も大きいループを外周（``outerList``・``outers``）とし、
-   残りを穴とする（両端の開いた筒では片方の口が外周、もう片方が穴になる）。
-5. 穴の法線はループの面積ベクトル（Newell の方法）を、穴の縁の三角形の向き（面の表側）に合わせたもの。
+3. 縫合（``sew_tolerance``。0 で縫合しない）: 2 と同じ突き合わせを、別の面の境界の辺どうしに限って縫合トレランス
+   以内まで広げる（面と面の離れを閉じる。1 つの面の中の小さい穴・細い切れ込みは消さない）。
+4. 残った境界の辺をループにつなぐ（途切れた端どうしが許容差以内なら橋渡しする）。平均の幅（2 × 面積 ÷ 周長）が
+   許容差以下のループ、縫合したときは複数の面にまたがり幅が縫合トレランス以下のループは隙間として除く。
+5. 面のまとまり（部分）: 1 の組と 2・3 の突き合わせでつながった面を 1 つにまとめる（``faceComponents``。面ごとの番号）。
+   B-rep のエッジの共有は使わない（縫い合わせた IGES で、重なった 2 枚の面がエッジを共有していることがあるため）。
+6. まとまりごとに、まとまりの外接箱の端（2 か所以上。厚みの無い向きは数えない）に届くループのうち、届く端が多く外接箱の
+   大きいものを外周（``outerList``・``outers``）とし、残りを穴とする（両端の開いた筒では片方の口が外周、もう片方が穴になる）。
+   外周の線が途切れて閉じていないときに、一番大きい穴を外周にしないため。
+7. 穴の法線はループの面積ベクトル（Newell の方法）を、穴の縁の三角形の向き（面の表側）に合わせたもの。
+   縫い合わせていない面は面ごとに表裏がそろっていないことがあるので、ビューアは向きの差を符号によらずに比べる。
 
 ローカル AXIS（``localAxes``）: 直線のエッジのうち長さが X・Y・Z の長さ（既定 100・200・300）に許容差以内で合う 3 本が、
 1 つの端点を共有して互いに直交するもの。共有する端点を原点、そこから各線の先への向きを X・Y・Z とする
@@ -42,6 +53,11 @@ LOCAL_AXES_MAX = 20
 _SAMPLES = (0.5, 0.1, 0.9, 0.3, 0.7)
 # 突き合わせる辺どうしが平行とみなす向きの差。
 _PARALLEL_COS = math.cos(math.radians(45))
+# 辺の両側の三角形が「反対側にある」とみなす、面の側の向き（辺から三角形の残りの頂点への向き）の内積の上限
+# （なす角が 60° を超える。ほぼ同じ面が重なっていると 0°、平らにつながると 180°、直角に折れると 90°）。
+_OPPOSITE_COS = 0.5
+# 外周に選ぶループが届いていなければならない、まとまりの外接箱の端の数（厚みのある向きが 2 つ以上あるとき）。
+_OUTER_MIN_SIDES = 2
 
 
 # ---------------------------------------------------------------------------
@@ -56,15 +72,11 @@ def attach_topology(data: dict[str, Any], options: dict[str, Any] | None = None)
     """
     options = options or {}
     try:
-        tol = float(options.get("hole_tolerance", DEFAULT_HOLE_TOLERANCE))
-        if tol > 0:
-            found = find_boundary_holes(data, tol)
-            if found is not None:
-                data["holeList"] = found["holeList"]
-                data["holes"] = found["holes"]
-                data["outerList"] = found["outerList"]
-                data["outers"] = found["outers"]
-                data.setdefault("stats", {}).update(holes=len(found["holeList"]), outers=len(found["outerList"]))
+        apply_holes(
+            data,
+            float(options.get("hole_tolerance", DEFAULT_HOLE_TOLERANCE)),
+            float(options.get("sew_tolerance", 0.0) or 0.0),
+        )
         lengths = _axis_lengths(options.get("local_axis_lengths"))
         if lengths:
             axes = find_local_axes(
@@ -105,23 +117,62 @@ def _decode(value: Any, dtype: str, width: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def find_boundary_holes(data: dict[str, Any], tolerance: float) -> dict[str, Any] | None:
-    """ビューア用データの三角形から、開いた形の穴と外周を求める。境界が無い（閉じた形・三角形が無い）なら None。
+# apply_holes が書き換えるビューア用データのキー（縫合をやり直すとき、前の結果を消してから入れる）。
+TOPOLOGY_KEYS = ("holeList", "holes", "outerList", "outers", "faceComponents")
 
-    戻り値は {"holeList": 穴の情報, "holes": 穴の縁の線分, "outerList": 外周の情報, "outers": 外周の線分}。
+
+def apply_holes(data: dict[str, Any], tolerance: float, sew_tolerance: float = 0.0) -> dict[str, Any] | None:
+    """data の穴・外周・面のまとまりを求め直して入れる（前の結果は消す）。tolerance が 0 以下なら穴は探さない。
+
+    ビューアの「縫合」（src/tools/cad_viewer.py の sew_viewer_data）は、縫合トレランスを変えてこれを呼び直す。
+    戻り値は find_boundary_holes の結果（三角形が無ければ None）。
+    """
+    for key in TOPOLOGY_KEYS:
+        data.pop(key, None)
+    stats = data.get("stats")
+    if isinstance(stats, dict):
+        stats.pop("holes", None)
+        stats.pop("outers", None)
+    found = find_boundary_holes(data, tolerance, sew_tolerance)
+    if found is None:
+        return None
+    # 面のまとまり（「連続する面」の選択に使う）は、閉じた形でも入れる。
+    if found.get("faceComponents") is not None:
+        data["faceComponents"] = found["faceComponents"]
+    if tolerance > 0 and found.get("holes") is not None:
+        data["holeList"] = found["holeList"]
+        data["holes"] = found["holes"]
+        data["outerList"] = found["outerList"]
+        data["outers"] = found["outers"]
+        data.setdefault("stats", {}).update(holes=len(found["holeList"]), outers=len(found["outerList"]))
+    return found
+
+
+def find_boundary_holes(data: dict[str, Any], tolerance: float, sew_tolerance: float = 0.0) -> dict[str, Any] | None:
+    """ビューア用データの三角形から、開いた形の穴と外周、面のまとまりを求める。三角形が無ければ None。
+
+    戻り値は {"faceComponents": 面ごとのまとまりの番号} と、境界があれば（tolerance > 0 のとき）
+    {"holeList": 穴の情報, "holes": 穴の縁の線分, "outerList": 外周の情報, "outers": 外周の線分}。
+    sew_tolerance（0 以下で縫合しない）は、別の面の境界の辺どうしを突き合わせる距離（「縫合」）。
     """
     mesh = data.get("mesh") or {}
     positions = _decode(mesh.get("positions"), "f4", 3).astype(np.float64)
     indices = _decode(mesh.get("indices"), "u4", 3).astype(np.int64)
     if not len(indices):
         return None
-    tri_face = _triangle_faces(mesh.get("faceRanges") or [], len(indices))
-    tris = _Boundary(positions, indices, tolerance)
-    if not len(tris.a):
-        return None
-    tris.match_within_tolerance()
-    loops, open_chains = tris.loops()
     faces = data.get("faces") or []
+    tri_face = _triangle_faces(mesh.get("faceRanges") or [], len(indices))
+    find_holes = tolerance > 0
+    tol = tolerance if find_holes else DEFAULT_HOLE_TOLERANCE
+    sew = max(float(sew_tolerance), 0.0) if find_holes else 0.0
+    tris = _Boundary(positions, indices, tol, sew, tri_face)
+    if find_holes:
+        tris.match_within_tolerance()
+    comp = _face_components(len(faces), tris.face_pairs(tri_face))
+    out: dict[str, Any] = {"faceComponents": _renumber(comp).tolist()}
+    if not find_holes or not len(tris.a):
+        return out
+    loops, open_chains = tris.loops()
     edges = data.get("edgeList") or []
     is_brep = (data.get("source") or {}).get("format") != "STL"
 
@@ -132,23 +183,16 @@ def find_boundary_holes(data: dict[str, Any], tolerance: float) -> dict[str, Any
         info = _loop_info(pts, loop_tris, tri_normals, tri_face)
         if info is None:
             continue
-        if info["_width"] <= tolerance:
+        # 許容差以下の幅のループ、縫合したときは面と面の間に残った縫合トレランス以下の幅のループは隙間。
+        if info["_width"] <= tol or (sew > tol and len(info["_faces"]) > 1 and info["_width"] <= sew):
             gaps += 1
             continue
         candidates.append(info)
     if not candidates and not open_chains and not gaps:
-        return None
+        return out
 
-    # つながった面のまとまり（部分）ごとに、外接箱の最も大きいループを外周とする。
-    comp = _face_components(len(faces), edges, tris.matched_face_pairs(tri_face))
-    outer: dict[int, int] = {}
-    for i, c in enumerate(candidates):
-        key = int(comp[c["_faces"][0]]) if c["_faces"] and len(comp) else -1
-        c["_component"] = key
-        j = outer.get(key)
-        if j is None or (c["_diag"], c["perimeter"]) > (candidates[j]["_diag"], candidates[j]["perimeter"]):
-            outer[key] = i
-    outer_ids = set(outer.values())
+    face_boxes = _face_boxes(positions, indices, mesh.get("faceRanges") or [], len(faces))
+    outer_ids = _choose_outers(candidates, comp, face_boxes, max(tol, sew))
     holes = [c for i, c in enumerate(candidates) if i not in outer_ids]
     outers = [candidates[i] for i in sorted(outer_ids)]
 
@@ -157,8 +201,83 @@ def find_boundary_holes(data: dict[str, Any], tolerance: float) -> dict[str, Any
 
     hole_items, hole_geometry = _loop_items(holes, "hole", faces)
     outer_items, outer_geometry = _loop_items(outers, "outer", faces)
-    hole_geometry.update(tolerance=rnd(tolerance), outerLoops=len(outer_ids), openChains=open_chains, gapLoops=gaps)
-    return {"holeList": hole_items, "holes": hole_geometry, "outerList": outer_items, "outers": outer_geometry}
+    hole_geometry.update(
+        tolerance=rnd(tol),
+        sewTolerance=rnd(sew),
+        sewnEdges=int(tris.sewn_count),
+        outerLoops=len(outer_ids),
+        openChains=open_chains,
+        gapLoops=gaps,
+    )
+    out.update(holeList=hole_items, holes=hole_geometry, outerList=outer_items, outers=outer_geometry)
+    return out
+
+
+def _renumber(comp: np.ndarray) -> np.ndarray:
+    """まとまりの番号を、最初に出てきた順の 0, 1, 2, … にする。"""
+    if not len(comp):
+        return comp
+    _, first, inverse = np.unique(comp, return_index=True, return_inverse=True)
+    order = np.argsort(np.argsort(first))
+    return order[inverse.reshape(-1)].astype(np.int64)
+
+
+def _face_boxes(positions: np.ndarray, indices: np.ndarray, face_ranges: Sequence[Sequence[int]], n_faces: int) -> np.ndarray:
+    """面ごとの三角形の外接箱 (n_faces, 2, 3)。三角形の無い面は NaN。"""
+    out = np.full((n_faces, 2, 3), np.nan)
+    if not len(indices):
+        return out
+    p = positions[indices]
+    lo, hi = p.min(axis=1), p.max(axis=1)
+    for fid, (start, count) in enumerate(face_ranges[:n_faces]):
+        s, c = int(start), int(count)
+        if c > 0:
+            out[fid, 0] = lo[s : s + c].min(axis=0)
+            out[fid, 1] = hi[s : s + c].max(axis=0)
+    return out
+
+
+def _choose_outers(candidates: list[dict[str, Any]], comp: np.ndarray, face_boxes: np.ndarray, tol: float) -> set[int]:
+    """まとまりごとの外周のループ（candidates の番号）。
+
+    まとまりの外接箱の端（各軸の最小・最大。厚みの無い軸は数えない）に届く数が多く、外接箱の大きいループを外周にする。
+    外周は形の端を回るので端に届く。届く端が _OUTER_MIN_SIDES（厚みのある軸が 1 つなら 1）に満たないループは外周に
+    しない（外周の線が途切れて閉じなかったとき、穴を外周にしてしまわないように）。
+    """
+    by_comp: dict[int, list[int]] = {}
+    for i, c in enumerate(candidates):
+        key = int(comp[c["_faces"][0]]) if c["_faces"] and len(comp) else -1
+        c["_component"] = key
+        by_comp.setdefault(key, []).append(i)
+    out: set[int] = set()
+    for key, ids in by_comp.items():
+        if key >= 0 and len(face_boxes):
+            members = face_boxes[comp == key]
+            members = members[~np.isnan(members[:, 0, 0])]
+        else:
+            members = np.zeros((0, 2, 3))
+        if not len(members):
+            best = max(ids, key=lambda i: (candidates[i]["_diag"], candidates[i]["perimeter"]))
+            out.add(best)
+            continue
+        lo, hi = members[:, 0].min(axis=0), members[:, 1].max(axis=0)
+        eps = max(2.0 * tol, 1e-4 * float(np.linalg.norm(hi - lo)))
+        thick = [k for k in range(3) if hi[k] - lo[k] > 2 * eps]
+        if not thick:
+            best = max(ids, key=lambda i: (candidates[i]["_diag"], candidates[i]["perimeter"]))
+            out.add(best)
+            continue
+        need = min(_OUTER_MIN_SIDES, len(thick))
+        scored = []
+        for i in ids:
+            pts = candidates[i]["_points"]
+            pmin, pmax = pts.min(axis=0), pts.max(axis=0)
+            touch = sum(int(pmin[k] <= lo[k] + eps) + int(pmax[k] >= hi[k] - eps) for k in thick)
+            if touch >= need:
+                scored.append(((touch, candidates[i]["_diag"], candidates[i]["perimeter"]), i))
+        if scored:
+            out.add(max(scored)[1])
+    return out
 
 
 def _loop_items(loops: list[dict[str, Any]], kind: str, faces: list[dict]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -199,10 +318,19 @@ def _triangle_normals(positions: np.ndarray, indices: np.ndarray) -> np.ndarray:
 
 
 class _Boundary:
-    """三角形の境界の辺（同じ座標の頂点をまとめた後で三角形 1 つにしか属さない辺）と、その突き合わせ・つなぎ。"""
+    """三角形の辺の組（両側の三角形）と境界の辺（組にならない辺）、境界の辺の突き合わせ・縫合・つなぎ。"""
 
-    def __init__(self, positions: np.ndarray, indices: np.ndarray, tolerance: float) -> None:
+    def __init__(
+        self,
+        positions: np.ndarray,
+        indices: np.ndarray,
+        tolerance: float,
+        sew_tolerance: float = 0.0,
+        tri_face: np.ndarray | None = None,
+    ) -> None:
         self.tol = tolerance
+        self.sew = sew_tolerance if sew_tolerance > tolerance else 0.0
+        self.tri_face = tri_face if tri_face is not None else np.full(len(indices), -1, dtype=np.int64)
         quantum = tolerance * 1e-3
         keys = np.floor(positions / quantum + 0.5).astype(np.int64)
         _, inverse = np.unique(keys, axis=0, return_inverse=True)
@@ -213,38 +341,98 @@ class _Boundary:
         tri = inverse[indices]
         ok = (tri[:, 0] != tri[:, 1]) & (tri[:, 1] != tri[:, 2]) & (tri[:, 0] != tri[:, 2])
         tri_ids = np.flatnonzero(ok)
+        orig = indices[ok]
         tri = tri[ok]
         a = tri[:, [0, 1, 2]].ravel()
         b = tri[:, [1, 2, 0]].ravel()
+        c = tri[:, [2, 0, 1]].ravel()
+        oa = orig[:, [0, 1, 2]].ravel()
+        ob = orig[:, [1, 2, 0]].ravel()
         owner = np.repeat(tri_ids, 3)
-        lo, hi = np.minimum(a, b), np.maximum(a, b)
-        key = lo * max(n_vertices, 1) + hi
-        _, inv, cnt = np.unique(key, return_inverse=True, return_counts=True)
-        boundary = cnt[inv.reshape(-1)] == 1
+        side = self._sides(a, b, c)
+        paired = np.zeros(len(a), dtype=bool)
+        # 面をまたいでつながる辺の両側の三角形の組（面のまとまりに使う）。
+        self.cross_pairs: list[tuple[int, int]] = []
+
+        # 1. 同じ面の三角形どうし: 元の頂点の番号が同じ辺（面ごとに三角形を作るので、面の中の辺は頂点を共有する）。
+        if len(a):
+            olo, ohi = np.minimum(oa, ob), np.maximum(oa, ob)
+            okey = olo * (int(orig.max()) + 1) + ohi
+            _, oinv, ocnt = np.unique(okey, return_inverse=True, return_counts=True)
+            paired |= ocnt[oinv.reshape(-1)] >= 2
+
+        # 2. 残りは同じ位置の辺どうしで、三角形が辺の反対側にあるものだけを組にする（同じ側にあるのは重なった面）。
+        rest = np.flatnonzero(~paired)
+        if len(rest):
+            lo, hi = np.minimum(a[rest], b[rest]), np.maximum(a[rest], b[rest])
+            key = lo * max(n_vertices, 1) + hi
+            order = np.argsort(key, kind="stable")
+            sorted_key = key[order]
+            starts = np.flatnonzero(np.r_[True, sorted_key[1:] != sorted_key[:-1]])
+            sizes = np.diff(np.r_[starts, len(sorted_key)])
+            # 2 本ずつの組は一度に調べる。
+            two = starts[sizes == 2]
+            if len(two):
+                i, j = rest[order[two]], rest[order[two + 1]]
+                opposite = np.einsum("ij,ij->i", side[i], side[j]) < _OPPOSITE_COS
+                paired[i[opposite]] = True
+                paired[j[opposite]] = True
+                self.cross_pairs += list(zip(owner[i[opposite]].tolist(), owner[j[opposite]].tolist()))
+            # 3 本以上（重なった面の上でさらに面がつながる等）は、反対側にあるものどうしを近い順に組にする。
+            for s, n in zip(starts[sizes > 2].tolist(), sizes[sizes > 2].tolist()):
+                group = rest[order[s : s + n]].tolist()
+                dots = sorted(
+                    (float(side[x] @ side[y]), x, y) for k, x in enumerate(group) for y in group[k + 1 :]
+                )
+                for d, x, y in dots:
+                    if d >= _OPPOSITE_COS:
+                        break
+                    if paired[x] or paired[y]:
+                        continue
+                    paired[x] = paired[y] = True
+                    self.cross_pairs.append((int(owner[x]), int(owner[y])))
+
+        boundary = ~paired
         self.a = a[boundary]
         self.b = b[boundary]
+        self.side = side[boundary]
         self.tri = owner[boundary]
         self.alive = np.ones(len(self.a), dtype=bool)
         self.partner = np.full(len(self.a), -1, dtype=np.int64)
+        self.sewn_count = 0
 
-    # --- 突き合わせ（トポロジートレランス） ---
+    def _sides(self, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+        """辺 (a, b) から三角形の残りの頂点 c への、辺に垂直な単位ベクトル（三角形が辺のどちら側にあるか）。"""
+        pa = self.points[a]
+        e = self.points[b] - pa
+        w = self.points[c] - pa
+        ee = np.einsum("ij,ij->i", e, e)
+        t = np.divide(np.einsum("ij,ij->i", w, e), ee, out=np.zeros(len(e)), where=ee > 0)
+        s = w - e * t[:, None]
+        n = np.linalg.norm(s, axis=1)
+        return np.divide(s, n[:, None], out=np.zeros_like(s), where=n[:, None] > 0)
+
+    # --- 突き合わせ（トポロジートレランス）と縫合 ---
 
     def match_within_tolerance(self) -> None:
-        """別の境界の辺から許容差以内に並ぶ境界の辺を除く（隙間が許容差以下の境目）。
+        """別の境界の辺から許容差以内に並ぶ境界の辺を除く（隙間が許容差以下の境目）。縫合するときは、別の面の
+        境界の辺どうしに限って縫合トレランス以内まで除く。
 
-        辺の上の数点（_SAMPLES）のどれもが、平行に近い別の境界の辺へ、その辺の内側で垂線を下ろせて、
-        その長さが許容差以内なら除く。同じ縁で続く隣の辺は、点から下ろした垂線がその辺の外に出るので相手にならない
-        （細かく分けた小さな円の縁でも）。
+        辺の上の数点（_SAMPLES）のどれもが、平行に近く、三角形が反対側にある別の境界の辺へ、その辺の内側で垂線を
+        下ろせて、その長さが許容差以内なら除く。同じ縁で続く隣の辺は、点から下ろした垂線がその辺の外に出るので相手に
+        ならない（細かく分けた小さな円の縁でも）。ほぼ同じ面が重なっている縁は三角形が同じ側にあるので除かない。
         """
         n = len(self.a)
         if n < 2:
             return
         tol = self.tol
+        reach = max(tol, self.sew)
         pa, pb = self.points[self.a], self.points[self.b]
         seg = pb - pa
         length = np.linalg.norm(seg, axis=1)
         direction = np.divide(seg, length[:, None], out=np.zeros_like(seg), where=length[:, None] > 0)
-        cell = max(tol * 4, float(np.median(length)))
+        face = self.tri_face[self.tri]
+        cell = max(reach * 4, float(np.median(length)))
         grid: dict[tuple[int, int, int], list[int]] = {}
         for i in range(n):
             # 辺に沿って升目の大きさごとに点を取り、各点の許容差の範囲に掛かる升目に入れる（升目に比べて長い辺
@@ -253,8 +441,8 @@ class _Boundary:
             cells: set[tuple[int, int, int]] = set()
             for t in np.linspace(0.0, 1.0, steps + 1):
                 p = pa[i] + seg[i] * t
-                x0, y0, z0 = np.floor((p - tol) / cell).astype(np.int64).tolist()
-                x1, y1, z1 = np.floor((p + tol) / cell).astype(np.int64).tolist()
+                x0, y0, z0 = np.floor((p - reach) / cell).astype(np.int64).tolist()
+                x1, y1, z1 = np.floor((p + reach) / cell).astype(np.int64).tolist()
                 for x in range(x0, x1 + 1):
                     for y in range(y0, y1 + 1):
                         for z in range(z0, z1 + 1):
@@ -262,11 +450,15 @@ class _Boundary:
             for c in cells:
                 grid.setdefault(c, []).append(i)
         tol2 = tol * tol
+        sew2 = self.sew * self.sew
 
-        def covering(i: int, p: np.ndarray) -> int:
-            """p から許容差以内で、内側に垂線を下ろせる平行に近い別の辺（無ければ -1）。"""
+        def covering(i: int, p: np.ndarray) -> tuple[int, bool]:
+            """p から許容差（別の面なら縫合トレランス）以内で、内側に垂線を下ろせる平行に近い別の辺と、縫合で見つけたか。"""
+            found, by_sewing = -1, False
             for j in grid.get(tuple(np.floor(p / cell).astype(np.int64).tolist()), ()):  # type: ignore[arg-type]
                 if j == i or abs(float(direction[i] @ direction[j])) < _PARALLEL_COS:
+                    continue
+                if float(self.side[i] @ self.side[j]) >= _OPPOSITE_COS:
                     continue
                 d = seg[j]
                 ll = float(d @ d)
@@ -276,28 +468,38 @@ class _Boundary:
                 if t < 0.0 or t > 1.0:
                     continue
                 q = pa[j] + d * t - p
-                if float(q @ q) <= tol2:
-                    return j
-            return -1
+                dist2 = float(q @ q)
+                if dist2 <= tol2:
+                    return j, False
+                if sew2 and found < 0 and dist2 <= sew2 and face[i] != face[j] and face[i] >= 0 and face[j] >= 0:
+                    found, by_sewing = j, True
+            return found, by_sewing
 
         for i in range(n):
             if length[i] <= 0:
                 continue
             partner = -1
+            sewn = False
             for k in _SAMPLES:
-                j = covering(i, pa[i] + seg[i] * k)
+                j, by_sewing = covering(i, pa[i] + seg[i] * k)
                 if j < 0:
                     partner = -1
                     break
+                sewn = sewn or by_sewing
                 if partner < 0:
                     partner = j
             if partner >= 0:
                 self.alive[i] = False
                 self.partner[i] = partner
+                self.sewn_count += int(sewn)
 
-    def matched_face_pairs(self, tri_face: np.ndarray) -> list[tuple[int, int]]:
-        """突き合わせで除いた辺の、両側の三角形が属する面の組（つながった面のまとまりを求めるのに使う）。"""
+    def face_pairs(self, tri_face: np.ndarray) -> list[tuple[int, int]]:
+        """つながった面の組: 面をまたぐ辺の両側の三角形の面と、突き合わせ・縫合で除いた辺の両側の面。"""
         out = []
+        for ta, tb in self.cross_pairs:
+            fa, fb = int(tri_face[ta]), int(tri_face[tb])
+            if fa >= 0 and fb >= 0 and fa != fb:
+                out.append((fa, fb))
         for i in np.flatnonzero(self.partner >= 0).tolist():
             fa, fb = int(tri_face[self.tri[i]]), int(tri_face[self.tri[self.partner[i]]])
             if fa >= 0 and fb >= 0 and fa != fb:
@@ -316,6 +518,16 @@ class _Boundary:
             in_edges.setdefault(int(self.b[i]), []).append(i)
         used: set[int] = set()
         chains: list[tuple[list[int], list[int]]] = []  # (頂点の並び, 辺の並び)
+        face = self.tri_face[self.tri] if len(self.tri) else np.zeros(0, dtype=np.int64)
+
+        def pick(cands: Iterable[int], prev: int) -> int | None:
+            # 同じ点から境界の辺が何本も出る（ほぼ同じ面が重なっている等）ときは、今の辺と同じ面の辺を先に選ぶ
+            # （重なった別の面の縁へ乗り移らないように）。
+            free = [e for e in cands if e not in used]
+            if not free:
+                return None
+            return next((e for e in free if face[e] == face[prev]), free[0])
+
         for start in live:
             if start in used:
                 continue
@@ -324,11 +536,11 @@ class _Boundary:
             path = [start]
             while verts[-1] != verts[0]:
                 cur = verts[-1]
-                nxt = next((e for e in out_edges.get(cur, ()) if e not in used), None)
+                nxt = pick(out_edges.get(cur, ()), path[-1])
                 flip = False
                 if nxt is None:
                     # 三角形の回り方がそろっていないメッシュでは、逆向きの辺でつなぐ。
-                    nxt = next((e for e in in_edges.get(cur, ()) if e not in used), None)
+                    nxt = pick(in_edges.get(cur, ()), path[-1])
                     flip = True
                 if nxt is None:
                     break
@@ -347,7 +559,8 @@ class _Boundary:
         """途切れた線の端どうしが許容差以内なら橋渡しして、閉じたループにする（opened から外す）。"""
         if not opened:
             return []
-        tol = self.tol
+        # 縫合したときは、縫い合わせた境目の端に縫合トレランスまでの途切れが残ることがある。
+        tol = max(self.tol, self.sew)
         closed: list[tuple[list[int], list[int]]] = []
         changed = True
         while changed and opened:
@@ -425,8 +638,8 @@ def _loop_info(pts: np.ndarray, loop_tris: list[int], tri_normals: np.ndarray, t
     }
 
 
-def _face_components(n_faces: int, edges: list[dict], extra_pairs: list[tuple[int, int]]) -> np.ndarray:
-    """面どうしのつながり（エッジを共有する・許容差以内で突き合わせた）でまとめた、面ごとのまとまりの番号。"""
+def _face_components(n_faces: int, pairs: list[tuple[int, int]]) -> np.ndarray:
+    """面どうしのつながり（三角形の辺でつながる・許容差以内で突き合わせた・縫合した）でまとめた、面ごとのまとまりの番号。"""
     parent = list(range(n_faces))
 
     def find(x: int) -> int:
@@ -441,11 +654,7 @@ def _face_components(n_faces: int, edges: list[dict], extra_pairs: list[tuple[in
             if rx != ry:
                 parent[ry] = rx
 
-    for e in edges:
-        fs = e.get("faces") or []
-        for f in fs[1:]:
-            union(int(fs[0]), int(f))
-    for x, y in extra_pairs:
+    for x, y in pairs:
         union(x, y)
     return np.array([find(i) for i in range(n_faces)], dtype=np.int64)
 
