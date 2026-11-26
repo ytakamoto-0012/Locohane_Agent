@@ -132,6 +132,8 @@ def _options(compare_with: str = "") -> dict[str, Any]:
         "local_axis_lengths": list(_setting("cad_viewer_local_axis_lengths", (100.0, 200.0, 300.0)) or []) or "off",
         "local_axis_length_tolerance": _setting("cad_viewer_local_axis_length_tolerance", 0.1),
         "local_axis_angle_tolerance_deg": _setting("cad_viewer_local_axis_angle_tolerance_deg", 0.5),
+        # ゼブラ・曲率の表示に使う頂点ごとの法線と主曲率（src/cad/analysis.py）。
+        "surface_analysis": bool(_setting("cad_viewer_surface_analysis", True)),
     }
     if compare_with:
         out["compare_with"] = compare_with
@@ -233,6 +235,52 @@ async def _resolve_compare_with(value: str) -> str:
     return str(path)
 
 
+# 基準モデル（reference）に使える形式。ビューア用データはその中の三角形をそのまま使う（元のファイルは読まない）。
+_REFERENCE_FORMATS = ("STEP", "IGES", "BREP", "BIN", "STL", "VIEWER_JSON")
+AlignMode = Literal["none", "bestfit"]
+
+
+def _resolve_reference(value: str) -> str:
+    """reference（絶対パスか @N）を絶対パスにする。使えなければ "Error: ..." を返す。"""
+    path, err = _resolve_input_path(value)
+    if path is None:
+        return f"Error: reference: {err}"
+    if not path.is_file():
+        return f"Error: reference: the file does not exist: {path}"
+    if format_of(path) not in _REFERENCE_FORMATS:
+        return f"Error: reference must be a STEP/IGES/BREP/BIN/STL file or viewer_data (got {path.suffix!r}; a DXF is 2D)."
+    return str(path)
+
+
+def _deviation_tolerance() -> float:
+    try:
+        tol = float(_setting("cad_viewer_deviation_tolerance", 0.1))
+    except (TypeError, ValueError):
+        return 0.1
+    return tol if tol > 0 else 0.1
+
+
+async def _attach_reference(data: dict, data_path: Path, reference: str, align: str) -> tuple[dict, Path] | str:
+    """ビューア用データに基準モデルとの位置合わせ・偏差を足したもの（サブプロセス run_cad.py --reference）と、その JSON。"""
+    workdir = _resolve_exec_workdir()
+    out = _new_data_path(workdir, prefix="cad_view_reference")
+    options = {
+        **_options(),
+        "reference": reference,
+        "align": align,
+        "reference_deflection_ratio": _setting("cad_viewer_reference_deflection_ratio", 0.0002),
+        "deviation_tolerance": _deviation_tolerance(),
+    }
+    cmd = [_state._SCRIPT_PYTHON, str(_RUN_CAD), "--reference", str(data_path), "--out", str(out), "--options", json.dumps(options)]
+    failed = await _run(cmd, workdir)
+    if failed:
+        return failed
+    made = await asyncio.to_thread(_load_data, out)
+    if isinstance(made, str):
+        return made
+    return made[0], made[1]
+
+
 def _tail(text: str) -> str:
     text = (text or "").strip()
     return text if len(text) <= _OUTPUT_TAIL_CHARS else "...\n" + text[-_OUTPUT_TAIL_CHARS:]
@@ -245,6 +293,8 @@ async def show_cad_viewer(
     code: str = "",
     select: list[SelectKind] | None = None,
     compare_with: str = "",
+    reference: str = "",
+    align: AlignMode = "none",
 ) -> tuple[str, dict | None]:
     """Show a 3D model in an interactive viewer in the chat, and return the elements the user selects.
 
@@ -284,6 +334,23 @@ async def show_cad_viewer(
       solid counts and size, and warnings. The viewer shows added material in green and removed
       material in red.
 
+    reference: a reference (nominal) model to measure the shown model against, e.g. the CAD model
+      for a scanned STL, or another version of a part (a STEP/IGES/BREP/BIN/STL file or viewer_data,
+      absolute path or @N). Unlike compare_with, it works for STL too and gives a deviation map: the
+      signed distance from every point of the shown model to the reference surface (positive = outside
+      the reference = extra material). The viewer overlays the reference and can align the models:
+      best fit, best fit on the selected faces, or datums A/B/C (3-2-1, like a checking fixture).
+      The result then has "comparison" (alignment method, transform, RMS, deviation statistics with
+      the tolerance, and deviation per selected face).
+    align: how to place the model on the reference before measuring when the viewer opens:
+      "none" (keep the coordinates; use this when both are in the same coordinate system) or
+      "bestfit" (least-squares best fit, for a scan in its own coordinates). The user can re-align
+      in the viewer.
+
+    The viewer can also show the model with zebra stripes (reflection lines from a dome or rows of
+    horizontal / vertical tube lights) and a curvature color map (mean, Gaussian, max / min principal
+    curvature) to check surface quality; no parameter is needed for these.
+
     Element IDs are 0-based in CadQuery order: face i is
     `cq.Workplane().add(shape).faces().vals()[i]` (same for edges() / vertices()) for the same shape.
     They are valid only for the shape whose model.digest they came from: after the shape changes,
@@ -310,6 +377,9 @@ async def show_cad_viewer(
             only for an open surface or mesh).
         compare_with: The previous version of the model to compare with (see above). Leave empty
             for no comparison.
+        reference: The reference model for the deviation map and alignment (see above). Leave empty
+            for none.
+        align: "none" or "bestfit" (see above). Used only with reference.
 
     Returns:
         A short JSON summary whose size does not depend on how many elements were selected:
@@ -319,7 +389,8 @@ async def show_cad_viewer(
         element counts, digest, check = solids / valid / open edges / volume / warnings, features =
         holes and bosses grouped by diameter and depth, holes = holes inside an open surface or mesh
         grouped by diameter and normal, and local_axes = local coordinate systems found as three
-        perpendicular lines), diff when compare_with was given, local_axis when the user viewed the
+        perpendicular lines), diff when compare_with was given, comparison when reference was given,
+        local_axis when the user viewed the
         model in a local coordinate system (then selected elements and measurements also have
         'local' values), and
         viewer_data (@N of the viewer data). If the user changed face / part
@@ -342,12 +413,19 @@ async def show_cad_viewer(
         ("Error: the user closed the 3D viewer ..."), or there is no answer within the timeout.
     """
     shot: dict[str, Any] = {}
-    text = await _show_cad_viewer(question, file_path, code, select, shot, compare_with)
+    text = await _show_cad_viewer(question, file_path, code, select, shot, compare_with, reference, align)
     return text, shot.get("artifact")
 
 
 async def _show_cad_viewer(
-    question: str, file_path: str, code: str, select: list[str] | None, shot: dict[str, Any], compare_with: str = ""
+    question: str,
+    file_path: str,
+    code: str,
+    select: list[str] | None,
+    shot: dict[str, Any],
+    compare_with: str = "",
+    reference: str = "",
+    align: str = "none",
 ) -> str:
     """show_cad_viewer の本体。指示付きの確定で画面を撮っていれば、LLM へ見せる画像を shot["artifact"] に入れる。"""
     if not _setting("cad_viewer_enabled", True):
@@ -364,6 +442,13 @@ async def _show_cad_viewer(
         previous = await _resolve_compare_with(compare_with.strip())
         if previous.startswith("Error:"):
             return previous
+    reference_path = ""
+    if (reference or "").strip():
+        reference_path = _resolve_reference(reference.strip())
+        if reference_path.startswith("Error:"):
+            return reference_path
+    if align not in ("none", "bestfit"):
+        return f"Error: align must be 'none' or 'bestfit' (got {align!r})."
     # 大きな CAD ファイルは形を読んでビューア用データにするまで 1 分以上かかることがあるので、その間は準備中と出しておく
     # （ビューアが出るまで何も表示されず、止まったように見えないように）。
     notice = await _show_preparing_notice()
@@ -372,6 +457,13 @@ async def _show_cad_viewer(
             made = await _viewer_data_from_code(code, previous)
         else:
             made = await _viewer_data_from_file(file_path, previous)
+        if not isinstance(made, str) and reference_path:
+            # 基準モデルとの位置合わせ・偏差は、できたビューア用データに後から足す（キャッシュには入れない）。
+            with_ref = await _attach_reference(made[0], made[1], reference_path, align)
+            if isinstance(with_ref, str):
+                made = with_ref
+            else:
+                made = (with_ref[0], with_ref[1], made[2])
     finally:
         await _remove_notice(notice)
     if isinstance(made, str):
@@ -395,10 +487,18 @@ async def _show_cad_viewer(
     data_id = uuid.uuid4().hex
     _VIEWER_PACKAGES[data_id] = ViewerPackage(path=package_path, thread_id=thread_id)
     _SAVE_TARGETS[save_id] = _SaveTarget(data=data, out_dir=_resolve_workdir(need_write=True), thread_id=thread_id, data_path=data_path)
+    align_state = _new_align_state(data, thread_id)
+    if align_state is not None:
+        _ALIGN_STATES[save_id] = align_state
     try:
-        answer = await _ask_selection(question, data, kinds, save_id, data_id)
+        answer = await _ask_selection(question, data, kinds, save_id, data_id, align_state is not None)
     finally:
         target = _SAVE_TARGETS.pop(save_id, None)
+        _ALIGN_STATES.pop(save_id, None)
+        if align_state is not None:
+            # 位置合わせの計算の途中で確定・閉じたときは、終わるのを待つ（終わった結果を LLM へ返す）。
+            async with align_state.lock:
+                _drop_align_state(align_state)
         _VIEWER_PACKAGES.pop(data_id, None)
         # ビューアは答え（時間切れ・閉じたを含む）を受け取った時点で消えるので、パッケージも消す（大きいため）。
         try:
@@ -425,7 +525,7 @@ async def _show_cad_viewer(
     # ブラウザへ届かない。この後の書き出し（大きな CAD ではビューア用データが数十 MB）を同期で行うと、その間
     # ビューアが閉じずに固まって見えるので、一度ループに譲ってから重い処理をスレッドで行う。
     await asyncio.sleep(_UI_FLUSH_SECONDS)
-    return await asyncio.to_thread(_finish_answer, data, answer, data_token, notes, extra, shot)
+    return await asyncio.to_thread(_finish_answer, data, answer, data_token, notes, extra, shot, align_state)
 
 
 def _finish_answer(
@@ -435,10 +535,11 @@ def _finish_answer(
     notes: list[str],
     extra: list[str],
     shot: dict[str, Any],
+    align_state: _AlignState | None = None,
 ) -> str:
     """答え後の処理。壊れたビューア用データ（LLM が書いた JSON 等）でも Error: 文字列を返す（例外をもらさない）。"""
     try:
-        return _finish_answer_body(data, answer, data_token, notes, extra, shot)
+        return _finish_answer_body(data, answer, data_token, notes, extra, shot, align_state)
     except Exception as e:  # noqa: BLE001 - LLM が書いた・手で編集した JSON で落とさない（Error: 文字列で返す）
         logger.warning("show_cad_viewer: could not process the viewer's answer", exc_info=True)
         return f"Error: could not process the viewer's answer ({type(e).__name__}: {e}). The selection was lost."
@@ -451,9 +552,14 @@ def _finish_answer_body(
     notes: list[str],
     extra: list[str],
     shot: dict[str, Any],
+    align_state: _AlignState | None = None,
 ) -> str:
     """ビューアの答えを受け取った後の処理（自動保存・画面の保存・選択結果の書き出し）。同期処理なのでスレッドで呼ぶ。"""
     res, picked, colors, message = answer
+    if align_state is not None and align_state.changed and align_state.values is not None:
+        # ビューアで合わせ直した位置と偏差を、自動保存するビューア用データにも残す（開き直すとその位置から始まる）。
+        _store_alignment(data, align_state)
+        res = {**res, "_alignment_changed": True}
     # ブラウザがビューア用データを読み込めなかった・読み込み中に閉じた（CadViewerBar.tsx の CadViewerLoader）。
     # 表示の状態が無いので、自動保存はしない（しないと、隠していた部品を戻したと受け取ってしまう）。
     load_error = res.get("load_error")
@@ -488,8 +594,23 @@ def _finish_answer_body(
             }
     measurements = _valid_measurements(data, res.get("measurements"))
     local_axis = _valid_local_axis(data, res.get("local_axis"))
+    try:
+        comparison = _comparison_summary(data, align_state, picked, res.get("deviation_tolerance"))
+    except Exception as e:  # noqa: BLE001 - 比較の要約を作れなくても選択は返す
+        logger.warning("show_cad_viewer: could not summarize the comparison", exc_info=True)
+        comparison = {"error": f"could not summarize the comparison with the reference model ({type(e).__name__}: {e})"}
     return _format_result(
-        data, picked, data_token, [*notes, *extra], colors, message, screenshot_token, attr_changes, measurements, local_axis
+        data,
+        picked,
+        data_token,
+        [*notes, *extra],
+        colors,
+        message,
+        screenshot_token,
+        attr_changes,
+        measurements,
+        local_axis,
+        comparison,
     )
 
 
@@ -623,6 +744,8 @@ def _view_edits(data: dict, payload: dict[str, Any], colors: list[dict[str, Any]
     visible = {k: bool(vis[k]) for k in ("face", "edge", "vertex") if isinstance(vis, dict) and isinstance(vis.get(k), bool)}
     before_visible = {"face": True, "edge": True, "vertex": True, **((data.get("viewState") or {}).get("visible") or {})}
     changed = bool(colors) or set(hidden_parts) != _initial_hidden(data) or any(before_visible.get(k) != v for k, v in visible.items())
+    # ビューアで基準モデルとの位置を合わせ直した（data["deviation"] は _store_alignment で書き換えてある）。
+    changed = changed or bool(payload.get("_alignment_changed"))
     attrs = _valid_attributes(data, payload.get("attributes"))
     # ビューアで「縫合」をした（data の穴・外周・面のまとまりは sew_viewer_data が求め直してある）。
     changed = changed or bool(attrs) or payload.get("sewn") is True
@@ -808,6 +931,219 @@ async def _save_locked(target: _SaveTarget, payload: dict[str, Any]) -> dict[str
     logger.info("show_cad_viewer: exported the model (%d color changes) to %s; notes: %s", len(colors), out, notes)
     await _offer_download(out)
     return {"ok": True, "path": str(out), "token": target.saved_token, "color_changes": len(colors), "notes": notes}
+
+
+@dataclass
+class _AlignState:
+    """基準モデルとの位置合わせ（ビューアを出している間だけ _ALIGN_STATES に置く。キーは save_id）。
+
+    ビューアの「位置合わせ」（app.py の action_callback "cad_viewer_align"）は、ここで覚えた今の変換から
+    詰め直して偏差を求め直す。偏差の値はブラウザが GET /locohane/cad/data/{values_id} で取りに来る
+    （float32 の並び。_VIEWER_PACKAGES に置く）。
+    """
+
+    data: dict
+    thread_id: str
+    workdir: Path
+    transform: Any  # np.ndarray (4,4)
+    initial_transform: Any
+    alignment: dict[str, Any]
+    tolerance: float
+    values: Any = None  # np.ndarray（対象の頂点ごとの偏差）。None なら data["deviation"]["values"] のまま
+    changed: bool = False
+    values_id: str = ""
+    values_path: Path | None = None
+    index: Any = None  # src.cad.align.SurfaceIndex（初めて合わせ直すときに作る）
+    target: Any = None  # src.cad.align.TargetMesh
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+_ALIGN_STATES: dict[str, _AlignState] = {}
+# ブラウザから受け取る面の ID の数の上限（データム・部分ベストフィット）。
+_ALIGN_MAX_FACES = 200_000
+
+
+def _new_align_state(data: dict, thread_id: str) -> _AlignState | None:
+    """基準モデルとの偏差があるビューア用データなら、位置合わせの状態を作る。"""
+    dev = data.get("deviation") or {}
+    if not data.get("reference") or not dev.get("values") or dev.get("error"):
+        return None
+    import numpy as np
+
+    from ..cad.align import as_matrix
+
+    T = as_matrix(dev.get("transform"))
+    if T is None:
+        T = np.eye(4)
+    tol = dev.get("tolerance")
+    return _AlignState(
+        data=data,
+        thread_id=thread_id,
+        workdir=_resolve_exec_workdir(),
+        transform=T,
+        initial_transform=T.copy(),
+        alignment=dict(dev.get("alignment") or {"method": "none"}),
+        tolerance=float(tol) if isinstance(tol, (int, float)) and tol > 0 else _deviation_tolerance(),
+    )
+
+
+def _face_ids(raw: Any, n_faces: int) -> list[int]:
+    if not isinstance(raw, list):
+        return []
+    out = [f for f in raw[:_ALIGN_MAX_FACES] if isinstance(f, int) and not isinstance(f, bool) and 0 <= f < n_faces]
+    return sorted(set(out))
+
+
+def _align_compute(state: _AlignState, method: str, faces: list[int], datums: dict[str, list[int]], dof: dict[str, int]) -> dict[str, Any]:
+    """位置合わせと偏差の計算（重いのでスレッドで呼ぶ）。"""
+    import numpy as np
+
+    from ..cad.align import SurfaceIndex, align, deviation_stats, deviations, describe_transform
+    from ..cad.reference import mesh_arrays, target_mesh
+
+    if state.index is None:
+        ref = state.data["reference"]
+        pos, idx = mesh_arrays({"mesh": {"positions": ref["positions"], "indices": ref["indices"]}})
+        state.index = SurfaceIndex(pos, idx)
+        state.target = target_mesh(state.data)
+    if method == "reset":
+        T, info = np.eye(4), {"method": "none"}
+    elif method == "initial":
+        T, info = state.initial_transform.copy(), dict((state.data.get("deviation") or {}).get("alignment") or {"method": "none"})
+    else:
+        T, info = align(state.target, state.index, method, start=state.transform, faces=faces, datums=datums, datum_dof=dof)
+    values = deviations(state.target, state.index, T)
+    stats = deviation_stats(values, state.target.vertex_weights(), state.tolerance)
+    path = state.workdir / f"cad_deviation_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.f32"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.part")
+    tmp.write_bytes(np.ascontiguousarray(values, dtype="<f4").tobytes())
+    os.replace(tmp, path)
+    state.transform, state.alignment, state.values, state.changed = T, info, values, True
+    return {"path": path, "transform": describe_transform(T), "alignment": info, "stats": stats}
+
+
+async def align_viewer_model(payload: dict[str, Any]) -> dict[str, Any]:
+    """ビューアの「位置合わせ」（app.py の action_callback "cad_viewer_align"）。
+
+    payload: {save_id, method: "bestfit" | "faces" | "datum" | "reset" | "initial", faces: [面の ID],
+    datums: {A: [...], B: [...], C: [...]}, dof: {A, B, C}, tolerance}。
+
+    Returns:
+        {"ok": True, "values_id", "transform", "alignment", "stats"} か {"ok": False, "error"}。
+    """
+    save_id = str(payload.get("save_id") or "")
+    state = _ALIGN_STATES.get(save_id)
+    if state is None:
+        return {"ok": False, "error": "This viewer has no reference model, or is no longer waiting for an answer."}
+    if (cl.user_session.get("thread_id") or "_no_session") != state.thread_id:
+        return {"ok": False, "error": "This viewer belongs to another conversation."}
+    method = str(payload.get("method") or "")
+    if method not in ("bestfit", "faces", "datum", "reset", "initial"):
+        return {"ok": False, "error": f"unknown alignment method {method!r}"}
+    n_faces = len(state.data.get("faces") or [])
+    faces = _face_ids(payload.get("faces"), n_faces)
+    raw_datums = payload.get("datums") if isinstance(payload.get("datums"), dict) else {}
+    datums = {k: _face_ids(raw_datums.get(k), n_faces) for k in ("A", "B", "C")}
+    raw_dof = payload.get("dof") if isinstance(payload.get("dof"), dict) else {}
+    dof = {k: int(v) for k, v in raw_dof.items() if k in ("A", "B", "C") and isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 6}
+    tol = payload.get("tolerance")
+    if isinstance(tol, (int, float)) and not isinstance(tol, bool) and math.isfinite(tol) and tol > 0:
+        state.tolerance = float(tol)
+    if state.lock.locked():
+        return {"ok": False, "error": "The alignment is still running. Wait until it finishes."}
+    async with state.lock:
+        try:
+            out = await asyncio.to_thread(_align_compute, state, method, faces, datums, dof)
+        except Exception as e:  # noqa: BLE001 - 点が足りない等は AlignError、壊れたデータでも落とさない
+            logger.info("show_cad_viewer: alignment failed: %s", e)
+            return {"ok": False, "error": str(e)}
+        old_id, old_path = state.values_id, state.values_path
+        state.values_id = uuid.uuid4().hex
+        state.values_path = out["path"]
+        _VIEWER_PACKAGES[state.values_id] = ViewerPackage(path=out["path"], thread_id=state.thread_id)
+        if old_id:
+            _VIEWER_PACKAGES.pop(old_id, None)
+        if old_path is not None:
+            old_path.unlink(missing_ok=True)
+    logger.info("show_cad_viewer: aligned by %s: %s", method, out["alignment"])
+    return {"ok": True, "values_id": state.values_id, "transform": out["transform"], "alignment": out["alignment"], "stats": out["stats"]}
+
+
+def _store_alignment(data: dict, state: _AlignState) -> None:
+    """合わせ直した変換・偏差を data["deviation"] に書く（自動保存するビューア用データに残すため）。"""
+    import numpy as np
+
+    from ..cad.align import describe_transform
+    from ..cad.mesh_data import b64
+
+    dev = dict(data.get("deviation") or {})
+    dev.update(
+        values=b64(np.asarray(state.values, dtype=np.float32), "f4"),
+        transform=describe_transform(state.transform)["matrix"],
+        alignment=state.alignment,
+        tolerance=state.tolerance,
+    )
+    data["deviation"] = dev
+
+
+def _drop_align_state(state: _AlignState | None) -> None:
+    """ビューアを閉じたら、偏差の値のファイルを消す。"""
+    if state is None:
+        return
+    if state.values_id:
+        _VIEWER_PACKAGES.pop(state.values_id, None)
+    if state.values_path is not None:
+        try:
+            state.values_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("show_cad_viewer: could not remove %s", state.values_path, exc_info=True)
+
+
+def _comparison_summary(data: dict, state: _AlignState | None, picked: list[tuple[str, int]], tolerance: Any) -> dict[str, Any] | None:
+    """LLM へ返す基準モデルとの比較の概要（位置合わせ・偏差の統計・選んだ面ごとの偏差）。"""
+    dev = data.get("deviation") or {}
+    ref = data.get("reference") or {}
+    if dev.get("error"):
+        return {"error": dev["error"]}
+    if not ref or not dev:
+        return None
+    import numpy as np
+
+    from ..cad.align import as_matrix, deviation_stats, describe_transform, face_deviation_stats
+    from ..cad.reference import _decode, target_mesh
+
+    tol = float(tolerance) if isinstance(tolerance, (int, float)) and not isinstance(tolerance, bool) and tolerance > 0 else None
+    if tol is None:
+        tol = state.tolerance if state is not None else float(dev.get("tolerance") or _deviation_tolerance())
+    if state is not None and state.values is not None:
+        values, T, alignment = state.values, state.transform, state.alignment
+    else:
+        values = _decode(dev["values"], "f4").astype(np.float64)
+        T = as_matrix(dev.get("transform"))
+        T = np.eye(4) if T is None else T
+        alignment = dev.get("alignment") or {"method": "none"}
+    target = state.target if state is not None and state.target is not None else target_mesh(data)
+    tf = describe_transform(T)
+    out: dict[str, Any] = {
+        "reference": (ref.get("source") or {}),
+        "alignment": {**alignment, "translation": tf["translation"], "rotation_deg": tf["rotation_deg"], "matrix": tf["matrix"]},
+        "deviation": deviation_stats(values, target.vertex_weights(), tol),
+        "units": data.get("units", "unknown"),
+        "note": (
+            "Deviation = signed distance from each point of the shown model (moved by alignment.matrix, which maps the shown "
+            "model's coordinates to the reference's) to the reference surface; positive = outside the reference (extra material), "
+            "negative = inside (missing material). Statistics are area-weighted. within_tolerance_ratio is the area ratio within "
+            "±tolerance."
+        ),
+    }
+    if ref.get("chordTolerance"):
+        out["reference_chord_tolerance"] = ref["chordTolerance"]
+        out["note"] += " The CAD reference was split into triangles with chords up to reference_chord_tolerance, which bounds the accuracy."
+    faces = [eid for kind, eid in picked if kind == "face"][:50]
+    if faces:
+        out["selected_faces"] = face_deviation_stats(target, np.asarray(values, dtype=np.float64), faces, tol)
+    return out
 
 
 def _export_notes(stdout: str) -> list[str]:
@@ -1378,7 +1714,7 @@ def _echo_text(
 
 
 async def _ask_selection(
-    question: str, data: dict, kinds: list[str], save_id: str = "", data_id: str = ""
+    question: str, data: dict, kinds: list[str], save_id: str = "", data_id: str = "", can_align: bool = False
 ) -> tuple[dict[str, Any], list[tuple[str, int]], list[dict[str, Any]], str] | str:
     # 3D ビューア専用のタイムアウト（[cad_viewer] timeout_seconds）。ビューアを閉じずにブラウザを閉じると、
     # 会話の生成がこの秒数まで待ち続けるので、既定は有限にしてある。
@@ -1406,6 +1742,9 @@ async def _ask_selection(
                 "sew_tolerance": float(_setting("cad_viewer_sew_tolerance", 0.5)),
                 # 待つ秒数（0 = 無期限）。ビューアは残りが少なくなったら残り時間を出す（出し直したときはそこから数える）。
                 "timeout_seconds": max(0, seconds),
+                # 基準モデルとの位置合わせをビューアからやり直せるか（app.py の cad_viewer_align）と、偏差の公差の既定値。
+                "can_align": can_align,
+                "deviation_tolerance": float((data.get("deviation") or {}).get("tolerance") or _deviation_tolerance()),
             },
         )
         ask_message = cl.AskElementMessage(content=question, element=element, timeout=timeout)
@@ -1510,6 +1849,10 @@ def _model_summary(data: dict) -> dict[str, Any]:
         out["step"] = summarize_step(data["step"])
     if data.get("holeList") or data.get("outerList"):
         out["holes"] = _holes_summary(data)
+    analysis = data.get("analysis") or {}
+    if analysis.get("summary"):
+        # ゼブラ・曲率の表示に使う主曲率の概要（凸 = 正。method は exact = B-rep の正確な値、mesh = 三角形から推定）。
+        out["curvature"] = {"method": analysis.get("method"), **analysis["summary"]}
     if data.get("localAxes"):
         out["local_axes"] = [{k: a.get(k) for k in ("id", "origin", "x", "y", "z", "rightHanded")} for a in (data.get("localAxes") or [])[:5]]
         if len(data["localAxes"]) > 5:
@@ -1600,6 +1943,7 @@ def _format_result(
     attr_changes: list[dict[str, Any]] | None = None,
     measurements: list[dict[str, Any]] | None = None,
     local_axis: dict[str, Any] | None = None,
+    comparison: dict[str, Any] | None = None,
 ) -> str:
     """LLM へ返す概要（JSON 文字列）。
 
@@ -1687,6 +2031,8 @@ def _format_result(
     result["model"] = _model_summary(data)
     if data.get("diff"):
         result["diff"] = _diff_summary(data["diff"])
+    if comparison:
+        result["comparison"] = comparison
     result["viewer_data"] = data_token
     result["viewer_data_note"] = "Pass viewer_data as file_path to show the same model again without rebuilding."
     result["id_note"] = _id_note(data)

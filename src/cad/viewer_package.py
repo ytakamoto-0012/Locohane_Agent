@@ -46,6 +46,13 @@ BYTES_PATHS = (
     ("diff", "added", "indices"),
     ("diff", "removed", "positions"),
     ("diff", "removed", "indices"),
+    # ゼブラ・曲率の表示（src/cad/analysis.py）と、基準モデル・偏差（src/cad/align.py）。
+    ("analysis", "normals"),
+    ("analysis", "k1"),
+    ("analysis", "k2"),
+    ("reference", "positions"),
+    ("reference", "indices"),
+    ("deviation", "values"),
 )
 
 

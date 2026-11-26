@@ -75,6 +75,8 @@ class Options:
     max_triangles: int = 1_000_000
     # CadQuery のセレクタの候補を求めるか（比べる前の形のように、選ばせない形では求めない）。
     selector_hints: bool = True
+    # ゼブラ・曲率の表示に使う頂点ごとの法線と主曲率を求めるか（src/cad/analysis.py。比べる前の形・基準モデルでは求めない）。
+    surface_analysis: bool = True
 
 
 class CadLoadError(ValueError):
@@ -527,6 +529,41 @@ def _triangulate_face(f: TopoDS_Shape) -> tuple[np.ndarray, np.ndarray]:
     return nodes, tris
 
 
+def _face_differentials(f: TopoDS_Shape, n_nodes: int) -> tuple[np.ndarray, np.ndarray]:
+    """メッシュ済みの面の各頂点での、正確な単位法線 (k,3) と主曲率 (k,2)（凸 = 正）。求まらない頂点は NaN。
+
+    OCP の BRepLProp_SLProps は面の向きを見ない（外向きの法線に対して凸のとき負）ので、反転した面
+    （TopAbs_REVERSED）は法線を反転し、曲率の符号を「表側に対して凸 = 正」にそろえる。BRepAdaptor_Surface は
+    面の配置（Location）を含むので、法線は世界座標。
+    """
+    from OCP.BRepLProp import BRepLProp_SLProps
+
+    normals = np.full((n_nodes, 3), np.nan)
+    curv = np.full((n_nodes, 2), np.nan)
+    face = TopoDS.Face_s(f)
+    tri = BRep_Tool.Triangulation_s(face, TopLoc_Location())
+    if tri is None or tri.NbNodes() != n_nodes or not tri.HasUVNodes():
+        return normals, curv
+    sign = -1.0 if f.Orientation() == TopAbs_REVERSED else 1.0
+    try:
+        props = BRepLProp_SLProps(BRepAdaptor_Surface(face), 2, 1e-9)
+    except Exception:  # noqa: BLE001 - 評価できない面はメッシュから推定する
+        return normals, curv
+    for i in range(n_nodes):
+        uv = tri.UVNode(i + 1)
+        try:
+            props.SetParameters(uv.X(), uv.Y())
+            if props.IsNormalDefined():
+                d = props.Normal()
+                normals[i] = (sign * d.X(), sign * d.Y(), sign * d.Z())
+            if props.IsCurvatureDefined():
+                # OCP は外向きの法線に対して凸のとき負。表側の向きで「凸 = 正」にする（反転した面は符号がそのまま）。
+                curv[i] = (-sign * props.MaxCurvature(), -sign * props.MinCurvature())
+        except Exception:  # noqa: BLE001 - 特異点（球の極など）は NaN のまま（メッシュから推定する）
+            continue
+    return normals, curv
+
+
 def _xyz(p) -> tuple[float, float, float]:
     return (p.X(), p.Y(), p.Z())
 
@@ -643,11 +680,21 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
     tri_offset = 0
     node_offset = 0
     default_rgb = np.array([180, 180, 180], dtype=np.uint8)
+    total_nodes = sum(len(nodes) for nodes, tris in face_meshes if len(tris))
+    from .analysis import MAX_VERTICES
+
+    analyse = options.surface_analysis and 0 < total_nodes <= MAX_VERTICES
+    exact_normals: list[np.ndarray] = []
+    exact_k: list[np.ndarray] = []
     for i, (nodes, tris) in enumerate(face_meshes):
         face_ranges.append([tri_offset, len(tris)])
         if len(tris):
             positions.append(nodes)
             indices.append(tris + node_offset)
+            if analyse:
+                fn, fk = _face_differentials(face_map.FindKey(i + 1), len(nodes))
+                exact_normals.append(fn)
+                exact_k.append(fk)
             if any_color:
                 rgb = np.array(face_color[i], dtype=np.uint8) if face_color[i] is not None else default_rgb
                 colors.append(np.tile(rgb, (len(nodes), 1)))
@@ -732,6 +779,14 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
         edges=edges,
         vertices=vertices,
     )
+    if analyse:
+        from .analysis import mesh_analysis
+
+        analysis = mesh_analysis(
+            np.concatenate(positions), np.concatenate(indices), np.concatenate(exact_normals), np.concatenate(exact_k)
+        )
+        if analysis:
+            data["analysis"] = analysis
     if with_parts:
         data["parts"] = [_part_info(pi, part, face_part, edge_part) for pi, part in enumerate(parts)]
         data["stats"]["parts"] = len(parts)

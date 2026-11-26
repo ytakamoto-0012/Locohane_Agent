@@ -8,7 +8,10 @@ import {
   CAD_DATA_FORMAT,
   attributeColor,
   connectedFaces,
+  decodeFloat32,
+  fetchCadFloat32,
   fetchCadPackage,
+  isMatrix4,
   dropUnchangedPartColors,
   effectiveColor,
   holeGroup,
@@ -23,8 +26,10 @@ import {
   toLocalPoint,
   toLocalVector,
   type BoxMode,
+  type CadAlignmentInfo,
   type CadColorOverrides,
   type CadData,
+  type CadDeviationStats,
   type CadItemInfo,
   type CadKind,
   type CadLocalAxis,
@@ -49,6 +54,17 @@ import {
 import { CadSidebar } from './cad/CadSidebar';
 import type { CadAttributeEdits } from './cad/CadStepPanel';
 import { restoreHistory, serializeHistory, type EditSnapshot } from './cad/editHistory';
+import {
+  AlignRow,
+  AnalysisSettingsRow,
+  ScalarLegend,
+  type AlignState,
+  type AnalysisMode,
+  type Datums,
+  type DatumName,
+  type RangeState
+} from './cad/CadAnalysisPanel';
+import { DEFAULT_ZEBRA, autoRange, curvatureValues, type CurvatureKind, type SurfaceDisplay, type ZebraSettings } from './cad/surfaceShading';
 
 const KIND_LABEL: Record<CadKind, MessageKey> = {
   face: 'cad.kind.face',
@@ -201,6 +217,8 @@ export function CadViewerBar() {
       holeSizeDefault={props.hole_size_tolerance ?? 0.3}
       sewDefault={props.sew_tolerance ?? 0.5}
       timeoutSeconds={props.timeout_seconds ?? 0}
+      canAlign={!!props.can_align}
+      deviationToleranceDefault={props.deviation_tolerance ?? data.deviation?.tolerance ?? 0.1}
       onSubmit={(selected, colors, message, view, screenshot, measurements) =>
         askUser.callback({
           submitted: true,
@@ -300,6 +318,10 @@ interface PanelProps {
   sewDefault: number;
   /** backend が答えを待つ秒数（0 = 無期限）。残りが少なくなったら残り時間を出す。 */
   timeoutSeconds: number;
+  /** 基準モデルとの位置合わせをやり直せるか（app.py の cad_viewer_align）。 */
+  canAlign: boolean;
+  /** 偏差の公差（±）の初めの値。 */
+  deviationToleranceDefault: number;
   /** screenshot: 指示があるときだけ撮った今の画面（PNG の data URL）。measurements: ビューアで測った結果。 */
   onSubmit: (
     selected: CadSelection[],
@@ -324,6 +346,8 @@ interface CadViewState {
   local_axis?: number;
   /** 「縫合」で穴・外周を求め直した（backend は求め直したデータを自動で保存する）。 */
   sewn?: boolean;
+  /** 基準モデルとの偏差の公差（±）。基準モデルがあるときだけ（backend は統計をこの公差で求める）。 */
+  deviation_tolerance?: number;
 }
 
 // 残り時間を出し始める秒数（3D ビューア専用のタイムアウトの残りがこれを切ったら出す）。
@@ -428,6 +452,8 @@ function CadViewerPanel({
   holeSizeDefault,
   sewDefault,
   timeoutSeconds,
+  canAlign,
+  deviationToleranceDefault,
   onSubmit,
   onCancel
 }: PanelProps) {
@@ -493,6 +519,57 @@ function CadViewerPanel({
   // 前の版からの変化の重ね表示（compare_with で比べたときだけ）。
   const hasDiff = !!(data.diff?.added || data.diff?.removed);
   const [diffVisible, setDiffVisible] = useState(true);
+  // 表面の解析表示（ゼブラ・曲率・偏差）。曲率は src/cad/analysis.py の主曲率、偏差は基準モデルとの符号付き距離。
+  const hasCurvature = !!data.analysis?.k1;
+  const hasReference = !!data.reference && !!data.deviation?.values;
+  const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('normal');
+  const [zebra, setZebra] = useState<ZebraSettings>(DEFAULT_ZEBRA);
+  const [curvatureKind, setCurvatureKind] = useState<CurvatureKind>('mean');
+  const [curvRange, setCurvRange] = useState<RangeState | null>(null);
+  const [devRange, setDevRange] = useState<RangeState | null>(null);
+  const [tolerance, setTolerance] = useState(deviationToleranceDefault);
+  const [scalarHover, setScalarHover] = useState<number | null>(null);
+  // 基準モデルとの位置合わせ。偏差の値は位置を合わせ直すたびに backend から取り直す。
+  const [alignOpen, setAlignOpen] = useState(false);
+  const [referenceVisible, setReferenceVisible] = useState(false);
+  const [referenceOpacity, setReferenceOpacity] = useState(0.35);
+  const [deviationValues, setDeviationValues] = useState<Float32Array | null>(() =>
+    data.deviation?.values ? decodeFloat32(data.deviation.values) : null
+  );
+  const [alignInfo, setAlignInfo] = useState<CadAlignmentInfo | null>(data.deviation?.alignment ?? null);
+  const [alignStats, setAlignStats] = useState<CadDeviationStats | null>(data.deviation?.stats ?? null);
+  const [alignState, setAlignState] = useState<AlignState>({ kind: 'idle' });
+  const [datums, setDatums] = useState<Datums>({ A: [], B: [], C: [] });
+  const curvature = useMemo(() => {
+    if (!data.analysis?.k1 || !data.analysis.k2) return null;
+    return { k1: decodeFloat32(data.analysis.k1), k2: decodeFloat32(data.analysis.k2) };
+  }, [data]);
+  const curvValues = useMemo(
+    () => (curvature && analysisMode === 'curvature' ? curvatureValues(curvature.k1, curvature.k2, curvatureKind) : null),
+    [curvature, curvatureKind, analysisMode]
+  );
+  // 範囲を自動にしているときは、値の分布から決める（曲率は平均・ガウス・k1・k2 を 0 中心、偏差も 0 中心）。
+  const effCurvRange = useMemo<RangeState>(() => {
+    if (curvRange && !curvRange.auto) return curvRange;
+    if (!curvValues) return { min: -1, max: 1, auto: true };
+    const [min, max] = autoRange(curvValues, curvatureKind !== 'absmax');
+    return { min: curvatureKind === 'absmax' ? 0 : min, max, auto: true };
+  }, [curvRange, curvValues, curvatureKind]);
+  const effDevRange = useMemo<RangeState>(() => {
+    if (devRange && !devRange.auto) return devRange;
+    if (!deviationValues) return { min: -1, max: 1, auto: true };
+    const [min, max] = autoRange(deviationValues, true, 0.01, 0.99);
+    const m = Math.max(max, tolerance * 3);
+    return { min: Math.min(min, -m), max: m, auto: true };
+  }, [devRange, deviationValues, tolerance]);
+  const surfaceDisplay = useMemo<SurfaceDisplay>(() => {
+    if (analysisMode === 'zebra') return { mode: 'zebra', zebra };
+    if (analysisMode === 'curvature' && curvValues)
+      return { mode: 'scalar', scalar: { values: curvValues, min: effCurvRange.min, max: effCurvRange.max, tolerance: 0, scheme: 'rainbow' } };
+    if (analysisMode === 'deviation' && deviationValues)
+      return { mode: 'scalar', scalar: { values: deviationValues, min: effDevRange.min, max: effDevRange.max, tolerance, scheme: 'deviation' } };
+    return { mode: 'normal' };
+  }, [analysisMode, zebra, curvValues, effCurvRange, deviationValues, effDevRange, tolerance]);
   const [kindVisible, setKindVisible] = useState({ face: true, edge: true, vertex: true, ...data.viewState?.visible });
   const [hiddenParts, setHiddenParts] = useState<Set<number>>(() => initialHiddenParts(data));
   // 「非表示」で 1 つずつ隠した面・エッジ・頂点・穴・外周（selectionKey の集合）。部品は hiddenParts に入れる。
@@ -642,7 +719,8 @@ function CadViewerPanel({
             onBoxPick: boxPick,
             onPivotSet: () => setPivotPicking(false),
             onMeasurePick: measurePick,
-            onPmiClick: (id) => selectPmiRef.current(id)
+            onPmiClick: (id) => selectPmiRef.current(id),
+            onScalarHover: setScalarHover
           },
           sceneColors()
         );
@@ -714,6 +792,13 @@ function CadViewerPanel({
     sceneRef.current?.setDiffVisible(diffVisible);
   }, [diffVisible, status]);
   useEffect(() => {
+    sceneRef.current?.setSurfaceDisplay(surfaceDisplay);
+    if (surfaceDisplay.mode !== 'scalar') setScalarHover(null);
+  }, [surfaceDisplay, status]);
+  useEffect(() => {
+    sceneRef.current?.setReferenceOverlay({ visible: referenceVisible, opacity: referenceOpacity });
+  }, [referenceVisible, referenceOpacity, status]);
+  useEffect(() => {
     sceneRef.current?.setMeasureTool(measureTool);
   }, [measureTool, status]);
   useEffect(() => {
@@ -768,8 +853,19 @@ function CadViewerPanel({
     }
     if (!item && mode === 'hole' && boxMode === 'off') return t('cad.hintHole', { deg: fmt(holeAngle) });
     if (!item && mode === 'outer' && boxMode === 'off') return t('cad.hintOuter');
+    // 曲率・偏差の表示中は、マウスの下の値（曲率は曲率半径も）を先に出す。
+    if (scalarHover !== null && (analysisMode === 'curvature' || analysisMode === 'deviation')) {
+      const value =
+        analysisMode === 'deviation'
+          ? t('cad.deviation.value', { value: `${scalarHover > 0 ? '+' : ''}${fmtNum(scalarHover)}` })
+          : t('cad.curvature.value', {
+              value: fmtNum(scalarHover),
+              radius: Math.abs(scalarHover) > 1e-9 && curvatureKind !== 'gauss' ? fmtNum(1 / Math.abs(scalarHover)) : '∞'
+            });
+      return item ? `${value}  ${item}` : value;
+    }
     return item || t(boxMode === 'off' ? 'cad.hint' : 'cad.hintBox');
-  }, [hover, data, label, t, colors, boxMode, pivotPicking, measureTool, measureError, pending, localAxis, holeAngle, holeSizeTol, mode, topologyVersion]);
+  }, [hover, data, label, t, colors, boxMode, pivotPicking, measureTool, measureError, pending, localAxis, holeAngle, holeSizeTol, mode, topologyVersion, scalarHover, analysisMode, curvatureKind]);
 
   const selectAll = () => {
     const ids = sceneRef.current?.selectableIds(mode) ?? [];
@@ -991,7 +1087,8 @@ function CadViewerPanel({
       ...(Object.keys(attributeEdits).length ? { attributes: attributeEdits } : {}),
       ...(saved ? { history: saved } : {}),
       ...(localAxis ? { local_axis: localAxis.id } : {}),
-      ...(sewnRef.current ? { sewn: true } : {})
+      ...(sewnRef.current ? { sewn: true } : {}),
+      ...(hasReference ? { deviation_tolerance: tolerance } : {})
     };
   };
   const cancel = () => {
@@ -1044,6 +1141,42 @@ function CadViewerPanel({
       setSaveState({ kind: 'error', message: err instanceof Error ? err.message : t('cad.saveFailed') });
     }
   };
+  // 基準モデルへの位置合わせをやり直す（app.py の cad_viewer_align）。偏差の値は返ってきた ID で取りに行く。
+  const selectedFaceIds = useMemo(() => selection.filter((s) => s.kind === 'face').map((s) => s.id), [selection]);
+  const runAlign = async (method: 'bestfit' | 'faces' | 'datum' | 'reset' | 'initial') => {
+    if (!saveId || alignState.kind === 'busy') return;
+    setAlignState({ kind: 'busy' });
+    const action: IAction = {
+      id: '',
+      name: 'cad_viewer_align',
+      payload: { save_id: saveId, method, faces: selectedFaceIds, datums, tolerance },
+      label: '',
+      tooltip: '',
+      forId: '',
+      onClick: () => {}
+    };
+    try {
+      const res = await client.callAction(action, sessionId);
+      const r = res?.response;
+      if (!r?.ok) {
+        setAlignState({ kind: 'error', message: String(r?.error ?? t('cad.align.failedUnknown')) });
+        return;
+      }
+      const values = await fetchCadFloat32(BACKEND_URL, String(r.values_id));
+      setDeviationValues(values);
+      setAlignInfo((r.alignment as CadAlignmentInfo) ?? null);
+      setAlignStats((r.stats as CadDeviationStats) ?? null);
+      const matrix = (r.transform as { matrix?: unknown } | undefined)?.matrix;
+      if (isMatrix4(matrix)) sceneRef.current?.setReferenceOverlay({ matrix });
+      setAlignState({ kind: 'idle' });
+      // 合わせたら偏差の色を見せる。
+      setAnalysisMode('deviation');
+    } catch (err) {
+      setAlignState({ kind: 'error', message: err instanceof Error ? err.message : t('cad.align.failedUnknown') });
+    }
+  };
+  const setDatum = (name: DatumName) => setDatums((cur) => ({ ...cur, [name]: selectedFaceIds }));
+
   const saveText =
     saveState.kind === 'saved'
       ? saveState.notes.length
@@ -1343,6 +1476,31 @@ function CadViewerPanel({
               {t('cad.diff')}
             </button>
           )}
+          {(['zebra', 'curvature', 'deviation'] as const).map((m) =>
+            m === 'curvature' && !hasCurvature ? null : m === 'deviation' && !hasReference ? null : (
+              <button
+                key={m}
+                type="button"
+                className={`cad-viewer-chip${analysisMode === m ? ' active' : ''}`}
+                aria-pressed={analysisMode === m}
+                title={t(`cad.analysis.${m}Title` as MessageKey)}
+                onClick={() => setAnalysisMode((cur) => (cur === m ? 'normal' : m))}
+              >
+                {t(`cad.analysis.${m}` as MessageKey)}
+              </button>
+            )
+          )}
+          {hasReference && (
+            <button
+              type="button"
+              className={`cad-viewer-chip${alignOpen ? ' active' : ''}`}
+              aria-pressed={alignOpen}
+              title={t('cad.alignTitle')}
+              onClick={() => setAlignOpen((x) => !x)}
+            >
+              {t('cad.align')}
+            </button>
+          )}
           <button
             type="button"
             className={`cad-viewer-chip${sidebarOpen ? ' active' : ''}`}
@@ -1386,6 +1544,40 @@ function CadViewerPanel({
           </button>
         </div>
       )}
+      <AnalysisSettingsRow
+        mode={analysisMode}
+        zebra={zebra}
+        onZebra={setZebra}
+        curvatureKind={curvatureKind}
+        onCurvatureKind={(k) => {
+          setCurvatureKind(k);
+          setCurvRange(null);
+        }}
+        range={analysisMode === 'deviation' ? effDevRange : effCurvRange}
+        onRange={(r) => (analysisMode === 'deviation' ? setDevRange(r) : setCurvRange(r))}
+        onAutoRange={() => (analysisMode === 'deviation' ? setDevRange(null) : setCurvRange(null))}
+        tolerance={tolerance}
+        onTolerance={setTolerance}
+        units={data.units}
+      />
+      {alignOpen && hasReference && (
+        <AlignRow
+          canAlign={canAlign && !!saveId}
+          state={alignState}
+          info={alignInfo}
+          stats={alignStats}
+          datums={datums}
+          selectedFaces={selectedFaceIds.length}
+          referenceVisible={referenceVisible}
+          onReferenceVisible={setReferenceVisible}
+          referenceOpacity={referenceOpacity}
+          onReferenceOpacity={setReferenceOpacity}
+          onSetDatum={setDatum}
+          onClearDatums={() => setDatums({ A: [], B: [], C: [] })}
+          onAlign={(m) => void runAlign(m)}
+          referenceName={data.reference?.source?.path ?? data.reference?.source?.format ?? ''}
+        />
+      )}
       <div className="cad-viewer-body">
         {sidebarOpen && (
           <CadSidebar
@@ -1415,6 +1607,19 @@ function CadViewerPanel({
               {hiddenCount ? t('cad.hiddenSpace', { count: hiddenCount }) : t('cad.hiddenSpaceEmpty')}
             </div>
           )}
+          {status === 'ready' && surfaceDisplay.mode === 'scalar' && (
+            <ScalarLegend
+              title={
+                analysisMode === 'deviation'
+                  ? t('cad.deviation.legend')
+                  : t(`cad.curvature.${curvatureKind}` as MessageKey)
+              }
+              min={surfaceDisplay.scalar.min}
+              max={surfaceDisplay.scalar.max}
+              tolerance={surfaceDisplay.scalar.tolerance}
+              scheme={surfaceDisplay.scalar.scheme}
+            />
+          )}
           {status === 'loading' && <div className="cad-viewer-overlay">{t('cad.loading')}</div>}
           {status === 'error' && <div className="cad-viewer-overlay">{t('cad.webglError')}</div>}
           {closing && (
@@ -1434,6 +1639,11 @@ function CadViewerPanel({
         {sewText && (mode === 'hole' || mode === 'outer') && <span className="cad-viewer-legend">{sewText}</span>}
         <span className="cad-viewer-hover">{hoverText}</span>
         {hasDiff && diffVisible && <span className="cad-viewer-legend">{t('cad.diffLegend')}</span>}
+        {data.deviation?.error && (
+          <span className="cad-viewer-legend cad-viewer-align-error" title={data.deviation.error}>
+            {t('cad.deviation.error', { error: data.deviation.error })}
+          </span>
+        )}
         <span className="cad-viewer-summary">{summary}</span>
       </div>
       {measurements.length > 0 && (

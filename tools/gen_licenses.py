@@ -45,6 +45,7 @@ TOP = [
     "numpy",
     "cadquery",
     "ezdxf",
+    "scipy",
 ]
 # 改変せず別のライブラリとして使う（動的リンク）限り商用利用できる弱いコピーレフト。
 WEAK_COPYLEFT = {"LGPL", "MPL 2.0"}

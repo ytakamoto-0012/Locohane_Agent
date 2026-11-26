@@ -14,9 +14,11 @@ import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
 import {
   decodeFloat32,
+  decodeInt16,
   decodeUint32,
   decodeUint8,
   holeGroup,
+  isMatrix4,
   overrideOf,
   selectionKey,
   type BoxMode,
@@ -29,6 +31,10 @@ import {
   type CadVisibility
 } from './cadData';
 import { asVec3, onCircle, onSphere, unit, type MeasureDraw, type MeasurePick, type MeasureTool, type Vec3 } from './measure';
+import { applySurfaceDisplay, createSurfaceMaterial, updateSurfaceUniforms, type SurfaceDisplay } from './surfaceShading';
+
+/** 基準モデル（偏差の比較相手）を重ねて描くときの色。 */
+const REFERENCE_COLOR = '#4f7fe0';
 
 export interface CadSceneColors {
   background: string;
@@ -50,6 +56,8 @@ export interface CadSceneCallbacks {
   onBoxPick: (items: CadSelection[], remove: boolean) => void;
   /** 「回転中心」でクリックした点を回転の中心にしたとき（ビューアは指定のモードを終える）。 */
   onPivotSet?: () => void;
+  /** 曲率・偏差の表示中、マウスの下の面の上の値（面に当たらなければ null）。 */
+  onScalarHover?: (value: number | null) => void;
   /** 計測のモード（setMeasureTool）でクリックした点・要素。選択はしない。 */
   onMeasurePick?: (pick: MeasurePick) => void;
   /** PMI の 3D ラベル（setPmiLabels）をクリックした。id は PMI の ID。 */
@@ -230,6 +238,18 @@ export class CadScene {
   private readonly pmiSvg: SVGSVGElement;
   private pmiLabels: PmiLabelView[] = [];
   private pmiInput: PmiLabel[] = [];
+  // 表面の解析表示（ゼブラ・曲率・偏差。surfaceShading.ts）。normal のときはふつうの材質で描く。
+  private standardMaterial: THREE.Material | null = null;
+  private surfaceMaterial: THREE.ShaderMaterial | null = null;
+  private surfaceDisplay: SurfaceDisplay = { mode: 'normal' };
+  // 頂点ごとの強調（0 = なし、1 = ホバー、2 = 選択）とスカラー（曲率・偏差）。解析表示の材質が読む。
+  private hlAttr: THREE.BufferAttribute | null = null;
+  private scalarAttr: THREE.BufferAttribute | null = null;
+  private scalarValues: Float32Array | null = null;
+  // 基準モデル（偏差の比較相手）。座標は基準のまま、対象 → 基準の変換の逆で動かして重ねる（対象の座標は動かさない）。
+  private referenceMesh: THREE.Mesh | null = null;
+  // 最後に当たった面の三角形（マウスの下の値を出すため）。
+  private lastMeshHit: THREE.Intersection | null = null;
 
   constructor(container: HTMLElement, data: CadData, callbacks: CadSceneCallbacks, colors: CadSceneColors) {
     this.container = container;
@@ -277,6 +297,7 @@ export class CadScene {
     this.buildPivotMarker();
     this.buildOriginAxes();
     this.buildDiffOverlay();
+    this.buildReference();
     this.buildMeasureOverlay();
     this.addAxes();
 
@@ -361,7 +382,134 @@ export class CadScene {
       polygonOffsetUnits: 1,
     });
     this.mesh = new THREE.Mesh(geometry, material);
+    this.standardMaterial = material;
     this.scene.add(this.mesh);
+
+    // 解析表示（ゼブラ・曲率・偏差）用。法線は src/cad/analysis.py の正確な値（無ければ三角形から求めた法線）。
+    const exact = decodeInt16(this.data.analysis?.normals);
+    if (exact.length === positions.length) geometry.setAttribute('aNormal', new THREE.BufferAttribute(exact, 3, true));
+    else geometry.setAttribute('aNormal', geometry.getAttribute('normal'));
+    this.hlAttr = new THREE.BufferAttribute(new Float32Array(vertexCount), 1);
+    geometry.setAttribute('hl', this.hlAttr);
+    this.scalarAttr = new THREE.BufferAttribute(new Float32Array(vertexCount), 1);
+    geometry.setAttribute('aScalar', this.scalarAttr);
+  }
+
+  /** 基準モデル（偏差の比較相手）を半透明で重ねる（setReferenceOverlay で見せる）。選択・当たり判定の対象にはしない。 */
+  private buildReference(): void {
+    const ref = this.data.reference;
+    if (!ref) return;
+    const indices = decodeUint32(ref.indices);
+    if (!indices.length) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(decodeFloat32(ref.positions), 3));
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    geometry.computeVertexNormals();
+    const material = new THREE.MeshStandardMaterial({
+      color: REFERENCE_COLOR,
+      roughness: 0.6,
+      metalness: 0,
+      transparent: true,
+      opacity: 0.35,
+      depthWrite: false,
+      side: THREE.DoubleSide
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.matrixAutoUpdate = false;
+    mesh.renderOrder = 1;
+    mesh.visible = false;
+    this.referenceMesh = mesh;
+    this.scene.add(mesh);
+    const T = this.data.deviation?.transform;
+    if (isMatrix4(T)) this.setReferenceOverlay({ matrix: T });
+  }
+
+  /** 基準モデルがあるか。 */
+  hasReference(): boolean {
+    return this.referenceMesh !== null;
+  }
+
+  /**
+   * 基準モデルの重ね表示。matrix は対象 → 基準の 4×4（行ごと）で、基準の方をその逆で動かして重ねる。
+   * 省いた項目は変えない。
+   */
+  setReferenceOverlay(opts: { visible?: boolean; opacity?: number; matrix?: number[][] }): void {
+    const m = this.referenceMesh;
+    if (!m) return;
+    if (opts.visible !== undefined) m.visible = opts.visible;
+    if (opts.opacity !== undefined) {
+      const mat = m.material as THREE.MeshStandardMaterial;
+      mat.opacity = Math.max(0.05, Math.min(1, opts.opacity));
+      mat.depthWrite = mat.opacity >= 0.99;
+    }
+    if (opts.matrix && isMatrix4(opts.matrix)) {
+      const T = new THREE.Matrix4().set(...(opts.matrix.flat() as [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number]));
+      m.matrix.copy(T.invert());
+      m.matrixWorldNeedsUpdate = true;
+    }
+    this.requestRender();
+  }
+
+  /** ゼブラ・曲率の表示に使う法線・曲率があるか。 */
+  hasSurfaceAnalysis(): boolean {
+    return !!this.data.analysis?.k1;
+  }
+
+  /**
+   * 表面の表示を変える（ふつう・ゼブラ・スカラー = 曲率や偏差の色）。スカラーの値は mesh の頂点と同じ並び。
+   */
+  setSurfaceDisplay(display: SurfaceDisplay): void {
+    this.surfaceDisplay = display;
+    if (!this.mesh) return;
+    if (display.mode === 'normal') {
+      if (this.standardMaterial) this.mesh.material = this.standardMaterial;
+      this.requestRender();
+      return;
+    }
+    if (!this.surfaceMaterial) {
+      this.surfaceMaterial = createSurfaceMaterial();
+      this.applyHighlightColors();
+    }
+    const u = this.surfaceMaterial.uniforms;
+    (u.uCenter.value as THREE.Vector3).copy(this.center);
+    u.uRadius.value = this.radius;
+    if (display.mode === 'scalar' && this.scalarAttr) {
+      const values = display.scalar.values;
+      if (values !== this.scalarValues) {
+        const arr = this.scalarAttr.array as Float32Array;
+        if (values.length === arr.length) arr.set(values);
+        else arr.fill(NaN);
+        this.scalarAttr.needsUpdate = true;
+        this.scalarValues = values;
+      }
+    }
+    applySurfaceDisplay(this.surfaceMaterial, display);
+    this.mesh.material = this.surfaceMaterial;
+    this.requestRender();
+  }
+
+  private applyHighlightColors(): void {
+    if (!this.surfaceMaterial) return;
+    (this.surfaceMaterial.uniforms.uHover.value as THREE.Color).set(this.colors.hover);
+    (this.surfaceMaterial.uniforms.uSelected.value as THREE.Color).set(this.colors.selected);
+  }
+
+  /** マウスの下（最後に当たった三角形の上の点）のスカラーの値。曲率・偏差を表示していなければ null。 */
+  private scalarAtLastHit(): number | null {
+    const h = this.lastMeshHit;
+    const values = this.scalarValues;
+    if (this.surfaceDisplay.mode !== 'scalar' || !h?.face || !values || !this.meshPositions) return null;
+    const { a, b, c } = h.face;
+    const p = this.meshPositions;
+    const tri = new THREE.Triangle(
+      new THREE.Vector3().fromArray(p, a * 3),
+      new THREE.Vector3().fromArray(p, b * 3),
+      new THREE.Vector3().fromArray(p, c * 3)
+    );
+    const w = new THREE.Vector3();
+    if (!tri.getBarycoord(h.point, w)) return values[a];
+    const v = w.x * values[a] + w.y * values[b] + w.z * values[c];
+    return Number.isFinite(v) ? v : null;
   }
 
   private buildLines(): void {
@@ -906,6 +1054,7 @@ export class CadScene {
   applyTheme(colors: CadSceneColors): void {
     this.colors = colors;
     (this.measureHoverMarker?.material as THREE.PointsMaterial | undefined)?.color.set(colors.hover);
+    this.applyHighlightColors();
     this.applyBackground();
     this.refreshColors();
   }
@@ -1265,6 +1414,9 @@ export class CadScene {
     };
     this.scene.traverse(disposeObject);
     this.gizmoScene.traverse(disposeObject);
+    // 面の材質は解析表示との切り替えで片方だけが付いているので、両方とも捨てる（2 回目の dispose は何もしない）。
+    this.standardMaterial?.dispose();
+    this.surfaceMaterial?.dispose();
     this.renderer.dispose();
     el.remove();
   }
@@ -1409,6 +1561,15 @@ export class CadScene {
         }
       });
       attr.needsUpdate = true;
+      // 解析表示（ゼブラ・曲率・偏差）での強調。頂点色は使わないので、状態だけを頂点ごとに持たせる。
+      if (this.hlAttr) {
+        const hl = this.hlAttr.array as Float32Array;
+        this.faceVertexRanges.forEach(([lo, hi], id) => {
+          const state = this.stateOf('face', id);
+          hl.fill(state === 'selected' ? 2 : state === 'hover' ? 1 : 0, lo, hi);
+        });
+        this.hlAttr.needsUpdate = true;
+      }
     }
     if (this.lines && this.edgePositions) {
       const attr = this.lines.geometry.getAttribute('color') as THREE.BufferAttribute;
@@ -1687,6 +1848,7 @@ export class CadScene {
     this.raycaster.setFromCamera(ndc, this.camera);
     const meshHit =
       this.mesh && this.visibility.face ? this.raycaster.intersectObject(this.mesh, false).find((h) => h.faceIndex != null) : undefined;
+    this.lastMeshHit = meshHit ?? null;
     const meshDistance = meshHit?.distance ?? Infinity;
     const scale = this.worldPerPixel();
     // 面の手前にあるもの（同じ面上の線・点を含む）だけを当てる。
@@ -1983,6 +2145,7 @@ export class CadScene {
       this.setHoverMarker(pick && this.measureWantsPoint() ? pick.point : null);
     } else {
       item = this.pickAt(e.clientX, e.clientY);
+      if (this.surfaceDisplay.mode === 'scalar') this.callbacks.onScalarHover?.(this.scalarAtLastHit());
     }
     const same = item && this.hover ? item.kind === this.hover.kind && item.id === this.hover.id : item === this.hover;
     if (same) return;
@@ -1994,6 +2157,7 @@ export class CadScene {
 
   private readonly handlePointerLeave = () => {
     this.setHoverMarker(null);
+    this.callbacks.onScalarHover?.(null);
     if (!this.hover) return;
     this.hover = null;
     this.hoverHoles = new Set();
@@ -2011,6 +2175,10 @@ export class CadScene {
   }
 
   private render(): void {
+    if (this.surfaceMaterial && this.mesh?.material === this.surfaceMaterial) {
+      // 視点に固定した照明・陰影の向きは、カメラが動くたびに合わせる。
+      updateSurfaceUniforms(this.surfaceMaterial, this.camera, this.surfaceDisplay.mode === 'zebra' ? this.surfaceDisplay.zebra : null);
+    }
     this.renderer.render(this.scene, this.camera);
     this.renderGizmo();
     this.placeMeasureLabels();
