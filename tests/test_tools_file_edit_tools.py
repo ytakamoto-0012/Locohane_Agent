@@ -200,3 +200,23 @@ def test_edit_of_a_cp932_file_with_a_character_cp932_cannot_hold_leaves_the_file
     assert result.startswith("Error:") and "cp932" in result and "not changed" in result
     assert target.read_bytes() == original
     assert not list(target.parent.glob(".sjis_emoji.txt.*.tmp"))
+
+
+def test_write_retries_when_windows_briefly_denies_the_replace(env, monkeypatch):
+    # 置き換え先を他のプロセスが一瞬開いていると os.replace が WinError 5 になる（並列 Edit のテストで発生）
+    from src.tools import file_edit_tools
+
+    real_replace = file_edit_tools.os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError(5, "Access is denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(file_edit_tools.os, "replace", flaky_replace)
+    monkeypatch.setattr(file_edit_tools, "_REPLACE_RETRY_DELAYS", (0, 0, 0))
+    result = _write(file_path="r.txt", content="あいう\n")
+    assert not result.startswith("Error"), result
+    assert (tools._workdir._resolve_exec_workdir() / "r.txt").read_text(encoding="utf-8") == "あいう\n"

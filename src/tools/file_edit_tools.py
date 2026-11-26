@@ -19,6 +19,7 @@ import locale
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 
 import chainlit as cl
@@ -99,9 +100,25 @@ def _write_text(path: Path, text: str, encoding: str, newline: str) -> None:
     try:
         with open(tmp, "w", encoding=encoding, newline="") as f:
             f.write(text.replace("\n", newline) if newline != "\n" else text)
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+# Windows では、置き換え先をウイルス対策・インデクサー・エディタが一瞬開いていると os.replace が
+# PermissionError（WinError 5）になる（直前に置き換えたばかりのファイルで起きやすい。並列 Edit の
+# テストが負荷の高いときに失敗した）。少し待って数回やり直す。
+_REPLACE_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8)
+
+
+def _replace_with_retry(src: Path, dst: Path) -> None:
+    for delay in _REPLACE_RETRY_DELAYS:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            time.sleep(delay)
+    os.replace(src, dst)
 
 
 # 同じファイルへの Write/Edit を1つずつ行うためのロック（パスごと）。サブエージェントは1回の応答の
