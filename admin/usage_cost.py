@@ -34,6 +34,7 @@ from pathlib import Path
 
 from admin.i18n import t as _t
 from src import embedding_usage
+from src.fs_replace import replace_with_retry
 
 from . import ai_usage
 from . import monitor
@@ -218,7 +219,7 @@ def write_settings(instances_root: Path, data: dict) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    replace_with_retry(tmp, path)
     return clean
 
 

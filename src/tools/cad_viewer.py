@@ -707,7 +707,7 @@ def _model_path(target: _SaveTarget, suffix: str) -> Path:
 
 def _initial_hidden(data: dict) -> set[int]:
     """ビューアを開いたときに隠れている部品（CadViewerBar.tsx の initialHiddenParts と同じ）。"""
-    view = data.get("viewState") or {}
+    view = data.get("viewState") if isinstance(data.get("viewState"), dict) else {}
     if view.get("hiddenParts") is not None and isinstance(view["hiddenParts"], list):
         # LLM が書いたり手で編集したりした JSON で数ではない項目があっても、例外にしない（壊れた項目は捨てる）
         out: set[int] = set()
@@ -742,7 +742,10 @@ def _view_edits(data: dict, payload: dict[str, Any], colors: list[dict[str, Any]
     hidden_parts = [p for p in (hidden if isinstance(hidden, list) else []) if isinstance(p, int) and not isinstance(p, bool) and 0 <= p < len(parts)]
     vis = payload.get("visible")
     visible = {k: bool(vis[k]) for k in ("face", "edge", "vertex") if isinstance(vis, dict) and isinstance(vis.get(k), bool)}
-    before_visible = {"face": True, "edge": True, "vertex": True, **((data.get("viewState") or {}).get("visible") or {})}
+    # LLM が書いた・手で編集した JSON で viewState・visible が辞書でなくても例外にしない（_initial_hidden と同じ）。
+    view_state = data.get("viewState") if isinstance(data.get("viewState"), dict) else {}
+    saved_visible = view_state.get("visible") if isinstance(view_state.get("visible"), dict) else {}
+    before_visible = {"face": True, "edge": True, "vertex": True, **saved_visible}
     changed = bool(colors) or set(hidden_parts) != _initial_hidden(data) or any(before_visible.get(k) != v for k, v in visible.items())
     # ビューアで基準モデルとの位置を合わせ直した（data["deviation"] は _store_alignment で書き換えてある）。
     changed = changed or bool(payload.get("_alignment_changed"))

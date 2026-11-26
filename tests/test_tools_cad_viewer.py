@@ -998,6 +998,11 @@ def test_malformed_viewer_data_returns_an_error_not_a_crash() -> None:
     # 部品に id が無くても例外にしない（並び順で補う）
     no_ids = {"parts": [{"name": "A", "layer": {"off": True}}, {"name": "B"}, "junk", {"id": 7, "layer": {"frozen": True}}]}
     assert cad_viewer._initial_hidden(no_ids) == {0, 7}
+    # viewState・visible が辞書でなくても、表示の変化の判定で例外にしない
+    for broken in ({"viewState": ["x"], "parts": []}, {"viewState": {"visible": ["face"]}, "parts": []}):
+        assert cad_viewer._initial_hidden(broken) == set()
+        _edited, changed = cad_viewer._view_edits(broken, {"visible": {"face": False}}, [])
+        assert changed
 
 
 def test_part_recolored_back_keeps_face_overrides() -> None:

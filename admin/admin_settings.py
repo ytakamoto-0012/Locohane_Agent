@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from src.config import ADMIN_SETTING_KEYS, PROJECT_ROOT, Config, admin_settings_path, load_config
+from src.fs_replace import replace_with_retry
 
 from . import audit
 from . import instances as inst
@@ -99,7 +100,7 @@ def _write(path: Path, data: dict) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise

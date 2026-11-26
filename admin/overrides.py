@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from src.config import ADDITIVE_OVERRIDE_KEYS, ADMIN_SETTING_KEYS, additive_override_additions, load_config
+from src.fs_replace import replace_with_retry
 
 from . import audit
 from . import instances as inst
@@ -303,7 +304,7 @@ def save(
         _check_data_dir_conflict(instances_root, config_ini_path, instance_name=instance_name, tmp_path=tmp_path)
 
         _backup(path, backup_dir, backup_keep)
-        os.replace(tmp_path, path)
+        replace_with_retry(tmp_path, path)
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
@@ -365,7 +366,7 @@ def _replace_checked(
         _check_data_dir_conflict(instances_root, config_ini_path, instance_name=instance_name, tmp_path=tmp_path)
 
         _backup(path, backup_dir, backup_keep)
-        os.replace(tmp_path, path)
+        replace_with_retry(tmp_path, path)
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise

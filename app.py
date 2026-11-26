@@ -3495,6 +3495,8 @@ async def on_cad_viewer_sew(action: cl.Action) -> dict:
     from src.tools.cad_viewer import sew_viewer_data
 
     return await sew_viewer_data(dict(action.payload or {}))
+
+
 @cl.action_callback("cad_viewer_align")
 async def on_cad_viewer_align(action: cl.Action) -> dict:
     """3D ビューア（CadViewerBar.tsx）の「位置合わせ」から呼ばれる action_callback。
