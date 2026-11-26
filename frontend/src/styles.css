@@ -320,6 +320,27 @@
   justify-content: flex-end;
 }
 
+/* AI の名前（config.ini [persona] name）を設定したときだけ、回答の吹き出しを名前の行と一緒に縦に並べる（MessageThread の MessageAuthor）。 */
+.message-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  max-width: var(--message-bubble-max-width);
+}
+
+.message-author {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin: 0 0 3px 2px;
+  line-height: 1.2;
+}
+
+.message-body > .message-bubble {
+  max-width: 100%;
+}
+
 .avatar {
   flex-shrink: 0;
   width: 28px;

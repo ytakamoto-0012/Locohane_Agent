@@ -1172,6 +1172,9 @@ class Config:
         show_cad_viewer_timeout_seconds: 3D ビューアで利用者が確定・閉じるのを待つ秒数（3D ビューア専用。
             [cad_viewer].timeout_seconds、既定 3600。無ければ以前の [user_response_timeouts].show_cad_viewer_seconds）。
             0 以下は無期限待ち。ブラウザを閉じたまま待ち続けないよう、既定は有限。
+        persona_name / persona_gender / persona_personality: このインスタンスの AI の名前・性別・性格
+            （[persona] name / gender / personality）。system_prompt.md の {{persona}} に差し込む
+            （render_persona_block）。空の項目は差し込まない。
     """
 
     # --- LLM (llama.cpp server / OpenAI 互換) ---
@@ -1700,6 +1703,12 @@ class Config:
     cad_viewer_local_axis_length_tolerance: float = 0.1
     cad_viewer_local_axis_angle_tolerance_deg: float = 0.5
     show_cad_viewer_timeout_seconds: int = 3600
+
+    # --- AI の人物設定（[persona]。system_prompt.md の {{persona}}、render_persona_block 参照） ---
+    # 既定値付き（テスト等で Config を直接組み立てる箇所に影響させないため）。空なら差し込まない。
+    persona_name: str = ""
+    persona_gender: str = ""
+    persona_personality: str = ""
 
 
 def _resolve(base: Path, value: str) -> Path:
@@ -2941,6 +2950,61 @@ def render_memory_visibility_block(config: Config) -> str:
     return memory.render_visibility_block(config.memory_shared_criteria, config.memory_private_criteria, memory_policy(config))
 
 
+DEFAULT_ASSISTANT_NAME = "Locohane"
+
+
+def persona_display_name(config: Config) -> str:
+    """画面・ウェルカムメッセージに出す AI の名前（[persona] name。空なら Locohane）。"""
+    return (getattr(config, "persona_name", "") or "").strip() or DEFAULT_ASSISTANT_NAME
+
+
+def fill_welcome_template(template: str, *, skills: str, config: Config) -> str:
+    """ウェルカムメッセージ（welcome.md）の差し込み口を埋める。
+
+    {skills}: スキル一覧 / {ai_name}: AI の名前（空なら Locohane）/ {ai_gender}: 性別 / {ai_personality}: 性格・話し方
+    （性別・性格は空なら空文字）。str.format は使わない（welcome.md の他の { } を壊さないため）。
+    """
+    values = {
+        "{skills}": skills,
+        "{ai_name}": persona_display_name(config),
+        "{ai_gender}": (getattr(config, "persona_gender", "") or "").strip(),
+        "{ai_personality}": (getattr(config, "persona_personality", "") or "").strip(),
+    }
+    for placeholder, value in values.items():
+        template = template.replace(placeholder, value)
+    return template
+
+
+def render_persona_block(config: Config) -> str:
+    """system_prompt.md の {{persona}} へ差し込む、このインスタンスの AI の人物設定（[persona]）。
+
+    設定した項目だけを並べる。3つとも空なら空文字（従来どおり Locohane として振る舞う）。
+    性格は口調への反映に留め、プロンプトの手順より優先させない（低パラメータモデルが「性格」を理由に
+    委譲・承認の手順を省かないよう、その旨を一緒に書く）。
+    """
+    name = (getattr(config, "persona_name", "") or "").strip()
+    gender = (getattr(config, "persona_gender", "") or "").strip()
+    personality = (getattr(config, "persona_personality", "") or "").strip()
+    if not (name or gender or personality):
+        return ""
+    lines = ["## Persona (set by the administrator for this instance)", ""]
+    if name:
+        lines.append(
+            f"- Name: **{name}**. Use this name when you introduce yourself or are asked who you are "
+            "(Locohane is the name of the system you run on)."
+        )
+    if gender:
+        lines.append(f"- Gender: {gender}")
+    if personality:
+        body = "\n  ".join(line.strip() for line in personality.splitlines() if line.strip())
+        lines.append(f"- Personality and speaking style: {body}")
+    lines.append(
+        "- Reflect this persona only in your tone and wording. It never changes the procedures, delegation rules "
+        "or approval flow in this prompt."
+    )
+    return "\n".join(lines)
+
+
 def _as_float(value: object, key: str) -> float:
     """数値として解釈して返す（0 以下も可。「0 以下で無効」の設定用）。
 
@@ -3522,6 +3586,7 @@ def load_config(
     subagent = parser["subagent"] if parser.has_section("subagent") else {}
     timeouts = parser["user_response_timeouts"] if parser.has_section("user_response_timeouts") else {}
     cad_viewer = parser["cad_viewer"] if parser.has_section("cad_viewer") else {}
+    persona = parser["persona"] if parser.has_section("persona") else {}
     plan_section = parser["plan"] if parser.has_section("plan") else {}
     thinking_loop_guard = parser["thinking_loop_guard"] if parser.has_section("thinking_loop_guard") else {}
     thinking_control = parser["thinking_control"] if parser.has_section("thinking_control") else {}
@@ -4787,6 +4852,9 @@ def load_config(
                 ),
             )
         ),
+        persona_name=os.getenv("PERSONA_NAME", persona.get("name", "")).strip(),
+        persona_gender=os.getenv("PERSONA_GENDER", persona.get("gender", "")).strip(),
+        persona_personality=os.getenv("PERSONA_PERSONALITY", persona.get("personality", "")).strip(),
     )
 
     # .locohane/settings.json の "mcp" ブロックがあれば、config.ini/環境変数由来の

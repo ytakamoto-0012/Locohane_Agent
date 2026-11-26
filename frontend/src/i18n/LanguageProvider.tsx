@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { BACKEND_URL } from '../chainlitClient';
+import { fetchUiConfig } from '../utils/uiConfig';
 import { I18nContext } from './context';
 import { MESSAGES, STORAGE_KEY, format, getBrowserLang, getStoredLang, ja, normalizeLang, type Lang, type Translate } from './messages';
 
@@ -11,8 +11,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
   // まだ言語を選んでいない利用者は、config.ini の既定値（auto ならブラウザの言語）にする。
   useEffect(() => {
     if (stored !== null) return;
-    fetch(`${BACKEND_URL}/locohane/ui-config`)
-      .then((res) => (res.ok ? res.json() : Promise.reject()))
+    fetchUiConfig()
       .then((config) => {
         const lang = normalizeLang(config?.default_language);
         if (lang) setLangState(lang);

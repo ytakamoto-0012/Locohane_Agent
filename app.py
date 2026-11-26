@@ -106,6 +106,7 @@ from src.cleanup import run_cleanup_loop as cleanup_run_cleanup_loop
 from src.auth_users import AuthUsersSource, token_issued_at
 from src.live_settings import MemoryRanksReloader
 from src.config import (
+    fill_welcome_template,
     load_config,
     with_reasoning_effort,
 )
@@ -1733,7 +1734,9 @@ def _register_instance_settings_route() -> None:
     async def _serve_ui_config():
         # 表示言語の既定値（[ui].default_language）。利用者がまだ言語を選んでいないとき、
         # ログイン画面から使うため認証なしで返す（frontend/src/i18n.tsx 参照）。
-        return {"default_language": _config.ui_default_language}
+        # assistant_name: 会話欄で AI の回答の上に出す名前（[persona] name。空なら名前の行を出さず従来の見た目のまま。
+        # MessageThread.tsx）。ヘッダー等と同じくログイン前に見えてよい表示用の値。
+        return {"default_language": _config.ui_default_language, "assistant_name": _config.persona_name}
 
     @_asgi_app.get("/public/settings/{filename}")
     async def _serve_settings_file(filename: str):
@@ -2934,7 +2937,8 @@ async def on_chat_start() -> None:
     # 起動時に走査した一覧を使う（スキルの追加・変更が効くのも再起動後のため、表示もそれに合わせる）。
     names = i18n.t("list.separator").join(_setup_skill_names) or i18n.t("welcome.no_skills")
     welcome_template = _load_settings_text("welcome.md", i18n.t("welcome.default"))
-    await cl.Message(content=welcome_template.replace("{skills}", names)).send()
+    # {skills} に加え、AI の人物設定（[persona]）の {ai_name}・{ai_gender}・{ai_personality} も差し込める。
+    await cl.Message(content=fill_welcome_template(welcome_template, skills=names, config=_config)).send()
 
     await _send_starter_prompts()
 

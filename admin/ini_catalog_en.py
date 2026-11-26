@@ -1640,6 +1640,20 @@ DESCRIPTIONS: dict[str, str] = {
     'ui.token_usage_alert_threshold': (
         'When the same target as above (the total tokens of the "per request" row) reaches this value or more, the whole row is highlighted in bold red (takes precedence over token_usage_warn_threshold; 0 or less disables it).'
     ),
+    'persona.name': (
+        "The name, gender and personality of this instance's AI. They are inserted into the Identity of the system prompt ({{persona}} in system_prompt.md).\n"
+        'You can change them per instance from the instance\'s "Display settings" tab (or the config.ini tab) of the settings dashboard. Changes take effect after the app restarts.\n'
+        'When all three are blank (the default), nothing is inserted and the AI behaves as Locohane, as before. Only the items you set are inserted.\n'
+        'The personality is reflected only in the tone and wording; it never takes precedence over the procedures, delegation rules or approval flow in the system prompt.\n'
+        'They can be inserted into the welcome message (welcome.md) with {ai_name}, {ai_gender} and {ai_personality} (Locohane when the name is blank).\n'
+        'The name of the AI (e.g. Kohane). Used when it introduces itself or is asked its name. When set, it is also shown above the AI\'s answers in the chat screen (not shown when blank).'
+    ),
+    'persona.gender': (
+        'The gender of the AI (e.g. female).'
+    ),
+    'persona.personality': (
+        'The personality and speaking style of the AI (e.g. cheerful and polite; gives the conclusion first, briefly). Can span several lines (start the second and later lines with a space).'
+    ),
     'websocket.ping_interval_seconds': (
         'Liveness check interval and timeout of the WebSocket (Socket.IO) connection between the browser and the server.\n'
         'A setting on a different layer from [llm].stream_chunk_timeout_seconds (the communication timeout with the LLM server). Chainlit itself (`socketio.AsyncServer(...)` in chainlit/server.py) does not specify these, so when unset the python-socketio/engineio defaults (25-second interval, 20-second timeout) are used.\n'

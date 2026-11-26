@@ -279,6 +279,7 @@ The admin tool started by `admin.bat` lets you do the following in the browser.
 - Change the AI endpoints and other settings (no text editor needed)
 - Add and change sign-in users
 - Change the screen header, welcome message and icon
+- Set the AI's name, gender and personality (speaking style) per instance (the instance's "Display settings" tab; the name is also shown in the chat screen and can be inserted into the welcome message; takes effect after a restart)
 - Start, stop and restart Locohane-Agent as **multiple instances** (different models, different departments, etc.) at the same time
 - Check the running status, conversations and logs, and the change history of settings
 - **Usage & cost**: total token usage by month, instance and user, and estimate the cost from the AWS pricing you enter

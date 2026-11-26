@@ -110,6 +110,7 @@ _MULTILINE_KEYS: frozenset[tuple[str, str]] = frozenset(
     {
         ("memory", "shared_criteria"),
         ("memory", "private_criteria"),
+        ("persona", "personality"),
     }
 )
 
