@@ -60,7 +60,8 @@ _ALL_KINDS: tuple[str, ...] = ("face", "edge", "vertex", "part", "hole", "outer"
 # （src/cad/topology.py）。
 _LIST_KEYS = {"face": "faces", "edge": "edgeList", "vertex": "vertexList", "part": "parts", "hole": "holeList", "outer": "outerList"}
 # ローカル座標に直して selection_file・計測に添える項目（点と向き）。
-_LOCAL_POINT_KEYS = ("center", "point", "start", "end", "axisOrigin", "circleCenter", "sphereCenter", "apex", "ellipseCenter")
+# foot は点とエッジの法線距離（point_edge_distance）の垂線の足。
+_LOCAL_POINT_KEYS = ("center", "point", "start", "end", "axisOrigin", "circleCenter", "sphereCenter", "apex", "ellipseCenter", "foot")
 _LOCAL_VECTOR_KEYS = ("normal", "normalAtCenter", "direction", "axisDirection", "axis", "delta")
 
 _CANCEL_MESSAGE = "Error: the user closed the 3D viewer without confirming a selection."

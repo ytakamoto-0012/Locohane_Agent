@@ -101,6 +101,31 @@ def test_long_border_edge_is_matched_along_its_whole_length(tmp_path) -> None:
     assert data["holes"]["outerLoops"] == 1
 
 
+def test_diagonal_border_edges_are_matched_across_grid_cell_corners() -> None:
+    # 斜めの向きに置いた 2 枚の帯が、許容差（0.1）より狭い隙間（0.05）で向かい合う。辺が升目の角を斜めに横切ると、
+    # 辺の端の点のまわりだけを升目に入れていたとき、辺の中ほどの点から相手が見つからず境目が残っていた。
+    from src.cad.topology import _Boundary
+
+    rng = np.random.default_rng(1)
+    for _ in range(40):
+        d = rng.normal(size=3)
+        d /= np.linalg.norm(d)
+        side = np.cross(d, rng.normal(size=3))
+        side /= np.linalg.norm(side)
+        o = rng.uniform(-50, 50, size=3)
+        pts, tris = [], []
+        for k in range(4):
+            a, b = o + d * 10.0 * k, o + d * 10.0 * (k + 1)
+            base = len(pts)
+            pts += [a, b, a - side * 3, b - side * 3, a + side * 0.05, b + side * 0.05, a + side * 3.05, b + side * 3.05]
+            tris += [[base, base + 1, base + 2], [base + 1, base + 3, base + 2], [base + 4, base + 6, base + 5], [base + 5, base + 6, base + 7]]
+        bd = _Boundary(np.array(pts), np.array(tris), 0.1)
+        before = int(bd.alive.sum())
+        bd.match_within_tolerance()
+        # 向かい合う縁の辺（帯ごとに 4 本、2 枚で 8 本）がすべて突き合わさる。
+        assert before - int(bd.alive.sum()) == 8
+
+
 def test_hole_smaller_than_the_tolerance_is_not_a_hole(tmp_path) -> None:
     # 升目 0.02 の板に、0.06 角の穴（許容差 0.1 より小さい）。
     data = _stl_data(tmp_path, _plate(50, 1, holes=[(0.5, 0.5, 0.03)]), hole_tolerance=0.1)
@@ -318,11 +343,15 @@ def test_selected_holes_and_measurements_get_local_values(tmp_path, monkeypatch)
     assert cad_viewer._valid_local_axis(data, 0) is axis
     assert cad_viewer._valid_local_axis(data, 1) is None and cad_viewer._valid_local_axis(data, True) is None
     m = {"type": "distance", "distance": 5.0, "delta": [0, 5, 0], "points": [[10, 0, 0], [10, 5, 0]]}
-    out = json.loads(cad_viewer._format_result(data, [("hole", 0)], "viewer.json", [], measurements=[m], local_axis=axis))
+    # 点とエッジの法線距離の垂線の足（foot）もローカル座標にする。
+    pe = {"type": "point_edge_distance", "distance": 5.0, "foot": [10, 5, 0], "delta": [0, 5, 0], "points": [[10, 0, 0], [10, 5, 0]]}
+    measurements = cad_viewer._valid_measurements(data, [m, pe])
+    out = json.loads(cad_viewer._format_result(data, [("hole", 0)], "viewer.json", [], measurements=measurements, local_axis=axis))
     assert out["selected_by_kind"] == {"hole": 1}
     assert out["local_axis"]["origin"] == [10, 0, 0] and "local =" in out["local_axis"]["note"]
     assert out["measurements"][0]["local"]["delta"] == pytest.approx([5, 0, 0])
     assert out["measurements"][0]["local"]["points"][1] == pytest.approx([5, 0, 0])
+    assert out["measurements"][1]["local"]["foot"] == pytest.approx([5, 0, 0])
     assert out["model"]["holes"]["count"] == 1 and out["model"]["holes"]["groups"][0]["diameter"] == 4.0
     detail = json.loads(open(out["selection_file"], encoding="utf-8").read())
     hole = detail["selected"][0]

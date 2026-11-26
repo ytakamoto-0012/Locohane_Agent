@@ -2979,9 +2979,10 @@ def fill_welcome_template(template: str, *, skills: str, config: Config) -> str:
         "{ai_gender}": (getattr(config, "persona_gender", "") or "").strip(),
         "{ai_personality}": (getattr(config, "persona_personality", "") or "").strip(),
     }
-    for placeholder, value in values.items():
-        template = template.replace(placeholder, value)
-    return template
+    # 1 回の置き換えで埋める（順に replace すると、差し込んだ値〔スキルの説明・性格の文〕に偶然ある {ai_name} 等まで
+    # 置き換わってしまう）。
+    pattern = re.compile("|".join(re.escape(p) for p in values))
+    return pattern.sub(lambda m: values[m.group(0)], template)
 
 
 def render_persona_block(config: Config) -> str:
@@ -4859,16 +4860,14 @@ def load_config(
             os.getenv("CAD_VIEWER_DEVIATION_TOLERANCE", cad_viewer.get("deviation_tolerance", 0.1)),
             "[cad_viewer].deviation_tolerance",
         ),
-        # 3D ビューア専用のタイムアウト。以前の [user_response_timeouts] show_cad_viewer_seconds（環境変数
-        # SHOW_CAD_VIEWER_TIMEOUT_SECONDS）は、[cad_viewer] timeout_seconds が無いときだけ使う。
+        # 3D ビューア専用のタイムアウト。以前の [user_response_timeouts] show_cad_viewer_seconds は、
+        # [cad_viewer] timeout_seconds が無いときだけ使う。環境変数はほかの設定と同じく ini より優先し、
+        # 以前の SHOW_CAD_VIEWER_TIMEOUT_SECONDS も CAD_VIEWER_TIMEOUT_SECONDS が無ければ使う（同梱の config.ini には
+        # timeout_seconds があるので、ini の後に見ると以前の環境変数が効かなくなる）。
         show_cad_viewer_timeout_seconds=int(
-            os.getenv(
-                "CAD_VIEWER_TIMEOUT_SECONDS",
-                cad_viewer.get(
-                    "timeout_seconds",
-                    os.getenv("SHOW_CAD_VIEWER_TIMEOUT_SECONDS", timeouts.get("show_cad_viewer_seconds", 3600)),
-                ),
-            )
+            os.getenv("CAD_VIEWER_TIMEOUT_SECONDS")
+            or os.getenv("SHOW_CAD_VIEWER_TIMEOUT_SECONDS")
+            or cad_viewer.get("timeout_seconds", timeouts.get("show_cad_viewer_seconds", 3600))
         ),
         persona_name=os.getenv("PERSONA_NAME", persona.get("name", "")).strip(),
         persona_gender=os.getenv("PERSONA_GENDER", persona.get("gender", "")).strip(),

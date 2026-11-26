@@ -499,6 +499,8 @@ export class CadScene {
     const h = this.lastMeshHit;
     const values = this.scalarValues;
     if (this.surfaceDisplay.mode !== 'scalar' || !h?.face || !values || !this.meshPositions) return null;
+    // 値の数が頂点の数と合わない（setSurfaceDisplay は NaN で埋めて描く）ときは、値を出さない。
+    if (values.length * 3 !== this.meshPositions.length) return null;
     const { a, b, c } = h.face;
     const p = this.meshPositions;
     const tri = new THREE.Triangle(

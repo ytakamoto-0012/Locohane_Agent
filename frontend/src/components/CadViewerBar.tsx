@@ -965,6 +965,9 @@ function CadViewerPanel({
       const cur = history.rewrite(withoutLoops);
       setSelection(cur.selection);
       setHiddenItems(cur.hiddenItems);
+      // 非表示領域に入っている間に縫合したときは、入る前の選択（戻るときに戻す）からも古い ID の穴・外周を外す。
+      stashedSelection.current = stashedSelection.current.filter((s) => s.kind !== 'hole' && s.kind !== 'outer');
+      setHover(null);
       sceneRef.current?.reloadTopology();
       sewnRef.current = true;
       setAppliedSew(data.holes?.sewTolerance ?? 0);

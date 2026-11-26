@@ -450,14 +450,17 @@ class _Boundary:
         cell = max(reach * 4, float(np.median(length)))
         grid: dict[tuple[int, int, int], list[int]] = {}
         for i in range(n):
-            # 辺に沿って升目の大きさごとに点を取り、各点の許容差の範囲に掛かる升目に入れる（升目に比べて長い辺
-            # 〔大きな平面の縁など〕でも、外接箱の升目すべてではなく辺の近くの升目だけになる）。
+            # 辺を升目の大きさ以下の区間に分け、区間ごとに「区間の外接箱 + 許容差」に掛かる升目に入れる（升目に比べて
+            # 長い辺〔大きな平面の縁など〕でも、外接箱の升目すべてではなく辺の近くの升目だけになる）。区間の端の点の
+            # まわりだけを入れると、許容差が升目より十分小さいとき、辺が升目の角を斜めに横切る所の升目が抜け、
+            # その近くの辺から相手として見つからない。
             steps = max(1, int(math.ceil(float(length[i]) / cell)))
             cells: set[tuple[int, int, int]] = set()
-            for t in np.linspace(0.0, 1.0, steps + 1):
-                p = pa[i] + seg[i] * t
-                x0, y0, z0 = np.floor((p - reach) / cell).astype(np.int64).tolist()
-                x1, y1, z1 = np.floor((p + reach) / cell).astype(np.int64).tolist()
+            ts = np.linspace(0.0, 1.0, steps + 1)
+            for t0, t1 in zip(ts[:-1], ts[1:]):
+                p0, p1 = pa[i] + seg[i] * t0, pa[i] + seg[i] * t1
+                x0, y0, z0 = np.floor((np.minimum(p0, p1) - reach) / cell).astype(np.int64).tolist()
+                x1, y1, z1 = np.floor((np.maximum(p0, p1) + reach) / cell).astype(np.int64).tolist()
                 for x in range(x0, x1 + 1):
                     for y in range(y0, y1 + 1):
                         for z in range(z0, z1 + 1):

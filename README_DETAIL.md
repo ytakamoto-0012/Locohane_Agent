@@ -2373,7 +2373,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[user_response_timeouts]` | `approval_seconds` | `approve_plan`／`run_script`・`execute_python_code`の個別実行確認でユーザー応答を待つ秒数。`0`で無期限待ち | `APPROVAL_TIMEOUT_SECONDS` |
 | `[user_response_timeouts]` | `ask_user_question_seconds` | `AskUserQuestion`（自由記述質問。`labels`省略時は単一入力、指定時は複数項目フォーム）でユーザー応答を待つ秒数。`0`で無期限待ち | `ASK_USER_QUESTION_TIMEOUT_SECONDS` |
 | `[user_response_timeouts]` | `ask_user_choice_seconds` | `ask_user_choice`（選択肢質問）でユーザー応答を待つ秒数。`0`で無期限待ち | `ASK_USER_CHOICE_TIMEOUT_SECONDS` |
-| `[user_response_timeouts]` | `show_cad_viewer_seconds` | 以前の 3D ビューアの待ち時間。`[cad_viewer] timeout_seconds` が無いときだけ使う（config.ini からは外した） | `SHOW_CAD_VIEWER_TIMEOUT_SECONDS` |
+| `[user_response_timeouts]` | `show_cad_viewer_seconds` | 以前の 3D ビューアの待ち時間。`[cad_viewer] timeout_seconds` が無いときだけ使う（config.ini からは外した）。環境変数 `SHOW_CAD_VIEWER_TIMEOUT_SECONDS` は、`CAD_VIEWER_TIMEOUT_SECONDS` が無ければ config.ini の `timeout_seconds` より優先する | `SHOW_CAD_VIEWER_TIMEOUT_SECONDS` |
 | `[cad_viewer]` | `enabled` | 3D ビューア（`show_cad_viewer`）を使えるようにするか。`false` ならツールはエラーを返す | `CAD_VIEWER_ENABLED` |
 | `[cad_viewer]` | `timeout_seconds` | 3D ビューア専用のタイムアウト。ビューアの「確定」「閉じる」を待つ秒数（既定 3600）。過ぎるとビューアを閉じる。ブラウザを閉じたまま待ち続けないよう、0 以下（無期限）は勧めない | `CAD_VIEWER_TIMEOUT_SECONDS` |
 | `[cad_viewer]` | `max_triangles` | ビューアへ送る三角形の上限（既定 1000000）。B-rep は超えたら粗く作り直し、それでも超えれば（STL は超えた時点で）エラー。0 以下で無制限。曲面の多い STL は三角形 100 万個でデータ約 500MB・変換に約 40 秒・メモリ 3〜4GB を使う。増やす場合は `[scripts] timeout` も合わせて延ばし、メモリの余裕を確かめる | `CAD_VIEWER_MAX_TRIANGLES` |

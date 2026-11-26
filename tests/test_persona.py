@@ -119,6 +119,21 @@ def test_welcome_template_placeholders():
     # 未設定なら名前は Locohane、性別・性格は空
     empty = SimpleNamespace(persona_name="", persona_gender="", persona_personality="")
     assert fill_welcome_template("{ai_name}[{ai_gender}{ai_personality}]", skills="", config=empty) == "Locohane[]"
+    # 差し込んだ値（スキルの一覧・性格の文）に偶然ある差し込み口は、置き換えない（1 回の置き換えで埋める）
+    odd = SimpleNamespace(persona_name="こはね", persona_gender="", persona_personality="{skills} と書く")
+    assert fill_welcome_template("{skills} / {ai_personality}", skills="x{ai_name}", config=odd) == "x{ai_name} / {skills} と書く"
+
+
+def test_cad_viewer_timeout_env_vars_win_over_config_ini(monkeypatch, tmp_path):
+    """3D ビューアのタイムアウト: 同梱の config.ini に [cad_viewer] timeout_seconds があっても、以前の環境変数
+    SHOW_CAD_VIEWER_TIMEOUT_SECONDS が効く（新しい CAD_VIEWER_TIMEOUT_SECONDS が先）。"""
+    for name in ("CAD_VIEWER_TIMEOUT_SECONDS", "SHOW_CAD_VIEWER_TIMEOUT_SECONDS"):
+        monkeypatch.delenv(name, raising=False)
+    assert _config(monkeypatch, tmp_path).show_cad_viewer_timeout_seconds == 3600
+    monkeypatch.setenv("SHOW_CAD_VIEWER_TIMEOUT_SECONDS", "120")
+    assert _config(monkeypatch, tmp_path).show_cad_viewer_timeout_seconds == 120
+    monkeypatch.setenv("CAD_VIEWER_TIMEOUT_SECONDS", "60")
+    assert _config(monkeypatch, tmp_path).show_cad_viewer_timeout_seconds == 60
 
 
 def test_app_uses_persona_for_welcome_and_chat_screen_name():
