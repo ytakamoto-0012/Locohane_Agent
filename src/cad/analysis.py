@@ -36,7 +36,8 @@ MAX_VERTICES = 6_000_000
 
 def weld(positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """同じ位置の頂点をまとめる。戻り値は (まとめた位置 (u,3), 元の頂点 → まとめた番号 (n,))。"""
-    pos = np.ascontiguousarray(positions, dtype=np.float32)
+    # + 0.0 で -0.0 を 0.0 にする（バイト列で比べるので、そのままだと同じ位置の 0.0 と -0.0 が別の頂点になる）。
+    pos = np.ascontiguousarray(positions, dtype=np.float32) + np.float32(0.0)
     if not len(pos):
         return pos.reshape(0, 3), np.zeros(0, dtype=np.int64)
     # 3 つの float32 を 1 つの 12 バイトの値として比べる（np.unique の axis=0 より速い）。

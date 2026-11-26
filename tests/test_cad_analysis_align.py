@@ -183,3 +183,23 @@ def test_as_matrix_rejects_non_rigid_or_broken_transforms() -> None:
     assert A.as_matrix([[2, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) is None
     assert A.as_matrix([[1, 0, 0]]) is None
     assert A.as_matrix("x") is None
+
+
+def test_coarse_candidates_are_rotations_whatever_the_eigenvector_handedness() -> None:
+    # eigh の固有ベクトルの並びが左手系だと、符号の積が +1 の 4 通りがすべて鏡映になり候補が 0 個になっていた
+    pos, tris, _ranges, _normals = _box(10, 5, 2)
+    index = A.SurfaceIndex(pos, tris)
+    rng = np.random.default_rng(0)
+    src = index.sample_points(3000, rng)
+    for flip in (np.diag([1.0, 1.0, 1.0]), np.diag([1.0, 1.0, -1.0])):
+        cands = A.coarse_candidates(src @ flip, index, rng)
+        assert len(cands) == 4
+        for T in cands:
+            assert np.linalg.det(T[:3, :3]) > 0
+
+
+def test_weld_treats_negative_zero_as_the_same_vertex() -> None:
+    pos = np.array([[0.0, 1.0, 2.0], [-0.0, 1.0, 2.0], [1.0, -0.0, 0.0], [1.0, 0.0, -0.0]], dtype=np.float32)
+    upos, inv = weld(pos)
+    assert len(upos) == 2
+    assert inv[0] == inv[1] and inv[2] == inv[3]

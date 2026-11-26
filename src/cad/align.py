@@ -426,6 +426,12 @@ def coarse_candidates(source: np.ndarray, index: SurfaceIndex, rng: np.random.Ge
     ref = index.sample_points(max(len(source), 2000), rng)
     cs, Es = _pca(source)
     cr, Er = _pca(ref)
+    # eigh の固有ベクトルの並びは右手系とは限らない。両方を右手系にそろえないと、下の 4 通り（符号の積が +1）が
+    # すべて鏡映（det < 0）になって捨てられ、初めの位置の候補が 1 つも無くなる。
+    if np.linalg.det(Es) < 0:
+        Es[:, 2] *= -1
+    if np.linalg.det(Er) < 0:
+        Er[:, 2] *= -1
     out = []
     for signs in ((1, 1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1)):
         R = Er @ np.diag(signs) @ Es.T
