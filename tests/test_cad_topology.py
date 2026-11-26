@@ -117,10 +117,10 @@ def test_closed_mesh_has_no_holes(tmp_path) -> None:
     assert "holeList" not in data and "holes" not in data
 
 
-def _faces_data(face_tris: list[list[np.ndarray]], **options) -> dict:
+def _faces_data(face_tris: list[list[np.ndarray]], parts: list[int] | None = None, **options) -> dict:
     """面ごとの三角形から、B-rep と同じ形（面ごとに頂点を持ち、面の中では頂点を共有する）のビューア用データを作る。
 
-    B-rep のエッジの共有（edgeList の faces）は入れない（縫い合わせていない面どうし）。
+    B-rep のエッジの共有（edgeList の faces）は入れない（縫い合わせていない面どうし）。parts は面ごとの部品の番号。
     """
     from src.cad.mesh_data import b64
 
@@ -133,6 +133,8 @@ def _faces_data(face_tris: list[list[np.ndarray]], **options) -> dict:
         indices.append(inv.reshape(-1, 3) + base)
         ranges.append([tri_start, len(tris)])
         faces.append({"id": fid, "kind": "face", "geomType": "PLANE"})
+        if parts is not None:
+            faces[-1]["part"] = parts[fid]
         base += len(uniq)
         tri_start += len(tris)
     data = {
@@ -200,6 +202,20 @@ def test_two_overlapping_copies_of_a_surface_each_keep_outer_and_holes(offset) -
     assert len(data["outerList"]) == 2
     assert len(data["holeList"]) == 4
     assert data["faceComponents"] == [0, 1]
+
+
+def test_patch_of_another_part_on_a_face_seam_keeps_each_outer() -> None:
+    # 部品 0 の 2 つの面（左右に並ぶ）の右の面に、別の部品 1 の面（ラベルのようなパッチ）がそっくり重なっている。
+    # 境目の位置には辺が 3 本（左の面・右の面・パッチ）あり、以前はパッチと左の面が組になって右の面の縁が境界に残り、
+    # 部品 0 の外周が崩れていた（パッチの縁へ乗り移る・パッチと 1 つのまとまりになる）。
+    left, right, patch = _tile(0, 0), _tile(1, 0), _tile(1, 0)
+    data = _faces_data([left, patch, right], parts=[0, 1, 0])
+    outers = sorted(data["outerList"], key=lambda o: -o["perimeter"])
+    assert [round(o["perimeter"]) for o in outers] == [60, 40]
+    assert outers[0]["faces"] == [0, 2] and outers[0]["part"] == 0
+    assert outers[1]["faces"] == [1] and outers[1]["part"] == 1
+    assert not data["holeList"]
+    assert data["faceComponents"] == [0, 1, 0]
 
 
 def test_sewing_closes_gaps_between_faces_but_keeps_small_holes_in_a_face() -> None:

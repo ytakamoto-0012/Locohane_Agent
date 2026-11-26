@@ -10,13 +10,15 @@ STL を同じ処理で扱う。run_cad.py が形をビューア用データに�
    反対側にあるもの（「辺から三角形の残りの頂点への向き」〔面の側〕がなす角が 60° を超える）だけを組にする。
    組にならない辺が境界の辺。B-rep は面ごとに三角形を作るが、隣り合う面のエッジの点は同じ位置なので、
    つながった面の境目は境界にならない。同じ側に面がある辺（フィレット前と後の面が重なっている等、ほぼ同じ面が
-   2 枚重なっているところ）は組にしないので、重なった面はそれぞれの縁を持つ。
+   2 枚重なっているところ）は組にしないので、重なった面はそれぞれの縁を持つ。同じ位置に辺が 3 本以上あるとき
+   （面の境目に別の部品のパッチの縁が重なっている等）は、同じ部品の辺どうしを先に組にする。
 2. トポロジートレランス（既定 0.1mm）: 境界の辺のうち、平行に近い別の境界の辺から許容差以内に並び、面が反対側に
    あるものは、隙間が許容差以下の「つながった」境目として除く（縫い合わせていない面どうし等）。
    許容差より細い切れ込み・小さい穴も同じ理由で消える。
 3. 縫合（``sew_tolerance``。0 で縫合しない）: 2 と同じ突き合わせを、別の面の境界の辺どうしに限って縫合トレランス
    以内まで広げる（面と面の離れを閉じる。1 つの面の中の小さい穴・細い切れ込みは消さない）。
-4. 残った境界の辺をループにつなぐ（途切れた端どうしが許容差以内なら橋渡しする）。平均の幅（2 × 面積 ÷ 周長）が
+4. 残った境界の辺をループにつなぐ。部品が分かっていれば同じ部品の辺だけをたどり（部品の縁に別の部品の縁が
+   重なっていても乗り移らない）、途切れた端どうしが許容差以内なら橋渡しする（部品をまたぐ縁もここでつながる）。平均の幅（2 × 面積 ÷ 周長）が
    許容差以下のループ、縫合したときは複数の面にまたがり幅が縫合トレランス以下のループは隙間として除く。
 5. 面のまとまり（部分）: 1 の組と 2・3 の突き合わせでつながった面を 1 つにまとめる（``faceComponents``。面ごとの番号）。
    B-rep のエッジの共有は使わない（縫い合わせた IGES で、重なった 2 枚の面がエッジを共有していることがあるため）。
@@ -165,7 +167,8 @@ def find_boundary_holes(data: dict[str, Any], tolerance: float, sew_tolerance: f
     find_holes = tolerance > 0
     tol = tolerance if find_holes else DEFAULT_HOLE_TOLERANCE
     sew = max(float(sew_tolerance), 0.0) if find_holes else 0.0
-    tris = _Boundary(positions, indices, tol, sew, tri_face)
+    face_part = np.array([f.get("part") if isinstance(f.get("part"), int) else -1 for f in faces], dtype=np.int64)
+    tris = _Boundary(positions, indices, tol, sew, tri_face, face_part)
     if find_holes:
         tris.match_within_tolerance()
     comp = _face_components(len(faces), tris.face_pairs(tri_face))
@@ -327,10 +330,16 @@ class _Boundary:
         tolerance: float,
         sew_tolerance: float = 0.0,
         tri_face: np.ndarray | None = None,
+        face_part: np.ndarray | None = None,
     ) -> None:
         self.tol = tolerance
         self.sew = sew_tolerance if sew_tolerance > tolerance else 0.0
         self.tri_face = tri_face if tri_face is not None else np.full(len(indices), -1, dtype=np.int64)
+        # 三角形ごとの部品の番号（分からなければ -1）。
+        self.tri_part = np.full(len(indices), -1, dtype=np.int64)
+        if face_part is not None and len(face_part):
+            known = (self.tri_face >= 0) & (self.tri_face < len(face_part))
+            self.tri_part[known] = face_part[self.tri_face[known]]
         quantum = tolerance * 1e-3
         keys = np.floor(positions / quantum + 0.5).astype(np.int64)
         _, inverse = np.unique(keys, axis=0, return_inverse=True)
@@ -378,15 +387,18 @@ class _Boundary:
                 paired[i[opposite]] = True
                 paired[j[opposite]] = True
                 self.cross_pairs += list(zip(owner[i[opposite]].tolist(), owner[j[opposite]].tolist()))
-            # 3 本以上（重なった面の上でさらに面がつながる等）は、反対側にあるものどうしを近い順に組にする。
+            # 3 本以上（重なった面の上でさらに面がつながる等）は、反対側にあるものどうしを、同じ部品どうしを先に、
+            # 近い順に組にする（別の部品のパッチが面の境目に重なっていても、部品の面どうしの境目を組にする）。
             for s, n in zip(starts[sizes > 2].tolist(), sizes[sizes > 2].tolist()):
                 group = rest[order[s : s + n]].tolist()
                 dots = sorted(
-                    (float(side[x] @ side[y]), x, y) for k, x in enumerate(group) for y in group[k + 1 :]
+                    (int(self._part_of(owner[x]) != self._part_of(owner[y])), float(side[x] @ side[y]), x, y)
+                    for k, x in enumerate(group)
+                    for y in group[k + 1 :]
                 )
-                for d, x, y in dots:
+                for _other, d, x, y in dots:
                     if d >= _OPPOSITE_COS:
-                        break
+                        continue
                     if paired[x] or paired[y]:
                         continue
                     paired[x] = paired[y] = True
@@ -400,6 +412,9 @@ class _Boundary:
         self.alive = np.ones(len(self.a), dtype=bool)
         self.partner = np.full(len(self.a), -1, dtype=np.int64)
         self.sewn_count = 0
+
+    def _part_of(self, tri: int) -> int:
+        return int(self.tri_part[tri])
 
     def _sides(self, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
         """辺 (a, b) から三角形の残りの頂点 c への、辺に垂直な単位ベクトル（三角形が辺のどちら側にあるか）。"""
@@ -519,11 +534,13 @@ class _Boundary:
         used: set[int] = set()
         chains: list[tuple[list[int], list[int]]] = []  # (頂点の並び, 辺の並び)
         face = self.tri_face[self.tri] if len(self.tri) else np.zeros(0, dtype=np.int64)
+        part = self.tri_part[self.tri] if len(self.tri) else np.zeros(0, dtype=np.int64)
 
         def pick(cands: Iterable[int], prev: int) -> int | None:
             # 同じ点から境界の辺が何本も出る（ほぼ同じ面が重なっている等）ときは、今の辺と同じ面の辺を先に選ぶ
-            # （重なった別の面の縁へ乗り移らないように）。
-            free = [e for e in cands if e not in used]
+            # （重なった別の面の縁へ乗り移らないように）。部品が分かっていれば同じ部品の辺だけをたどる（別の部品の
+            # パッチの縁が部品の縁に重なっていても、それぞれの縁を回る。部品をまたぐ縁は _bridge でつなぐ）。
+            free = [e for e in cands if e not in used and (part[prev] < 0 or part[e] == part[prev])]
             if not free:
                 return None
             return next((e for e in free if face[e] == face[prev]), free[0])
