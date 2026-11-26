@@ -77,6 +77,7 @@ def compare(old: cq.Shape, new: cq.Shape, new_data: dict[str, Any], options: Any
         angular_deflection_deg=options.angular_deflection_deg,
         max_triangles=options.max_triangles,
         selector_hints=False,
+        surface_analysis=False,
     )
     old_data = shapes_to_viewer_data([Part("previous", "previous", old.wrapped)], source={"kind": "compare"}, units="mm", options=opts)
     out: dict[str, Any] = {

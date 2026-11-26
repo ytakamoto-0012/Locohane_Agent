@@ -1213,3 +1213,85 @@ async def test_viewer_offers_holes_of_an_open_stl(env, tmp_path) -> None:
     assert len(shown["data"]["holeList"]) == 2
     assert out["selected_by_kind"] == {"hole": 2, "outer": 1}
     assert out["model"]["holes"]["count"] == 2 and out["model"]["holes"]["outer_boundaries"] == 1
+
+
+# ---------------------------------------------------------------------------
+# reference（基準モデルとの位置合わせ・偏差。src/cad/reference.py・src/cad/align.py）
+# ---------------------------------------------------------------------------
+
+
+def _box_mesh(sx: float, sy: float, sz: float) -> tuple[np.ndarray, np.ndarray]:
+    """箱（面ごとに頂点を持つ 6 面・12 三角形）。"""
+    c = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]], float) * [sx, sy, sz]
+    pos, tris = [], []
+    for q in _CUBE_QUADS:
+        base = len(pos)
+        pos += [c[i] for i in q]
+        tris += [[base, base + 1, base + 2], [base, base + 2, base + 3]]
+    return np.array(pos), np.array(tris, dtype=np.int64)
+
+
+def _moved(T: np.ndarray, pos: np.ndarray) -> np.ndarray:
+    Ti = np.linalg.inv(T)
+    return pos @ Ti[:3, :3].T + Ti[:3, 3]
+
+
+
+def _write_stl(path, triangles: np.ndarray) -> str:
+    with path.open("wb") as f:
+        f.write(b" " * 80)
+        f.write(struct.pack("<I", len(triangles)))
+        for tri in triangles:
+            f.write(struct.pack("<3f", 0, 0, 0) + struct.pack("<9f", *tri.ravel()) + struct.pack("<H", 0))
+    return str(path)
+
+
+@pytest.mark.asyncio
+async def test_reference_bestfit_and_realign_from_the_viewer(env, tmp_path) -> None:
+    pos, tris = _box_mesh(40, 20, 10)
+    ref = _write_stl(tmp_path / "nominal.stl", pos[tris])
+    T_true = np.eye(4)
+    T_true[:3, 3] = [1.0, -0.5, 0.25]
+    scan = _write_stl(tmp_path / "scan.stl", _moved(T_true, pos)[tris])
+
+    async def on_show(props):
+        data = props["data"]
+        assert props["can_align"] is True and props["deviation_tolerance"] == pytest.approx(0.1)
+        # ビューアへ渡すパッケージに、法線・曲率と基準モデル・偏差が入る。
+        assert data["analysis"]["k1"] and data["reference"]["indices"] and data["deviation"]["values"]
+        res = await cad_viewer.align_viewer_model({"save_id": props["save_id"], "method": "reset"})
+        assert res["ok"] and res["alignment"]["method"] == "none"
+        package = cad_viewer.viewer_package(res["values_id"])
+        values = np.frombuffer(package.path.read_bytes(), dtype="<f4")
+        assert np.abs(values).max() > 0.2  # 合わせる前はずれている
+        res = await cad_viewer.align_viewer_model({"save_id": props["save_id"], "method": "bestfit", "tolerance": 0.05})
+        assert res["ok"] and res["stats"]["within_tolerance_ratio"] == 1.0
+        assert np.allclose(res["transform"]["translation"], T_true[:3, 3], atol=1e-3)
+        bad = await cad_viewer.align_viewer_model({"save_id": props["save_id"], "method": "datum"})
+        assert bad["ok"] is False and "datum" in bad["error"]
+        return res["values_id"]
+
+    _viewer.on_show = on_show
+    _viewer.response = {"submitted": True, "selected": [{"kind": "face", "id": 0}], "deviation_tolerance": 0.05}
+    out = json.loads(await _call(file_path=scan, reference=ref, align="none"))
+    cmp = out["comparison"]
+    assert cmp["alignment"]["method"] == "bestfit"
+    assert cmp["deviation"]["tolerance"] == 0.05 and cmp["deviation"]["within_tolerance_ratio"] == 1.0
+    assert set(cmp["selected_faces"]) == {"0"}
+    assert out["model"]["curvature"]["method"] == "mesh"
+    # 閉じたら偏差の値のファイルは片付ける。合わせ直した位置は自動保存したビューア用データに残る。
+    assert cad_viewer.viewer_package(_viewer.on_show_result) is None
+    saved = json.loads(open(out["viewer_data"], encoding="utf-8").read())
+    assert np.allclose(np.array(saved["deviation"]["transform"])[:3, 3], T_true[:3, 3], atol=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_reference_errors(env, tmp_path) -> None:
+    pos, tris = _box_mesh(10, 10, 10)
+    scan = _write_stl(tmp_path / "scan.stl", pos[tris])
+    assert (await _call(file_path=scan, reference=str(tmp_path / "none.stl"))).startswith("Error: reference: the file does not exist")
+    dxf = tmp_path / "a.dxf"
+    dxf.write_text("0\nEOF\n")
+    assert "a DXF is 2D" in await _call(file_path=scan, reference=str(dxf))
+    assert "align must be" in await cad_viewer._show_cad_viewer("q", scan, "", None, {}, "", scan, "nope")
+    assert _viewer.shown == []

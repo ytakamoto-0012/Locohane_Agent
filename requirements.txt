@@ -64,6 +64,7 @@ numpy==2.3.5                         # BSD。onnxruntime の依存として導�
 #     STL は numpy だけで読むので、cadquery が無くても表示できる。サブプロセス（src/cad/run_cad.py）でだけ import する ---
 cadquery==2.8.0                      # Apache 2.0。OCP（ラッパーは Apache 2.0、同梱の OpenCASCADE 本体は LGPL-2.1 + 例外）・ezdxf（MIT）・casadi（LGPL-3.0+）・nlopt（MIT）・trame/vtk（Apache 2.0 / BSD）等を連れてくる。casadi と OpenCASCADE は改変禁止（README_DETAIL.md「依存パッケージ」の「改変禁止のパッケージ」参照）
 ezdxf>=1.4.5                         # MIT License。DXF のレイヤー・POINT を読む（src/cad/export_mesh.py が直接 import する。cadquery の依存として導入される）
+scipy==1.17.1                        # BSD-3-Clause。基準モデルとの位置合わせ・偏差で表面への最近点を引く KD-tree（src/cad/align.py の cKDTree。アプリ本体の「位置合わせ」でも使う）
 
 # --- pdf-tools スキル（PDF読み込み: pypdf / PDFページ画像化: pypdfium2 /
 #     PDF生成: reportlab（platypus）で自前のセマンティックHTML断片パーサーから

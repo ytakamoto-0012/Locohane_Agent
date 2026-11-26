@@ -2066,6 +2066,58 @@ The tool description tells the LLM to (1) ask the user (`ask_user_choice`) inste
 compare with the previous version and check `model.check` and `diff` before saying the edit is done, and (3) fix an unintended change at most twice,
 then ask the user.
 
+**Surface analysis (zebra, curvature)** (`src/cad/analysis.py`, `frontend/src/components/cad/surfaceShading.ts`): "Zebra" and "Curvature" on the toolbar
+switch the face display (press again for the normal display). Drawing is done by a shader in the browser; the result for the AI does not change
+(only a summary in `model.curvature`).
+
+- **Zebra**: black-and-white stripes from where the reflected view ray hits virtual lights. Lights are "Dome" (parallel stripes painted on a dome; the usual
+  zebra), "Horizontal tubes" (tube lights on the ceiling and walls of a horizontal tunnel around the model, radius 3 × the model radius; the tube-light
+  reflection used in car-body inspection; ±30 degrees around straight down is a dark floor) and "Vertical tubes" (a ring of vertical tubes around the
+  model). Every reflection from inside the tunnel / ring hits it, so faces facing any direction get stripes. Where stripes are denser than a pixel they
+  fade to the average brightness. Count, width (share of the light part) and angle (stripe direction) can be changed,
+  and the lights can be fixed to the view (stripes move as you rotate) or to the model (room lights with world +Z up and −Y in front).
+  Broken stripes = a step (G0 break), kinked = a tangent break (G1), a sudden change of bend = a curvature break (G2).
+- **Curvature**: mean, Gaussian, max / min principal curvature and curvature magnitude (max |k|) as a rainbow color map with a legend at the bottom right.
+  The sign is "convex toward the outward normal = positive" (+1/R on the outside of a sphere, −1/R inside a hole). The range can be typed in Min / Max, and
+  "Auto" sets it again from 2-98% of the values (centered on 0 except for the magnitude). The value and radius of curvature under the mouse are shown below.
+- **How the values are made**: when the subprocess makes the viewer data, it adds per-vertex normals (int16) and principal curvatures k1 ≥ k2 (float32)
+  as `analysis` (14 bytes per vertex). For B-rep, exact values are evaluated per face with OCP's `BRepLProp_SLProps` at the UV of each triangle vertex
+  (normal and curvature sign flipped on reversed faces), and only singular points (sphere poles etc.) are estimated from the mesh (`method` `exact` / `mixed`).
+  For STL, vertices at the same position are merged and curvature is estimated from the differences of vertex normals (Rusinkiewicz 2004, `method: mesh`).
+  The display normals of an STL average only the connected triangles within 40 degrees of each other (creases such as box corners stay flat).
+  `[cad_viewer] surface_analysis = false` turns it off (the buttons are not shown). It takes about 6 seconds for a 1-million-triangle STL, and B-rep
+  tessellation becomes 10-20% slower.
+
+**Deviation from a reference model and alignment** (`reference`, `align`, `src/cad/reference.py`, `src/cad/align.py`): give a reference model (the nominal
+CAD or another version: STEP, IGES, BREP, BIN, STL or viewer data) as `reference`, and the signed distance (deviation; positive on the side of the
+reference's outward normal = extra material) from every vertex of the shown model (e.g. a scanned STL) to the reference surface is computed, and
+"Deviation" and "Align" appear on the toolbar. Unlike `compare_with` (B-rep booleans with the previous version), it works for STL vs STL and STL vs CAD.
+
+- **Deviation display**: "Deviation" draws values within the tolerance (±, `[cad_viewer] deviation_tolerance`, default 0.1, editable) in green, material
+  outside the reference in yellow to red and inside in cyan to blue. The range is Min / Max or "Auto" (1-99% of the values, at least 3 × the tolerance).
+  The deviation under the mouse is shown.
+- **Alignment**: `align` is `none` (default; keep the coordinates) or `bestfit` (best fit when opening). In the viewer's "Align" row: "Best fit"
+  (point-to-plane ICP of the whole model; tries the current position and 4 placements matching centroid and principal axes and refines the best),
+  "Fit selected faces" (local best fit from the current position), datums A, B and C (set from the selected faces) with "Align by datums" (A fixes 3,
+  B 2 and C 1 degrees of freedom: 3-2-1, a prioritized least squares where later datums do not move what earlier ones fixed; the position given by the
+  pads, pin and slot of a checking fixture; best fit roughly first), and "Position when opened" / "Original coordinates".
+  It runs in app.py's action_callback `cad_viewer_align` (`align_viewer_model`, numpy and scipy's cKDTree in a thread of the app). The deviation values
+  are written to `_tmp_` as float32 and the browser fetches them with `GET /locohane/cad/data/{id}` (removed when the viewer closes).
+  Outlying matches (missing scan data, fixtures in the scan, etc.) beyond 3 × the median residual (MAD scaled) are ignored.
+- **Overlay**: "Overlay reference" shows the reference in translucent blue (opacity editable). The shown model's coordinates do not move; the reference
+  is moved by the inverse transform (so selection, measurement and box selection keep their coordinates).
+- **Closest points**: sample points on the reference triangles (1/400 of the diagonal apart, up to 4 million) go into a KD-tree; 8 candidates are looked
+  up and the exact closest point on those triangles (Ericson's method) gives the distance. When the closest point is on an edge or corner, the sign comes
+  from the triangle whose normal best matches the offset, or else from the corner's pseudo-normal. A CAD reference is tessellated finer than for display
+  (`[cad_viewer] reference_deflection_ratio`, default 0.0002 × the diagonal; the chord error becomes deviation error, reported as
+  `reference_chord_tolerance`). For 1 million triangles: about 2.5 s for the index, 2 s for a best fit and 3 s for the deviation of every vertex.
+- **What the AI gets**: `comparison` in the result has the reference file, the alignment (method, RMS, inlier ratio, translation, rotation angle and the 4×4
+  transform = shown model → reference), area-weighted deviation statistics (min, max, mean, σ, RMS, 95% of |deviation|, and the area ratios within,
+  outside and inside the tolerance; the tolerance is the viewer's value), and per-selected-face statistics (up to 50 faces). The re-aligned position and
+  deviation are also kept in `deviation` of the auto-saved viewer data (reopening starts there).
+- **How it works**: the reference is added after the shape becomes viewer data, by another subprocess (`run_cad.py --reference`; not part of the file
+  cache). If the reference cannot be read, the shape is still shown and `comparison.error` says why. A DXF (2D) cannot be a reference.
+
 **STEP attributes and PMI** (`src/cad/step_xcaf.py`, `src/cad/step_p21.py`): for a STEP file the viewer data has `step`, and `model.step` has a summary
 (AP and edition, originating system, PMI counts and up to 20 PMI texts, attribute counts and names, materials, layers, warnings).
 
@@ -2099,7 +2151,7 @@ PMI can only be written in AP242; when writing AP203 / AP214, or when OCCT canno
 the file is written without PMI and `notes` says so (the original file keeps its PMI). Saving from other sources (IGES, BREP, CadQuery code) follows the
 same schema setting.
 
-**Settings**: `[cad_viewer]` (`enabled`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`, `screenshot_enabled`, `screenshot_long_side_pixels`, `step_write_schema`, `cache_dir`, `cache_max_mb`, `hole_topology_tolerance`, `hole_normal_angle_deg`, `local_axis_lengths`, `local_axis_length_tolerance`, `local_axis_angle_tolerance_deg`) and
+**Settings**: `[cad_viewer]` (`enabled`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`, `screenshot_enabled`, `screenshot_long_side_pixels`, `step_write_schema`, `cache_dir`, `cache_max_mb`, `hole_topology_tolerance`, `hole_normal_angle_deg`, `local_axis_lengths`, `local_axis_length_tolerance`, `local_axis_angle_tolerance_deg`, `surface_analysis`, `reference_deflection_ratio`, `deviation_tolerance`) and
 `[user_response_timeouts] show_cad_viewer_seconds` (default 0 = no limit). It is registered in `[main_agent_tool_guard] allow_entries` so the main agent can call it directly.
 It is not given to sub-agents (it shows something on the screen).
 

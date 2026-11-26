@@ -17,7 +17,12 @@
   // 開いた形の面の中の穴とローカル AXIS（src/cad/topology.py。見つかったときだけ）。
   "holes": {"positions": <float32 base64、線分ごとに 2 点>, "ranges": [[先頭の線分, 線分数], ...], "tolerance": ...},
   "holeList": [穴の情報, ...], "outers": {"positions", "ranges"}, "outerList": [外周の情報, ...],
-  "localAxes": [{"origin", "x", "y", "z", ...}, ...]
+  "localAxes": [{"origin", "x", "y", "z", ...}, ...],
+  // ゼブラ・曲率の表示に使う頂点ごとの法線と主曲率（src/cad/analysis.py。[cad_viewer] surface_analysis）。
+  "analysis": {"normals": <int16 base64>, "k1": <float32 base64>, "k2": <float32 base64>, "method", "summary"},
+  // 基準モデルと、mesh の頂点ごとの偏差（show_cad_viewer の reference。src/cad/reference.py）。
+  "reference": {"positions", "indices", "source", "triangles", "bbox", "chordTolerance"},
+  "deviation": {"values": <float32 base64>, "transform": 4×4, "alignment", "tolerance", "stats"} | {"error"}
 }
 ```
 
@@ -111,11 +116,11 @@ def build_viewer_data(
     }
 
 
-def stl_to_viewer_data(path: str | Path, *, max_triangles: int, region_angle_deg: float = 1.0) -> dict[str, Any]:
+def stl_to_viewer_data(path: str | Path, *, max_triangles: int, region_angle_deg: float = 1.0, analysis: bool = True) -> dict[str, Any]:
     """STL を読み、平面領域を「面」、領域の境目を「エッジ」にしたビューア用データを返す。
 
     STL は B-rep（面・エッジ・頂点の位相）を持たないため、頂点は選べない。単位も持たないので
-    units は "unknown"。
+    units は "unknown"。analysis が真なら、ゼブラ・曲率の表示に使う法線と主曲率（src/cad/analysis.py）も付ける。
 
     Raises:
         StlError: STL として読めない場合。
@@ -201,7 +206,7 @@ def stl_to_viewer_data(path: str | Path, *, max_triangles: int, region_angle_deg
     source = {"kind": "file", "format": "STL", "path": str(path), "binary": stl.binary}
     if stl.color_format:
         source["colorFormat"] = stl.color_format
-    return build_viewer_data(
+    data = build_viewer_data(
         source=source,
         units="unknown",
         positions=positions,
@@ -215,6 +220,13 @@ def stl_to_viewer_data(path: str | Path, *, max_triangles: int, region_angle_deg
         edges=edges,
         vertices=[],
     )
+    if analysis:
+        from .analysis import stl_analysis
+
+        result = stl_analysis(positions, indices)
+        if result:
+            data["analysis"] = result
+    return data
 
 
 _AXES = ("X", "Y", "Z")

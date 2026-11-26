@@ -1,7 +1,7 @@
 # 第三者ライセンス告知 (THIRD_PARTY_LICENSES)
 
 本ファイルは Locohane が実行時に利用する第三者オープンソース
-パッケージとそのライセンスの一覧です（tools/gen_licenses.py で自動生成 / 生成日: 2026-11-21）。
+パッケージとそのライセンスの一覧です（tools/gen_licenses.py で自動生成 / 生成日: 2026-11-26）。
 対象は requirements.txt の直接依存から到達する実行時の推移的依存集合です。
 
 再生成:

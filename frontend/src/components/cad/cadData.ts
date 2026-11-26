@@ -233,6 +233,25 @@ export interface CadData {
   localAxes?: CadLocalAxis[];
   /** 前の版との比較（show_cad_viewer の compare_with）。added / removed は増えた・削った部分の三角形。 */
   diff?: { added?: CadTriangles; removed?: CadTriangles; error?: string; [key: string]: unknown };
+  /**
+   * ゼブラ・曲率の表示に使う頂点ごとの法線（int16 × 32767）と主曲率 k1 ≥ k2（float32。凸 = 正）。src/cad/analysis.py。
+   * mesh の頂点と同じ並び。method は exact（B-rep の正確な値）・mesh（三角形から推定）・mixed。
+   */
+  analysis?: { normals: CadBuffer; k1: CadBuffer; k2: CadBuffer; method?: string; summary?: Record<string, unknown> };
+  /** 基準モデル（show_cad_viewer の reference）の三角形（src/cad/reference.py）。 */
+  reference?: CadTriangles & { source?: { format?: string; path?: string }; triangles?: number; chordTolerance?: number };
+  /**
+   * 基準モデルとの偏差。values は mesh の頂点ごとの符号付き距離（float32。正 = 基準の外側）、transform は
+   * 対象 → 基準の 4×4（行ごと）。error があれば基準モデルを読めなかった。
+   */
+  deviation?: {
+    values?: CadBuffer;
+    transform?: number[][];
+    alignment?: CadAlignmentInfo;
+    tolerance?: number;
+    stats?: CadDeviationStats;
+    error?: string;
+  };
   /** 「保存」で書いたデータにある、保存したときの表示（隠した部品・種類ごとの表示）。 */
   viewState?: {
     hiddenParts?: number[];
@@ -240,6 +259,30 @@ export interface CadData {
     /** 自動保存・保存したときの「元に戻す」「やり直す」の履歴（開き直しても続きから戻せる。CadViewerBar.tsx）。 */
     history?: CadSavedHistory;
   };
+}
+
+/** 位置合わせの記録（src/cad/align.py の align の戻り値）。 */
+export interface CadAlignmentInfo {
+  method: string;
+  rms?: number;
+  inlier_ratio?: number;
+  iterations?: number;
+  points?: number;
+  [key: string]: unknown;
+}
+
+/** 偏差の統計（src/cad/align.py の deviation_stats。面積で重み付け）。 */
+export interface CadDeviationStats {
+  min?: number;
+  max?: number;
+  mean?: number;
+  std?: number;
+  rms?: number;
+  abs_p95?: number;
+  tolerance?: number;
+  within_tolerance_ratio?: number;
+  above_ratio?: number;
+  below_ratio?: number;
 }
 
 /** 保存した履歴の 1 時点（選択は含めない）。色・属性は history.base のデータに対する上書き。 */
@@ -278,6 +321,10 @@ export interface CadViewerProps {
   screenshot_long_side?: number;
   /** 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差の既定値（度、[cad_viewer].hole_normal_angle_deg）。 */
   hole_normal_angle_deg?: number;
+  /** 基準モデルとの位置合わせをビューアからやり直せるか（app.py の action_callback "cad_viewer_align"）。 */
+  can_align?: boolean;
+  /** 偏差の公差の既定値（±、[cad_viewer].deviation_tolerance）。 */
+  deviation_tolerance?: number;
 }
 
 /** ローカル座標系。origin と単位ベクトル x・y・z はワールド座標（右手系でなければ rightHanded が false）。 */
@@ -352,6 +399,24 @@ export function decodeFloat32(value: CadBuffer | null | undefined): Float32Array
 export function decodeUint32(value: CadBuffer | null | undefined): Uint32Array {
   const bytes = aligned(decodeBytes(value));
   return new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+}
+
+export function decodeInt16(value: CadBuffer | null | undefined): Int16Array {
+  const raw = decodeBytes(value);
+  const bytes = raw.byteOffset % 2 === 0 ? raw : raw.slice();
+  return new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+}
+
+/** 4×4 の変換（行ごとの入れ子の配列）が使える形か。 */
+export function isMatrix4(m: unknown): m is number[][] {
+  return Array.isArray(m) && m.length === 4 && m.every((row) => Array.isArray(row) && row.length === 4 && row.every((v) => typeof v === 'number' && Number.isFinite(v)));
+}
+
+/** 位置合わせし直した偏差の値（float32 の並び。app.py の GET /locohane/cad/data/{id}）を取ってくる。 */
+export async function fetchCadFloat32(backendUrl: string, id: string, signal?: AbortSignal): Promise<Float32Array> {
+  const res = await fetch(`${backendUrl}/locohane/cad/data/${encodeURIComponent(id)}`, { credentials: 'include', signal });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return new Float32Array(await res.arrayBuffer());
 }
 
 /** 色（三角形の頂点ごとの RGB）。書き換えて使うことがあるので、パッケージのバイト列はコピーして返す。 */

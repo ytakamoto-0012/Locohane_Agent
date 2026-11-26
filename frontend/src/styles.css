@@ -797,6 +797,7 @@
 }
 
 /* 穴の法線の角度差の欄・座標系の切り替え（チップの中に入力欄を置く）。 */
+.cad-viewer-num,
 .cad-viewer-hole-angle,
 .cad-viewer-coords {
   display: inline-flex;
@@ -805,6 +806,8 @@
   cursor: default;
 }
 
+.cad-viewer-num input,
+.cad-viewer-analysis-bar select,
 .cad-viewer-hole-angle input {
   width: 4.2em;
   padding: 0 4px;
@@ -1169,6 +1172,83 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 4px;
+}
+
+/* 表面の解析（ゼブラ・曲率・偏差）と位置合わせの行（CadAnalysisPanel.tsx）。 */
+.cad-viewer-num input {
+  width: 5.5em;
+}
+
+.cad-viewer-analysis-bar select {
+  width: auto;
+}
+
+.cad-viewer-unit {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.cad-viewer-ref-name {
+  max-width: 18em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.cad-viewer-align {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cad-viewer-align-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  min-height: 1.4em;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.cad-viewer-align-error {
+  color: var(--danger, #e5484d);
+}
+
+.cad-viewer-bar.cad-viewer-busy .cad-viewer-align {
+  pointer-events: none;
+}
+
+/* 曲率・偏差の色の凡例（3D 表示の右下に重ねる）。 */
+.cad-viewer-legend-box {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  width: 200px;
+  padding: 4px 8px 3px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.cad-viewer-legend-title {
+  color: var(--text-muted);
+}
+
+.cad-viewer-legend-bar {
+  height: 10px;
+  margin: 2px 0;
+  border-radius: 3px;
+}
+
+.cad-viewer-legend-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-variant-numeric: tabular-nums;
 }
 
 /* 3D 表示に重ねる計測の値（CadScene が描くたびに位置を合わせる）。 */

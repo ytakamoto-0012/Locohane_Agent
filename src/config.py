@@ -1163,6 +1163,12 @@ class Config:
             [cad_viewer].local_axis_angle_tolerance_deg）。
         cad_viewer_cache_max_mb: そのキャッシュの合計の上限（MB。[cad_viewer].cache_max_mb）。超えたら使った時刻の古いものから消す。
             0 以下でキャッシュを使わない。
+        cad_viewer_surface_analysis: ゼブラ・曲率の表示に使う頂点ごとの法線と主曲率を求めるか
+            （[cad_viewer].surface_analysis。src/cad/analysis.py）。
+        cad_viewer_reference_deflection_ratio: 基準モデル（show_cad_viewer の reference）が CAD のとき、偏差を測るために
+            三角形に分ける許容差（形の対角線に対する割合。[cad_viewer].reference_deflection_ratio）。
+        cad_viewer_deviation_tolerance: 偏差の公差（±、モデルの単位。[cad_viewer].deviation_tolerance）。
+            偏差のカラーマップで公差内を緑にし、統計に公差内の割合を入れる。ビューアで変えられる。
         show_cad_viewer_timeout_seconds: 3D ビューアで利用者が選択を確定するのを待つ秒数
             （[user_response_timeouts].show_cad_viewer_seconds）。0 以下は無期限待ち。
     """
@@ -1689,6 +1695,9 @@ class Config:
     cad_viewer_local_axis_lengths: tuple[float, float, float] | None = (100.0, 200.0, 300.0)
     cad_viewer_local_axis_length_tolerance: float = 0.1
     cad_viewer_local_axis_angle_tolerance_deg: float = 0.5
+    cad_viewer_surface_analysis: bool = True
+    cad_viewer_reference_deflection_ratio: float = 0.0002
+    cad_viewer_deviation_tolerance: float = 0.1
     show_cad_viewer_timeout_seconds: int = 0
 
 
@@ -4762,6 +4771,15 @@ def load_config(
         cad_viewer_local_axis_angle_tolerance_deg=_positive_float(
             os.getenv("CAD_VIEWER_LOCAL_AXIS_ANGLE_TOLERANCE_DEG", cad_viewer.get("local_axis_angle_tolerance_deg", 0.5)),
             "[cad_viewer].local_axis_angle_tolerance_deg",
+        ),
+        cad_viewer_surface_analysis=_as_bool(os.getenv("CAD_VIEWER_SURFACE_ANALYSIS", cad_viewer.get("surface_analysis", True))),
+        cad_viewer_reference_deflection_ratio=_positive_float(
+            os.getenv("CAD_VIEWER_REFERENCE_DEFLECTION_RATIO", cad_viewer.get("reference_deflection_ratio", 0.0002)),
+            "[cad_viewer].reference_deflection_ratio",
+        ),
+        cad_viewer_deviation_tolerance=_positive_float(
+            os.getenv("CAD_VIEWER_DEVIATION_TOLERANCE", cad_viewer.get("deviation_tolerance", 0.1)),
+            "[cad_viewer].deviation_tolerance",
         ),
         show_cad_viewer_timeout_seconds=int(os.getenv("SHOW_CAD_VIEWER_TIMEOUT_SECONDS", timeouts.get("show_cad_viewer_seconds", 0))),
     )

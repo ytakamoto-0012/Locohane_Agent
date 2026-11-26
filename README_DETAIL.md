@@ -2117,6 +2117,52 @@ three.js はビューアを開いたときだけ読み込む（`frontend/src/com
 ツールの説明で LLM に、(1) 寸法が足りなければ推測せず `ask_user_choice` で聞く、(2) コードで形を変えたら `compare_with` で前の版と比べ、
 `model.check` と `diff` の数値で確かめてから完了と言う、(3) 意図しない変化は 2 回まで直し、それでもだめなら利用者に相談する、を指示している。
 
+**表面の解析（ゼブラ・曲率）**（`src/cad/analysis.py`・`frontend/src/components/cad/surfaceShading.ts`）: ツールバーの「ゼブラ」「曲率」で
+面の表示を切り替える（もう一度押すと通常の表示）。表示はブラウザのシェーダーで行い、AI への戻り値は変わらない（`model.curvature` に概要だけ）。
+
+- **ゼブラ**: 視線の反射の向きが仮想の照明のどこに当たるかで白黒の縞を描く。照明は「ドーム」（球のドームに描いた平行な縞。一般的なゼブラ）、
+  「水平蛍光灯」（モデルを囲む横向きのトンネル＝半径はモデル半径の 3 倍の天井と壁に並んだ蛍光灯。外観検査の蛍光灯の映り込み。真下 ±30 度は床で暗い）、
+  「垂直蛍光灯」（モデルを囲む縦の筒に縦に並んだ蛍光灯）。トンネル・筒の中からの反射は必ずどこかに当たるので、どの向きの面にも縞が出る。
+  縞が画面の 1 ピクセルより細かく詰まるところは、ちらつかないよう平均の明るさに寄せる。
+  本数・幅（明るい部分の割合）・角度（縞の向き）を変えられ、照明を「視点に固定」（回すと縞が流れる）か「モデルに固定」（ワールドの +Z を上、
+  −Y を手前にした部屋の照明）にできる。縞が切れる＝段差（G0 の不連続）、折れる＝接線の不連続（G1）、曲がり方が急に変わる＝曲率の不連続（G2）。
+- **曲率**: 平均曲率・ガウス曲率・最大／最小主曲率・曲率の大きさ（|k| の最大）を虹色のカラーマップで描き、右下に凡例を出す。符号は
+  「外向きの法線に対して凸 = 正」（球の外面 +1/R、穴の内面 −1/R）。範囲は最小・最大の欄で変えられ、「自動」で値の分布の 2〜98% から決め直す
+  （曲率の大きさ以外は 0 を中心にそろえる）。マウスを乗せた点の値と曲率半径を下の行に出す。
+- **値の求め方**: サブプロセスでビューア用データを作るとき、頂点ごとの法線（int16）と主曲率 k1 ≥ k2（float32）を `analysis` に入れる
+  （頂点 1 つあたり 14 バイト）。B-rep は面ごとに OCP の `BRepLProp_SLProps` で三角形の頂点の UV での正確な値を求め（反転した面は法線と曲率の符号を
+  反転）、求まらない特異点（球の極など）だけメッシュから推定する（`method` が `exact` / `mixed`）。STL は同じ位置の頂点をまとめ、三角形の頂点の
+  法線の差から推定する（Rusinkiewicz 2004、`method: mesh`）。STL の表示用の法線は、つながる三角形のうち向きの差が 40 度以内のものだけを
+  面積で平均する（箱の角のような折れ目は平らなまま）。`[cad_viewer] surface_analysis = false` で求めない（ボタンも出ない）。
+  三角形 100 万個の STL で約 6 秒、B-rep は三角形化が 1〜2 割遅くなる。
+
+**基準モデルとの偏差・位置合わせ**（`reference`・`align`、`src/cad/reference.py`・`src/cad/align.py`）: 基準モデル（公称の CAD・別の版。
+STEP・IGES・BREP・BIN・STL・ビューア用データ）を `reference` に渡すと、表示するモデル（対象。スキャンした STL 等）の各頂点から基準の表面までの
+符号付き距離（偏差。基準の外向きの法線の側 = 肉が多いが正）を求め、ツールバーに「偏差」「位置合わせ」を出す。`compare_with`（前の版との
+B-rep のブール演算）と違い、STL どうし・STL と CAD でも使える。
+
+- **偏差の表示**: 「偏差」で、公差（±、`[cad_viewer] deviation_tolerance` 既定 0.1。欄で変更）内を緑、外側に出ている部分を黄〜赤、内側に入っている
+  部分を水色〜青で描く。範囲は最小・最大の欄か「自動」（分布の 1〜99%、公差の 3 倍以上）。マウスを乗せた点の偏差を出す。
+- **位置合わせ**: `align` が `none`（既定。座標のまま）か `bestfit`（開くときにベストフィット）。ビューアの「位置合わせ」の行で、
+  「ベストフィット」（対象全体を point-to-plane の ICP で最小二乗。今の位置と、重心・主軸を合わせた 4 通りを試して合いの良いものから詰める）、
+  「選んだ面で合わせる」（部分ベストフィット。今の位置から）、データム A・B・C（選んだ面を設定）による「データムで合わせる」
+  （A で 3・B で 2・C で 1 自由度を決める 3-2-1。先の段が決めた向きは後の段で動かさない優先度付きの最小二乗。検査具の当て面・ピン穴・
+  長穴で押さえた位置に当たる。先にベストフィットで大まかに合わせておく）、「開いたときの位置」「元の座標」で合わせ直す。
+  計算は app.py の action_callback `cad_viewer_align`（`align_viewer_model`。numpy と scipy の cKDTree でアプリの中のスレッドで行う）。
+  偏差の値は float32 の並びを `_tmp_` に書き、ブラウザが `GET /locohane/cad/data/{id}` で取りに来る（ビューアを閉じたら消す）。
+  外れた対応（測定の抜け・治具の写り込み等）は残差の中央値の 3 倍（MAD 換算）を超えたものを外す。
+- **重ね表示**: 「基準を重ねる」で基準モデルを青の半透明で重ねる（不透明度を変えられる）。対象の座標は動かさず、基準の方を
+  変換の逆で動かして重ねる（選択・計測・範囲選択の座標が変わらないように）。
+- **最近点**: 基準の三角形の上に見本の点（対角線の 1/400 間隔、400 万点まで）を置いた KD-tree で 8 点の候補を引き、その三角形への正確な
+  最近点（Ericson の方法）で距離を求める。最近点が稜線・角の上なら、ずれの向きと法線がそろう三角形、それでも決まらなければ角の擬似法線で符号を決める。
+  基準が CAD のときは表示用より細かく三角形に分ける（`[cad_viewer] reference_deflection_ratio`、既定は対角線の 0.0002 倍。弦と曲面の差が偏差の誤差になる。
+  戻り値の `reference_chord_tolerance`）。三角形 100 万個で、索引 2.5 秒・ベストフィット 2 秒・全頂点の偏差 3 秒ほど。
+- **AI へ返すもの**: 戻り値の `comparison` に、基準のファイル、位置合わせ（方法・RMS・対応の割合・移動量・回転角・4×4 の変換 = 対象 → 基準）、
+  偏差の統計（面積で重み付けした最小・最大・平均・σ・RMS・|偏差| の 95% 点、公差内・外側・内側の面積の割合。公差はビューアの欄の値）、
+  選んだ面ごとの偏差の統計（50 面まで）。合わせ直した位置と偏差は自動保存するビューア用データの `deviation` にも残る（開き直すとその位置から始まる）。
+- **しくみ**: 基準モデルは、形をビューア用データにした後に別のサブプロセス（`run_cad.py --reference`）で足す（ファイルのキャッシュには入れない）。
+  基準モデルが読めなくても形は表示し、`comparison.error` で伝える。DXF（2D）は基準にできない。
+
 **STEP の属性・PMI**（`src/cad/step_xcaf.py`・`src/cad/step_p21.py`）: STEP ファイルはビューア用データの `step` に次を入れ、`model.step` に概要
 （AP と版・作成システム・PMI の件数と文 20 件まで・属性の件数と名前・材料・レイヤー・気づいた点）を返す。
 
@@ -2146,7 +2192,7 @@ ASCII 以外の文字は `\X2\` で書き、本文を ASCII だけにする。�
 PMI は AP242 でだけ書け、AP203・AP214 で書くときや、OCCT が PMI を書けなかったとき（NIST の CTC-01 等、実際の CAD が書いた PMI の一部）は、
 PMI を除いて書きその旨を `notes` で伝える（元のファイルの PMI はそのまま）。STEP 以外（IGES・BREP・CadQuery コード）の保存も同じスキーマの設定に従う。
 
-**設定**: `[cad_viewer]`（`enabled`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`・`screenshot_enabled`・`screenshot_long_side_pixels`・`step_write_schema`・`cache_dir`・`cache_max_mb`・`hole_topology_tolerance`・`hole_normal_angle_deg`・`local_axis_lengths`・`local_axis_length_tolerance`・`local_axis_angle_tolerance_deg`）と
+**設定**: `[cad_viewer]`（`enabled`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`・`screenshot_enabled`・`screenshot_long_side_pixels`・`step_write_schema`・`cache_dir`・`cache_max_mb`・`hole_topology_tolerance`・`hole_normal_angle_deg`・`local_axis_lengths`・`local_axis_length_tolerance`・`local_axis_angle_tolerance_deg`・`surface_analysis`・`reference_deflection_ratio`・`deviation_tolerance`）と
 `[user_response_timeouts] show_cad_viewer_seconds`（既定 0 = 無期限）。メインエージェントから直接呼べるよう `[main_agent_tool_guard] allow_entries` に登録済み。
 サブエージェントには渡さない（画面に出すツールのため）。
 

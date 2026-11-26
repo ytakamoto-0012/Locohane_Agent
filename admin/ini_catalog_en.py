@@ -1546,6 +1546,17 @@ DESCRIPTIONS: dict[str, str] = {
     'cad_viewer.local_axis_angle_tolerance_deg': (
         'Tolerance (degrees) for treating those three lines as perpendicular.'
     ),
+    'cad_viewer.surface_analysis': (
+        'Whether to compute per-vertex normals and principal curvatures for the zebra display and the curvature color map. CAD gets exact values per face; STL estimates them from the triangles.\n'
+        'The viewer data grows by 14 bytes per vertex and CAD tessellation takes 10-20% longer. false hides zebra and curvature in the viewer.'
+    ),
+    'cad_viewer.reference_deflection_ratio': (
+        'When the reference model (show_cad_viewer reference: deviation and alignment) is CAD, the tolerance for splitting it into triangles to measure deviation (ratio to the diagonal of the shape).\n'
+        'The gap between a triangle chord and the curved surface becomes deviation error, so this is finer than the display linear_deflection_ratio. The default 0.0002 is about 0.04 mm for a part with a 200 mm diagonal.'
+    ),
+    'cad_viewer.deviation_tolerance': (
+        'Deviation tolerance (±, model units). The deviation color map shows values within it in green, and the statistics include the area ratio within it. It can be changed in the viewer (this is the value when it opens).'
+    ),
     'plan.allow_badge_unlock': (
         'Behavior when clicking the Plan Mode / Edit Automatically badge shown near the send button.\n'
         'true : can switch both ways (including Plan Mode -> Edit Automatically).\n'
