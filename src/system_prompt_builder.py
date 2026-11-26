@@ -109,6 +109,7 @@ def build_prompts(config: "Config", skills: list, agent_type_defs: list) -> tupl
         expand_config_vars,
         render_agent_type_run_script_allowlist_block,
         render_memory_visibility_block,
+        render_persona_block,
         render_plan_approval_exempt_scripts_block,
     )
     from .memory import MEMORY_INDEX_MARKER
@@ -155,6 +156,13 @@ def build_prompts(config: "Config", skills: list, agent_type_defs: list) -> tupl
     # LOCOHANE.md と公開範囲の振り分け基準は自由記述のため、偶然 ${...} を含んでいても展開でエラーにならないよう、展開の後に差し込む。
     system_prompt = system_prompt.replace("{{project_instructions}}", render_project_instructions_block(config.project_instructions_paths))
     system_prompt = system_prompt.replace("{{memory_visibility}}", render_memory_visibility_block(config))
+    # AI の名前・性別・性格（[persona]）も自由記述のため展開の後に差し込む。未設定なら目印の行ごと消す。
+    persona_block = render_persona_block(config)
+    system_prompt = (
+        system_prompt.replace("{{persona}}", persona_block)
+        if persona_block
+        else system_prompt.replace("{{persona}}\n\n", "").replace("{{persona}}", "")
+    )
 
     # サブエージェント共通の注意事項を各種別の末尾に連結する（agents/*.md 自体には書かない）。
     subagent_common = expand_config_vars((config.system_prompt_path.parent / "subagent_common.md").read_text(encoding="utf-8"), config)

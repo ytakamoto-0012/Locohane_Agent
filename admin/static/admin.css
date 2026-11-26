@@ -295,6 +295,9 @@ select.le-type { width: auto; padding: 4px; font-size: 12px; flex-shrink: 0; }
 .settings-section { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 14px; }
 .settings-section h3 { margin: 0 0 8px; font-size: 14px; }
 .settings-section textarea { width: 100%; margin-bottom: 8px; }
+.persona-fields label { display: block; margin-bottom: 8px; }
+.persona-fields input[type=text] { display: block; width: 100%; max-width: 360px; margin-top: 2px; }
+.persona-fields textarea { display: block; margin-top: 2px; }
 
 .subtabs { display: flex; gap: 4px; margin-bottom: 14px; }
 .reset-setting-btn.hidden { display: none; }

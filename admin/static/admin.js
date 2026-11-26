@@ -3550,7 +3550,114 @@ async function renderSettingsPanel(container, target) {
     section.querySelector(".upload-image-btn").addEventListener("click", () => uploadImage(section, kind));
     section.querySelector(".reset-setting-btn").addEventListener("click", () => resetSetting(`images/${kind}`));
   });
-  await loadSettings();
+  $(".save-persona-btn").addEventListener("click", savePersona);
+  $(".reset-persona-btn").addEventListener("click", resetPersona);
+  await Promise.all([loadSettings(), loadPersona()]);
+}
+
+/* --- AI の人物設定（[persona]。config.ini が既定値で、インスタンス別の値は config_overrides.json に保存する） --- */
+
+const PERSONA_KEYS = ["name", "gender", "personality"];
+let personaState = { keys: {}, mtime: null };
+
+function personaInput(key) {
+  return $(`#persona-${key}`);
+}
+
+async function loadPersona() {
+  const fields = $(".persona-fields");
+  // 共通の表示設定（public/settings/）には置き場が無い（config.ini は管理ツールから書き換えない）ため、案内だけを出す。
+  if (!settingsTarget) {
+    fields.classList.add("hidden");
+    $("#persona-hint").textContent = _t(
+      "AI の名前・性別・性格はインスタンスごとの設定です。既定値は config.ini の [persona] で、インスタンスの「設定」→「表示設定」タブで変えられます。"
+    );
+    return;
+  }
+  $("#persona-hint").textContent = _t(
+    "システムプロンプトの Identity に差し込まれます（空欄の項目は差し込みません）。名前はチャット画面の AI の回答の上にも表示され、ウェルカムメッセージでは {ai_name} などで差し込めます。変更はインスタンスの再起動後に反映されます。性格は口調・言葉づかいにだけ反映され、手順や承認フローは変わりません。"
+  );
+  const data = await api(`/api/instances/${encodeURIComponent(settingsTarget)}/config`);
+  personaState = { keys: {}, mtime: data.mtime };
+  for (const k of data.keys) {
+    if (k.section === "persona" && PERSONA_KEYS.includes(k.key)) personaState.keys[k.key] = k;
+  }
+  let anyOverride = false;
+  for (const key of PERSONA_KEYS) {
+    const info = personaState.keys[key];
+    const input = personaInput(key);
+    input.value = info ? info.effective || "" : "";
+    input.disabled = !info || Boolean(info.env_override_active);
+    if (info && info.override !== null && info.override !== undefined) anyOverride = true;
+  }
+  $("#persona-source").textContent = anyOverride ? _t("［このインスタンス専用］") : _t("［config.ini の既定値を使用中］");
+  $(".reset-persona-btn").classList.toggle("hidden", !anyOverride);
+  const envKeys = PERSONA_KEYS.filter((key) => personaState.keys[key] && personaState.keys[key].env_override_active);
+  if (envKeys.length) {
+    $("#persona-hint").textContent += " " + _t("環境変数で指定されている項目は変更できません: {0}", envKeys.join(", "));
+  }
+}
+
+// config.ini の継続行と同じく、各行の前後の空白を除いて比べる（保存した値と既定値の見かけの違いで上書きを作らない）。
+function normalizePersonaValue(value) {
+  return String(value || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line)
+    .join("\n");
+}
+
+async function savePersona() {
+  const updates = { persona: {} };
+  const resets = [];
+  for (const key of PERSONA_KEYS) {
+    const info = personaState.keys[key];
+    if (!info || info.env_override_active) continue;
+    const value = normalizePersonaValue(personaInput(key).value);
+    const hasOverride = info.override !== null && info.override !== undefined;
+    if (value === normalizePersonaValue(info.default)) {
+      if (hasOverride) resets.push(["persona", key]);
+    } else if (!hasOverride || value !== normalizePersonaValue(info.override)) {
+      updates.persona[key] = value;
+    }
+  }
+  if (!Object.keys(updates.persona).length && !resets.length) {
+    alert(_t("変更はありません。"));
+    return;
+  }
+  await putPersona({ updates, resets });
+}
+
+function resetPersona() {
+  if (!confirm(_t("このインスタンス専用の AI の人物設定を削除し、config.ini の既定値に戻します。よろしいですか？"))) return;
+  const resets = PERSONA_KEYS.filter((key) => {
+    const info = personaState.keys[key];
+    return info && !info.env_override_active && info.override !== null && info.override !== undefined;
+  }).map((key) => ["persona", key]);
+  return putPersona({ updates: {}, resets });
+}
+
+async function putPersona({ updates, resets }) {
+  $("#settings-error").textContent = "";
+  try {
+    const result = await api(`/api/instances/${encodeURIComponent(settingsTarget)}/config`, {
+      method: "PUT",
+      body: { updates, resets, base_mtime: personaState.mtime },
+    });
+    await loadPersona();
+    alert(
+      result.needs_restart
+        ? _t("保存しました。稼働中のインスタンスには、再起動後に反映されます。")
+        : _t("保存しました（次の起動から反映されます）。")
+    );
+  } catch (e) {
+    if (e.status === 409) {
+      alert(_t("他のセッションで既に保存されています。画面を再読み込みします。"));
+      await loadPersona();
+    } else {
+      $("#settings-error").textContent = e.message;
+    }
+  }
 }
 
 async function loadSettings() {

@@ -2418,6 +2418,9 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[ui]` | `max_input_chars` | Maximum characters per send (the input box + pasted text in total). While over, sending is not possible, and the backend also refuses (`0` or less is unlimited) | `UI_MAX_INPUT_CHARS` |
 | `[ui]` | `token_usage_warn_threshold` | When the total tokens of a "per request" row of the token usage card (one row each for the main agent and running sub-agents / batch delegation groups; summarizing calls for context compaction appear as a "compaction (most recent)" row and are also added to the conversation total; judged per row) reach this value or more, it is shown in bold orange (`0` or less disables it) | `UI_TOKEN_USAGE_WARN_THRESHOLD` |
 | `[ui]` | `token_usage_alert_threshold` | Same as above, bold red at this value or more (takes precedence over `token_usage_warn_threshold`; `0` or less disables it) | `UI_TOKEN_USAGE_ALERT_THRESHOLD` |
+| `[persona]` | `name` | The name of this instance's AI. Inserted into the Identity of the system prompt (`{{persona}}` in `system_prompt.md`, `render_persona_block` in `src/config.py`) and used when it introduces itself. Blank means not inserted (with all three blank, the default, it behaves as Locohane as before). Can also be changed in the instance's "Display settings" tab of the settings dashboard (section "Display settings (shared + per instance)"). Takes effect after a restart | `PERSONA_NAME` |
+| `[persona]` | `gender` | Same as above, the AI's gender (blank means not inserted) | `PERSONA_GENDER` |
+| `[persona]` | `personality` | Same as above, the AI's personality and speaking style (may span lines). Inserted with a note that it only affects tone and wording and never takes precedence over the procedures, delegation rules or approval flow | `PERSONA_PERSONALITY` |
 | `[websocket]` | `ping_interval_seconds` | Interval in seconds of liveness pings of the WebSocket (Socket.IO) between the browser and the server. A different layer from `[llm].stream_chunk_timeout_seconds` (communication with the LLM server) | `WEBSOCKET_PING_INTERVAL_SECONDS` |
 | `[websocket]` | `ping_timeout_seconds` | If no response to the latest ping is received after waiting this many seconds, the connection is considered disconnected. Too short a value tends to disconnect wrongly during periods when the event loop tends to block waiting for LLM responses (such as long `dispatch_agent` runs) | `WEBSOCKET_PING_TIMEOUT_SECONDS` |
 
@@ -2903,6 +2906,30 @@ and if the instance side has even one, the shared side is not used). Instance-on
 `app.py` handles `/public/settings/{file name}` ahead of Chainlit's standard static delivery
 and returns files in this order of priority. Changes **do not need a restart** and take effect when the browser
 is reloaded (welcome.md at the start of the next chat).
+
+welcome.md can contain the following placeholders (`fill_welcome_template` in `src/config.py`; any other `{ }` is shown as is).
+
+| Placeholder | Replaced with |
+|---|---|
+| `{skills}` | The list of skills loaded at startup |
+| `{ai_name}` | The AI's name (`[persona] name`; `Locohane` when blank) |
+| `{ai_gender}` | The AI's gender (`[persona] gender`; an empty string when blank) |
+| `{ai_personality}` | The AI's personality and speaking style (`[persona] personality`; an empty string when blank) |
+
+At the top of the instance's "Display settings" sub tab there is also an **AI persona** box (name, gender, personality and
+speaking style). Unlike the files above, these are the values of the `[persona]` section of config.ini (`name`, `gender`,
+`personality`); saving records them in `instances/<name>/config_overrides.json`, just like the config.ini tab (it uses the
+same `PUT /api/instances/{name}/config`, so validation, backups and the change history are the same). Setting a value equal
+to the config.ini default removes the override, and "Revert to the config.ini default" removes all three at once. Items set
+by environment variables (`PERSONA_NAME`, etc.) cannot be changed. The values are inserted into the Identity of the system
+prompt (`{{persona}}` in `system_prompt.md`; blank items are not inserted, and nothing is added when all three are blank).
+When a name is set, it is also shown above the AI's answers (and the waiting indicator) in the chat screen
+(`frontend/src/components/MessageThread.tsx` reads `assistant_name` from `/locohane/ui-config`; when blank, no name line is
+shown and the screen looks as before; it is not shown on sub-agent or system messages). It can also be inserted into the
+welcome message with `{ai_name}` etc. from the table above. All of these use the values read at startup, so **the instance
+must be restarted** for a change to take effect (then reload the browser). The top "Display settings" tab (shared) has no place to
+store them (the admin tool does not rewrite config.ini), so it only shows a note. If you use your own system prompt via
+`[paths] system_prompt_path`, the persona is inserted only where that file contains `{{persona}}`.
 
 ### Monitor (running status, viewing conversations, token trends, logs)
 

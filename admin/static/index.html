@@ -439,6 +439,17 @@
   <div class="view-settings">
     <h2 id="settings-title">表示設定（全インスタンス共通）</h2>
     <p class="hint" id="settings-target-hint"></p>
+    <section class="settings-section persona-section">
+      <h3>AI の人物設定（config.ini の [persona]） <span class="setting-source" id="persona-source"></span></h3>
+      <p class="hint" id="persona-hint"></p>
+      <div class="persona-fields">
+        <label>名前 <input type="text" id="persona-name" placeholder="例: こはね" /></label>
+        <label>性別 <input type="text" id="persona-gender" placeholder="例: 女性" /></label>
+        <label>性格・話し方 <textarea rows="4" id="persona-personality" placeholder="例: 明るく丁寧。結論から短く話す"></textarea></label>
+        <button class="save-persona-btn">保存</button>
+        <button class="reset-persona-btn hidden">config.ini の既定値に戻す</button>
+      </div>
+    </section>
     <section class="settings-section" data-text="header.md">
       <h3>ヘッダー文言（header.md） <span class="setting-source"></span></h3>
       <textarea rows="2"></textarea>
@@ -454,6 +465,7 @@
     <section class="settings-section" data-text="welcome.md">
       <h3>ウェルカムメッセージ（welcome.md） <span class="setting-source"></span></h3>
       <p class="hint"><code>{skills}</code> はスキル一覧に置換されます。</p>
+      <p class="hint"><code>{ai_name}</code>・<code>{ai_gender}</code>・<code>{ai_personality}</code> は、インスタンスの AI の人物設定（名前・性別・性格）に置換されます（名前が空欄なら Locohane、性別・性格が空欄なら空文字）。</p>
       <textarea rows="6"></textarea>
       <button class="save-setting-btn">保存</button>
       <button class="reset-setting-btn hidden">共通に戻す</button>
