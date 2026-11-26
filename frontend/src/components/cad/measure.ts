@@ -258,8 +258,13 @@ export function measurePointEdge(info: CadItemInfo | undefined, a: MeasurePick, 
       const radial = unit(sub(sub(p, c), scale(axis, dot(sub(p, c), axis))));
       foot = radial ? add(c, scale(radial, r)) : (polyline[0] ?? null);
       exact = !!foot;
+      // 足は円の上、折れ線は円の弦なので、円弧の内側の足でも折れ線から弦の膨らみ（r − √(r² − (弦/2)²)）まで離れる。
+      // 一番長い弦の膨らみより離れていれば円弧の外（延長した円の上）とみなす。
+      let longest = 0;
+      for (let i = 1; i < polyline.length; i++) longest = Math.max(longest, norm(sub(polyline[i], polyline[i - 1])));
+      const sag = r - Math.sqrt(Math.max(0, r * r - (longest / 2) ** 2));
       const near = foot ? nearestOnPolyline(foot, polyline) : null;
-      onExtension = !!near && near.distance > Math.max(slack, r * 1e-3);
+      onExtension = !!near && near.distance > Math.max(slack, r * 1e-3, sag * 1.5);
     }
   }
   if (!foot) {
