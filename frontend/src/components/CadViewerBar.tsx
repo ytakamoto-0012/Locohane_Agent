@@ -204,6 +204,15 @@ export function CadViewerBar() {
       ? elements.find((e) => e.type === 'custom' && e.id === askUser.spec.element_id && e.name === 'CadViewer')
       : undefined;
   const props = element?.type === 'custom' ? (element.props as CadViewerProps) : undefined;
+  // 答えを待つ期限（backend の [cad_viewer] timeout_seconds）は、要素が届いた時点から数える（backend は送った時点から
+  // 待ち始める）。ビューア用データを読み終えてから数えると、大きなモデルでは読み込みの時間だけ残り時間が長く出ていた。
+  // 出し直したとき（要素の ID が変わる）はそこから数え直す。
+  const timeoutSeconds = props?.timeout_seconds ?? 0;
+  const deadlineAt = useMemo(
+    () => (timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 要素が変わったときだけ数え直す
+    [element?.id]
+  );
   if (!askUser || !element || !props) return null;
   const panel = (data: CadData) => (
     <CadViewerPanel
@@ -216,7 +225,7 @@ export function CadViewerBar() {
       holeAngleDefault={props.hole_normal_angle_deg ?? 3}
       holeSizeDefault={props.hole_size_tolerance ?? 0.3}
       sewDefault={props.sew_tolerance ?? 0.5}
-      timeoutSeconds={props.timeout_seconds ?? 0}
+      deadlineAt={deadlineAt}
       canAlign={!!props.can_align}
       deviationToleranceDefault={props.deviation_tolerance ?? data.deviation?.tolerance ?? 0.1}
       onSubmit={(selected, colors, message, view, screenshot, measurements) =>
@@ -316,8 +325,8 @@ interface PanelProps {
   holeSizeDefault: number;
   /** 「縫合」の欄の初めの値（モデルの単位）。 */
   sewDefault: number;
-  /** backend が答えを待つ秒数（0 = 無期限）。残りが少なくなったら残り時間を出す。 */
-  timeoutSeconds: number;
+  /** backend が答えを待つ期限（Date.now() の値。0 = 無期限）。残りが少なくなったら残り時間を出す。 */
+  deadlineAt: number;
   /** 基準モデルとの位置合わせをやり直せるか（app.py の cad_viewer_align）。 */
   canAlign: boolean;
   /** 偏差の公差（±）の初めの値。 */
@@ -451,7 +460,7 @@ function CadViewerPanel({
   holeAngleDefault,
   holeSizeDefault,
   sewDefault,
-  timeoutSeconds,
+  deadlineAt,
   canAlign,
   deviationToleranceDefault,
   onSubmit,
@@ -496,7 +505,7 @@ function CadViewerPanel({
   const pmiItems = useMemo(() => [...pmiById(data).values()], [data]);
   const [pmiLabels, setPmiLabels] = useState(false);
   // 3D ビューア専用のタイムアウト（[cad_viewer] timeout_seconds）の残り秒数。
-  const deadline = useRef(timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : 0);
+  const deadline = useRef(deadlineAt);
   const [remaining, setRemaining] = useState<number | null>(null);
   // 「座標系」で選んだローカル座標系（null ならワールド）。
   const localAxes = data.localAxes ?? [];
