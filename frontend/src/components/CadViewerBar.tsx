@@ -15,6 +15,7 @@ import {
   isMatrix4,
   dropUnchangedPartColors,
   effectiveColor,
+  featureSizeLabel,
   holeGroup,
   itemsOf,
   partOf,
@@ -153,7 +154,7 @@ function extraInfo(item: CadItemInfo, data: CadData | undefined, t: (k: MessageK
   if (feat) {
     const kind = feat.type === 'hole' ? t('cad.info.feature') : t('cad.info.boss');
     const extra = feat.type === 'hole' ? ` ${feat.through ? t('cad.info.through') : `${t('cad.info.blind')} ${fmt(feat.depth)}`}` : '';
-    out.push(`${kind} ⌀${fmt(feat.diameter)}${extra}`);
+    out.push(`${kind} ${featureSizeLabel(feat)}${extra}`);
   }
   const ids = Array.isArray(item.pmi) ? (item.pmi as string[]) : [];
   if (ids.length) {

@@ -2099,6 +2099,13 @@ So for B-rep shapes the tool returns numbers before pictures.
   face beyond its end circle fits inside the circle (a bottom or a drill point), otherwise through. The summary groups them by type, diameter, depth and
   through/blind (up to 12 groups); each feature (axis, faces) is under `features` in the viewer data and faces have `feature` (e.g. `hole:3`).
   The viewer shows e.g. "Hole ⌀5 through" when hovering a face.
+- **Non-round holes and holes of closed meshes** (`src/cad/profile_holes.py`): for solids (B-rep) and closed STL alike, an inner outline of a flat face
+  is a hole mouth, and the walls parallel to the mouth normal are followed (only walls facing the axis; bosses are not reported). The outline is
+  classified as round (`circle`, `diameter`), rectangle (`rectangle`, `width` ≥ `height`), rounded rectangle (`roundedRectangle`, `cornerRadius`),
+  regular 5- to 8-gon (`polygon`, `sides`, `acrossFlats`, `acrossCorners`) or other (`other`, size of the bounding rectangle), with `shape`,
+  `xDirection` (the x direction of the shape) and `inscribedDiameter` (the largest circle at the center). A face inside the outline beyond the walls
+  makes it blind. B-rep round holes stay with the cylinder recognition above (not reported twice). The summary groups by shape and size, and the viewer
+  shows e.g. "Hole □20×10 through" or "Hole ⬡6 S13.856 through". Chamfered or tapered mouths (walls not parallel to the axis) are not handled.
 - **Digest** (`model.digest`): a 16-character value made from the order and geometry of faces, edges and vertices. Element IDs are positions, so after
   the shape changes the same ID can point at another element; the LLM is told that IDs are valid only for the shape with this digest.
 
@@ -2171,6 +2178,10 @@ reference's outward normal = extra material) from every vertex of the shown mode
     reference model (found by fitting a circle to its wall). Within the clearance (hole − pin) / 2 the hole can move; beyond it the hole rim is pushed onto
     the pin. A pin larger than the hole aligns the centers without clearance. The result shows the hole offset from the pin axis, the clearance and the
     reference hole diameter.
+    Rectangular, rounded-rectangular and regular-polygon holes (and round holes of closed meshes) are picked with their shape by clicking a hole wall or
+    rim. The pin starts as the thickest pin that fits (the short side, or across flats); within the hole shape shrunk by the pin radius the hole can
+    move (the clearance differs by direction) and beyond it the rim is pushed onto the pin. The reference hole center comes from fitting the same shape
+    to its wall. The mark draws the pin circle and the hole outline.
   - "Priority" (default): A fixes 3, B 2 and C 1 degrees of freedom (3-2-1, a prioritized least squares where later datums do not move what earlier ones
     fixed). D joins the last stage with a lower weight (`[cad_viewer] datum_d_weight`, default 0.3) and does not move what A and B fixed. "Average": all
     datums at the same weight in one least squares (6 DOF). Each datum's weight does not depend on its number of points.

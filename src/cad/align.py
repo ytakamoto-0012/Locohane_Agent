@@ -14,6 +14,8 @@ p について、T·p から基準モデルの表面までの符号付き距離�
   - 点: クリックした点の周り（半径 ``pad_radius``、つながった表面だけ）を基準の表面に当てる（検査具の当て面）。
   - 基準穴（1 本か 2 本）: 穴（対象の穴の中心・軸・実測の径）に、基準モデルの同じ穴の軸に立てた丸ピン（直径を指定）を
     通す。穴とピンの隙間（(穴径 − ピン径) / 2）の中では動けて、はみ出す分だけ穴の縁をピンに当てて押し戻す。
+    四角・角 R の四角・正多角形の穴（``profile``。src/cad/profile_holes.py）は、穴の形をピンの半径だけ内側へ縮めた形の中で
+    ピンが動けるとし（隙間は向きごとに違う）、基準モデルの穴の中心はその形を壁の点に当てはめて求める。
 
   ``datum_mode="priority"``（既定）は A・B・C の順に、各段で決める自由度の数を A=3・B=2・C=1（3-2-1 の位置決め）に
   限って合わせ、先の段が決めた向きは後の段で動かさない（優先度付きの最小二乗）。D は最後の段に低い重み
@@ -33,6 +35,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from .mesh_data import rnd
+from .profile_holes import SDF_SHAPES, profile_circumradius, profile_inradius, profile_sdf
 
 # 基準モデルの表面に置く見本の点の間隔（基準の対角線に対する割合）と、見本の点の数の上限。
 SAMPLE_SPACING_RATIO = 1 / 400
@@ -497,11 +500,25 @@ class HoleDatum:
     axis: np.ndarray
     diameter: float
     pin: float
+    # 丸以外の穴（四角・角 R の四角・正多角形。src/cad/profile_holes.py の profile_sdf の形）と、その x の向き。
+    # このとき diameter は中心に置ける一番大きい円の直径。
+    profile: dict[str, Any] | None = None
+    xdir: np.ndarray | None = None
 
     @property
     def clearance(self) -> float:
-        """穴とピンの隙間（半径の差）。ピンが穴より太ければ 0（隙間なしで中心を合わせる）。"""
+        """穴とピンの隙間（半径の差。丸以外の穴は一番狭い向きの隙間）。ピンが穴より太ければ 0（隙間なしで中心を合わせる）。"""
         return max(0.0, (self.diameter - self.pin) / 2)
+
+    def frame(self, T: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """変換 T の後の (中心, 軸, 形の x の向き, y の向き)。"""
+        q = apply(T, self.center[None])[0]
+        a = T[:3, :3] @ self.axis
+        a = a / np.linalg.norm(a)
+        x = T[:3, :3] @ (self.xdir if self.xdir is not None else _plane_basis(self.axis)[0])
+        x = x - (x @ a) * a
+        x = x / np.linalg.norm(x)
+        return q, a, x, np.cross(a, x)
 
 
 def _plane_basis(a: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -552,6 +569,89 @@ def fit_reference_hole(index: SurfaceIndex, center: np.ndarray, axis: np.ndarray
     return c, r_guess
 
 
+def _sdf_grad(profile: dict[str, Any], xy: np.ndarray, h: float) -> tuple[np.ndarray, np.ndarray]:
+    """形の符号付き距離 (k,) とその勾配 (k,2)（中心差分）。"""
+    d = profile_sdf(profile, xy)
+    gx = (profile_sdf(profile, xy + [h, 0]) - profile_sdf(profile, xy - [h, 0])) / (2 * h)
+    gy = (profile_sdf(profile, xy + [0, h]) - profile_sdf(profile, xy - [0, h])) / (2 * h)
+    return d, np.stack([gx, gy], axis=1)
+
+
+def fit_reference_profile(
+    index: SurfaceIndex, center: np.ndarray, axis: np.ndarray, xdir: np.ndarray, profile: dict[str, Any]
+) -> np.ndarray | None:
+    """基準モデルの、center の近くにある丸以外の穴（profile の形・大きさ・向き）の中心（center を通り軸に直交する平面の上）。
+
+    fit_reference_hole と同じく軸に平行な壁の見本の点を平面へ写し、形の輪郭までの距離が最小になるよう中心だけを動かす
+    （ガウス・ニュートン法。形の向きは対象の穴の向き）。点が半周に満たない・足りないときは None。
+    """
+    a = axis / np.linalg.norm(axis)
+    x = xdir - (xdir @ a) * a
+    x = x / np.linalg.norm(x)
+    y = np.cross(a, x)
+    inr = max(profile_inradius(profile), index.diag * 1e-4)
+    reach = max(profile_circumradius(profile), inr)
+    h = inr * 1e-4
+    c = center.astype(np.float64)
+    for _pass in range(2):
+        ids = np.asarray(index.tree.query_ball_point(c, r=2.5 * reach), dtype=np.int64)
+        if len(ids) < 12:
+            return None
+        rel = index.samples[ids] - c
+        n = index.normals[index.owner[ids]]
+        xy = np.stack([rel @ x, rel @ y], axis=1)
+        d = profile_sdf(profile, xy)
+        keep = (np.abs(n @ a) < 0.5) & (np.abs(rel @ a) <= 2.5 * reach)
+        keep &= ((d > -0.7 * inr) & (d < inr)) if _pass == 0 else (np.abs(d) < 0.3 * inr)
+        if keep.sum() < 12:
+            return None
+        xy = xy[keep]
+        t = np.zeros(2)
+        for _it in range(10):
+            r, g = _sdf_grad(profile, xy - t, h)
+            step, *_ = np.linalg.lstsq(-g, -r, rcond=None)
+            t = t + step
+            if float(np.linalg.norm(step)) < inr * 1e-7:
+                break
+        if not np.all(np.isfinite(t)):
+            return None
+        rel2 = xy - t
+        sectors = np.unique(((np.arctan2(rel2[:, 1], rel2[:, 0]) + math.pi) / (2 * math.pi) * 8).astype(int) % 8)
+        if len(sectors) < 5:
+            return None
+        c = c + t[0] * x + t[1] * y
+    return c
+
+
+def _profile_rows(datum: HoleDatum, T: np.ndarray, center: np.ndarray, scale: float, index: SurfaceIndex) -> tuple[np.ndarray, np.ndarray] | None:
+    """丸以外の基準穴の行: 基準の穴の中心に立てた丸ピン（半径 s）が、対象の穴の形を s だけ内側へ縮めた形の外へ出る分を押し戻す。
+
+    縮めた形は「形の符号付き距離 ≤ −s」の点なので、残差は max(距離 + s, 0)。縮めた形が空（ピンが一番狭い向きより太い）なら
+    距離 + s が最小のところ（形の中心の近く）へ寄せる。
+    """
+    assert datum.profile is not None
+    q, a, x, y = datum.frame(T)
+    c0 = fit_reference_profile(index, q, a, x, datum.profile)
+    if c0 is None:
+        raise AlignError(f"no hole was found on the reference model near datum hole {datum.name}")
+    p = c0 - q
+    xy = np.array([[p @ x, p @ y]])
+    inr = profile_inradius(datum.profile)
+    d, g = _sdf_grad(datum.profile, xy, max(inr, index.diag * 1e-4) * 1e-4)
+    val = float(d[0]) + datum.pin / 2
+    band = max(max(inr - datum.pin / 2, 0.0) * 0.05, index.diag * 1e-6)
+    if val <= -band:
+        return None
+    # val の q についての勾配（p = c0 − q なので符号が逆）。
+    direction = -(g[0, 0] * x + g[0, 1] * y)
+    norm = float(np.linalg.norm(direction))
+    if norm < 1e-12:
+        return None
+    dirs = (direction / norm)[None]
+    J = np.hstack([np.cross((q - center)[None], dirs) / scale, dirs])
+    return J, -np.array([max(val, 0.0)])
+
+
 def _datum_rows(
     datum: PadDatum | HoleDatum, T: np.ndarray, center: np.ndarray, scale: float, index: SurfaceIndex, floor: float
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -564,6 +664,8 @@ def _datum_rows(
             return None
         J = np.hstack([np.cross(q - center, n) / scale, n]) * w[:, None]
         return J, -d * w
+    if datum.profile is not None:
+        return _profile_rows(datum, T, center, scale, index)
     q = apply(T, datum.center[None])[0]
     a = T[:3, :3] @ datum.axis
     fit = fit_reference_hole(index, q, a, datum.diameter / 2)
@@ -651,6 +753,14 @@ def _datum_report(datum: PadDatum | HoleDatum, T: np.ndarray, index: SurfaceInde
     }
     if datum.pin > datum.diameter:
         out["pin_larger_than_hole"] = True
+    if datum.profile is not None:
+        out["shape"] = datum.profile["shape"]
+        q, a, x, _y = datum.frame(T)
+        c0 = fit_reference_profile(index, q, a, x, datum.profile)
+        if c0 is not None:
+            e = (q - c0) - ((q - c0) @ a) * a
+            out.update(nominal_center=[rnd(v, 6) for v in c0], offset=rnd(float(np.linalg.norm(e)), 6))
+        return out
     fit = fit_reference_hole(index, q, a, datum.diameter / 2)
     if fit is not None:
         c0, r0 = fit
@@ -679,7 +789,11 @@ def _parse_datum(name: str, raw: Any, target: TargetMesh, index: SurfaceIndex, p
         c, a, dia, pin = vec(raw.get("center")), vec(raw.get("axis")), num(raw.get("diameter")), num(raw.get("pin"))
         if c is None or a is None or dia is None or float(np.linalg.norm(a)) < 1e-12:
             raise AlignError(f"datum hole {name} needs the center, axis and diameter of the hole")
-        return HoleDatum(name, c, a / np.linalg.norm(a), dia, pin if pin is not None else dia)
+        a = a / np.linalg.norm(a)
+        profile, xdir = _parse_profile(name, raw.get("profile"), a, num, vec)
+        if profile is not None:
+            dia = 2 * profile_inradius(profile)
+        return HoleDatum(name, c, a, dia, pin if pin is not None else dia, profile, xdir)
     p = vec(raw.get("point"))
     if p is None:
         return None
@@ -688,6 +802,35 @@ def _parse_datum(name: str, raw: Any, target: TargetMesh, index: SurfaceIndex, p
     if len(pts) < 3:
         raise AlignError(f"datum {name}: no surface of the model within {radius:.4g} of the picked point")
     return PadDatum(name, p, radius, pts)
+
+
+def _parse_profile(name: str, raw: Any, axis: np.ndarray, num: Any, vec: Any) -> tuple[dict[str, Any] | None, np.ndarray | None]:
+    """基準穴の形（{shape, width, height, cornerRadius, sides, acrossFlats, xDirection}）。丸・無し・other は (None, None)
+    （丸穴として扱う）。"""
+    if not isinstance(raw, dict) or raw.get("shape") not in SDF_SHAPES or raw.get("shape") == "circle":
+        return None, None
+    shape = raw["shape"]
+    x = vec(raw.get("xDirection"))
+    if x is not None:
+        x = x - (x @ axis) * axis
+    if x is None or float(np.linalg.norm(x)) < 1e-9:
+        raise AlignError(f"datum hole {name} needs the x direction of its {shape} shape")
+    x = x / np.linalg.norm(x)
+    if shape == "polygon":
+        sides, flats = raw.get("sides"), num(raw.get("acrossFlats"))
+        if not isinstance(sides, int) or isinstance(sides, bool) or sides < 3 or flats is None:
+            raise AlignError(f"datum hole {name} needs the number of sides and the across-flats size of its polygon")
+        return {"shape": shape, "sides": sides, "acrossFlats": flats}, x
+    w, h = num(raw.get("width")), num(raw.get("height"))
+    if w is None or h is None:
+        raise AlignError(f"datum hole {name} needs the width and height of its {shape}")
+    out: dict[str, Any] = {"shape": shape, "width": max(w, h), "height": min(w, h)}
+    if h > w:
+        x = np.cross(axis, x)
+    if shape == "roundedRectangle":
+        r = raw.get("cornerRadius")
+        out["cornerRadius"] = float(r) if isinstance(r, (int, float)) and not isinstance(r, bool) and math.isfinite(r) and r >= 0 else 0.0
+    return out, x
 
 
 def _pca(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

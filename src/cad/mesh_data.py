@@ -206,12 +206,17 @@ def stl_to_viewer_data(path: str | Path, *, max_triangles: int, region_angle_deg
     source = {"kind": "file", "format": "STL", "path": str(path), "binary": stl.binary}
     if stl.color_format:
         source["colorFormat"] = stl.color_format
+    face_ranges = [[int(s), int(c)] for s, c in zip(starts, counts)]
+    # 閉じた形の穴（丸・四角・角 R の四角・正多角形。src/cad/profile_holes.py）。壁の面に feature が付く。
+    from .profile_holes import recognize_profile_holes
+
+    features = recognize_profile_holes(positions, indices, face_ranges, faces, [])
     data = build_viewer_data(
         source=source,
         units="unknown",
         positions=positions,
         indices=indices,
-        face_ranges=[[int(s), int(c)] for s, c in zip(starts, counts)],
+        face_ranges=face_ranges,
         colors=colors,
         edge_positions=edge_positions,
         edge_ranges=edge_ranges,
@@ -220,6 +225,8 @@ def stl_to_viewer_data(path: str | Path, *, max_triangles: int, region_angle_deg
         edges=edges,
         vertices=[],
     )
+    if features:
+        data["features"] = features
     if analysis:
         from .analysis import stl_analysis
 

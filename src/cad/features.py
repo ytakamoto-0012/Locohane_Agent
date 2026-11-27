@@ -1,5 +1,8 @@
 """穴・ボス（円柱の特徴）の認識と、モデルのダイジェスト。numpy だけで動く（cadquery 不要）。
 
+丸以外の穴（四角・角 R の四角・正多角形）と、閉じたメッシュ（STL）の穴は src/cad/profile_holes.py が足す
+（``shape`` と形ごとの大きさを持つ。ここで認識する丸穴は ``shape`` を持たず ``diameter`` だけ）。
+
 ビューア用データの面・エッジの情報（src/cad/export_mesh.py の _face_info / _edge_info）から求める。
 小さなローカル LLM に面の生の一覧（数百〜数千件）を読ませる代わりに、「φ5 の通し穴 ×4」のような
 特徴の一覧を渡すためのもの（build123d-mcp の inspect_features と同じ考え方）。
@@ -24,6 +27,7 @@ from typing import Any
 import numpy as np
 
 from .mesh_data import rnd, vec
+from .profile_holes import profile_size_fields
 
 # 1 周を覆うとみなす被覆率（面積 ÷ (2πr × 軸方向の長さ)）。
 _FULL_COVERAGE = 0.98
@@ -184,18 +188,27 @@ def _cap_faces(comp: list[int], comp_edges: set[int], r: float, faces: list[dict
     return caps
 
 
+def feature_group_key(feature: dict) -> tuple:
+    """要約でまとめるキー: 種類・形と大きさ（丸は直径。src/cad/profile_holes.py の profile_size_fields）・深さ・通しかどうか。
+    ((項目, 値), ...) の並びなので、dict(key) で要約の 1 行の項目に戻せる。"""
+    kind = feature["type"]
+    items: list[tuple[str, Any]] = [("type", kind)]
+    items += list(profile_size_fields(feature).items())
+    items.append(("depth" if kind == "hole" else "length", feature.get("depth", feature.get("length"))))
+    if kind == "hole":
+        items.append(("through", feature.get("through")))
+    return tuple(items)
+
+
 def summarize_features(features: list[dict]) -> dict[str, Any]:
-    """LLM へ返す特徴の要約（大きさが件数によらず一定）。同じ種類・直径・深さ・通しかどうかでまとめる。"""
+    """LLM へ返す特徴の要約（大きさが件数によらず一定）。同じ種類・形と大きさ・深さ・通しかどうかでまとめる。"""
     groups: dict[tuple, int] = {}
     for f in features:
-        key = (f["type"], f["diameter"], f.get("depth", f.get("length")), f.get("through"))
+        key = feature_group_key(f)
         groups[key] = groups.get(key, 0) + 1
     rows = []
-    for (kind, dia, size, through), n in sorted(groups.items(), key=lambda kv: (kv[0][0], -kv[1], kv[0][1])):
-        row: dict[str, Any] = {"type": kind, "diameter": dia, "depth" if kind == "hole" else "length": size, "count": n}
-        if kind == "hole":
-            row["through"] = through
-        rows.append(row)
+    for key, n in sorted(groups.items(), key=lambda kv: (kv[0][0][1], -kv[1], str(kv[0]))):
+        rows.append({**dict(key), "count": n})
     out: dict[str, Any] = {
         "holes": sum(1 for f in features if f["type"] == "hole"),
         "bosses": sum(1 for f in features if f["type"] == "boss"),

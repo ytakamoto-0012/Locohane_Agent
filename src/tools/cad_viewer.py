@@ -403,7 +403,8 @@ async def show_cad_viewer(
         and its geometry under "selected", and the color changes under "color_changes"; it can be
         very large, so read only the fields you need with json_query), model (format, units, size,
         element counts, digest, check = solids / valid / open edges / volume / warnings, features =
-        holes and bosses grouped by diameter and depth, holes = holes inside an open surface or mesh
+        holes and bosses of solids and closed meshes grouped by shape (round = diameter; rectangle,
+        roundedRectangle, polygon with sides and acrossFlats, other = width x height) and depth, holes = holes inside an open surface or mesh
         grouped by diameter and normal, and local_axes = local coordinate systems found as three
         perpendicular lines), diff when compare_with was given, comparison when reference was given,
         local_axis when the user viewed the

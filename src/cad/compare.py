@@ -169,12 +169,7 @@ def _feature_changes(before: list[dict], after: list[dict]) -> dict[str, Any]:
     changes = []
     for key in sorted(set(a) | set(b), key=str):
         if a.get(key, 0) != b.get(key, 0):
-            kind, dia, size, through = key
-            row: dict[str, Any] = {"type": kind, "diameter": dia, "depth" if kind == "hole" else "length": size}
-            if kind == "hole":
-                row["through"] = through
-            row.update(before=b.get(key, 0), after=a.get(key, 0))
-            changes.append(row)
+            changes.append({**dict(key), "before": b.get(key, 0), "after": a.get(key, 0)})
     return {
         "holes": {"before": sum(1 for f in before if f["type"] == "hole"), "after": sum(1 for f in after if f["type"] == "hole")},
         "bosses": {"before": sum(1 for f in before if f["type"] == "boss"), "after": sum(1 for f in after if f["type"] == "boss")},
@@ -183,7 +178,8 @@ def _feature_changes(before: list[dict], after: list[dict]) -> dict[str, Any]:
 
 
 def _group_key(g: dict) -> tuple:
-    return (g["type"], g["diameter"], g.get("depth", g.get("length")), g.get("through"))
+    """要約の 1 行（件数を除く項目）を、並びをそろえたキーにする。"""
+    return tuple((k, v) for k, v in g.items() if k != "count")
 
 
 def summary_of(diff: dict[str, Any]) -> dict[str, Any]:

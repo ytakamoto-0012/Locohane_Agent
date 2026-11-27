@@ -191,15 +191,107 @@ export interface CadStepInfo {
   warnings?: string[];
 }
 
-/** 穴・ボス（src/cad/features.py）。 */
+/** 穴の形（src/cad/profile_holes.py）。shape が無い穴は丸（src/cad/features.py の円柱面の穴）。 */
+export type CadHoleShape = 'circle' | 'rectangle' | 'roundedRectangle' | 'polygon' | 'other';
+
+/** 基準穴の形（src/cad/align.py の _parse_profile）。xDirection は形の x の向き（長方形は長い辺、正多角形は頂点の 1 つ）。 */
+export interface CadHoleProfile {
+  shape: CadHoleShape;
+  width?: number;
+  height?: number;
+  cornerRadius?: number;
+  sides?: number;
+  acrossFlats?: number;
+  xDirection: [number, number, number];
+}
+
+/** 穴・ボス（src/cad/features.py・src/cad/profile_holes.py）。 */
 export interface CadFeature {
   id: string;
   type: 'hole' | 'boss';
-  diameter: number;
+  /** 丸穴・ボスの直径（丸以外の穴には無い）。 */
+  diameter?: number;
+  shape?: CadHoleShape;
+  width?: number;
+  height?: number;
+  cornerRadius?: number;
+  sides?: number;
+  acrossFlats?: number;
+  acrossCorners?: number;
+  /** 中心に置ける一番大きい円の直径（丸以外の穴）。 */
+  inscribedDiameter?: number;
   depth?: number;
   length?: number;
   through?: boolean;
+  axisDirection?: number[];
+  axisStart?: number[];
+  axisEnd?: number[];
+  xDirection?: number[];
   faces: number[];
+}
+
+function fmt3(n: number | undefined): string {
+  return typeof n === 'number' ? String(Math.round(n * 1000) / 1000) : '?';
+}
+
+/**
+ * 穴・ボスの形と大きさの短い表示（⌀5、□20×10、□24×12 R3、⬡6 S13.856、形不明は ?20×10）。
+ * 正多角形は「辺の数」と対辺（S）。
+ */
+export function featureSizeLabel(f: Pick<CadFeature, 'shape' | 'diameter' | 'width' | 'height' | 'cornerRadius' | 'sides' | 'acrossFlats'>): string {
+  switch (f.shape ?? 'circle') {
+    case 'circle':
+      return `⌀${fmt3(f.diameter)}`;
+    case 'rectangle':
+      return `□${fmt3(f.width)}×${fmt3(f.height)}`;
+    case 'roundedRectangle':
+      return `□${fmt3(f.width)}×${fmt3(f.height)} R${fmt3(f.cornerRadius)}`;
+    case 'polygon':
+      return `⬡${f.sides ?? '?'} S${fmt3(f.acrossFlats)}`;
+    default:
+      return `?${fmt3(f.width)}×${fmt3(f.height)}`;
+  }
+}
+
+/** 基準穴に使える形（丸ピンの当て方を形で決められるもの。丸と other は丸穴として扱う）。 */
+export function datumProfileOf(f: CadFeature): CadHoleProfile | null {
+  const x = f.xDirection;
+  if (!x || x.length !== 3) return null;
+  const xDirection: [number, number, number] = [x[0], x[1], x[2]];
+  if ((f.shape === 'rectangle' || f.shape === 'roundedRectangle') && f.width && f.height)
+    return { shape: f.shape, width: f.width, height: f.height, cornerRadius: f.cornerRadius ?? 0, xDirection };
+  if (f.shape === 'polygon' && f.sides && f.acrossFlats) return { shape: 'polygon', sides: f.sides, acrossFlats: f.acrossFlats, xDirection };
+  return null;
+}
+
+/**
+ * 形の輪郭の点（形の平面の 2 次元。中心が原点、xDirection が +x）。四角は角、角 R は弧を arcSegments に分けた点、
+ * 正多角形は頂点（1 つは +x の上）。
+ */
+export function profileOutline2d(p: CadHoleProfile, arcSegments = 6): [number, number][] {
+  if (p.shape === 'polygon' && p.sides && p.acrossFlats) {
+    const r = p.acrossFlats / 2 / Math.cos(Math.PI / p.sides);
+    return Array.from({ length: p.sides }, (_, k) => [r * Math.cos((2 * Math.PI * k) / p.sides!), r * Math.sin((2 * Math.PI * k) / p.sides!)]);
+  }
+  const a = (p.width ?? 0) / 2;
+  const b = (p.height ?? 0) / 2;
+  const r = Math.min(p.shape === 'roundedRectangle' ? (p.cornerRadius ?? 0) : 0, a, b);
+  const out: [number, number][] = [];
+  const corners: [number, number, number][] = [
+    [a - r, b - r, 0],
+    [-a + r, b - r, 90],
+    [-a + r, -b + r, 180],
+    [a - r, -b + r, 270]
+  ];
+  for (const [cx, cy, start] of corners) {
+    const n = r > 0 ? arcSegments : 0;
+    for (let i = 0; i <= n; i++) {
+      const t = ((start + (90 * i) / Math.max(n, 1)) * Math.PI) / 180;
+      // r = 0 なら角の点（cx, cy は角そのもの）。
+      out.push([cx + r * Math.cos(t), cy + r * Math.sin(t)]);
+    }
+  }
+  return out;
 }
 
 /**
@@ -229,7 +321,7 @@ export interface CadData {
   stats: Record<string, number>;
   /** STEP のヘッダー・製品の属性・PMI・レイヤー（元が STEP のときだけ）。 */
   step?: CadStepInfo;
-  /** 穴・ボスの一覧（B-rep のときだけ）。 */
+  /** 穴・ボスの一覧（B-rep と、閉じた形の STL の穴）。 */
   features?: CadFeature[];
   /** 開いた形の面の中の穴（holeList）の縁の線（線分ごとに 2 点。穴 i は ranges[i] の範囲）。 */
   holes?: {
@@ -312,6 +404,8 @@ export interface CadDatumReport {
   offset?: number;
   nominal_diameter?: number;
   pin_larger_than_hole?: boolean;
+  /** 丸以外の基準穴の形（このときは nominal_diameter が無い）。 */
+  shape?: CadHoleShape;
 }
 
 /** データムの名前（D は任意）。 */
@@ -322,10 +416,13 @@ export type DatumMode = 'priority' | 'average';
 /** 基準穴は 2 本まで（src/cad/align.py の MAX_HOLES）。 */
 export const MAX_DATUM_HOLES = 2;
 
-/** シーンで拾ったデータム（モデルの座標）。穴は中心・軸・実測の径。 */
+/**
+ * シーンで拾ったデータム（モデルの座標）。穴は中心・軸・実測の径。丸以外の穴（四角・角 R の四角・正多角形）は
+ * profile に形を持ち、diameter は中心に置ける一番大きい円の直径（ピンの太さの上限）。
+ */
 export type DatumScenePick =
   | { type: 'point'; point: [number, number, number] }
-  | { type: 'hole'; center: [number, number, number]; axis: [number, number, number]; diameter: number };
+  | { type: 'hole'; center: [number, number, number]; axis: [number, number, number]; diameter: number; profile?: CadHoleProfile };
 
 /** 設定したデータム。穴にはピンの直径が付く（初めは穴の径）。 */
 export type DatumPick = (DatumScenePick & { type: 'point' }) | (DatumScenePick & { type: 'hole'; pin: number });

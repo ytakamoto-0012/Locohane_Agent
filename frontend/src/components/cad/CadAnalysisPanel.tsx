@@ -7,6 +7,7 @@ import type { MessageKey } from '../../i18n/messages';
 import {
   DATUM_NAMES,
   MAX_DATUM_HOLES,
+  featureSizeLabel,
   type CadAlignmentInfo,
   type CadDeviationStats,
   type DatumMode,
@@ -456,7 +457,7 @@ export function AlignRow(p: AlignProps) {
                 onClick={() => p.onPickDatum(picking ? null : n)}
               >
                 {n === 'D' ? t('cad.align.datumD') : n}
-                {d ? (d.type === 'hole' ? ` ⌀${fmtNum(d.diameter)}` : ' ●') : ''}
+                {d ? (d.type === 'hole' ? ` ${d.profile ? featureSizeLabel(d.profile) : `⌀${fmtNum(d.diameter)}`}` : ' ●') : ''}
               </button>
             );
           })}
@@ -466,7 +467,11 @@ export function AlignRow(p: AlignProps) {
               <NumberField
                 key={`pin-${n}`}
                 label={t('cad.align.pin', { name: n })}
-                title={t('cad.align.pinTitle', { name: n, hole: fmtNum(d.diameter) })}
+                title={
+                  d.profile
+                    ? t('cad.align.pinProfileTitle', { name: n, shape: featureSizeLabel(d.profile), hole: fmtNum(d.diameter) })
+                    : t('cad.align.pinTitle', { name: n, hole: fmtNum(d.diameter) })
+                }
                 value={d.pin}
                 step={0.01}
                 min={0.001}
@@ -522,6 +527,8 @@ export function AlignRow(p: AlignProps) {
                 <span key={`hole-${n}`} className={r.pin_larger_than_hole ? 'cad-viewer-align-error' : undefined}>
                   {r.pin_larger_than_hole
                     ? t('cad.align.holePinLarger', { name: n, pin: fmtNum(r.pin ?? NaN), hole: fmtNum(r.diameter ?? NaN) })
+                    : r.shape
+                    ? t('cad.align.holeResultProfile', { name: n, offset: fmtNum(r.offset ?? NaN), clearance: fmtNum(r.clearance ?? NaN) })
                     : t('cad.align.holeResult', {
                         name: n,
                         offset: fmtNum(r.offset ?? NaN),

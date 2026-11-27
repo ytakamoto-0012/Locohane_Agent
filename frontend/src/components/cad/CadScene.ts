@@ -13,17 +13,20 @@ import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
 import {
+  datumProfileOf,
   decodeFloat32,
   decodeInt16,
   decodeUint32,
   decodeUint8,
   holeGroup,
+  profileOutline2d,
   isMatrix4,
   overrideOf,
   selectionKey,
   type BoxMode,
   type CadColorOverrides,
   type CadData,
+  type CadFeature,
   type CadKind,
   type CadLocalAxis,
   type CadLoopKind,
@@ -921,6 +924,17 @@ export class CadScene {
           const q = on(k + 1);
           segs.push(p.x, p.y, p.z, q.x, q.y, q.z);
         }
+        // 丸以外の穴は、ピンの円に加えて穴の形の輪郭も描く（ピンがどの向きにどれだけ動けるかが見える）。
+        if (d.profile) {
+          const px = new THREE.Vector3(...d.profile.xDirection);
+          px.addScaledVector(a, -px.dot(a)).normalize();
+          const py = new THREE.Vector3().crossVectors(a, px);
+          const outline = profileOutline2d(d.profile).map(([x, y]) => c.clone().addScaledVector(px, x).addScaledVector(py, y));
+          outline.forEach((p, k) => {
+            const q = outline[(k + 1) % outline.length];
+            segs.push(p.x, p.y, p.z, q.x, q.y, q.z);
+          });
+        }
       }
       pts.push(...at);
       const el = document.createElement('div');
@@ -964,13 +978,23 @@ export class CadScene {
       if (c && n && dia) return { type: 'hole', center: c, axis: n, diameter: dia };
     }
     const edge = this.pickAt(clientX, clientY, 'edge');
+    // 穴（src/cad/features.py・profile_holes.py）の壁の面・口の縁のエッジなら、その穴の形で拾う（四角・正多角形・メッシュの丸穴も）。
+    const edgeInfo = edge ? this.data.edgeList[edge.id] : undefined;
+    const edgeFaces = Array.isArray(edgeInfo?.faces) ? (edgeInfo.faces as number[]) : [];
+    const face0 = this.pickAt(clientX, clientY, 'face');
+    for (const fid of [...(face0 ? [face0.id] : []), ...edgeFaces]) {
+      const featId = this.data.faces[fid]?.feature;
+      const feat = typeof featId === 'string' ? this.data.features?.find((f) => f.id === featId) : undefined;
+      const got = feat?.type === 'hole' ? this.featureDatum(feat, this.pointAt(clientX, clientY)) : null;
+      if (got) return got;
+    }
     if (edge) {
       const info = this.data.edgeList[edge.id];
       const c = asVec3(info?.circleCenter);
       const a = unit(asVec3(info?.axisDirection) ?? [0, 0, 0]);
       if (info?.geomType === 'CIRCLE' && c && a && typeof info.radius === 'number') return { type: 'hole', center: c, axis: a, diameter: info.radius * 2 };
     }
-    const face = this.pickAt(clientX, clientY, 'face');
+    const face = face0;
     if (face) {
       const info = this.data.faces[face.id];
       const o = asVec3(info?.axisOrigin);
@@ -982,6 +1006,22 @@ export class CadScene {
       }
     }
     return null;
+  }
+
+  /**
+   * 穴の一覧（features）の穴を基準穴にする。中心はクリックした点を穴の軸へ写した点（点が無ければ口の中心）。
+   * 丸以外は形（profile）を付け、径は中心に置ける一番大きい円の直径にする。
+   */
+  private featureDatum(feat: CadFeature, at: THREE.Vector3 | null): DatumScenePick | null {
+    const s = asVec3(feat.axisStart);
+    const a = unit(asVec3(feat.axisDirection) ?? [0, 0, 0]);
+    if (!s || !a) return null;
+    const t = at ? (at.x - s[0]) * a[0] + (at.y - s[1]) * a[1] + (at.z - s[2]) * a[2] : 0;
+    const center: Vec3 = [s[0] + a[0] * t, s[1] + a[1] * t, s[2] + a[2] * t];
+    const profile = datumProfileOf(feat);
+    const dia = profile ? feat.inscribedDiameter : (feat.diameter ?? feat.inscribedDiameter);
+    if (typeof dia !== 'number' || !(dia > 0)) return null;
+    return profile ? { type: 'hole', center, axis: a, diameter: dia, profile } : { type: 'hole', center, axis: a, diameter: dia };
   }
 
   /**

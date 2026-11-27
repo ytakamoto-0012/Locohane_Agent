@@ -33,6 +33,7 @@ from OCP.TopTools import TopTools_IndexedMapOfShape
 
 from .features import model_digest, recognize_features
 from .mesh_data import TooManyTrianglesError, build_viewer_data, hex_color, rnd, vec
+from .profile_holes import recognize_profile_holes
 
 # セレクタ候補を計算する上限（面・エッジ・頂点それぞれの数）。超えたら候補を付けない（時間がかかるため）。
 SELECTOR_HINT_MAX_ENTITIES = 2000
@@ -764,12 +765,16 @@ def shapes_to_viewer_data(parts: list[Part], *, source: dict[str, Any], units: s
                 items[idx]["selectors"] = sels
     # 穴・ボスの判定の許容差には、三角形に分けた後の正確な大きさを使う（三角形があるのですぐ求まる）。
     features = recognize_features(faces, edges, _diag(root, exact=True))
+    all_positions = np.concatenate(positions).astype(np.float32) if positions else np.zeros((0, 3), np.float32)
+    all_indices = np.concatenate(indices).astype(np.uint32) if indices else np.zeros((0, 3), np.uint32)
+    # 丸以外の穴（四角・角 R の四角・正多角形）と、円柱面でない丸穴（src/cad/profile_holes.py）。
+    features += recognize_profile_holes(all_positions, all_indices, face_ranges, faces, features)
 
     data = build_viewer_data(
         source=source,
         units=units,
-        positions=np.concatenate(positions).astype(np.float32) if positions else np.zeros((0, 3), np.float32),
-        indices=np.concatenate(indices).astype(np.uint32) if indices else np.zeros((0, 3), np.uint32),
+        positions=all_positions,
+        indices=all_indices,
         face_ranges=face_ranges,
         colors=np.concatenate(colors) if colors else None,
         edge_positions=np.concatenate(seg_points).astype(np.float32) if seg_points else np.zeros((0, 3), np.float32),
