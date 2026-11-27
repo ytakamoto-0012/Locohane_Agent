@@ -1,5 +1,7 @@
 /**
- * 3D ビューア（CadViewerBar）の左のサイドバー。
+ * 3D ビューア（CadViewerBar）の左のサイドバー。「表示」と「選択」のタブに分ける。
+ * 「選択」タブ: 選んでいる要素のタグの一覧（中身は CadViewerBar から selectionPanel で受け取る）
+ * 「表示」タブ:
  * - 表示: 面・エッジ・頂点の表示／非表示
  * - 比較モデル: 基準モデルと比べるときの ①（表示するモデル）・②（基準モデル）の表示／非表示・色
  * - 色: 選んだ面・部品の色（RGB）の表示と変更
@@ -7,7 +9,7 @@
  * - 構成ツリー（STEP/IGES のアセンブリ）／レイヤー（DXF）: 部品ごとの表示／非表示・色・レイヤーの設定。名前のクリックで部品を選ぶ
  * three.js は使わない（CadScene と違い、チャット画面の本体と一緒に読み込まれる）。
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useI18n } from '../../i18n';
 import type { MessageKey } from '../../i18n/messages';
 import {
@@ -49,6 +51,8 @@ interface Props {
   onSelectItems: (items: CadSelection[]) => void;
   /** 基準モデルと比べるときの ①（表示するモデル）と ②（基準モデル）の表示・色。基準モデルが無ければ省く。 */
   compare?: CompareModels;
+  /** 「選択」タブの中身（選んでいる要素のタグの一覧。CadViewerBar が作る）。 */
+  selectionPanel: ReactNode;
 }
 
 export interface CompareModels {
@@ -124,47 +128,73 @@ export function CadSidebar(props: Props) {
     props.onHiddenParts(next);
   };
 
+  const [tab, setTab] = useState<'display' | 'selection'>('display');
+  const tabs: { id: typeof tab; label: string }[] = [
+    { id: 'display', label: t('cad.side.tabDisplay') },
+    { id: 'selection', label: t('cad.side.tabSelection', { count: props.selection.length }) }
+  ];
+
   return (
     <aside className="cad-sidebar" aria-label={t('cad.sidebar')}>
-      <section>
-        <h4>{t('cad.side.display')}</h4>
-        {kindRows
-          .filter((r) => r.has)
-          .map((r) => (
-            <label key={r.kind} className="cad-sidebar-row">
-              <input type="checkbox" checked={props.kindVisible[r.kind]} onChange={(e) => props.onKindVisible(r.kind, e.target.checked)} />
-              {t(`cad.kind.${r.kind}` as MessageKey)}
-            </label>
-          ))}
-      </section>
-      {props.compare && <CompareSection c={props.compare} />}
-      <ColorSection {...props} />
-      <CadStepPanel
-        data={data}
-        selection={props.selection}
-        attributeEdits={props.attributeEdits}
-        onAttributeEdits={props.onAttributeEdits}
-        onSelectItems={props.onSelectItems}
-      />
-      {tree.length > 0 && (
-        <section>
-          <h4>
-            {t(isDxf ? 'cad.side.layers' : 'cad.side.tree')}
-            <span className="cad-sidebar-actions">
-              <button type="button" onClick={() => setHidden(parts.map((p) => p.id), false)}>
-                {t('cad.side.showAll')}
-              </button>
-              <button type="button" onClick={() => setHidden(parts.map((p) => p.id), true)}>
-                {t('cad.side.hideAll')}
-              </button>
-            </span>
-          </h4>
-          <ul className="cad-tree" role="tree">
-            {tree.map((node) => (
-              <TreeRow key={node.key} node={node} depth={0} sidebar={props} setHidden={setHidden} />
-            ))}
-          </ul>
-        </section>
+      <div className="cad-sidebar-tabs" role="tablist" aria-label={t('cad.side.tabs')}>
+        {tabs.map((x) => (
+          <button
+            key={x.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === x.id}
+            className={tab === x.id ? 'active' : ''}
+            onClick={() => setTab(x.id)}
+          >
+            {x.label}
+          </button>
+        ))}
+      </div>
+      {tab === 'selection' ? (
+        <div role="tabpanel">{props.selectionPanel}</div>
+      ) : (
+        <div role="tabpanel">
+          <section>
+            <h4>{t('cad.side.display')}</h4>
+            {kindRows
+              .filter((r) => r.has)
+              .map((r) => (
+                <label key={r.kind} className="cad-sidebar-row">
+                  <input type="checkbox" checked={props.kindVisible[r.kind]} onChange={(e) => props.onKindVisible(r.kind, e.target.checked)} />
+                  {t(`cad.kind.${r.kind}` as MessageKey)}
+                </label>
+              ))}
+          </section>
+          {props.compare && <CompareSection c={props.compare} />}
+          <ColorSection {...props} />
+          <CadStepPanel
+            data={data}
+            selection={props.selection}
+            attributeEdits={props.attributeEdits}
+            onAttributeEdits={props.onAttributeEdits}
+            onSelectItems={props.onSelectItems}
+          />
+          {tree.length > 0 && (
+            <section>
+              <h4>
+                {t(isDxf ? 'cad.side.layers' : 'cad.side.tree')}
+                <span className="cad-sidebar-actions">
+                  <button type="button" onClick={() => setHidden(parts.map((p) => p.id), false)}>
+                    {t('cad.side.showAll')}
+                  </button>
+                  <button type="button" onClick={() => setHidden(parts.map((p) => p.id), true)}>
+                    {t('cad.side.hideAll')}
+                  </button>
+                </span>
+              </h4>
+              <ul className="cad-tree" role="tree">
+                {tree.map((node) => (
+                  <TreeRow key={node.key} node={node} depth={0} sidebar={props} setHidden={setHidden} />
+                ))}
+              </ul>
+            </section>
+          )}
+        </div>
       )}
     </aside>
   );

@@ -533,9 +533,10 @@ function CadViewerPanel({
   measureRef.current = { tool: measureTool, pending };
   const hasParts = (data.parts?.length ?? 0) > 0;
   // 狭い画面ではサイドバーが 3D 表示の場所を取るため、最初は閉じておく（ボタンで開ける）。
+  // サイドバーには選択中の要素の一覧（「選択」タブ）もあるので、広い画面では部品の有無にかかわらず開いておく。
   // 基準モデル（reference）があれば、表示するモデル ① と基準モデル ② をアセンブリのように並べて表示・非表示と色を変えられる。
   const hasRefModel = !!data.reference?.indices;
-  const [sidebarOpen, setSidebarOpen] = useState((hasParts || !!data.step || hasRefModel) && !isNarrowScreen());
+  const [sidebarOpen, setSidebarOpen] = useState(() => !isNarrowScreen());
   // STEP の属性の編集（製品名 → 編集後の一覧）。
   const [attributeEdits, setAttributeEdits] = useState<CadAttributeEdits>({});
   // 前の版からの変化の重ね表示（compare_with で比べたときだけ）。
@@ -1245,6 +1246,39 @@ function CadViewerPanel({
     .map(fmt)
     .join(' × ')}${data.units !== 'unknown' ? ' ' + data.units : ''}`;
 
+  // 左のサイドバーの「選択」タブ: 選んでいる要素のタグ（数万件になりうるので、3D 表示の下ではなくパネルに出す）。
+  const selectionPanel = (
+    <div className="cad-viewer-selected">
+      {selection.length === 0 ? (
+        <span className="cad-viewer-empty">{t('cad.noneSelected')}</span>
+      ) : (
+        <>
+          <button type="button" className="cad-viewer-clear" onClick={() => setSelection([])}>
+            {t('cad.clear')}
+          </button>
+          {selection.map((s) => (
+            <span
+              key={`${s.kind}-${s.id}`}
+              className="cad-viewer-tag"
+              title={describe(itemsOf(data, s.kind)[s.id], label(s), effectiveColor(data, colors, s), t, data, localAxis)}
+            >
+              {label(s)}
+              <button type="button" aria-label={t('cad.remove')} onClick={() => toggle(s)}>
+                ×
+              </button>
+            </span>
+          ))}
+        </>
+      )}
+    </div>
+  );
+  // 右のパネル（計測・解析表示・位置合わせの設定）は、どれかを開いているときだけ出す。
+  const toolsOpen = measureOpen || analysisMode !== 'normal' || (alignOpen && hasReference);
+  const closeMeasure = () => {
+    setMeasureOpen(false);
+    chooseMeasureTool(null);
+  };
+
   return (
     <div
       ref={barRef}
@@ -1544,88 +1578,13 @@ function CadViewerPanel({
           </button>
         </div>
       </div>
-      {measureOpen && (
-        <div className="cad-viewer-measure-bar" role="radiogroup" aria-label={t('cad.measure')}>
-          {MEASURE_TOOLS.map((m) => (
-            <button
-              key={m}
-              type="button"
-              role="radio"
-              aria-checked={measureTool === m}
-              title={t(`cad.measure.tool.${m}Title` as MessageKey)}
-              className={`cad-viewer-chip${measureTool === m ? ' active' : ''}`}
-              onClick={() => chooseMeasureTool(m)}
-            >
-              {t(`cad.measure.tool.${m}` as MessageKey)}
-            </button>
-          ))}
-          <button
-            type="button"
-            className="cad-viewer-chip"
-            title={t('cad.measure.clearTitle')}
-            disabled={!measurements.length && !pending.length}
-            onClick={() => {
-              setMeasurements([]);
-              setPending([]);
-              setMeasureError(null);
-            }}
-          >
-            {t('cad.measure.clear')}
-          </button>
-        </div>
-      )}
-      <AnalysisSettingsRow
-        mode={analysisMode}
-        zebra={zebra}
-        onZebra={setZebra}
-        basePicking={basePickingOn}
-        onBasePicking={(on) => {
-          setZebraBasePicking(on);
-          if (on) {
-            setPivotPicking(false);
-            chooseMeasureTool(null);
-            setBoxMode('off');
-          }
-        }}
-        curvatureKind={curvatureKind}
-        onCurvatureKind={(k) => {
-          setCurvatureKind(k);
-          setCurvRange(null);
-        }}
-        range={analysisMode === 'deviation' ? effDevRange : effCurvRange}
-        onRange={(r) => (analysisMode === 'deviation' ? setDevRange(r) : setCurvRange(r))}
-        onAutoRange={() => (analysisMode === 'deviation' ? setDevRange(null) : setCurvRange(null))}
-        linkable={analysisMode === 'deviation' || curvatureKind !== 'absmax'}
-        linked={rangeLinked}
-        onLinked={setRangeLinked}
-        tolerance={tolerance}
-        onTolerance={setTolerance}
-        units={data.units}
-      />
-      {alignOpen && hasReference && (
-        <AlignRow
-          canAlign={canAlign && !!saveId}
-          state={alignState}
-          info={alignInfo}
-          stats={alignStats}
-          datums={datums}
-          selectedFaces={selectedFaceIds.length}
-          referenceVisible={referenceVisible}
-          onReferenceVisible={setReferenceVisible}
-          referenceOpacity={referenceOpacity}
-          onReferenceOpacity={setReferenceOpacity}
-          onSetDatum={setDatum}
-          onClearDatums={() => setDatums({ A: [], B: [], C: [] })}
-          onAlign={(m) => void runAlign(m)}
-          referenceName={data.reference?.source?.path ?? data.reference?.source?.format ?? ''}
-        />
-      )}
       <div className="cad-viewer-body">
         {sidebarOpen && (
           <CadSidebar
             data={data}
             kinds={kinds}
             selection={selection}
+            selectionPanel={selectionPanel}
             kindVisible={kindVisible}
             onKindVisible={(k, v) => setKindVisible((cur) => ({ ...cur, [k]: v }))}
             hiddenParts={hiddenParts}
@@ -1691,6 +1650,135 @@ function CadViewerPanel({
             </div>
           )}
         </div>
+        {toolsOpen && (
+          // 右のパネル: 計測・解析表示（ゼブラ・曲率・偏差）・位置合わせの設定。開いているものだけを縦に並べる。
+          <aside className="cad-sidebar cad-tools-panel" aria-label={t('cad.tools')}>
+            {measureOpen && (
+              <section>
+                <h4>
+                  {t('cad.measure')}
+                  <button type="button" className="cad-tools-close" aria-label={t('cad.tools.close')} title={t('cad.tools.close')} onClick={closeMeasure}>
+                    ×
+                  </button>
+                </h4>
+                <div className="cad-viewer-measure-bar" role="radiogroup" aria-label={t('cad.measure')}>
+                  {MEASURE_TOOLS.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      role="radio"
+                      aria-checked={measureTool === m}
+                      title={t(`cad.measure.tool.${m}Title` as MessageKey)}
+                      className={`cad-viewer-chip${measureTool === m ? ' active' : ''}`}
+                      onClick={() => chooseMeasureTool(m)}
+                    >
+                      {t(`cad.measure.tool.${m}` as MessageKey)}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    className="cad-viewer-chip"
+                    title={t('cad.measure.clearTitle')}
+                    disabled={!measurements.length && !pending.length}
+                    onClick={() => {
+                      setMeasurements([]);
+                      setPending([]);
+                      setMeasureError(null);
+                    }}
+                  >
+                    {t('cad.measure.clear')}
+                  </button>
+                </div>
+                {measurements.length > 0 && (
+                  <div className="cad-viewer-measures">
+                    {measurements.map((m, i) => (
+                      <span key={i} className="cad-viewer-measure-tag" title={measureTitle(m, t, localAxis)}>
+                        {`${i + 1}: ${m.tool === 'planes' && m.result.type === 'plane_angle' ? t('cad.measure.angle') : t(`cad.measure.tool.${m.tool}` as MessageKey)} ${m.draw.label}`}
+                        <button
+                          type="button"
+                          aria-label={t('cad.measure.remove')}
+                          onClick={() => setMeasurements((list) => list.filter((_, j) => j !== i))}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
+            {analysisMode !== 'normal' && (
+              <section>
+                <h4>
+                  {t(`cad.analysis.${analysisMode}` as MessageKey)}
+                  <button
+                    type="button"
+                    className="cad-tools-close"
+                    aria-label={t('cad.tools.close')}
+                    title={t('cad.tools.close')}
+                    onClick={() => setAnalysisMode('normal')}
+                  >
+                    ×
+                  </button>
+                </h4>
+                <AnalysisSettingsRow
+                  mode={analysisMode}
+                  zebra={zebra}
+                  onZebra={setZebra}
+                  basePicking={basePickingOn}
+                  onBasePicking={(on) => {
+                    setZebraBasePicking(on);
+                    if (on) {
+                      setPivotPicking(false);
+                      chooseMeasureTool(null);
+                      setBoxMode('off');
+                    }
+                  }}
+                  curvatureKind={curvatureKind}
+                  onCurvatureKind={(k) => {
+                    setCurvatureKind(k);
+                    setCurvRange(null);
+                  }}
+                  range={analysisMode === 'deviation' ? effDevRange : effCurvRange}
+                  onRange={(r) => (analysisMode === 'deviation' ? setDevRange(r) : setCurvRange(r))}
+                  onAutoRange={() => (analysisMode === 'deviation' ? setDevRange(null) : setCurvRange(null))}
+                  linkable={analysisMode === 'deviation' || curvatureKind !== 'absmax'}
+                  linked={rangeLinked}
+                  onLinked={setRangeLinked}
+                  tolerance={tolerance}
+                  onTolerance={setTolerance}
+                  units={data.units}
+                />
+              </section>
+            )}
+            {alignOpen && hasReference && (
+              <section>
+                <h4>
+                  {t('cad.align')}
+                  <button type="button" className="cad-tools-close" aria-label={t('cad.tools.close')} title={t('cad.tools.close')} onClick={() => setAlignOpen(false)}>
+                    ×
+                  </button>
+                </h4>
+                <AlignRow
+                  canAlign={canAlign && !!saveId}
+                  state={alignState}
+                  info={alignInfo}
+                  stats={alignStats}
+                  datums={datums}
+                  selectedFaces={selectedFaceIds.length}
+                  referenceVisible={referenceVisible}
+                  onReferenceVisible={setReferenceVisible}
+                  referenceOpacity={referenceOpacity}
+                  onReferenceOpacity={setReferenceOpacity}
+                  onSetDatum={setDatum}
+                  onClearDatums={() => setDatums({ A: [], B: [], C: [] })}
+                  onAlign={(m) => void runAlign(m)}
+                  referenceName={data.reference?.source?.path ?? data.reference?.source?.format ?? ''}
+                />
+              </section>
+            )}
+          </aside>
+        )}
       </div>
       <div className="cad-viewer-status">
         {remaining !== null && !closing && (
@@ -1717,45 +1805,6 @@ function CadViewerPanel({
           </span>
         )}
         <span className="cad-viewer-summary">{summary}</span>
-      </div>
-      {measurements.length > 0 && (
-        <div className="cad-viewer-measures">
-          {measurements.map((m, i) => (
-            <span key={i} className="cad-viewer-measure-tag" title={measureTitle(m, t, localAxis)}>
-              {`${i + 1}: ${m.tool === 'planes' && m.result.type === 'plane_angle' ? t('cad.measure.angle') : t(`cad.measure.tool.${m.tool}` as MessageKey)} ${m.draw.label}`}
-              <button
-                type="button"
-                aria-label={t('cad.measure.remove')}
-                onClick={() => setMeasurements((list) => list.filter((_, j) => j !== i))}
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="cad-viewer-selected">
-        {selection.length === 0 ? (
-          <span className="cad-viewer-empty">{t('cad.noneSelected')}</span>
-        ) : (
-          selection.map((s) => (
-            <span
-              key={`${s.kind}-${s.id}`}
-              className="cad-viewer-tag"
-              title={describe(itemsOf(data, s.kind)[s.id], label(s), effectiveColor(data, colors, s), t, data, localAxis)}
-            >
-              {label(s)}
-              <button type="button" aria-label={t('cad.remove')} onClick={() => toggle(s)}>
-                ×
-              </button>
-            </span>
-          ))
-        )}
-        {selection.length > 0 && (
-          <button type="button" className="cad-viewer-clear" onClick={() => setSelection([])}>
-            {t('cad.clear')}
-          </button>
-        )}
       </div>
       <textarea
         className="cad-viewer-message"

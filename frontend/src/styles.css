@@ -958,6 +958,83 @@
   font-size: 12px;
 }
 
+/* 左のサイドバーの「表示」「選択」のタブ（CadSidebar.tsx）。スクロールしても上端に残す。 */
+.cad-sidebar-tabs {
+  position: sticky;
+  top: -6px;
+  z-index: 1;
+  display: flex;
+  gap: 2px;
+  margin: -6px -8px 6px;
+  padding: 4px 6px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.cad-sidebar-tabs button {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cad-sidebar-tabs button.active {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 「選択」タブの中ではタグの一覧を高さの制限なしに並べる（サイドバーがスクロールする）。 */
+.cad-sidebar .cad-viewer-selected {
+  max-height: none;
+  overflow: visible;
+}
+
+/* 右のパネル: 計測・解析表示・位置合わせの設定（CadViewerBar.tsx）。 */
+.cad-tools-panel {
+  width: 250px;
+}
+
+/* 縦長のパネルでは、行の中の区切り線を改行として使う（設定のまとまりごとに行を分ける）。 */
+.cad-tools-panel .cad-viewer-sep {
+  flex-basis: 100%;
+  width: auto;
+  height: 0;
+  margin: 2px 0;
+  background: none;
+}
+
+.cad-tools-panel .cad-viewer-measures {
+  max-height: none;
+  margin-top: 6px;
+}
+
+.cad-tools-panel .cad-viewer-ref-name {
+  max-width: 100%;
+}
+
+.cad-tools-close {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.cad-tools-close:hover {
+  color: inherit;
+}
+
 .cad-sidebar section + section {
   margin-top: 8px;
   padding-top: 6px;
@@ -2967,7 +3044,8 @@
     min-height: 200px;
   }
 
-  .cad-sidebar {
+  .cad-sidebar,
+  .cad-tools-panel {
     width: auto;
     max-height: 40%;
   }
