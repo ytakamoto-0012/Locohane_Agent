@@ -44,8 +44,6 @@ import { ZebraLightGuide, applySurfaceDisplay, createSurfaceMaterial, updateSurf
 const COMPARISON_COLOR = '#e5484d';
 // 比較モデルのワイヤー表示で線にする折れ目の角度（度）。曲面の細かい三角形の境目は線にしない。
 const COMPARISON_EDGE_ANGLE = 20;
-// 偏差の色で描いている比較モデルの、折れ目の線の色。
-const COMPARISON_EDGE_ON_DEVIATION = '#3a3a40';
 // 一度に重ねられる比較モデルの数（② ③ ④。three.js のレイヤー 1〜3 に置く）。
 const MAX_COMPARISONS = 3;
 
@@ -619,8 +617,8 @@ export class CadScene {
       l.mesh.visible = true;
       if (lines) {
         lines.visible = showLines;
-        // 偏差の色の上では、どの色にも埋もれない暗い灰色にする。
-        (lines.material as THREE.LineBasicMaterial).color.set(COMPARISON_EDGE_ON_DEVIATION);
+        // 偏差の色の上でも、① のエッジと同じテーマのエッジ色（どの面の色にも埋もれない濃さ）で描く。
+        (lines.material as THREE.LineBasicMaterial).color.set(this.colors.edge);
       }
       return;
     }
@@ -631,9 +629,11 @@ export class CadScene {
     l.mesh.visible = !l.wire;
     if (lines) {
       lines.visible = showLines;
-      // 面と一緒に描くときは、面と見分けられるよう同じ色を暗くする（ワイヤーだけのときはそのモデルの色）。
-      const c = (lines.material as THREE.LineBasicMaterial).color.copy(l.standard.color);
-      if (!l.wire) c.multiplyScalar(0.55);
+      // 面と一緒に描くときは、① のエッジと同じテーマのエッジ色にする（同系色の面の上でも見分けられるように。
+      // モデルの色を暗くした線は半透明の面に埋もれて見えなかった）。ワイヤーだけのときはそのモデルの色。
+      const material = lines.material as THREE.LineBasicMaterial;
+      if (l.wire) material.color.copy(l.standard.color);
+      else material.color.set(this.colors.edge);
     }
   }
 
@@ -1626,6 +1626,8 @@ export class CadScene {
     this.applyHighlightColors();
     this.applyBackground();
     this.refreshColors();
+    // 比較モデルのエッジの色もテーマに合わせる。
+    for (const l of this.comparisons) if (l) this.applyComparisonLook(l);
     // PMI の図形の色をテーマに合わせて描き直す（ラベルの色は styles.css がテーマで切り替える）。
     if (this.pmiInput.length) this.setPmiLabels(this.pmiInput);
   }

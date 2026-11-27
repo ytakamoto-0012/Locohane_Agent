@@ -2214,8 +2214,7 @@ each other. Unlike `compare_with` (B-rep booleans with the previous version), it
   recolor. At first ① green, ② red, ③ blue, ④ yellow. ①'s color replaces the file colors and the default color; per-face / per-part colors and the selection /
   hover colors still show. Hiding ① also removes it from picking and box selection. A compared model that could not be read is shown with ⚠ and the reason.
   Colors and visibility are not returned to the AI (`CompareSection` in `CadSidebar.tsx`). ② ③ ④ have only triangles, so the creases of 20° or
-  more and the boundary are drawn as their edges (with "Edges" on, also over the faces, in a darker shade of the model's color, or dark gray during the
-  deviation display). Unchecking "Faces" shows ② ③ ④ as wireframes too (only the lines, in the model's color). "Make ①" on a compared model reopens the viewer with
+  more and the boundary are drawn as their edges (with "Edges" on, also over the faces, in the theme's edge color like the edges of ①). Unchecking "Faces" shows ② ③ ④ as wireframes too (only the lines, in the model's color). "Make ①" on a compared model reopens the viewer with
   that model as the base model ① and the current ① as the compared model in its place (②, ③ or ④); deviations are recomputed against the new ①, and if the
   models had been aligned they are aligned again by best fit; selection and color changes start over. When ① has no original file (CadQuery code etc.),
   its viewer data becomes the compared model. The AI's result says that the models were swapped and gives the current ① ② ③ ④ (`swap_models` in
