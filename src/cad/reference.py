@@ -8,14 +8,17 @@
 cadquery で三角形に分ける。① が CAD（元のファイル、CadQuery のコードなら隣の .brep）なら、偏差の誤差を抑えるため
 ① も表示用より細かく分けた三角形（[cad_viewer].reference_deflection_ratio）を偏差の表面に使い、baseSurface に残す。
 
+比較モデルは ① と同じ読み込み（app 側の show_cad_viewer が run_cad.py --file・キャッシュで作ったビューア用データ）を受け取るので、
+面・エッジ・頂点・穴・外周・部品の一覧と、ゼブラ・曲率の法線と主曲率（CAD は B-rep の正確な値）を ① と同じ形で持つ。
+
 ビューア用データに足すもの（src/cad/mesh_data.py の docstring）::
 
     "comparisons": [
-        {"positions": <float32 base64>, "indices": <uint32 base64>, "source": {"format", "path"},
-         "triangles": 数, "bbox": {...}, "chordTolerance": 三角形の弦の許容差（CAD のとき）,
-         "deviation": {"values": <float32 base64、このモデルの頂点ごとの符号付き距離>, "transform": 4×4（このモデル → ①）,
+        {<そのモデルのビューア用データ（mesh・edges・vertices・faces・edgeList・vertexList・parts・holes・analysis 等）>,
+         "inputPath": 渡されたファイル,
+         "deviation": {"values": <float32 base64、このモデルの mesh の頂点ごとの符号付き距離>, "transform": 4×4（このモデル → ①）,
                        "alignment": {"method", "rms", ...}, "stats": {...}, "tolerance": 公差}}
-        | {"source": {"path"}, "error": "読めなかった理由"},
+        | {"source": {"path"}, "inputPath": 渡されたファイル, "error": "読めなかった理由"},
         ...  # ② ③ ④ の順
     ],
     "baseSurface": {"positions", "indices", "chordTolerance"}  # ① を細かく分けた三角形（① が CAD のときだけ。ブラウザへは送らない）
@@ -34,7 +37,7 @@ import numpy as np
 from .align import AlignError, SurfaceIndex, TargetMesh, align, deviation_stats, deviations, describe_transform
 from .formats import format_of
 from .mesh_data import FORMAT as VIEWER_FORMAT
-from .mesh_data import TooManyTrianglesError, b64, bbox_of, rnd
+from .mesh_data import TooManyTrianglesError, b64, rnd
 
 
 class ReferenceModelError(ValueError):
@@ -186,31 +189,28 @@ def base_index(data: dict[str, Any]) -> SurfaceIndex:
 
 
 def comparison_mesh(entry: dict[str, Any]) -> TargetMesh:
-    """比較モデル（comparisons の 1 つ）の三角形（位置を合わせる側・偏差を塗る側）。"""
-    pos, idx = mesh_arrays({"mesh": entry})
-    return TargetMesh(pos, idx, [])
+    """比較モデル（comparisons の 1 つ）の三角形と面ごとの範囲（位置を合わせる側・偏差を塗る側）。"""
+    return target_mesh(entry)
 
 
-def _comparison(path: str, index: SurfaceIndex, raw: dict[str, Any], method: str, tolerance: float) -> dict[str, Any]:
-    ref = load_reference(
-        path,
-        deflection_ratio=float(raw.get("reference_deflection_ratio") or 0.0002),
-        angular_deg=min(float(raw.get("angular_deflection_deg") or 20.0), 10.0),
-        max_triangles=int(raw.get("max_triangles", 1_000_000)),
-    )
-    target = TargetMesh(ref["positions"], ref["indices"], [])
+# 比較モデルのビューア用データから外すもの（入れ子の比較・前の版の基準モデル・前の版との比較）。
+_NESTED_KEYS = ("comparisons", "baseSurface", "reference", "deviation", "diff")
+
+
+def _comparison(item: dict[str, Any], index: SurfaceIndex, method: str, tolerance: float) -> dict[str, Any]:
+    try:
+        data = json.loads(Path(item["data"]).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ReferenceModelError(f"could not read the viewer data {item['data']}: {e}") from e
+    if not isinstance(data, dict) or data.get("format") != VIEWER_FORMAT:
+        raise ReferenceModelError(f"{item['data']} is not viewer data made by show_cad_viewer")
+    target = target_mesh(data)
+    if not len(target.triangles):
+        raise ReferenceModelError("the model has no faces (triangles) to compare with ①")
     T, info = align(target, index, method if method in ("none", "bestfit") else "none")
     values = deviations(target, index, T)
-    pos = ref["positions"].astype(np.float32)
-    out: dict[str, Any] = {
-        "positions": b64(pos, "f4"),
-        "indices": b64(ref["indices"].astype(np.uint32), "u4"),
-        "source": ref["source"],
-        "triangles": int(len(ref["indices"])),
-        "bbox": bbox_of(pos),
-    }
-    if ref["chordTolerance"] is not None:
-        out["chordTolerance"] = rnd(ref["chordTolerance"], 6)
+    out: dict[str, Any] = {k: v for k, v in data.items() if k not in _NESTED_KEYS}
+    out["inputPath"] = str(item.get("input") or (data.get("source") or {}).get("path") or "")
     out["deviation"] = {
         "values": b64(values, "f4"),
         "transform": describe_transform(T)["matrix"],
@@ -234,7 +234,9 @@ def attach_comparisons(data: dict[str, Any], raw: dict[str, Any], data_path: str
 
     比較モデルが読めなくても形の表示はできるので、失敗はそのモデルの {"source", "error"} にして続ける（② ③ ④ の番号は保つ）。
     """
-    paths = [str(p) for p in (raw.get("compare_models") or []) if p][:MAX_COMPARISONS]
+    # 各要素は {"input": 渡されたファイル, "data": そのビューア用データの JSON} か {"input", "error"}（app 側で読み込んだもの）。
+    items = [x for x in (raw.get("compare_models") or []) if isinstance(x, dict)][:MAX_COMPARISONS]
+    paths = [str(x.get("input") or "") for x in items]
     # 前の版の基準モデル（① の偏差）は向きが逆なので使わない。
     data.pop("reference", None)
     data.pop("deviation", None)
@@ -249,7 +251,7 @@ def attach_comparisons(data: dict[str, Any], raw: dict[str, Any], data_path: str
         index = SurfaceIndex(pos, idx)
     except Exception as e:  # noqa: BLE001 - ① の三角形が無い等。どの比較もできない
         msg = "the base model ① has no faces (triangles) to measure the deviation against" if isinstance(e, AlignError) else _error_text(e)
-        data["comparisons"] = [{"source": {"path": p}, "error": msg} for p in paths]
+        data["comparisons"] = [{"source": {"path": p}, "inputPath": p, "error": msg} for p in paths]
         return
     if chord is not None:
         data["baseSurface"] = {
@@ -258,9 +260,12 @@ def attach_comparisons(data: dict[str, Any], raw: dict[str, Any], data_path: str
             "chordTolerance": rnd(chord, 6),
         }
     out: list[dict[str, Any]] = []
-    for p in paths:
+    for item, p in zip(items, paths):
+        if item.get("error") or not item.get("data"):
+            out.append({"source": {"path": p}, "inputPath": p, "error": str(item.get("error") or "the model could not be read")})
+            continue
         try:
-            out.append(_comparison(p, index, raw, method, tolerance))
+            out.append(_comparison(item, index, method, tolerance))
         except Exception as e:  # noqa: BLE001 - OCP の C++ 例外は Python の別の型で来る
-            out.append({"source": {"path": p}, "error": _error_text(e)})
+            out.append({"source": {"path": p}, "inputPath": p, "error": _error_text(e)})
     data["comparisons"] = out

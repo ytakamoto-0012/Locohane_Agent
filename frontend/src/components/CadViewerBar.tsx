@@ -575,7 +575,7 @@ function CadViewerPanel({
   // サイドバーには選択中の要素の一覧（「選択」タブ）もあるので、広い画面では部品の有無にかかわらず開いておく。
   // 比較モデル ②③④（compare_models）があれば、① 基準モデルと一緒にアセンブリのように並べて表示・非表示と色を変えられる。
   const comparisons = useMemo(() => (data.comparisons ?? []).slice(0, 3), [data]);
-  const usable = useMemo(() => comparisons.map((c) => !c.error && !!c.indices && !!c.positions), [comparisons]);
+  const usable = useMemo(() => comparisons.map((c) => !c.error && !!c.mesh?.indices && !!c.mesh.positions), [comparisons]);
   const hasRefModel = usable.some(Boolean);
   const [sidebarOpen, setSidebarOpen] = useState(() => !isNarrowScreen());
   // STEP の属性の編集（製品名 → 編集後の一覧）。
@@ -584,7 +584,7 @@ function CadViewerPanel({
   const hasDiff = !!(data.diff?.added || data.diff?.removed);
   const [diffVisible, setDiffVisible] = useState(true);
   // 表面の解析表示（ゼブラ・曲率・偏差）。曲率は src/cad/analysis.py の主曲率、偏差は基準モデルとの符号付き距離。
-  const hasCurvature = !!data.analysis?.k1;
+  const hasCurvature = !!data.analysis?.k1 || (data.comparisons ?? []).some((c) => !c.error && !!c.analysis?.k1);
   // ① からの偏差を持つ比較モデルがあるか（偏差の表示・位置合わせ）。
   const hasReference = comparisons.some((c, i) => usable[i] && !!c.deviation?.values);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('normal');
@@ -637,13 +637,34 @@ function CadViewerPanel({
     () => (curvature && analysisMode === 'curvature' ? curvatureValues(curvature.k1, curvature.k2, curvatureKind) : null),
     [curvature, curvatureKind, analysisMode]
   );
+  // 比較モデル ②③④ の曲率（① と同じ読み込みで求めた主曲率から。曲率の表示中だけ）。
+  const compareCurvature = useMemo(
+    () => comparisons.map((c, i) => (usable[i] && c.analysis?.k1 && c.analysis.k2 ? { k1: decodeFloat32(c.analysis.k1), k2: decodeFloat32(c.analysis.k2) } : null)),
+    [comparisons, usable]
+  );
+  const compareCurvValues = useMemo(
+    () => compareCurvature.map((c) => (c && analysisMode === 'curvature' ? curvatureValues(c.k1, c.k2, curvatureKind) : null)),
+    [compareCurvature, curvatureKind, analysisMode]
+  );
   // 範囲を自動にしているときは、値の分布から決める（曲率は平均・ガウス・k1・k2 を 0 中心、偏差も 0 中心）。
+  // 曲率は ① と ②③④ の値をまとめて見る（色の意味をそろえるため、範囲は共通）。
+  const allCurv = useMemo(() => {
+    const list = [curvValues, ...compareCurvValues].filter((v): v is Float32Array => !!v);
+    if (list.length <= 1) return list[0] ?? null;
+    const out = new Float32Array(list.reduce((n, v) => n + v.length, 0));
+    let at = 0;
+    for (const v of list) {
+      out.set(v, at);
+      at += v.length;
+    }
+    return out;
+  }, [curvValues, compareCurvValues]);
   const effCurvRange = useMemo<RangeState>(() => {
     if (curvRange && !curvRange.auto) return curvRange;
-    if (!curvValues) return { min: -1, max: 1, auto: true };
-    const [min, max] = autoRange(curvValues, curvatureKind !== 'absmax');
+    if (!allCurv) return { min: -1, max: 1, auto: true };
+    const [min, max] = autoRange(allCurv, curvatureKind !== 'absmax');
     return { min: curvatureKind === 'absmax' ? 0 : min, max, auto: true };
-  }, [curvRange, curvValues, curvatureKind]);
+  }, [curvRange, allCurv, curvatureKind]);
   // 偏差の範囲を自動で決めるときは、すべての比較モデルの値をまとめて見る（色の意味をそろえるため、範囲は共通）。
   const allDeviation = useMemo(() => {
     const list = deviationValues.filter((v): v is Float32Array => !!v);
@@ -665,11 +686,15 @@ function CadViewerPanel({
   }, [devRange, allDeviation, tolerance]);
   const surfaceDisplay = useMemo<SurfaceDisplay>(() => {
     if (analysisMode === 'zebra') return { mode: 'zebra', zebra };
-    if (analysisMode === 'curvature' && curvValues)
-      return { mode: 'scalar', scalar: { values: curvValues, min: effCurvRange.min, max: effCurvRange.max, tolerance: 0, scheme: 'rainbow' } };
+    // ① に曲率が無く ②③④ にだけあるときも、②③④ に映すため曲率の表示にする（① は値が無いので灰色）。
+    if (analysisMode === 'curvature' && (curvValues || compareCurvValues.some(Boolean)))
+      return {
+        mode: 'scalar',
+        scalar: { values: curvValues ?? new Float32Array(0), min: effCurvRange.min, max: effCurvRange.max, tolerance: 0, scheme: 'rainbow' }
+      };
     // 偏差は ① でなく比較モデルの上に描く（setDeviationDisplay）。① はふつうの表示。
     return { mode: 'normal' };
-  }, [analysisMode, zebra, curvValues, effCurvRange]);
+  }, [analysisMode, zebra, curvValues, compareCurvValues, effCurvRange]);
   const deviationOn = analysisMode === 'deviation' && hasReference;
   const [kindVisible, setKindVisible] = useState({ face: true, edge: true, vertex: true, ...data.viewState?.visible });
   const [hiddenParts, setHiddenParts] = useState<Set<number>>(() => initialHiddenParts(data));
@@ -950,6 +975,9 @@ function CadViewerPanel({
     sceneRef.current?.setSplit(split, paneModels);
   }, [split, paneModels, status]);
   useEffect(() => {
+    compareCurvValues.forEach((v, i) => sceneRef.current?.setComparisonCurvature(i, v));
+  }, [compareCurvValues, status]);
+  useEffect(() => {
     sceneRef.current?.setMeasureTool(measureTool);
   }, [measureTool, status]);
   useEffect(() => {
@@ -1007,6 +1035,14 @@ function CadViewerPanel({
     if (!item && mode === 'hole' && boxMode === 'off') return t('cad.hintHole', { deg: fmt(holeAngle) });
     if (!item && mode === 'outer' && boxMode === 'off') return t('cad.hintOuter');
     // 曲率・偏差の表示中は、マウスの下の値（曲率は曲率半径も）を先に出す。
+    if (compareHover && analysisMode === 'curvature') {
+      const v = compareHover.value;
+      const value = `${MODEL_MARKS[compareHover.model] ?? ''} ${t('cad.curvature.value', {
+        value: fmtNum(v),
+        radius: Math.abs(v) > 1e-9 && curvatureKind !== 'gauss' ? fmtNum(1 / Math.abs(v)) : '∞'
+      })}`;
+      return item ? `${value}  ${item}` : value;
+    }
     if (compareHover && deviationOn) {
       const v = compareHover.value;
       const value = t('cad.deviation.value', { mark: MODEL_MARKS[compareHover.model] ?? '', value: `${v > 0 ? '+' : ''}${fmtNum(v)}` });

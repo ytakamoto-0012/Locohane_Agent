@@ -101,8 +101,8 @@ def test_no_temporary_file_is_left(tmp_path):
 def test_comparisons_are_bytes_and_base_surface_is_not_sent(tmp_path) -> None:
     data = _sample()
     cmp = {
-        "positions": _b64(np.arange(9, dtype="<f4") + 1),
-        "indices": _b64(np.arange(3, dtype="<u4")),
+        "mesh": {"positions": _b64(np.arange(9, dtype="<f4") + 1), "indices": _b64(np.arange(3, dtype="<u4")), "colors": None, "faceRanges": [[0, 1]]},
+        "faces": [{"id": 0}],
         "source": {"format": "STL", "path": "C:/data/b.stl"},
         "deviation": {"values": _b64(np.array([0.1, 0.2, 0.3], dtype="<f4")), "transform": np.eye(4).tolist()},
     }
@@ -113,10 +113,13 @@ def test_comparisons_are_bytes_and_base_surface_is_not_sent(tmp_path) -> None:
     raw = path.read_bytes()
     header = json.loads(raw[12 : 12 + struct.unpack_from("<I", raw, 8)[0]].decode("utf-8"))
     paths = [b["path"] for b in header["blobs"] if b["type"] == "bytes"]
-    assert ["comparisons", 0, "positions"] in paths and ["comparisons", 0, "deviation", "values"] in paths
+    assert ["comparisons", 0, "mesh", "positions"] in paths and ["comparisons", 0, "deviation", "values"] in paths
+    assert ["comparisons", 0, "faces"] in [b["path"] for b in header["blobs"] if b["type"] == "json"]
+    assert "faces" not in header["data"]["comparisons"][0]
     assert "baseSurface" not in header["data"] and header["data"]["comparisons"][1]["error"] == "bad"
     back = read_package(path)
-    assert back["comparisons"][0]["positions"] == cmp["positions"]
+    assert back["comparisons"][0]["mesh"]["positions"] == cmp["mesh"]["positions"]
+    assert back["comparisons"][0]["faces"] == [{"id": 0}]
     assert back["comparisons"][0]["deviation"]["values"] == cmp["deviation"]["values"]
     # 元のデータは書き換えない。
-    assert data["comparisons"][0]["positions"] == cmp["positions"]
+    assert data["comparisons"][0]["mesh"]["positions"] == cmp["mesh"]["positions"] and data["comparisons"][0]["faces"]

@@ -51,8 +51,8 @@ BYTES_PATHS = (
     ("analysis", "k1"),
     ("analysis", "k2"),
 )
-# 比較モデル ② ③ ④（comparisons の i 番目）のバイト列にする項目。
-COMPARISON_BYTES_KEYS = (("positions",), ("indices",), ("deviation", "values"))
+# 比較モデル ② ③ ④（comparisons の i 番目。① と同じ形のビューア用データ）でバイト列にする項目（BYTES_PATHS に加えて）。
+COMPARISON_BYTES_KEYS = (("deviation", "values"),)
 # ブラウザでは使わない項目（偏差を測る ① の細かい三角形。大きいので送らない）と、前の版の基準モデル・偏差
 # （① の頂点の偏差。今は比較モデルの側に持つ）。
 DROP_KEYS = ("baseSurface", "reference", "deviation")
@@ -80,21 +80,41 @@ def _bytes_paths(data: dict) -> list[tuple[str | int, ...]]:
     comparisons = data.get("comparisons")
     if isinstance(comparisons, list):
         for i in range(len(comparisons)):
-            paths += [("comparisons", i, *keys) for keys in COMPARISON_BYTES_KEYS]
+            paths += [("comparisons", i, *keys) for keys in (*BYTES_PATHS, *COMPARISON_BYTES_KEYS)]
+    return paths
+
+
+def _list_paths(data: dict) -> list[tuple[str | int, ...]]:
+    """JSON の塊に分ける一覧の場所（比較モデルの一覧は並びの番号を含む）。"""
+    paths: list[tuple[str | int, ...]] = [(k,) for k in LIST_KEYS]
+    comparisons = data.get("comparisons")
+    if isinstance(comparisons, list):
+        for i in range(len(comparisons)):
+            paths += [("comparisons", i, k) for k in LIST_KEYS]
     return paths
 
 
 def _copy_without(data: dict) -> dict:
     """大きな項目（塊にするもの）を除いた浅いコピー（入れ子の dict・list は、除く項目がある分だけコピーする）。"""
     out = {k: v for k, v in data.items() if k not in LIST_KEYS and k not in DROP_KEYS}
-    for path in _bytes_paths(data):
-        if not isinstance(_get(data, path), str):
-            continue
+    copied: set[tuple[str | int, ...]] = set()
+
+    def parent(path: tuple[str | int, ...]) -> Any:
         node: Any = out
-        for key in path[:-1]:
-            node[key] = list(node[key]) if isinstance(node[key], list) else dict(node[key])
+        for depth, key in enumerate(path[:-1]):
+            sub = path[: depth + 1]
+            if sub not in copied:
+                node[key] = list(node[key]) if isinstance(node[key], list) else dict(node[key])
+                copied.add(sub)
             node = node[key]
-        node[path[-1]] = None
+        return node
+
+    for path in _bytes_paths(data):
+        if isinstance(_get(data, path), str):
+            parent(path)[path[-1]] = None
+    for path in _list_paths(data):
+        if len(path) > 1 and isinstance(_get(data, path), list):
+            parent(path).pop(path[-1], None)
     return out
 
 
@@ -107,12 +127,12 @@ def write_package(data: dict, path: Path) -> int:
         if isinstance(value, str):
             blobs.append({"path": list(bpath), "type": "bytes"})
             payloads.append(base64.b64decode(value))
-    for key in LIST_KEYS:
-        items = data.get(key)
+    for lpath in _list_paths(data):
+        items = _get(data, lpath)
         if not isinstance(items, list):
             continue
         for start in range(0, max(len(items), 1), JSON_CHUNK_ITEMS):
-            blobs.append({"path": [key], "type": "json"})
+            blobs.append({"path": list(lpath), "type": "json"})
             payloads.append(json.dumps(items[start : start + JSON_CHUNK_ITEMS], ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
     base = _copy_without(data)

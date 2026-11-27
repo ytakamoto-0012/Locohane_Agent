@@ -296,12 +296,23 @@ def _deviation_tolerance() -> float:
 
 
 async def _attach_comparisons(data: dict, data_path: Path, models: list[str], align: str) -> tuple[dict, Path] | str:
-    """ビューア用データに比較モデル ② ③ ④ を ① に合わせた位置・偏差を足したもの（サブプロセス run_cad.py --compare）と、その JSON。"""
+    """ビューア用データに比較モデル ② ③ ④ を ① に合わせた位置・偏差を足したもの（サブプロセス run_cad.py --compare）と、その JSON。
+
+    比較モデルは ① と同じ読み込み（_viewer_data_from_file。キャッシュも使う）でビューア用データにしてから渡すので、面・エッジ・
+    頂点・穴・外周・部品とゼブラ・曲率の値（CAD は B-rep の正確な値）を ① と同じ形で持つ。
+    """
     workdir = _resolve_exec_workdir()
     out = _new_data_path(workdir, prefix="cad_view_compare")
+    inputs: list[dict[str, str]] = []
+    for model in models:
+        made = await _viewer_data_from_file(model)
+        if isinstance(made, str):
+            inputs.append({"input": model, "error": made.removeprefix("Error: ")})
+        else:
+            inputs.append({"input": model, "data": str(made[1])})
     options = {
         **_options(),
-        "compare_models": models,
+        "compare_models": inputs,
         "align": align,
         "reference_deflection_ratio": _setting("cad_viewer_reference_deflection_ratio", 0.0002),
         "deviation_tolerance": _deviation_tolerance(),
@@ -578,7 +589,7 @@ async def _show_cad_viewer(
         # ビューアの「① にする」: 比較モデル（② ③ ④ のどれか）を ① 基準モデルに、今の ① をその位置の比較モデルにして開き直す。
         # 位置を合わせていたら、入れ替えた後も合わせる（変換の向きが逆になるので合わせ直す）。
         swapped_align = "bestfit" if align == "bestfit" or (align_state is not None and align_state.changed) else "none"
-        sources = [str((c.get("source") or {}).get("path") or "") for c in data.get("comparisons") or []]
+        sources = [_comparison_input(c) for c in _comparison_entries(data)]
         new_base = sources[swap]
         new_models = list(sources)
         new_models[swap] = _model_source(data, data_path)
@@ -1061,7 +1072,14 @@ def _comparison_entries(data: dict) -> list[dict]:
 
 def _usable_comparison(entry: dict) -> bool:
     dev = entry.get("deviation") if isinstance(entry.get("deviation"), dict) else {}
-    return not entry.get("error") and bool(entry.get("indices")) and bool(dev.get("values"))
+    mesh = entry.get("mesh") if isinstance(entry.get("mesh"), dict) else {}
+    return not entry.get("error") and bool(mesh.get("indices")) and bool(dev.get("values"))
+
+
+def _comparison_input(entry: dict) -> str:
+    """比較モデルとして渡されたファイル（無ければそのビューア用データの元のファイル）。"""
+    path = entry.get("inputPath") or (entry.get("source") or {}).get("path") or ""
+    return str(path)
 
 
 def _swap_target(raw: Any, data: dict) -> int | None:
@@ -1073,8 +1091,8 @@ def _swap_target(raw: Any, data: dict) -> int | None:
     number = 0 if raw is True else raw
     if not isinstance(number, int) or isinstance(number, bool) or not 0 <= number < len(entries):
         return None
-    path = (entries[number].get("source") or {}).get("path")
-    return number if isinstance(path, str) and path and Path(path).is_file() else None
+    path = _comparison_input(entries[number])
+    return number if path and Path(path).is_file() else None
 
 
 def _new_align_state(data: dict, thread_id: str) -> _AlignState | None:
@@ -1145,7 +1163,7 @@ def _align_compute(
         T, info = align(model.target, state.base_index, "bestfit", start=model.transform)
     else:
         if model.surface is None:
-            pos, idx = mesh_arrays({"mesh": entry})
+            pos, idx = mesh_arrays(entry)
             model.surface = SurfaceIndex(pos, idx)
         if state.base_target is None:
             state.base_target = target_mesh(state.data)
@@ -1301,7 +1319,7 @@ def _comparison_summary(data: dict, state: _AlignState | None, picked: list[tupl
     faces = [eid for kind, eid in picked if kind == "face"][:50]
     models: list[dict[str, Any]] = []
     for number, entry in enumerate(entries):
-        item: dict[str, Any] = {"model": _MARKS[number], "path": (entry.get("source") or {}).get("path", "")}
+        item: dict[str, Any] = {"model": _MARKS[number], "path": _comparison_input(entry)}
         if not _usable_comparison(entry):
             item["error"] = str(entry.get("error") or (entry.get("deviation") or {}).get("error") or "no deviation for this model")
             models.append(item)
@@ -1318,10 +1336,10 @@ def _comparison_summary(data: dict, state: _AlignState | None, picked: list[tupl
         target = m.target if m is not None and m.target is not None else comparison_mesh(entry)
         tf = describe_transform(T)
         item["format"] = (entry.get("source") or {}).get("format", "")
+        if isinstance(entry.get("units"), str):
+            item["units"] = entry["units"]
         item["alignment"] = {**alignment, "translation": tf["translation"], "rotation_deg": tf["rotation_deg"], "matrix": tf["matrix"]}
         item["deviation"] = deviation_stats(values, target.vertex_weights(), tol)
-        if entry.get("chordTolerance"):
-            item["chord_tolerance"] = entry["chordTolerance"]
         if faces:
             if state is not None and state.base_target is not None:
                 base = state.base_target
@@ -1352,12 +1370,11 @@ def _comparison_summary(data: dict, state: _AlignState | None, picked: list[tupl
         ),
     }
     base_chord = (data.get("baseSurface") or {}).get("chordTolerance") if isinstance(data.get("baseSurface"), dict) else None
-    if base_chord or any(m.get("chord_tolerance") for m in models):
-        if base_chord:
-            out["base_chord_tolerance"] = base_chord
+    if base_chord:
+        out["base_chord_tolerance"] = base_chord
         out["note"] += (
-            " CAD models were split into triangles with chords up to base_chord_tolerance (①) / chord_tolerance (each model), "
-            "which bounds the accuracy."
+            " The CAD base model ① was split into triangles with chords up to base_chord_tolerance for the deviation, "
+            "which bounds the accuracy (deviations are measured at the vertices of each compared model)."
         )
     return out
 

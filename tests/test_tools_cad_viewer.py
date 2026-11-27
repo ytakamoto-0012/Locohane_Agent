@@ -1350,7 +1350,9 @@ async def test_compare_models_bestfit_and_realign_from_the_viewer(env, tmp_path)
         # ① は基準（偏差を持たない）。② ③ はそれぞれの頂点の ① からの偏差を持つ。ブラウザへは ① の細かい三角形を送らない。
         assert "baseSurface" not in data and "deviation" not in data
         assert len(data["comparisons"]) == 2
-        assert all(c["indices"] and c["deviation"]["values"] for c in data["comparisons"])
+        assert all(c["mesh"]["indices"] and c["deviation"]["values"] for c in data["comparisons"])
+        # 比較モデルも ① と同じ読み込み: 面の一覧と、ゼブラ・曲率の法線・主曲率を持つ。
+        assert all(c["faces"] and c["analysis"]["k1"] for c in data["comparisons"])
         res = await cad_viewer.align_viewer_model({"save_id": props["save_id"], "models": [0], "method": "reset"})
         assert res["ok"] and [r["model"] for r in res["results"]] == [0] and res["results"][0]["alignment"]["method"] == "none"
         package = cad_viewer.viewer_package(res["results"][0]["values_id"])

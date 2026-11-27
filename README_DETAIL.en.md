@@ -2181,7 +2181,7 @@ each other. Unlike `compare_with` (B-rep booleans with the previous version), it
   The view (rotation, pan, zoom, view buttons) is shared by all panes: dragging in any pane moves them all. In the panes showing ①, selection, box
   selection and datum picking work. Measurement points (point distance, 3-point arc, the point of point-to-edge), the rotation center and the zebra base
   point can also be picked on the surfaces of ② ③ ④ (when overlaid, on the nearest model; they are points on triangles, so the values are approximate "≈",
-  in ①'s coordinates; measurement texts go over the pane last clicked for measuring). Zebra is shown on ② ③ ④ with the same lights (curvature only on ①). Compared models are drawn opaque in split panes. Drawing
+  in ①'s coordinates; measurement texts go over the pane last clicked for measuring). Zebra and curvature are shown on ② ③ ④ with the same lights, range and colors as ① (curvature from each model's principal curvatures; "Auto" uses the values of all models). Compared models are drawn opaque in split panes. Drawing
   splits one canvas per pane (scissor) and separates the models by three.js layers (① = 0, ② ③ ④ = 1–3; `CadScene.setSplit`). ArcballControls gets
   the position within the pane where the pointer went down (`getCursorNDC` is replaced). Measurement texts and PMI labels are put over the first pane showing ①.
 - **Alignment**: `align` is `none` (default, keep the coordinates) or `bestfit` (best fit each of ② ③ ④ to ① when opening). In the viewer's "Align" (right
@@ -2226,8 +2226,8 @@ each other. Unlike `compare_with` (B-rep booleans with the previous version), it
   point on those triangles (Ericson's method) gives the distance. When the closest point is on an edge or corner, the sign comes from the triangle whose
   normal agrees best with the offset, or else from the pseudo-normal of the corner. When ① is CAD (the original file, or the `.brep` next to it for
   CadQuery code), the surface of ① used for deviation is tessellated finer than for display (`[cad_viewer] reference_deflection_ratio`, default
-  0.0002 × the diagonal; the chord error becomes deviation error) and kept as `baseSurface` in the viewer data (not sent to the browser). CAD compared models are
-  tessellated the same way (`base_chord_tolerance` and each model's `chord_tolerance` in the result). With 1 million triangles: index 2.5 s, best fit
+  0.0002 × the diagonal; the chord error becomes deviation error) and kept as `baseSurface` in the viewer data (not sent to the browser). The deviation of a compared
+  model is measured at the vertices of its display triangles (they lie on the shape; `base_chord_tolerance` in the result). With 1 million triangles: index 2.5 s, best fit
   2 s, deviation of all vertices about 3 s.
 - **Returned to the AI**: `comparison` in the result has the file of ① (`base`), the tolerance and `models` per compared model (`model` = ②③④, file,
   alignment [method, RMS, inlier ratio, translation, rotation angle, 4×4 transform = that model → ①], deviation statistics [area-weighted min, max,
@@ -2235,9 +2235,12 @@ each other. Unlike `compare_with` (B-rep booleans with the previous version), it
   deviation per selected face of ① [up to 50 faces; triangle centroids of the compared model whose nearest point on ① is on that face]; `error` for a model
   that could not be read). A re-aligned position and deviation are also kept in `comparisons[i].deviation` of the automatically saved viewer data
   (reopening starts from that position).
-- **How it works**: the compared models are added after the shape is turned into viewer data, by another subprocess (`run_cad.py --compare`; not in the
-  file cache). The viewer data's `comparisons` (in the order ② ③ ④; `{source, error}` for one that could not be read) has the triangles and `deviation`
-  (values, transform, record, statistics). If a compared model cannot be read, the shape is still shown and that model's `error` tells it. A DXF (2D) cannot
+- **How it works**: each compared model is read the same way as ① (`_viewer_data_from_file`: subprocess `run_cad.py --file` and the cache); after ①
+  is turned into viewer data, another subprocess (`run_cad.py --compare`) adds their positions aligned to ① and the deviations (that result is not cached).
+  The viewer data's `comparisons` (in the order ② ③ ④; `{source, inputPath, error}` for one that could not be read) has each model's viewer data (mesh,
+  edges, vertices, faces, edgeList, vertexList, parts, holes, outers, analysis etc., the same form as ①), the given file `inputPath` and `deviation` (values,
+  transform, record, statistics). CAD compared models have exact B-rep normals and principal curvatures like ①. In the package for the browser, their
+  arrays and lists are split into bytes and chunks like ①'s. If a compared model cannot be read, the shape is still shown and that model's `error` tells it. A DXF (2D) cannot
   be a compared model. Viewer data of an earlier version with `reference` / `deviation` (deviation on ①'s vertices, the opposite direction) does not use them.
 
 **STEP attributes and PMI** (`src/cad/step_xcaf.py`, `src/cad/step_p21.py`): for a STEP file the viewer data has `step`, and `model.step` has a summary

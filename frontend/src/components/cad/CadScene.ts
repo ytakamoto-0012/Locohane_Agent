@@ -61,6 +61,10 @@ interface ComparisonLayer {
   scalarAttr: THREE.BufferAttribute;
   /** 頂点ごとの ① からの偏差（無ければ null）。 */
   values: Float32Array | null;
+  /** 頂点ごとの曲率（曲率の表示中だけ。setComparisonCurvature）。 */
+  curv: Float32Array | null;
+  /** 今 aScalar に入れている値（偏差か曲率）。 */
+  scalarSource: Float32Array | null;
   wire: boolean;
   /** エッジ（折れ目の線）を描くか（ビューアのエッジの表示。面を表示していても描く）。 */
   edges: boolean;
@@ -509,17 +513,20 @@ export class CadScene {
   private buildComparisons(): void {
     const list = (this.data.comparisons ?? []).slice(0, MAX_COMPARISONS);
     this.comparisons = list.map((c, i) => {
-      if (!c || c.error || !c.indices || !c.positions) return null;
-      const indices = decodeUint32(c.indices);
+      if (!c || c.error || !c.mesh?.indices || !c.mesh.positions) return null;
+      const indices = decodeUint32(c.mesh.indices);
       if (!indices.length) return null;
-      const positions = decodeFloat32(c.positions);
+      const positions = decodeFloat32(c.mesh.positions);
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
       geometry.setIndex(new THREE.BufferAttribute(indices, 1));
       geometry.computeVertexNormals();
-      // 偏差の色で描く材質（surfaceShading.ts）が読む法線・強調・値。
+      // 解析表示（偏差・ゼブラ・曲率。surfaceShading.ts）が読む法線・強調・値。法線は ① と同じく src/cad/analysis.py の
+      // 正確な値（CAD は B-rep の法線）があればそれ、無ければ三角形から求めた法線。
       const n = positions.length / 3;
-      geometry.setAttribute('aNormal', geometry.getAttribute('normal'));
+      const exact = decodeInt16(c.analysis?.normals);
+      if (exact.length === positions.length) geometry.setAttribute('aNormal', new THREE.BufferAttribute(exact, 3, true));
+      else geometry.setAttribute('aNormal', geometry.getAttribute('normal'));
       geometry.setAttribute('hl', new THREE.BufferAttribute(new Float32Array(n), 1));
       const scalarAttr = new THREE.BufferAttribute(new Float32Array(n).fill(NaN), 1);
       geometry.setAttribute('aScalar', scalarAttr);
@@ -555,6 +562,8 @@ export class CadScene {
         positions,
         scalarAttr,
         values: null,
+        curv: null,
+        scalarSource: null,
         wire: false,
         edges: true,
         opacity: 0.35
@@ -588,15 +597,16 @@ export class CadScene {
   }
 
   private fillValues(l: ComparisonLayer, values: Float32Array | null): void {
-    const arr = l.scalarAttr.array as Float32Array;
-    if (values && values.length === arr.length) {
-      arr.set(values);
-      l.values = values;
-    } else {
-      arr.fill(NaN);
-      l.values = null;
-    }
+    l.values = values && values.length === l.scalarAttr.count ? values : null;
+    l.scalarSource = null;
+  }
+
+  /** 比較モデルの aScalar に values（偏差か曲率）を入れる（同じものなら何もしない）。 */
+  private useScalars(l: ComparisonLayer, values: Float32Array): void {
+    if (l.scalarSource === values) return;
+    (l.scalarAttr.array as Float32Array).set(values);
     l.scalarAttr.needsUpdate = true;
+    l.scalarSource = values;
   }
 
   /**
@@ -610,7 +620,9 @@ export class CadScene {
     const lines = showLines ? this.comparisonEdges(l) : l.lines;
     // ゼブラは ① と同じ照明・縞で比較モデルにも映す（曲率は比較モデルに値が無いので、ふつうの表示のまま）。
     const zebra = this.surfaceDisplay.mode === 'zebra' ? this.surfaceDisplay : null;
-    if ((d && l.values) || (zebra && !l.wire)) {
+    // 曲率は、比較モデルにもそのモデルの主曲率（① と同じ求め方）から求めた値を ① と同じ範囲・色で映す。
+    const curv = this.surfaceDisplay.mode === 'scalar' && !d && l.curv ? this.surfaceDisplay.scalar : null;
+    if ((d && l.values) || (zebra && !l.wire) || (curv && !l.wire)) {
       if (!l.scalar) {
         l.scalar = createSurfaceMaterial();
         (l.scalar.uniforms.uCenter.value as THREE.Vector3).copy(this.center);
@@ -618,9 +630,13 @@ export class CadScene {
         (l.scalar.uniforms.uHover.value as THREE.Color).set(this.colors.hover);
         (l.scalar.uniforms.uSelected.value as THREE.Color).set(this.colors.selected);
       }
-      if (d && l.values)
+      if (d && l.values) {
+        this.useScalars(l, l.values);
         applySurfaceDisplay(l.scalar, { mode: 'scalar', scalar: { values: l.values, min: d.min, max: d.max, tolerance: d.tolerance, scheme: 'deviation' } });
-      else if (zebra) applySurfaceDisplay(l.scalar, zebra);
+      } else if (curv && l.curv) {
+        this.useScalars(l, l.curv);
+        applySurfaceDisplay(l.scalar, { mode: 'scalar', scalar: { ...curv, values: l.curv } });
+      } else if (zebra) applySurfaceDisplay(l.scalar, zebra);
       l.mesh.material = l.scalar;
       l.mesh.visible = true;
       if (lines) {
@@ -670,6 +686,16 @@ export class CadScene {
     }
     if (opts.opacity !== undefined) l.opacity = Math.max(0.05, Math.min(1, opts.opacity));
     if (opts.matrix && isMatrix4(opts.matrix)) this.setLayerMatrix(l, opts.matrix);
+    this.applyComparisonLook(l);
+    this.requestRender();
+  }
+
+  /** 比較モデル i（0 = ②）の頂点ごとの曲率（曲率の表示中。null で消す）。範囲と色は ① の曲率の表示（setSurfaceDisplay）と同じ。 */
+  setComparisonCurvature(i: number, values: Float32Array | null): void {
+    const l = this.comparisons[i];
+    if (!l) return;
+    l.curv = values && values.length === l.scalarAttr.count ? values : null;
+    if (l.scalarSource !== l.values) l.scalarSource = null;
     this.applyComparisonLook(l);
     this.requestRender();
   }
@@ -786,7 +812,8 @@ export class CadScene {
     this.raycaster.setFromCamera(ndc, this.camera);
     let best: { model: number; value: number; distance: number } | null = null;
     this.comparisons.forEach((l, i) => {
-      if (!l || !l.values) return;
+      const vals = l?.scalarSource ?? null;
+      if (!l || !vals || l.mesh.material !== l.scalar) return;
       if (model > 0 ? model !== i + 1 : model === 0 || !l.group.visible) return;
       l.group.updateMatrixWorld(true);
       this.raycaster.layers.set(l.layer);
@@ -801,7 +828,7 @@ export class CadScene {
         new THREE.Vector3().fromArray(p, c * 3)
       );
       const w = new THREE.Vector3();
-      const v = tri.getBarycoord(local, w) ? w.x * l.values[a] + w.y * l.values[b] + w.z * l.values[c] : l.values[a];
+      const v = tri.getBarycoord(local, w) ? w.x * vals[a] + w.y * vals[b] + w.z * vals[c] : vals[a];
       if (Number.isFinite(v)) best = { model: i + 1, value: v, distance: h.distance };
     });
     this.raycaster.layers.set(0);
@@ -2872,7 +2899,8 @@ export class CadScene {
     }
     // 偏差の表示中は、マウスの下の比較モデルの値を出す（分けた画面では、その画面に映すモデル）。
     const paneModel = this.paneModel(this.paneIndexAt(e.clientX, e.clientY));
-    this.callbacks.onComparisonHover?.(this.deviationDisplay && paneModel !== 0 ? this.comparisonValueAt(e.clientX, e.clientY, paneModel) : null);
+    const scalarShown = !!this.deviationDisplay || this.surfaceDisplay.mode === 'scalar';
+    this.callbacks.onComparisonHover?.(scalarShown && paneModel !== 0 ? this.comparisonValueAt(e.clientX, e.clientY, paneModel) : null);
     let item: CadSelection | null;
     if (this.measureTool) {
       // 計測では、拾う要素を浮かせ、点を使う計測は拾う点（角・円の上などに合わせた点）に印を出す。

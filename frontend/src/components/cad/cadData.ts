@@ -369,13 +369,15 @@ export interface CadData {
 }
 
 /** 比較モデル 1 つ（data.comparisons の要素）。 */
-export interface CadComparison extends Partial<CadTriangles> {
-  source?: { format?: string; path?: string };
-  triangles?: number;
-  bbox?: { min: number[]; max: number[]; size: number[] };
-  chordTolerance?: number;
+/**
+ * 比較モデル 1 つ（data.comparisons の要素）。① と同じ読み込みのビューア用データ（mesh・edges・faces・analysis 等）に、
+ * ① からの偏差を足したもの。読めなかったモデルは source・inputPath・error だけ。
+ */
+export interface CadComparison extends Partial<Omit<CadData, 'comparisons'>> {
+  /** 比較モデルとして渡されたファイル。 */
+  inputPath?: string;
   /**
-   * ① からの偏差。values はこのモデルの頂点ごとの符号付き距離（float32。正 = ① の外側）、transform は
+   * ① からの偏差。values はこのモデルの mesh の頂点ごとの符号付き距離（float32。正 = ① の外側）、transform は
    * このモデル → ① の 4×4（行ごと）。
    */
   deviation?: {
