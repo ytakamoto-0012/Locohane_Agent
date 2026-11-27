@@ -786,7 +786,9 @@ function CadViewerPanel({
   }, [pending, status]);
   useEffect(() => {
     sceneRef.current?.setPmiLabels(
-      pmiLabels ? pmiItems.map((p) => ({ id: p.id, kind: p.kind, text: p.text, targets: pmiTargets(p) })) : []
+      pmiLabels
+        ? pmiItems.map((p) => ({ id: p.id, kind: p.kind, text: p.text, targets: pmiTargets(p), graphic: p.graphic, graphicOnly: p.graphicOnly }))
+        : []
     );
   }, [pmiLabels, pmiItems, status]);
   // タイムアウトの残り（残りが TIMEOUT_WARN_SECONDS を切ったら出す。過ぎると backend がビューアを閉じる）。

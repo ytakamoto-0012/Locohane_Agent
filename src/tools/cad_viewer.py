@@ -1931,7 +1931,8 @@ def _write_selection(
     refs = {r for kind, eid in picked if kind in ("face", "edge") for r in data[_LIST_KEYS[kind]][eid].get("pmi") or []}
     if refs:
         pmi = (data.get("step") or {}).get("pmi") or {}
-        body["pmi"] = [item for items in pmi.values() for item in items if item.get("id") in refs]
+        # graphic（文字・引き出し線の線分の座標）はビューアで描くためのもので、LLM には渡さない。
+        body["pmi"] = [{k: v for k, v in item.items() if k != "graphic"} for items in pmi.values() for item in items if item.get("id") in refs]
     path.write_text(json.dumps(body, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
 

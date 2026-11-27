@@ -123,10 +123,60 @@ def _refs(dt, label: TDF_Label, index: _ShapeIndex) -> dict[str, list[int]]:
 
 _DIM_SYMBOL = {"Size_Diameter": "⌀", "Size_SphericalDiameter": "S⌀", "Size_Radius": "R", "Size_SphericalRadius": "SR"}
 
+# PMI の図形（文字・引き出し線の線分）の、曲線を折れ線にするときの分け数と、1 項目あたりの線分の上限。
+_GRAPHIC_CURVE_STEPS = 16
+_GRAPHIC_MAX_SEGMENTS = 20_000
+
+
+def _graphic(obj) -> dict[str, Any]:
+    """PMI の図形としての表現（AP242 の tessellated / polyline の注釈）。
+
+    数値を持たない「図形だけの PMI」（NX・CATIA 等が書く寸法・注記）は、文字も引き出し線も線分で書かれている。
+    ビューアはその線分を描いて読めるようにする。戻り値の ``graphic`` は線分の両端を並べた座標
+    （[x1, y1, z1, x2, y2, z2, ...]、モデルと同じワールド座標）。``presentationName`` は注釈の名前（例: 寸法.1）。
+    """
+    import unicodedata
+
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.GeomAbs import GeomAbs_Line
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+
+    out: dict[str, Any] = {}
+    try:
+        name = obj.GetPresentationName()
+        text = _hstr(name).strip()
+        if text:
+            out["presentationName"] = unicodedata.normalize("NFKC", text)  # 半角カナ（ﾃｷｽﾄ）を全角に
+        pres = obj.GetPresentation()
+    except Exception:  # noqa: BLE001 - 図形の無い PMI
+        return out
+    # 空の形に ShapeType 等を呼ぶと OCP がプロセスごと落ちるので、先に IsNull を見る。
+    if pres is None or pres.IsNull():
+        return out
+    coords: list[float] = []
+    n = 0
+    exp = TopExp_Explorer(pres, TopAbs_EDGE)
+    while exp.More() and n < _GRAPHIC_MAX_SEGMENTS:
+        try:
+            curve = BRepAdaptor_Curve(TopoDS.Edge_s(exp.Current()))
+            a, b = curve.FirstParameter(), curve.LastParameter()
+            steps = 1 if curve.GetType() == GeomAbs_Line else _GRAPHIC_CURVE_STEPS
+            pts = [curve.Value(a + (b - a) * k / steps) for k in range(steps + 1)]
+            for p, q in zip(pts, pts[1:]):
+                coords.extend(rnd(v, 4) for v in (p.X(), p.Y(), p.Z(), q.X(), q.Y(), q.Z()))
+                n += 1
+        except Exception:  # noqa: BLE001 - 範囲の無い曲線は飛ばす
+            pass
+        exp.Next()
+    if coords:
+        out["graphic"] = coords
+    return out
+
 
 def _dimension(obj) -> dict[str, Any]:
     dtype = _enum_name(obj.GetType(), "DimensionType_")
-    item: dict[str, Any] = {"type": dtype}
+    item: dict[str, Any] = {"type": dtype, **_graphic(obj)}
     try:
         item["value"] = rnd(obj.GetValue(), 6)
     except Exception:  # noqa: BLE001 - 範囲で書かれた寸法は値が 1 つでない
@@ -152,7 +202,14 @@ def _dimension(obj) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
     item["text"] = _dimension_text(item)
+    if item.get("graphic") and _presentation_only(item):
+        item["graphicOnly"] = True
     return item
+
+
+def _presentation_only(item: dict[str, Any]) -> bool:
+    """数値を持たない寸法（図形だけの PMI）か。"""
+    return item["type"] in ("None", "") or (item.get("value") == 0 and "upperTol" not in item and "lower" not in item)
 
 
 def _dimension_text(item: dict[str, Any]) -> str:
@@ -170,15 +227,17 @@ def _dimension_text(item: dict[str, Any]) -> str:
     if "upperTol" in item:
         up, lo = item["upperTol"], item["lowerTol"]
         text += f" +{up:g}/-{abs(lo):g}" if abs(up) != abs(lo) else f" ±{abs(up):g}"
-    if item["type"] in ("None", "") or (item.get("value") == 0 and "upperTol" not in item and "lower" not in item):
-        return "Dimension (presentation only, no value)"
+    if _presentation_only(item):
+        # 数値を持たない、図形だけの PMI（文字は graphic の線分で描かれている）。
+        name = item.get("presentationName")
+        return f"{name} (graphic only)" if name else "Dimension (presentation only, no value)"
     label = item["type"].replace("_", " ")
     return f"{label}: {text}" if not sym else text
 
 
 def _tolerance(obj, datums: list[str]) -> dict[str, Any]:
     ttype = _enum_name(obj.GetType(), "GeomToleranceType_")
-    item: dict[str, Any] = {"type": ttype}
+    item: dict[str, Any] = {"type": ttype, **_graphic(obj)}
     try:
         item["value"] = rnd(obj.GetValue(), 6)
         mat = _enum_name(obj.GetMaterialRequirementModifier(), "GeomToleranceMatReqModif_")
@@ -215,7 +274,10 @@ def read_pmi(parts: list, face_map, edge_map) -> dict[str, Any]:
             continue
         obj = XCAFDoc_Datum.Set_s(lab).GetObject()
         name = _hstr(obj.GetName()) if obj is not None else ""
-        out["datums"].append({"id": f"datum:{len(out['datums'])}", "kind": "datum", "name": name, "text": f"Datum {name}", **_refs(dt, lab, index)})
+        graphic = _graphic(obj) if obj is not None else {}
+        out["datums"].append(
+            {"id": f"datum:{len(out['datums'])}", "kind": "datum", "name": name, "text": f"Datum {name}", **graphic, **_refs(dt, lab, index)}
+        )
 
     labels = TDF_LabelSequence()
     dt.GetDimensionLabels(labels)

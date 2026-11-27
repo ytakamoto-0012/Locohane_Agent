@@ -174,6 +174,12 @@ export interface CadPmiItem {
   edges?: number[];
   edges_second?: number[];
   parts?: number[];
+  /** 注釈の図形（文字・引き出し線）の線分の両端の座標 [x1, y1, z1, x2, y2, z2, ...]。 */
+  graphic?: number[];
+  /** 数値を持たない、図形だけの PMI（文字は graphic）。 */
+  graphicOnly?: boolean;
+  /** 注釈の名前（例: 寸法.1）。 */
+  presentationName?: string;
   [key: string]: unknown;
 }
 

@@ -1334,7 +1334,8 @@
   padding: 0 5px;
   border: 1px solid currentColor;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.9);
+  /* 下の形が透けて見えるよう、塗りはごく薄く（マウスを乗せると白く塗る）。 */
+  background: rgba(255, 255, 255, 0.15);
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;

@@ -70,6 +70,10 @@ export interface PmiLabel {
   kind: 'dimension' | 'tolerance' | 'datum';
   text: string;
   targets: CadSelection[];
+  /** 注釈の図形（文字・引き出し線）の線分の両端の座標 [x1, y1, z1, x2, y2, z2, ...]。ファイルに図形があるときだけ。 */
+  graphic?: number[];
+  /** 数値を持たない、図形だけの PMI。文字は graphic で描くので、HTML のラベルは出さない。 */
+  graphicOnly?: boolean;
 }
 
 interface PmiLabelView extends PmiLabel {
@@ -84,6 +88,8 @@ interface PmiLabelView extends PmiLabel {
 const PMI_COLORS: Record<PmiLabel['kind'], string> = { dimension: '#1d6fd1', tolerance: '#18794e', datum: '#a35200' };
 const PMI_LEADER_PIXELS = 36;
 const PMI_LEADER_STEP_PIXELS = 18;
+// PMI の図形（ファイルに線分で書かれた文字・引き出し線）の線の幅（ピクセル）。
+const PMI_GRAPHIC_LINE_WIDTH = 1.5;
 
 // 開いた形の面の中の穴・外周の縁の色（そのモードのとき。選択・ホバーはそれぞれの色）と線の幅（ピクセル）。
 const LOOP_COLORS: Record<CadLoopKind, string> = { hole: '#d6409f', outer: '#b08800' };
@@ -239,6 +245,8 @@ export class CadScene {
   private readonly pmiSvg: SVGSVGElement;
   private pmiLabels: PmiLabelView[] = [];
   private pmiInput: PmiLabel[] = [];
+  // PMI の図形（文字・引き出し線の線分）。形に隠れないよう手前に重ねる。
+  private pmiGraphic: LineSegments2 | null = null;
   // 表面の解析表示（ゼブラ・曲率・偏差。surfaceShading.ts）。normal のときはふつうの材質で描く。
   private standardMaterial: THREE.Material | null = null;
   private surfaceMaterial: THREE.ShaderMaterial | null = null;
@@ -887,6 +895,7 @@ export class CadScene {
    * PMI の 3D ラベルを出す（空の配列で消す）。ラベルは指す要素（面の中心・エッジの中ほど・部品の面の中心）の
    * 平均の点から、モデルの中心から外へ向かう向きに少し離して出し、引き出し線でつなぐ。指す要素がすべて隠れて
    * いるラベルは出さない。クリックすると onPmiClick（指す要素を選ぶ）。
+   * ファイルに図形（線分で書かれた文字・引き出し線）がある PMI は、その線も描く（CAD で見えるのと同じ注記）。
    */
   setPmiLabels(labels: PmiLabel[]): void {
     this.pmiInput = labels;
@@ -895,9 +904,18 @@ export class CadScene {
       l.line.remove();
     }
     this.pmiLabels = [];
+    const positions: number[] = [];
+    const colors: number[] = [];
     labels.forEach((label, i) => {
       const anchor = this.anchorOf(label.targets);
-      if (!anchor) return;
+      // 指す要素がすべて隠れた PMI は図形も出さない（何も指さない注記は出す）。
+      if (label.graphic?.length && (anchor || !label.targets.length)) {
+        const c = new THREE.Color(PMI_COLORS[label.kind]);
+        const n = Math.floor(label.graphic.length / 3) * 3;
+        for (let k = 0; k < n; k++) positions.push(label.graphic[k]);
+        for (let k = 0; k < n / 3; k++) colors.push(c.r, c.g, c.b);
+      }
+      if (!anchor || label.graphicOnly) return;
       const el = document.createElement('div');
       el.className = `cad-viewer-pmi-label cad-viewer-pmi-${label.kind}`;
       el.textContent = label.text;
@@ -914,7 +932,27 @@ export class CadScene {
       // 近くのラベルが重なりにくいよう、引き出しの長さを 3 段に分ける。
       this.pmiLabels.push({ ...label, el, line, anchor, reach: PMI_LEADER_PIXELS + (i % 3) * PMI_LEADER_STEP_PIXELS });
     });
+    this.setPmiGraphic(positions, colors);
     this.requestRender();
+  }
+
+  /** PMI の図形の線分を描き直す（空なら消す）。 */
+  private setPmiGraphic(positions: number[], colors: number[]): void {
+    if (this.pmiGraphic) {
+      this.scene.remove(this.pmiGraphic);
+      this.pmiGraphic.geometry.dispose();
+      (this.pmiGraphic.material as LineMaterial).dispose();
+      this.pmiGraphic = null;
+    }
+    if (positions.length < 6) return;
+    const geometry = new LineSegmentsGeometry();
+    geometry.setPositions(positions);
+    geometry.setColors(colors);
+    const material = new LineMaterial({ linewidth: PMI_GRAPHIC_LINE_WIDTH, vertexColors: true, depthTest: false, transparent: true });
+    material.resolution.set(Math.max(this.container.clientWidth, 1), Math.max(this.container.clientHeight, 1));
+    this.pmiGraphic = new LineSegments2(geometry, material);
+    this.pmiGraphic.renderOrder = 3;
+    this.scene.add(this.pmiGraphic);
   }
 
   /** 要素の並びの上の代表の点（面は中心、エッジは折れ線の中ほど、部品はその面の中心の平均）。見えている要素だけ。 */
@@ -1007,7 +1045,7 @@ export class CadScene {
       ctx.lineTo(l.x * k, l.y * k);
       ctx.stroke();
       const tw = ctx.measureText(l.label.text).width + size * 0.8;
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.15)'; // styles.css の .cad-viewer-pmi-label と同じ薄い塗り
       ctx.fillRect(l.x * k - tw / 2, l.y * k - size * 0.75, tw, size * 1.5);
       ctx.strokeRect(l.x * k - tw / 2, l.y * k - size * 0.75, tw, size * 1.5);
       ctx.fillStyle = color;
@@ -1403,6 +1441,7 @@ export class CadScene {
     (this.edgeHighlight?.material as LineMaterial | undefined)?.resolution.set(w, h);
     (this.originAxesLine?.material as LineMaterial | undefined)?.resolution.set(w, h);
     (this.measureLines?.material as LineMaterial | undefined)?.resolution.set(w, h);
+    (this.pmiGraphic?.material as LineMaterial | undefined)?.resolution.set(w, h);
     for (const layer of Object.values(this.loops)) {
       (layer.lines.material as LineMaterial).resolution.set(w, h);
       (layer.highlight.material as LineMaterial).resolution.set(w, h);
