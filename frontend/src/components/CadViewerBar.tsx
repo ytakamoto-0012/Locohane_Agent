@@ -52,6 +52,7 @@ import {
   type MeasureTool
 } from './cad/measure';
 import { CadSidebar } from './cad/CadSidebar';
+import { NumberInput } from './cad/NumberInput';
 import type { CadAttributeEdits } from './cad/CadStepPanel';
 import { restoreHistory, serializeHistory, type EditSnapshot } from './cad/editHistory';
 import {
@@ -1360,18 +1361,7 @@ function CadViewerPanel({
           {mode === 'hole' && (
             <label className="cad-viewer-chip cad-viewer-hole-angle" title={t('cad.holeAngleTitle')}>
               {t('cad.holeAngle')}
-              <input
-                type="number"
-                min={0}
-                max={90}
-                step={0.5}
-                value={holeAngle}
-                aria-label={t('cad.holeAngleTitle')}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  if (Number.isFinite(v) && v >= 0) setHoleAngle(Math.min(v, 90));
-                }}
-              />
+              <NumberInput min={0} max={90} step={0.5} value={holeAngle} aria-label={t('cad.holeAngleTitle')} onChange={setHoleAngle} />
               °
             </label>
           )}
@@ -1384,37 +1374,20 @@ function CadViewerPanel({
                 onChange={(e) => setHoleSizeOn(e.target.checked)}
               />
               {t('cad.holeSize')}
-              <input
-                type="number"
-                min={0}
-                step={0.1}
-                value={holeSize}
-                disabled={!holeSizeOn}
-                aria-label={t('cad.holeSizeTitle')}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  if (Number.isFinite(v) && v >= 0) setHoleSize(v);
-                }}
-              />
+              <NumberInput min={0} step={0.1} value={holeSize} disabled={!holeSizeOn} aria-label={t('cad.holeSizeTitle')} onChange={setHoleSize} />
             </label>
           )}
           {canSew && (mode === 'hole' || mode === 'outer') && (
             <span className="cad-viewer-chip cad-viewer-sew" title={sewText || t('cad.sewTitle')}>
               {t('cad.sewTol')}
-              <input
-                type="number"
+              <NumberInput
                 min={0}
                 step={0.1}
                 value={sewTol}
                 aria-label={t('cad.sewTitle')}
                 disabled={sewState.kind === 'sewing' || !!closing}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  if (Number.isFinite(v) && v >= 0) setSewTol(v);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void sew(sewTol);
-                }}
+                onChange={setSewTol}
+                onEnter={(v) => void sew(v)}
               />
               <button type="button" className="cad-viewer-chip" disabled={sewState.kind === 'sewing' || !!closing} onClick={() => void sew(sewTol)}>
                 {sewState.kind === 'sewing' ? t('cad.sewing') : t('cad.sew')}

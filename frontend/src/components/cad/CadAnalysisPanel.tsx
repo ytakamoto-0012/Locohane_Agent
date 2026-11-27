@@ -6,6 +6,7 @@ import { useI18n } from '../../i18n';
 import type { MessageKey } from '../../i18n/messages';
 import type { CadAlignmentInfo, CadDeviationStats } from './cadData';
 import { fmtNum } from './measure';
+import { NumberInput } from './NumberInput';
 import { CURVATURE_KINDS, MAX_ZEBRA_STRIPES, legendGradient, type CurvatureKind, type ScalarScheme, type ZebraLight, type ZebraOrientation, type ZebraSettings } from './surfaceShading';
 
 export type AnalysisMode = 'normal' | 'zebra' | 'curvature' | 'deviation';
@@ -30,7 +31,7 @@ function offsetStep(off: number[]): number {
   return m > 0 ? 10 ** Math.floor(Math.log10(m / 10)) : 1;
 }
 
-/** 数の入力欄（空・数でない入力は無視する）。 */
+/** 数の入力欄（打ちかけの文字は書き換えず、範囲への丸めは確定時。NumberInput.tsx）。 */
 function NumberField({
   label,
   title,
@@ -51,18 +52,7 @@ function NumberField({
   return (
     <label className="cad-viewer-chip cad-viewer-num" title={title ?? label}>
       {label}
-      <input
-        type="number"
-        value={Number.isFinite(value) ? Number(value.toPrecision(6)) : ''}
-        step={step}
-        min={min}
-        max={max}
-        aria-label={title ?? label}
-        onChange={(e) => {
-          const v = Number(e.target.value);
-          if (e.target.value !== '' && Number.isFinite(v)) onChange(min !== undefined || max !== undefined ? Math.min(max ?? v, Math.max(min ?? v, v)) : v);
-        }}
-      />
+      <NumberInput value={value} step={step} min={min} max={max} aria-label={title ?? label} onChange={onChange} />
     </label>
   );
 }

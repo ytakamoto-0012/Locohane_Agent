@@ -23,6 +23,7 @@ import {
   type CadSelection
 } from './cadData';
 import { CadStepPanel, type CadAttributeEdits } from './CadStepPanel';
+import { NumberInput } from './NumberInput';
 
 // 色の無い面（テーマの既定色で描く）を変えるときの、色の入力の初期値。
 const DEFAULT_PICKER_COLOR = '#b9bfcb';
@@ -374,8 +375,8 @@ function ColorSection({ data, selection, colors, onColors }: Props) {
     }
     onColors({ faces, parts });
   };
-  const setChannel = (i: number, value: string) => {
-    const v = Math.max(0, Math.min(255, Math.round(Number(value) || 0)));
+  const setChannel = (i: number, value: number) => {
+    const v = Math.max(0, Math.min(255, Math.round(value)));
     const next: [number, number, number] = [...rgb];
     next[i] = v;
     setRgb(next);
@@ -410,7 +411,7 @@ function ColorSection({ data, selection, colors, onColors }: Props) {
             {(['R', 'G', 'B'] as const).map((ch, i) => (
               <label key={ch} className="cad-rgb">
                 {ch}
-                <input type="number" min={0} max={255} value={rgb[i]} onChange={(e) => setChannel(i, e.target.value)} />
+                <NumberInput min={0} max={255} value={rgb[i]} onChange={(v) => setChannel(i, v)} />
               </label>
             ))}
           </div>
