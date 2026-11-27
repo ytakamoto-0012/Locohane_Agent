@@ -22,6 +22,7 @@ import {
   profileOutline2d,
   isMatrix4,
   overrideOf,
+  splitGrid,
   selectionKey,
   type BoxMode,
   type CadColorOverrides,
@@ -33,15 +34,48 @@ import {
   type CadSelection,
   type CadVisibility,
   type DatumPick,
-  type DatumScenePick
+  type DatumScenePick,
+  type SplitLayout
 } from './cadData';
 import { asVec3, onCircle, onSphere, unit, type MeasureDraw, type MeasurePick, type MeasureTool, type Vec3 } from './measure';
 import { ZebraLightGuide, applySurfaceDisplay, createSurfaceMaterial, updateSurfaceUniforms, type SurfaceDisplay } from './surfaceShading';
 
-/** 基準モデル（偏差の比較相手）を重ねて描くときの色。 */
-const REFERENCE_COLOR = '#4f7fe0';
-// 基準モデルのワイヤー表示で線にする折れ目の角度（度）。曲面の細かい三角形の境目は線にしない。
-const REFERENCE_EDGE_ANGLE = 20;
+/** 比較モデル（② ③ ④）を重ねて描くときの、色を決めてもらう前の色。 */
+const COMPARISON_COLOR = '#e5484d';
+// 比較モデルのワイヤー表示で線にする折れ目の角度（度）。曲面の細かい三角形の境目は線にしない。
+const COMPARISON_EDGE_ANGLE = 20;
+// 偏差の色で描いている比較モデルの、折れ目の線の色。
+const COMPARISON_EDGE_ON_DEVIATION = '#3a3a40';
+// 一度に重ねられる比較モデルの数（② ③ ④。three.js のレイヤー 1〜3 に置く）。
+const MAX_COMPARISONS = 3;
+
+/** 比較モデル 1 つ（data.comparisons の i 番目）の描画。レイヤー layer（= i + 1）に置く。 */
+interface ComparisonLayer {
+  layer: number;
+  group: THREE.Group;
+  mesh: THREE.Mesh;
+  standard: THREE.MeshStandardMaterial;
+  /** 偏差の色で描く材質（初めて使うときに作る）。 */
+  scalar: THREE.ShaderMaterial | null;
+  /** ワイヤー表示の線（初めて使うときに作る）。 */
+  lines: THREE.LineSegments | null;
+  positions: Float32Array;
+  scalarAttr: THREE.BufferAttribute;
+  /** 頂点ごとの ① からの偏差（無ければ null）。 */
+  values: Float32Array | null;
+  wire: boolean;
+  /** エッジ（折れ目の線）を描くか（ビューアのエッジの表示。面を表示していても描く）。 */
+  edges: boolean;
+  opacity: number;
+}
+
+/** 画面分割の 1 つの画面（ペイン）の位置と大きさ（CSS ピクセル、3D 表示の左上から）。 */
+interface PaneRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
 
 export interface CadSceneColors {
   background: string;
@@ -75,6 +109,8 @@ export interface CadSceneCallbacks {
   onPmiClick?: (id: string) => void;
   /** データムを拾うモード（setDatumPicking）でクリックした点・穴。選択はしない。 */
   onDatumPick?: (pick: DatumScenePick) => void;
+  /** 偏差の表示中、マウスの下の比較モデル（1〜3 = ② ③ ④）とその点の偏差（当たらなければ null）。 */
+  onComparisonHover?: (hit: { model: number; value: number } | null) => void;
 }
 
 /** 位置合わせのデータムの印（setDatumOverlay）。穴はピンの円も描く。 */
@@ -292,11 +328,16 @@ export class CadScene {
   private hlAttr: THREE.BufferAttribute | null = null;
   private scalarAttr: THREE.BufferAttribute | null = null;
   private scalarValues: Float32Array | null = null;
-  // 基準モデル（偏差の比較相手）。座標は基準のまま、対象 → 基準の変換の逆で動かして重ねる（対象の座標は動かさない）。
-  private referenceMesh: THREE.Mesh | null = null;
-  private referenceGroup: THREE.Group | null = null;
-  // 基準モデルのワイヤー表示の線（referenceEdges で初めて使うときに作る）。
-  private referenceLines: THREE.LineSegments | null = null;
+  // 比較モデル ② ③ ④（data.comparisons の i 番目。読めなかったものは null）。座標はそのモデルのまま、そのモデル → ① の
+  // 変換で動かして重ねる（① の座標は動かさない）。レイヤー i + 1 に置き、画面分割ではそのモデルを映す画面だけに描く。
+  private comparisons: (ComparisonLayer | null)[] = [];
+  // 比較モデルを偏差の色で描く範囲・公差（null ならそれぞれの色の半透明で描く）。
+  private deviationDisplay: { min: number; max: number; tolerance: number } | null = null;
+  // 画面分割（single は分けない）と、画面ごとに映すモデル（0 = ①、1〜3 = ② ③ ④）。
+  private split: SplitLayout = 'single';
+  private paneModels: number[] = [0];
+  // ポインタを押した・乗せている画面（ArcballControls の回転・移動・拡大縮小の計算に使う）。
+  private activePane = 0;
   // 最後に当たった面の三角形（マウスの下の値を出すため）。
   private lastMeshHit: THREE.Intersection | null = null;
 
@@ -334,10 +375,15 @@ export class CadScene {
     const h = this.radius;
     this.camera = new THREE.OrthographicCamera(-h, h, h, -h, 0, this.radius * CAMERA_DISTANCE * 2);
     this.scene.add(this.camera);
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8a96, 1.6));
+    // 照明はどの画面（レイヤー）のモデルも照らす。
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x8a8a96, 1.6);
+    hemi.layers.enableAll();
+    this.scene.add(hemi);
     const light = new THREE.DirectionalLight(0xffffff, 1.4);
     light.position.set(1, 1.5, 2);
+    light.layers.enableAll();
     this.camera.add(light);
+    this.camera.layers.enableAll();
 
     this.buildMesh();
     this.buildLines();
@@ -346,8 +392,11 @@ export class CadScene {
     this.buildPivotMarker();
     this.buildOriginAxes();
     this.buildDiffOverlay();
-    this.buildReference();
+    this.buildComparisons();
     this.buildMeasureOverlay();
+    // 原点の軸と回転中心の印は、どの画面にも出す。
+    this.originAxes?.traverse((o) => o.layers.enableAll());
+    this.pivotMarker?.layers.enableAll();
     this.addAxes();
 
     // ArcballControls: 画面を基準に回す（縦ドラッグは常に画面の横軸まわりの回転になる）。CAD ソフトに近い操作感。
@@ -367,6 +416,18 @@ export class CadScene {
     // ArcballControls は右ドラッグの移動・カーソル位置への拡大縮小で、カメラと一緒に回転の中心（内部のギズモ）も
     // 動かす。指定した回転中心があれば、操作が終わるたびにその点へ戻す（戻さないと移動で中心が外れる）。
     this.controls.addEventListener('end', () => this.restoreFixedPivot());
+    // 画面分割のときは、ポインタを押した画面の中での位置で回転・移動・拡大縮小を計算させる（ArcballControls は canvas 全体を
+    // 1 つの画面とみなすので、そのままでは分けた画面の大きさと合わず、移動の量やカーソルへの拡大がずれる）。
+    const arc = this.controls as unknown as { getCursorNDC: (x: number, y: number, canvas: HTMLElement) => THREE.Vector2 };
+    arc.getCursorNDC = (x: number, y: number, canvas: HTMLElement) => {
+      const rect = canvas.getBoundingClientRect();
+      const p = this.paneRects()[this.activePane] ?? { x: 0, y: 0, w: rect.width, h: rect.height };
+      return new THREE.Vector2(((x - rect.left - p.x) / Math.max(p.w, 1)) * 2 - 1, ((rect.top + p.y + p.h - y) / Math.max(p.h, 1)) * 2 - 1);
+    };
+    // ArcballControls より先に、押した・乗せた画面を覚える（container の捕捉段階で受ける）。
+    container.addEventListener('pointerdown', this.trackPane, true);
+    container.addEventListener('wheel', this.trackPane, true);
+    container.addEventListener('pointermove', this.trackPaneHover, true);
     this.resize();
     this.setView('iso');
 
@@ -444,91 +505,292 @@ export class CadScene {
     geometry.setAttribute('aScalar', this.scalarAttr);
   }
 
-  /** 基準モデル（偏差の比較相手）を半透明で重ねる（setReferenceOverlay で見せる）。選択・当たり判定の対象にはしない。 */
-  private buildReference(): void {
-    const ref = this.data.reference;
-    if (!ref) return;
-    const indices = decodeUint32(ref.indices);
-    if (!indices.length) return;
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(decodeFloat32(ref.positions), 3));
-    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-    geometry.computeVertexNormals();
-    const material = new THREE.MeshStandardMaterial({
-      color: REFERENCE_COLOR,
-      roughness: 0.6,
-      metalness: 0,
-      transparent: true,
-      opacity: 0.35,
-      depthWrite: false,
-      side: THREE.DoubleSide
+  /** 比較モデル ② ③ ④ を作る（setComparisonOverlay で見せる）。選択・当たり判定の対象にはしない。 */
+  private buildComparisons(): void {
+    const list = (this.data.comparisons ?? []).slice(0, MAX_COMPARISONS);
+    this.comparisons = list.map((c, i) => {
+      if (!c || c.error || !c.indices || !c.positions) return null;
+      const indices = decodeUint32(c.indices);
+      if (!indices.length) return null;
+      const positions = decodeFloat32(c.positions);
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+      geometry.computeVertexNormals();
+      // 偏差の色で描く材質（surfaceShading.ts）が読む法線・強調・値。
+      const n = positions.length / 3;
+      geometry.setAttribute('aNormal', geometry.getAttribute('normal'));
+      geometry.setAttribute('hl', new THREE.BufferAttribute(new Float32Array(n), 1));
+      const scalarAttr = new THREE.BufferAttribute(new Float32Array(n).fill(NaN), 1);
+      geometry.setAttribute('aScalar', scalarAttr);
+      const standard = new THREE.MeshStandardMaterial({
+        color: COMPARISON_COLOR,
+        roughness: 0.6,
+        metalness: 0,
+        transparent: true,
+        opacity: 0.35,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        // 折れ目の線が面に埋もれないよう、面を少し奥へずらす（① の面と同じ）。
+        polygonOffset: true,
+        polygonOffsetFactor: 1,
+        polygonOffsetUnits: 1
+      });
+      const mesh = new THREE.Mesh(geometry, standard);
+      mesh.renderOrder = 1;
+      mesh.layers.set(i + 1);
+      // 面と線（ワイヤー表示）をまとめて動かす。
+      const group = new THREE.Group();
+      group.matrixAutoUpdate = false;
+      group.visible = false;
+      group.add(mesh);
+      this.scene.add(group);
+      const layer: ComparisonLayer = {
+        layer: i + 1,
+        group,
+        mesh,
+        standard,
+        scalar: null,
+        lines: null,
+        positions,
+        scalarAttr,
+        values: null,
+        wire: false,
+        edges: true,
+        opacity: 0.35
+      };
+      const T = c.deviation?.transform;
+      if (isMatrix4(T)) this.setLayerMatrix(layer, T);
+      if (c.deviation?.values) this.fillValues(layer, decodeFloat32(c.deviation.values));
+      return layer;
     });
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.renderOrder = 1;
-    // 面と線（ワイヤー表示）をまとめて動かす。
-    const group = new THREE.Group();
-    group.matrixAutoUpdate = false;
-    group.visible = false;
-    group.add(mesh);
-    this.referenceMesh = mesh;
-    this.referenceGroup = group;
-    this.scene.add(group);
-    const T = this.data.deviation?.transform;
-    if (isMatrix4(T)) this.setReferenceOverlay({ matrix: T });
   }
 
   /**
-   * 基準モデルのワイヤー表示の線。三角形しか無いので、隣の三角形との角度が REFERENCE_EDGE_ANGLE 度以上の折れ目と
+   * 比較モデルのワイヤー表示の線。三角形しか無いので、隣の三角形との角度が COMPARISON_EDGE_ANGLE 度以上の折れ目と
    * 外周を線にする（CAD のエッジに近い線になる）。重いので初めて使うときに作る。
    */
-  private referenceEdges(): THREE.LineSegments | null {
-    if (this.referenceLines) return this.referenceLines;
-    const mesh = this.referenceMesh;
-    if (!mesh || !this.referenceGroup) return null;
-    const geometry = new THREE.EdgesGeometry(mesh.geometry, REFERENCE_EDGE_ANGLE);
-    const material = new THREE.LineBasicMaterial({ color: (mesh.material as THREE.MeshStandardMaterial).color.clone() });
-    const lines = new THREE.LineSegments(geometry, material);
+  private comparisonEdges(l: ComparisonLayer): THREE.LineSegments {
+    if (l.lines) return l.lines;
+    const geometry = new THREE.EdgesGeometry(l.mesh.geometry, COMPARISON_EDGE_ANGLE);
+    const lines = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color: l.standard.color.clone() }));
     lines.renderOrder = 1;
-    this.referenceLines = lines;
-    this.referenceGroup.add(lines);
+    lines.layers.set(l.layer);
+    l.lines = lines;
+    l.group.add(lines);
     return lines;
   }
 
-  /** 基準モデルがあるか。 */
-  hasReference(): boolean {
-    return this.referenceMesh !== null;
+  private setLayerMatrix(l: ComparisonLayer, matrix: number[][]): void {
+    const T = new THREE.Matrix4().set(...(matrix.flat() as [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number]));
+    l.group.matrix.copy(T);
+    l.group.matrixWorldNeedsUpdate = true;
+  }
+
+  private fillValues(l: ComparisonLayer, values: Float32Array | null): void {
+    const arr = l.scalarAttr.array as Float32Array;
+    if (values && values.length === arr.length) {
+      arr.set(values);
+      l.values = values;
+    } else {
+      arr.fill(NaN);
+      l.values = null;
+    }
+    l.scalarAttr.needsUpdate = true;
   }
 
   /**
-   * 基準モデルの重ね表示。matrix は対象 → 基準の 4×4（行ごと）で、基準の方をその逆で動かして重ねる。
+   * 比較モデルの見た目を今の設定に合わせる。偏差の表示中は偏差の色（不透明）、そうでなければそのモデルの色の半透明か
+   * ワイヤー。solo は画面分割でそのモデルだけを映す画面に描くとき（重ねないので不透明にする）。
+   */
+  private applyComparisonLook(l: ComparisonLayer, solo = false): void {
+    const d = this.deviationDisplay;
+    // 折れ目の線（エッジ）は、エッジを表示しているとき（面を表示していても）と、ワイヤー表示のときに描く。
+    const showLines = l.wire || l.edges;
+    const lines = showLines ? this.comparisonEdges(l) : l.lines;
+    if (d && l.values) {
+      if (!l.scalar) {
+        l.scalar = createSurfaceMaterial();
+        (l.scalar.uniforms.uCenter.value as THREE.Vector3).copy(this.center);
+        l.scalar.uniforms.uRadius.value = this.radius;
+      }
+      applySurfaceDisplay(l.scalar, { mode: 'scalar', scalar: { values: l.values, min: d.min, max: d.max, tolerance: d.tolerance, scheme: 'deviation' } });
+      l.mesh.material = l.scalar;
+      l.mesh.visible = true;
+      if (lines) {
+        lines.visible = showLines;
+        // 偏差の色の上では、どの色にも埋もれない暗い灰色にする。
+        (lines.material as THREE.LineBasicMaterial).color.set(COMPARISON_EDGE_ON_DEVIATION);
+      }
+      return;
+    }
+    l.mesh.material = l.standard;
+    const opacity = solo ? 1 : l.opacity;
+    l.standard.opacity = opacity;
+    l.standard.depthWrite = opacity >= 0.99;
+    l.mesh.visible = !l.wire;
+    if (lines) {
+      lines.visible = showLines;
+      // 面と一緒に描くときは、面と見分けられるよう同じ色を暗くする（ワイヤーだけのときはそのモデルの色）。
+      const c = (lines.material as THREE.LineBasicMaterial).color.copy(l.standard.color);
+      if (!l.wire) c.multiplyScalar(0.55);
+    }
+  }
+
+  /** 比較モデル（② ③ ④）がいくつあるか（読めなかったものも数える。data.comparisons の長さ）。 */
+  comparisonCount(): number {
+    return this.comparisons.length;
+  }
+
+  /** 比較モデル i（0 = ②）が表示できるか。 */
+  hasComparison(i: number): boolean {
+    return !!this.comparisons[i];
+  }
+
+  /**
+   * 比較モデル i（0 = ②）の重ね表示。matrix はそのモデル → ① の 4×4（行ごと）で、そのモデルをそれで動かして重ねる。
    * 省いた項目は変えない。
    */
-  setReferenceOverlay(opts: { visible?: boolean; opacity?: number; color?: string; matrix?: number[][]; wire?: boolean }): void {
-    const m = this.referenceMesh;
-    const g = this.referenceGroup;
-    if (!m || !g) return;
-    if (opts.visible !== undefined) g.visible = opts.visible;
-    if (opts.wire !== undefined) {
-      // ワイヤー表示（面を描かず、折れ目の線を ② の色で描く）。
-      m.visible = !opts.wire;
-      const lines = opts.wire ? this.referenceEdges() : this.referenceLines;
-      if (lines) lines.visible = opts.wire;
-    }
+  setComparisonOverlay(i: number, opts: { visible?: boolean; opacity?: number; color?: string; matrix?: number[][]; wire?: boolean; edges?: boolean }): void {
+    const l = this.comparisons[i];
+    if (!l) return;
+    if (opts.visible !== undefined) l.group.visible = opts.visible;
+    if (opts.wire !== undefined) l.wire = opts.wire;
+    if (opts.edges !== undefined) l.edges = opts.edges;
     if (opts.color) {
-      (m.material as THREE.MeshStandardMaterial).color.set(opts.color);
-      if (this.referenceLines) (this.referenceLines.material as THREE.LineBasicMaterial).color.set(opts.color);
+      l.standard.color.set(opts.color);
     }
-    if (opts.opacity !== undefined) {
-      const mat = m.material as THREE.MeshStandardMaterial;
-      mat.opacity = Math.max(0.05, Math.min(1, opts.opacity));
-      mat.depthWrite = mat.opacity >= 0.99;
-    }
-    if (opts.matrix && isMatrix4(opts.matrix)) {
-      const T = new THREE.Matrix4().set(...(opts.matrix.flat() as [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number]));
-      g.matrix.copy(T.invert());
-      g.matrixWorldNeedsUpdate = true;
-    }
+    if (opts.opacity !== undefined) l.opacity = Math.max(0.05, Math.min(1, opts.opacity));
+    if (opts.matrix && isMatrix4(opts.matrix)) this.setLayerMatrix(l, opts.matrix);
+    this.applyComparisonLook(l);
     this.requestRender();
+  }
+
+  /** 比較モデル i（0 = ②）の頂点ごとの偏差（位置を合わせ直したとき）。 */
+  setComparisonValues(i: number, values: Float32Array | null): void {
+    const l = this.comparisons[i];
+    if (!l) return;
+    this.fillValues(l, values);
+    this.applyComparisonLook(l);
+    this.requestRender();
+  }
+
+  /** 比較モデルを偏差の色で描く（null でそれぞれの色に戻す）。範囲と公差はすべての比較モデルで共通。 */
+  setDeviationDisplay(display: { min: number; max: number; tolerance: number } | null): void {
+    this.deviationDisplay = display;
+    for (const l of this.comparisons) if (l) this.applyComparisonLook(l);
+    this.requestRender();
+  }
+
+  /**
+   * 画面分割。models は画面ごとに映すモデル（0 = ①、1〜3 = ② ③ ④）。画面の視点（回転・拡大）はすべての画面で同じ。
+   * ① を映す画面では選択・計測などもできる（ほかの画面では回転・移動・拡大縮小と、偏差の値の表示だけ）。
+   */
+  setSplit(layout: SplitLayout, models: number[]): void {
+    const { cols, rows } = splitGrid(layout);
+    const n = cols * rows;
+    this.split = n > 1 ? layout : 'single';
+    this.paneModels = Array.from({ length: n }, (_, i) => {
+      const m = models[i];
+      return typeof m === 'number' && m >= 0 && m <= this.comparisons.length ? m : 0;
+    });
+    this.activePane = 0;
+    this.resize();
+    this.render();
+  }
+
+  /** 画面（ペイン）の並び。分けないときは 3D 表示の全体が 1 つ。 */
+  private paneRects(): PaneRect[] {
+    const W = Math.max(this.container.clientWidth, 1);
+    const H = Math.max(this.container.clientHeight, 1);
+    if (this.split === 'single') return [{ x: 0, y: 0, w: W, h: H }];
+    const { cols, rows } = splitGrid(this.split);
+    const w = W / cols;
+    const h = H / rows;
+    return this.paneModels.map((_, i) => ({ x: (i % cols) * w, y: Math.floor(i / cols) * h, w, h }));
+  }
+
+  /** 1 つの画面の大きさ（分けた画面はどれも同じ大きさ）。カメラの縦横比・線の太さの基準にする。 */
+  private viewSize(): { w: number; h: number } {
+    const r = this.paneRects()[0];
+    return { w: Math.max(r.w, 1), h: Math.max(r.h, 1) };
+  }
+
+  /** 画面 i に映すモデル（-1 = 分けていない＝すべて重ねる、0 = ①、1〜3 = ② ③ ④）。 */
+  private paneModel(i: number): number {
+    return this.split === 'single' ? -1 : (this.paneModels[i] ?? 0);
+  }
+
+  /** ブラウザの座標の点がある画面の番号。 */
+  private paneIndexAt(clientX: number, clientY: number): number {
+    if (this.split === 'single') return 0;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const i = this.paneRects().findIndex((p) => x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h);
+    return i >= 0 ? i : 0;
+  }
+
+  /** ブラウザの座標の点の、その点がある画面の中での位置（CSS ピクセル）と画面の番号。 */
+  private paneLocal(clientX: number, clientY: number): { x: number; y: number; pane: number } {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const pane = this.paneIndexAt(clientX, clientY);
+    const p = this.paneRects()[pane];
+    return { x: clientX - rect.left - p.x, y: clientY - rect.top - p.y, pane };
+  }
+
+  /** ブラウザの座標の点の、その画面の中での正規化座標。any でなければ ① を映していない画面では null（① に当てない）。 */
+  private ndcAt(clientX: number, clientY: number, any = false): THREE.Vector2 | null {
+    const { x, y, pane } = this.paneLocal(clientX, clientY);
+    if (!any && this.paneModel(pane) > 0) return null;
+    const { w, h } = this.viewSize();
+    return new THREE.Vector2((x / w) * 2 - 1, -(y / h) * 2 + 1);
+  }
+
+  /** ① の計測の文字・PMI のラベルを重ねる画面（① を映す最初の画面。どの画面にも ① が無ければ null）。 */
+  private labelPane(): PaneRect | null {
+    const rects = this.paneRects();
+    if (this.split === 'single') return rects[0];
+    const i = this.paneModels.indexOf(0);
+    return i >= 0 ? rects[i] : null;
+  }
+
+  private readonly trackPane = (e: PointerEvent | WheelEvent) => {
+    this.activePane = this.paneIndexAt(e.clientX, e.clientY);
+  };
+
+  private readonly trackPaneHover = (e: PointerEvent) => {
+    if (e.buttons === 0) this.trackPane(e);
+  };
+
+  /** マウスの下の比較モデルの点の偏差。model は画面に映すモデル（-1 なら重ねて見えているすべて）。 */
+  private comparisonValueAt(clientX: number, clientY: number, model: number): { model: number; value: number } | null {
+    const ndc = this.ndcAt(clientX, clientY, true);
+    if (!ndc) return null;
+    this.raycaster.setFromCamera(ndc, this.camera);
+    let best: { model: number; value: number; distance: number } | null = null;
+    this.comparisons.forEach((l, i) => {
+      if (!l || !l.values) return;
+      if (model > 0 ? model !== i + 1 : model === 0 || !l.group.visible) return;
+      l.group.updateMatrixWorld(true);
+      this.raycaster.layers.set(l.layer);
+      const h = this.raycaster.intersectObject(l.mesh, false).find((x) => x.face);
+      if (!h?.face || (best && best.distance <= h.distance)) return;
+      const local = l.mesh.worldToLocal(h.point.clone());
+      const p = l.positions;
+      const { a, b, c } = h.face;
+      const tri = new THREE.Triangle(
+        new THREE.Vector3().fromArray(p, a * 3),
+        new THREE.Vector3().fromArray(p, b * 3),
+        new THREE.Vector3().fromArray(p, c * 3)
+      );
+      const w = new THREE.Vector3();
+      const v = tri.getBarycoord(local, w) ? w.x * l.values[a] + w.y * l.values[b] + w.z * l.values[c] : l.values[a];
+      if (Number.isFinite(v)) best = { model: i + 1, value: v, distance: h.distance };
+    });
+    this.raycaster.layers.set(0);
+    const got = best as { model: number; value: number; distance: number } | null;
+    return got ? { model: got.model, value: got.value } : null;
   }
 
   /** ゼブラ・曲率の表示に使う法線・曲率があるか。 */
@@ -1100,13 +1362,14 @@ export class CadScene {
 
   /** 計測の文字を、各点の今の画面上の位置へ動かす（描くたびに呼ぶ）。 */
   private placeMeasureLabels(): void {
-    if (!this.measureLabels.length && !this.datumLabels.length) return;
-    const w = this.container.clientWidth;
-    const h = this.container.clientHeight;
+    const pane = this.labelPane();
+    this.labelLayer.style.display = pane ? '' : 'none';
+    if (!pane || (!this.measureLabels.length && !this.datumLabels.length)) return;
+    const { x: ox, y: oy, w, h } = pane;
     const v = new THREE.Vector3();
     for (const l of [...this.measureLabels, ...this.datumLabels]) {
       v.copy(l.at).project(this.camera);
-      l.el.style.transform = `translate(${((v.x + 1) / 2) * w}px, ${((1 - v.y) / 2) * h}px) translate(-50%, -50%)`;
+      l.el.style.transform = `translate(${ox + ((v.x + 1) / 2) * w}px, ${oy + ((1 - v.y) / 2) * h}px) translate(-50%, -50%)`;
     }
   }
 
@@ -1202,17 +1465,18 @@ export class CadScene {
 
   /** PMI のラベルと引き出し線を、今の画面上の位置へ動かす（描くたびに呼ぶ）。 */
   private placePmiLabels(): void {
-    if (!this.pmiLabels.length) return;
-    const w = this.container.clientWidth;
-    const h = this.container.clientHeight;
-    this.pmiSvg.setAttribute('width', String(w));
-    this.pmiSvg.setAttribute('height', String(h));
+    const pane = this.labelPane();
+    this.pmiLayer.style.display = pane ? '' : 'none';
+    if (!pane || !this.pmiLabels.length) return;
+    const { x: ox, y: oy, w, h } = pane;
+    this.pmiSvg.setAttribute('width', String(this.container.clientWidth));
+    this.pmiSvg.setAttribute('height', String(this.container.clientHeight));
     for (const l of this.pmiLayout(w, h)) {
-      l.label.el.style.transform = `translate(${l.x}px, ${l.y}px) translate(-50%, -50%)`;
-      l.label.line.setAttribute('x1', String(l.ax));
-      l.label.line.setAttribute('y1', String(l.ay));
-      l.label.line.setAttribute('x2', String(l.x));
-      l.label.line.setAttribute('y2', String(l.y));
+      l.label.el.style.transform = `translate(${ox + l.x}px, ${oy + l.y}px) translate(-50%, -50%)`;
+      l.label.line.setAttribute('x1', String(ox + l.ax));
+      l.label.line.setAttribute('y1', String(oy + l.ay));
+      l.label.line.setAttribute('x2', String(ox + l.x));
+      l.label.line.setAttribute('y2', String(oy + l.y));
     }
   }
 
@@ -1278,9 +1542,11 @@ export class CadScene {
 
   /** PMI のラベル（HTML で重ねているので WebGL の画面には入らない）を、撮った画面にも描く。k は CSS ピクセルからの倍率。 */
   private drawPmiLabels(ctx: CanvasRenderingContext2D, k: number): void {
-    if (!this.pmiLabels.length) return;
-    const w = this.container.clientWidth;
-    const h = this.container.clientHeight;
+    const pane = this.labelPane();
+    if (!pane || !this.pmiLabels.length) return;
+    const { w, h } = pane;
+    ctx.save();
+    ctx.translate(pane.x * k, pane.y * k);
     const size = Math.max(9, Math.round(11 * Math.max(k, 0.75)));
     ctx.font = `600 ${size}px sans-serif`;
     ctx.textAlign = 'center';
@@ -1303,6 +1569,7 @@ export class CadScene {
       ctx.fillStyle = color;
       ctx.fillText(l.label.text, l.x * k, l.y * k);
     }
+    ctx.restore();
   }
 
   /** 左下の XYZ 軸（X 赤・Y 緑・Z 青、ラベル付き）を作る。 */
@@ -1663,9 +1930,9 @@ export class CadScene {
 
   /** 計測の文字（HTML で重ねているので WebGL の画面には入らない）を、撮った画面にも描く。k は CSS ピクセルからの倍率。 */
   private drawMeasureLabels(ctx: CanvasRenderingContext2D, k: number): void {
-    if (!this.measureLabels.length && !this.datumLabels.length) return;
-    const w = this.container.clientWidth;
-    const h = this.container.clientHeight;
+    const pane = this.labelPane();
+    if (!pane || (!this.measureLabels.length && !this.datumLabels.length)) return;
+    const { x: ox, y: oy, w, h } = pane;
     const size = Math.max(9, Math.round(12 * Math.max(k, 0.75)));
     ctx.font = `600 ${size}px sans-serif`;
     ctx.textAlign = 'center';
@@ -1673,8 +1940,8 @@ export class CadScene {
     const v = new THREE.Vector3();
     for (const l of [...this.measureLabels, ...this.datumLabels]) {
       v.copy(l.at).project(this.camera);
-      const x = ((v.x + 1) / 2) * w * k;
-      const y = ((1 - v.y) / 2) * h * k;
+      const x = (ox + ((v.x + 1) / 2) * w) * k;
+      const y = (oy + ((1 - v.y) / 2) * h) * k;
       const tw = ctx.measureText(l.text).width + size * 0.8;
       ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
       ctx.fillRect(x - tw / 2, y - size * 0.75, tw, size * 1.5);
@@ -1691,23 +1958,27 @@ export class CadScene {
     // 大きさを変えると canvas の中身が消える。ResizeObserver は requestAnimationFrame の後に呼ばれるので、次のフレームで
     // 描くと消えた画面が 1 フレーム映り、大きさが行き来すると（下の行の折り返しなど）画面がちらつく。変わったときはすぐ描き直す。
     if (changed) this.renderer.setSize(w, h, false);
-    // 縦の見える範囲はそのままで、横を画面の縦横比に合わせる。
+    // 縦の見える範囲はそのままで、横を画面（分けたときは 1 つの画面）の縦横比に合わせる。
+    const view = this.viewSize();
     const halfV = this.radius;
     this.camera.top = halfV;
     this.camera.bottom = -halfV;
-    this.camera.right = halfV * (w / h);
-    this.camera.left = -halfV * (w / h);
+    this.camera.right = halfV * (view.w / view.h);
+    this.camera.left = -halfV * (view.w / view.h);
     this.camera.updateProjectionMatrix();
-    (this.edgeHighlight?.material as LineMaterial | undefined)?.resolution.set(w, h);
-    (this.originAxesLine?.material as LineMaterial | undefined)?.resolution.set(w, h);
-    (this.measureLines?.material as LineMaterial | undefined)?.resolution.set(w, h);
-    (this.datumLines?.material as LineMaterial | undefined)?.resolution.set(w, h);
-    (this.pmiGraphic?.material as LineMaterial | undefined)?.resolution.set(w, h);
+    // 太線（LineMaterial）の太さは描く画面の大きさで決まる。
+    const rw = view.w;
+    const rh = view.h;
+    (this.edgeHighlight?.material as LineMaterial | undefined)?.resolution.set(rw, rh);
+    (this.originAxesLine?.material as LineMaterial | undefined)?.resolution.set(rw, rh);
+    (this.measureLines?.material as LineMaterial | undefined)?.resolution.set(rw, rh);
+    (this.datumLines?.material as LineMaterial | undefined)?.resolution.set(rw, rh);
+    (this.pmiGraphic?.material as LineMaterial | undefined)?.resolution.set(rw, rh);
     for (const layer of Object.values(this.loops)) {
-      (layer.lines.material as LineMaterial).resolution.set(w, h);
-      (layer.highlight.material as LineMaterial).resolution.set(w, h);
+      (layer.lines.material as LineMaterial).resolution.set(rw, rh);
+      (layer.highlight.material as LineMaterial).resolution.set(rw, rh);
     }
-    (this.localAxesLine?.material as LineMaterial | undefined)?.resolution.set(w, h);
+    (this.localAxesLine?.material as LineMaterial | undefined)?.resolution.set(rw, rh);
     if (changed) this.render();
     else this.requestRender();
   }
@@ -1715,6 +1986,9 @@ export class CadScene {
   dispose(): void {
     this.resizeObserver.disconnect();
     this.controls.dispose();
+    this.container.removeEventListener('pointerdown', this.trackPane, true);
+    this.container.removeEventListener('wheel', this.trackPane, true);
+    this.container.removeEventListener('pointermove', this.trackPaneHover, true);
     const el = this.renderer.domElement;
     el.removeEventListener('pointerdown', this.handlePointerDown);
     el.removeEventListener('pointerup', this.handlePointerUp);
@@ -1737,6 +2011,10 @@ export class CadScene {
     // 面の材質は解析表示との切り替えで片方だけが付いているので、両方とも捨てる（2 回目の dispose は何もしない）。
     this.standardMaterial?.dispose();
     this.surfaceMaterial?.dispose();
+    for (const l of this.comparisons) {
+      l?.standard.dispose();
+      l?.scalar?.dispose();
+    }
     this.renderer.dispose();
     el.remove();
   }
@@ -2026,9 +2304,8 @@ export class CadScene {
     if (!layer) return null;
     const { positions: pos, ranges } = layer;
     const holes = this.loopItems(kind);
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    const x = clientX - rect.left;
-    const y = clientY - rect.top;
+    // 画面上の位置は、その点がある画面の中で比べる（project も 1 つの画面の中の位置を返す）。
+    const { x, y } = this.paneLocal(clientX, clientY);
     const p = this.project(pos);
     const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
     const tol2 = PICK_PIXELS_LINE * PICK_PIXELS_LINE;
@@ -2079,14 +2356,14 @@ export class CadScene {
 
   /** 画面の 1 ピクセルがモデルの空間でどれだけの長さか（平行投影なので奥行きによらない）。 */
   private worldPerPixel(): number {
-    const h = Math.max(this.container.clientHeight, 1);
+    const h = this.viewSize().h;
     return (this.camera.top - this.camera.bottom) / this.camera.zoom / h;
   }
 
   /** クリックした位置の、見えている面の上の点（面に当たらなければ手前のエッジ・頂点の点）。何も無ければ null。 */
   private pointAt(clientX: number, clientY: number): THREE.Vector3 | null {
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    const ndc = this.ndcAt(clientX, clientY);
+    if (!ndc) return null;
     this.raycaster.setFromCamera(ndc, this.camera);
     const hits: { distance: number; point: THREE.Vector3 }[] = [];
     if (this.mesh && this.visibility.face) {
@@ -2119,8 +2396,8 @@ export class CadScene {
    * それ以外の曲線・曲面は表示用の線・三角形の上の点なので exact = false。
    */
   private measurePointAt(clientX: number, clientY: number): MeasurePick | null {
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    const ndc = this.ndcAt(clientX, clientY);
+    if (!ndc) return null;
     this.raycaster.setFromCamera(ndc, this.camera);
     const meshHit =
       this.mesh && this.visibility.face ? this.raycaster.intersectObject(this.mesh, false).find((h) => h.faceIndex != null) : undefined;
@@ -2200,8 +2477,11 @@ export class CadScene {
   }
 
   private pickAt(clientX: number, clientY: number, mode: CadKind = this.mode): CadSelection | null {
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    const ndc = this.ndcAt(clientX, clientY);
+    if (!ndc) {
+      this.lastMeshHit = null;
+      return null;
+    }
     this.raycaster.setFromCamera(ndc, this.camera);
     const meshHit =
       this.mesh && this.visibility.face ? this.raycaster.intersectObject(this.mesh, false).find((h) => h.faceIndex != null) : undefined;
@@ -2264,11 +2544,10 @@ export class CadScene {
   // 範囲選択
   // ---------------------------------------------------------------------------
 
-  /** 点の並び（xyz の繰り返し）を画面上の位置（canvas 内のピクセル）にする。カメラの後ろの点は NaN。 */
+  /** 点の並び（xyz の繰り返し）を画面上の位置（1 つの画面＝分けたときはその画面の中のピクセル）にする。カメラの後ろの点は NaN。 */
   private project(positions: Float32Array): Float32Array {
     const m = new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse).elements;
-    const w = Math.max(this.container.clientWidth, 1);
-    const h = Math.max(this.container.clientHeight, 1);
+    const { w, h } = this.viewSize();
     const n = positions.length / 3;
     const out = new Float32Array(n * 2);
     for (let i = 0; i < n; i++) {
@@ -2459,7 +2738,13 @@ export class CadScene {
     this.boxEl.hidden = true;
     if (!down || e.button !== 0) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_MOVE_PIXELS) {
-      if (boxing && rect) this.callbacks.onBoxPick(this.boxPick(rect, this.boxMode === 'crossing'), e.ctrlKey || e.metaKey);
+      // 範囲選択は押した画面が ① を映しているときだけ。枠はその画面の中の位置にして比べる。
+      const pane = this.paneIndexAt(down.x, down.y);
+      if (boxing && rect && this.paneModel(pane) <= 0) {
+        const p = this.paneRects()[pane];
+        const r = { x0: rect.x0 - p.x, y0: rect.y0 - p.y, x1: rect.x1 - p.x, y1: rect.y1 - p.y };
+        this.callbacks.onBoxPick(this.boxPick(r, this.boxMode === 'crossing'), e.ctrlKey || e.metaKey);
+      }
       return;
     }
     if (this.zebraBasePicking) {
@@ -2510,6 +2795,9 @@ export class CadScene {
       this.setHoverMarker(pick ? (pick.type === 'point' ? pick.point : pick.center) : null);
       return;
     }
+    // 偏差の表示中は、マウスの下の比較モデルの値を出す（分けた画面では、その画面に映すモデル）。
+    const paneModel = this.paneModel(this.paneIndexAt(e.clientX, e.clientY));
+    this.callbacks.onComparisonHover?.(this.deviationDisplay && paneModel !== 0 ? this.comparisonValueAt(e.clientX, e.clientY, paneModel) : null);
     let item: CadSelection | null;
     if (this.measureTool) {
       // 計測では、拾う要素を浮かせ、点を使う計測は拾う点（角・円の上などに合わせた点）に印を出す。
@@ -2531,6 +2819,7 @@ export class CadScene {
   private readonly handlePointerLeave = () => {
     this.setHoverMarker(null);
     this.callbacks.onScalarHover?.(null);
+    this.callbacks.onComparisonHover?.(null);
     if (!this.hover) return;
     this.hover = null;
     this.hoverHoles = new Set();
@@ -2555,7 +2844,44 @@ export class CadScene {
         this.lightGuide.update(this.surfaceDisplay.zebra, this.center, this.radius);
       }
     }
-    this.renderer.render(this.scene, this.camera);
+    for (const l of this.comparisons) {
+      if (l?.scalar && l.mesh.material === l.scalar) updateSurfaceUniforms(l.scalar, this.camera, null);
+    }
+    if (this.split === 'single') {
+      // 偏差の色で比較モデルを重ねているときは、① の面を描かない（① の内側に入った部分 = 負の偏差が隠れないように。
+      // エッジは描く。当たり判定は面を描かなくても効く）。
+      const hideBase = !!this.deviationDisplay && this.comparisons.some((l) => !!l && !!l.values && l.group.visible);
+      const meshVisible = this.mesh?.visible ?? false;
+      if (hideBase && this.mesh) this.mesh.visible = false;
+      this.camera.layers.enableAll();
+      this.renderer.render(this.scene, this.camera);
+      if (this.mesh) this.mesh.visible = meshVisible;
+    } else {
+      // 画面分割: 同じカメラで、画面ごとにそのモデルのレイヤーだけを描く（比較モデルは重ねないので不透明にする）。
+      const H = Math.max(this.container.clientHeight, 1);
+      this.renderer.setScissorTest(true);
+      this.paneRects().forEach((r, i) => {
+        const model = this.paneModel(i);
+        const y = H - r.y - r.h;
+        this.renderer.setViewport(r.x, y, r.w, r.h);
+        this.renderer.setScissor(r.x, y, r.w, r.h);
+        this.camera.layers.set(Math.max(0, model));
+        const l = model > 0 ? this.comparisons[model - 1] : null;
+        const shown = l?.group.visible ?? false;
+        if (l) {
+          l.group.visible = true;
+          this.applyComparisonLook(l, true);
+        }
+        this.renderer.render(this.scene, this.camera);
+        if (l) {
+          l.group.visible = shown;
+          this.applyComparisonLook(l);
+        }
+      });
+      this.renderer.setScissorTest(false);
+      this.renderer.setViewport(0, 0, this.container.clientWidth, this.container.clientHeight);
+      this.camera.layers.enableAll();
+    }
     this.renderGizmo();
     this.placeMeasureLabels();
     this.placePmiLabels();

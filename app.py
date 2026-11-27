@@ -3501,14 +3501,14 @@ async def on_cad_viewer_sew(action: cl.Action) -> dict:
 async def on_cad_viewer_align(action: cl.Action) -> dict:
     """3D ビューア（CadViewerBar.tsx）の「位置合わせ」から呼ばれる action_callback。
 
-    基準モデル（show_cad_viewer の reference）への位置合わせをやり直し、偏差を求め直す
+    比較モデル ② ③ ④（show_cad_viewer の compare_models）の ① 基準モデルへの位置合わせをやり直し、偏差を求め直す
     （src/tools/cad_viewer.py の align_viewer_model）。偏差の値はブラウザが GET /locohane/cad/data/{values_id} で取りに来る。
 
     Args:
-        action: payload に save_id・method・faces・datums・dof・tolerance が入る。
+        action: payload に save_id・models・method・faces・datums・dof・tolerance が入る。
 
     Returns:
-        {"ok": True, "values_id", "transform", "alignment", "stats"} か {"ok": False, "error"}。
+        {"ok": True, "results": [{"model", "values_id", "transform", "alignment", "stats"}, ...], "errors"} か {"ok": False, "error"}。
     """
     from src.tools.cad_viewer import align_viewer_model
 

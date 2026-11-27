@@ -1581,15 +1581,15 @@ DESCRIPTIONS: dict[str, str] = {
         'The viewer data grows by 14 bytes per vertex and CAD tessellation takes 10-20% longer. false hides zebra and curvature in the viewer.'
     ),
     'cad_viewer.reference_deflection_ratio': (
-        'When the reference model (show_cad_viewer reference: deviation and alignment) is CAD, the tolerance for splitting it into triangles to measure deviation (ratio to the diagonal of the shape).\n'
+        'With compared models (show_cad_viewer compare_models: deviation of ②③④ from ① and alignment), the tolerance for splitting the base model ① and CAD compared models into triangles to measure deviation (ratio to the diagonal of the shape).\n'
         'The gap between a triangle chord and the curved surface becomes deviation error, so this is finer than the display linear_deflection_ratio. The default 0.0002 is about 0.04 mm for a part with a 200 mm diagonal.'
     ),
     'cad_viewer.deviation_tolerance': (
         'Deviation tolerance (±, model units). The deviation color map shows values within it in green, and the statistics include the area ratio within it. It can be changed in the viewer (this is the value when it opens).'
     ),
     'cad_viewer.datum_pad_radius': (
-        'In "Align by datums", the area that a point datum (A, B, C, D) puts onto the reference surface: the radius around the picked point (model units).\n'
-        'It is the size of a checking-fixture pad, and only the surface connected to the picked point is used. 0 or less means 1/50 of the diagonal of the reference model.\n'
+        'In "Align by datums", the area that a point datum (A, B, C, D) picked on ① puts onto the surface of the compared model: the radius around the picked point (model units).\n'
+        'It is the size of a checking-fixture pad, and only the surface connected to the picked point is used. 0 or less means 1/50 of the diagonal of the shape.\n'
         'It can be changed in the viewer ("Pad R"; this is the value when it opens).'
     ),
     'cad_viewer.datum_d_weight': (

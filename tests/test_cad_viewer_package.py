@@ -96,3 +96,27 @@ def test_not_a_package_is_rejected(tmp_path):
 def test_no_temporary_file_is_left(tmp_path):
     write_package(_sample(), tmp_path / "d.lcvd")
     assert [p.name for p in tmp_path.iterdir()] == ["d.lcvd"]
+
+
+def test_comparisons_are_bytes_and_base_surface_is_not_sent(tmp_path) -> None:
+    data = _sample()
+    cmp = {
+        "positions": _b64(np.arange(9, dtype="<f4") + 1),
+        "indices": _b64(np.arange(3, dtype="<u4")),
+        "source": {"format": "STL", "path": "C:/data/b.stl"},
+        "deviation": {"values": _b64(np.array([0.1, 0.2, 0.3], dtype="<f4")), "transform": np.eye(4).tolist()},
+    }
+    data["comparisons"] = [cmp, {"source": {"path": "C:/data/c.stl"}, "error": "bad"}]
+    data["baseSurface"] = {"positions": _b64(np.zeros(9, dtype="<f4")), "indices": _b64(np.arange(3, dtype="<u4"))}
+    path = tmp_path / "p.lcvd"
+    write_package(data, path)
+    raw = path.read_bytes()
+    header = json.loads(raw[12 : 12 + struct.unpack_from("<I", raw, 8)[0]].decode("utf-8"))
+    paths = [b["path"] for b in header["blobs"] if b["type"] == "bytes"]
+    assert ["comparisons", 0, "positions"] in paths and ["comparisons", 0, "deviation", "values"] in paths
+    assert "baseSurface" not in header["data"] and header["data"]["comparisons"][1]["error"] == "bad"
+    back = read_package(path)
+    assert back["comparisons"][0]["positions"] == cmp["positions"]
+    assert back["comparisons"][0]["deviation"]["values"] == cmp["deviation"]["values"]
+    # 元のデータは書き換えない。
+    assert data["comparisons"][0]["positions"] == cmp["positions"]

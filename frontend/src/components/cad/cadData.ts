@@ -354,20 +354,11 @@ export interface CadData {
    * mesh の頂点と同じ並び。method は exact（B-rep の正確な値）・mesh（三角形から推定）・mixed。
    */
   analysis?: { normals: CadBuffer; k1: CadBuffer; k2: CadBuffer; method?: string; summary?: Record<string, unknown> };
-  /** 基準モデル（show_cad_viewer の reference）の三角形（src/cad/reference.py）。 */
-  reference?: CadTriangles & { source?: { format?: string; path?: string }; triangles?: number; chordTolerance?: number };
   /**
-   * 基準モデルとの偏差。values は mesh の頂点ごとの符号付き距離（float32。正 = 基準の外側）、transform は
-   * 対象 → 基準の 4×4（行ごと）。error があれば基準モデルを読めなかった。
+   * 比較モデル ② ③ ④（show_cad_viewer の compare_models。src/cad/reference.py）。この data（①）が基準で、偏差は
+   * それぞれのモデルの頂点から ① の表面までの距離。読めなかったモデルは error だけを持つ（並びの位置は ② ③ ④ のまま）。
    */
-  deviation?: {
-    values?: CadBuffer;
-    transform?: number[][];
-    alignment?: CadAlignmentInfo;
-    tolerance?: number;
-    stats?: CadDeviationStats;
-    error?: string;
-  };
+  comparisons?: CadComparison[];
   /** 「保存」で書いたデータにある、保存したときの表示（隠した部品・種類ごとの表示）。 */
   viewState?: {
     hiddenParts?: number[];
@@ -375,6 +366,66 @@ export interface CadData {
     /** 自動保存・保存したときの「元に戻す」「やり直す」の履歴（開き直しても続きから戻せる。CadViewerBar.tsx）。 */
     history?: CadSavedHistory;
   };
+}
+
+/** 比較モデル 1 つ（data.comparisons の要素）。 */
+export interface CadComparison extends Partial<CadTriangles> {
+  source?: { format?: string; path?: string };
+  triangles?: number;
+  bbox?: { min: number[]; max: number[]; size: number[] };
+  chordTolerance?: number;
+  /**
+   * ① からの偏差。values はこのモデルの頂点ごとの符号付き距離（float32。正 = ① の外側）、transform は
+   * このモデル → ① の 4×4（行ごと）。
+   */
+  deviation?: {
+    values?: CadBuffer;
+    transform?: number[][];
+    alignment?: CadAlignmentInfo;
+    tolerance?: number;
+    stats?: CadDeviationStats;
+  };
+  error?: string;
+}
+
+/** モデルの印（0 = ① 基準モデル、1〜3 = ② ③ ④ 比較モデル）。 */
+export const MODEL_MARKS = ['①', '②', '③', '④'];
+
+/**
+ * 画面分割。lr は左右（横に並べる）、tb は上下（縦に並べる）に 2〜4 分割、grid4 は上下左右の 4 分割。
+ * 画面の番号は左上から右へ、次の段へ（grid4 は 左上・右上・左下・右下）。
+ */
+export type SplitLayout = 'single' | 'lr2' | 'lr3' | 'lr4' | 'tb2' | 'tb3' | 'tb4' | 'grid4';
+export const SPLIT_LAYOUTS: SplitLayout[] = ['single', 'lr2', 'lr3', 'lr4', 'tb2', 'tb3', 'tb4', 'grid4'];
+
+/** 画面分割の列と段の数。 */
+export function splitGrid(layout: SplitLayout): { cols: number; rows: number } {
+  switch (layout) {
+    case 'lr2':
+      return { cols: 2, rows: 1 };
+    case 'lr3':
+      return { cols: 3, rows: 1 };
+    case 'lr4':
+      return { cols: 4, rows: 1 };
+    case 'tb2':
+      return { cols: 1, rows: 2 };
+    case 'tb3':
+      return { cols: 1, rows: 3 };
+    case 'tb4':
+      return { cols: 1, rows: 4 };
+    case 'grid4':
+      return { cols: 2, rows: 2 };
+    default:
+      return { cols: 1, rows: 1 };
+  }
+}
+
+/** モデルが n 個（① を含む）あるときに使える画面分割（画面の数がモデルの数以下のもの）。 */
+export function splitLayoutsFor(n: number): SplitLayout[] {
+  return SPLIT_LAYOUTS.filter((l) => {
+    const { cols, rows } = splitGrid(l);
+    return cols * rows <= Math.max(1, n);
+  });
 }
 
 /** 位置合わせの記録（src/cad/align.py の align の戻り値）。 */
@@ -740,7 +791,8 @@ const PACKAGE_MAGIC = 'LCVD';
 const PACKAGE_VERSION = 1;
 
 interface PackageBlob {
-  path: string[];
+  /** 比較モデルの項目は並びの番号を含む（例 ["comparisons", 0, "positions"]）。 */
+  path: (string | number)[];
   type: 'bytes' | 'json';
   offset: number;
   length: number;
@@ -771,6 +823,7 @@ export function parseCadPackage(buffer: ArrayBuffer): CadData {
       if (typeof node[key] !== 'object' || node[key] === null) node[key] = {};
       node = node[key] as Record<string, unknown>;
     }
+    // 並びの番号（数）も、配列の添字としてそのまま使える。
     const last = blob.path[blob.path.length - 1];
     if (blob.type === 'bytes') {
       node[last] = bytes;

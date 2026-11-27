@@ -7,9 +7,9 @@
 ビューアの「保存」は ``--export <ビューア用データ> --out <CADファイル>``、「縫合」は
 ``--topology <ビューア用データ> --out <JSON> --options '{"hole_tolerance": .., "sew_tolerance": ..}'``。
 
-基準モデル（options の reference・align）との位置合わせと偏差を、できたビューア用データに足す場合::
+比較モデル（options の compare_models・align）を ① に合わせた位置と偏差を、できたビューア用データに足す場合::
 
-    python run_cad.py --reference <ビューア用データの JSON> --out <JSON> --options '<JSON>'
+    python run_cad.py --compare <ビューア用データの JSON> --out <JSON> --options '<JSON>'
 
 CadQuery コードの場合は、ツールが「書き込みガード + CODE_PROLOGUE + 利用者のコード + CODE_EPILOGUE」を 1 つの
 スクリプトにして実行する。コードは ``result`` 変数に形を入れるか、``show_object(形)`` を呼ぶ
@@ -195,22 +195,22 @@ def _topology(data_path: str, out_path: str, raw: dict[str, Any]) -> None:
     print(f"{OK_MARKER} {json.dumps(out['stats'])}")
 
 
-def _reference(data_path: str, out_path: str, raw: dict[str, Any]) -> None:
-    """ビューア用データに基準モデル（options の reference）との位置合わせ・偏差を足して --out に書く（src/cad/reference.py）。
+def _compare(data_path: str, out_path: str, raw: dict[str, Any]) -> None:
+    """ビューア用データに比較モデル（options の compare_models）を ① に合わせた位置・偏差を足して --out に書く（src/cad/reference.py）。
 
-    基準モデルが読めなくても形は表示するので、失敗は deviation.error に入れて終了コード 0 で終える。
+    比較モデルが読めなくても形は表示するので、失敗はそのモデルの error に入れて終了コード 0 で終える。
     """
-    from src.cad.reference import attach_reference
+    from src.cad.reference import attach_comparisons
 
     try:
         data = json.loads(Path(data_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         _fail(f"Error: could not read the viewer data {data_path}: {e}")
         return
-    attach_reference(data, raw)
+    attach_comparisons(data, raw, data_path)
     write_viewer_json(data, out_path)
-    dev = data.get("deviation") or {}
-    print(f"{OK_MARKER} {json.dumps({'error': dev.get('error')} if dev.get('error') else {'stats': dev.get('stats')}, ensure_ascii=False)}")
+    summary = [{"error": c["error"]} if c.get("error") else {"stats": (c.get("deviation") or {}).get("stats")} for c in data.get("comparisons") or []]
+    print(f"{OK_MARKER} {json.dumps(summary, ensure_ascii=False)}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -219,7 +219,7 @@ def main(argv: list[str] | None = None) -> None:
     group.add_argument("--file")
     group.add_argument("--export", help="変更を反映したビューア用データの JSON。--out に 3D モデルを書き出す。")
     group.add_argument("--topology", help="ビューア用データの JSON。穴・外周・面のまとまりを求め直して --out に書く（縫合）。")
-    group.add_argument("--reference", help="ビューア用データの JSON。options の reference（基準モデル）との偏差を足して --out に書く。")
+    group.add_argument("--compare", help="ビューア用データの JSON。options の compare_models（② ③ ④）の ① からの偏差を足して --out に書く。")
     parser.add_argument("--out", required=True)
     parser.add_argument("--options", default="{}")
     args = parser.parse_args(argv)
@@ -230,8 +230,8 @@ def main(argv: list[str] | None = None) -> None:
         _topology(args.topology, args.out, json.loads(args.options))
         return
     raw = json.loads(args.options)
-    if args.reference:
-        _reference(args.reference, args.out, raw)
+    if args.compare:
+        _compare(args.compare, args.out, raw)
         return
     path = Path(args.file)
     fmt = format_of(path)

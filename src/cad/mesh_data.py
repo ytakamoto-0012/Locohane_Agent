@@ -20,9 +20,11 @@
   "localAxes": [{"origin", "x", "y", "z", ...}, ...],
   // ゼブラ・曲率の表示に使う頂点ごとの法線と主曲率（src/cad/analysis.py。[cad_viewer] surface_analysis）。
   "analysis": {"normals": <int16 base64>, "k1": <float32 base64>, "k2": <float32 base64>, "method", "summary"},
-  // 基準モデルと、mesh の頂点ごとの偏差（show_cad_viewer の reference。src/cad/reference.py）。
-  "reference": {"positions", "indices", "source", "triangles", "bbox", "chordTolerance"},
-  "deviation": {"values": <float32 base64>, "transform": 4×4, "alignment", "tolerance", "stats"} | {"error"}
+  // 比較モデル ② ③ ④ と、その頂点ごとの ① からの偏差（show_cad_viewer の compare_models。src/cad/reference.py）。
+  "comparisons": [{"positions", "indices", "source", "triangles", "bbox", "chordTolerance",
+                   "deviation": {"values": <float32 base64>, "transform": 4×4（そのモデル → ①）, "alignment", "tolerance", "stats"}}
+                  | {"source", "error"}, ...],
+  "baseSurface": {"positions", "indices", "chordTolerance"}  // 偏差を測る ① の細かい三角形（① が CAD のとき。ブラウザへは送らない）
 }
 ```
 

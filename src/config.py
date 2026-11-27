@@ -1173,12 +1173,12 @@ class Config:
             0 以下でキャッシュを使わない。
         cad_viewer_surface_analysis: ゼブラ・曲率の表示に使う頂点ごとの法線と主曲率を求めるか
             （[cad_viewer].surface_analysis。src/cad/analysis.py）。
-        cad_viewer_reference_deflection_ratio: 基準モデル（show_cad_viewer の reference）が CAD のとき、偏差を測るために
-            三角形に分ける許容差（形の対角線に対する割合。[cad_viewer].reference_deflection_ratio）。
+        cad_viewer_reference_deflection_ratio: 比較モデル（show_cad_viewer の compare_models）と比べるとき、① 基準モデル・比較モデルが
+            CAD なら偏差を測るために三角形に分ける許容差（形の対角線に対する割合。[cad_viewer].reference_deflection_ratio）。
         cad_viewer_deviation_tolerance: 偏差の公差（±、モデルの単位。[cad_viewer].deviation_tolerance）。
             偏差のカラーマップで公差内を緑にし、統計に公差内の割合を入れる。ビューアで変えられる。
-        cad_viewer_datum_pad_radius: データムで合わせるとき、点のデータムで基準の表面に当てる範囲（クリックした点の周りの
-            半径、モデルの単位。[cad_viewer].datum_pad_radius）。0 以下なら基準モデルの対角線の 1/50。ビューアで変えられる。
+        cad_viewer_datum_pad_radius: データムで合わせるとき、① の上の点のデータムで比較モデルの表面に当てる範囲（クリックした点の周りの
+            半径、モデルの単位。[cad_viewer].datum_pad_radius）。0 以下なら形の対角線の 1/50。ビューアで変えられる。
         cad_viewer_datum_d_weight: データム D を「優先」で使うときの D の重み（A・B・C を 1 として。[cad_viewer].datum_d_weight）。
         show_cad_viewer_timeout_seconds: 3D ビューアで利用者が確定・閉じるのを待つ秒数（3D ビューア専用。
             [cad_viewer].timeout_seconds、既定 3600。無ければ以前の [user_response_timeouts].show_cad_viewer_seconds）。

@@ -348,17 +348,28 @@ export function ScalarLegend({ title, min, max, tolerance, scheme }: { title: st
 
 export type AlignState = { kind: 'idle' } | { kind: 'busy' } | { kind: 'error'; message: string };
 
+/** 比較モデル 1 つの、位置合わせの結果（mark は ②③④）。 */
+export interface AlignResult {
+  mark: string;
+  info: CadAlignmentInfo | null;
+  stats: CadDeviationStats | null;
+}
+
 interface AlignProps {
   canAlign: boolean;
   state: AlignState;
-  info: CadAlignmentInfo | null;
-  stats: CadDeviationStats | null;
+  /** 比較モデルごとの結果（②③④ の順。偏差の無いモデルは省く）。 */
+  results: AlignResult[];
+  /** 合わせ直せる比較モデル（model は data.comparisons の位置、0 = ②）と、合わせ直すモデル（-1 = すべて）。 */
+  targets: { model: number; mark: string; name: string }[];
+  target: number;
+  onTarget: (model: number) => void;
   datums: Datums;
   selectedFaces: number;
-  referenceVisible: boolean;
-  onReferenceVisible: (v: boolean) => void;
-  referenceOpacity: number;
-  onReferenceOpacity: (v: number) => void;
+  overlayVisible: boolean;
+  onOverlayVisible: (v: boolean) => void;
+  overlayOpacity: number;
+  onOverlayOpacity: (v: number) => void;
   /** 次にクリックして拾うデータム（null なら拾っていない）。A〜D は点、H1・H2 は基準穴を拾う。 */
   datumPicking: DatumName | null;
   onPickDatum: (name: DatumName | null) => void;
@@ -369,34 +380,49 @@ interface AlignProps {
   onPadRadius: (v: number) => void;
   onClearDatums: () => void;
   onAlign: (method: 'bestfit' | 'faces' | 'datum' | 'reset' | 'initial') => void;
-  referenceName: string;
 }
 
-/** 基準モデルの重ね表示と位置合わせの行、合わせた結果（RMS・偏差の統計）。 */
+/** 比較モデルの重ね表示と、① への位置合わせの行、合わせた結果（比較モデルごとの RMS・偏差の統計）。 */
 export function AlignRow(p: AlignProps) {
   const { t } = useI18n();
   const busy = p.state.kind === 'busy';
   const hasDatum = DATUM_NAMES.some((n) => p.datums[n]);
-  const reports = p.info?.method === 'datum' ? (p.info.datums ?? {}) : {};
   const pct = (v: number | undefined) => (typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : '—');
-  const s = p.stats;
   return (
     <div className="cad-viewer-align">
       <div className="cad-viewer-measure-bar cad-viewer-analysis-bar" role="group" aria-label={t('cad.align')}>
-        <span className="cad-viewer-chip cad-viewer-ref-name" title={p.referenceName}>
-          {t('cad.align.reference')}: {p.referenceName.split(/[\\/]/).pop()}
-        </span>
+        {p.canAlign && p.targets.length > 1 && (
+          <>
+            <span className="cad-viewer-row-label" title={t('cad.align.targetTitle')}>
+              {t('cad.align.target')}
+            </span>
+            {[{ model: -1, mark: t('cad.align.targetAll'), name: '' }, ...p.targets].map((x) => (
+              <button
+                key={x.model}
+                type="button"
+                className={`cad-viewer-chip${p.target === x.model ? ' active' : ''}`}
+                aria-pressed={p.target === x.model}
+                disabled={busy}
+                title={x.name || t('cad.align.targetTitle')}
+                onClick={() => p.onTarget(x.model)}
+              >
+                {x.mark}
+              </button>
+            ))}
+            <span className="cad-viewer-sep" />
+          </>
+        )}
         <button
           type="button"
-          className={`cad-viewer-chip${p.referenceVisible ? ' active' : ''}`}
-          aria-pressed={p.referenceVisible}
+          className={`cad-viewer-chip${p.overlayVisible ? ' active' : ''}`}
+          aria-pressed={p.overlayVisible}
           title={t('cad.align.overlayTitle')}
-          onClick={() => p.onReferenceVisible(!p.referenceVisible)}
+          onClick={() => p.onOverlayVisible(!p.overlayVisible)}
         >
           {t('cad.align.overlay')}
         </button>
-        {p.referenceVisible && (
-          <NumberField label={t('cad.align.opacity')} value={p.referenceOpacity} step={0.05} min={0.05} max={1} onChange={p.onReferenceOpacity} />
+        {p.overlayVisible && (
+          <NumberField label={t('cad.align.opacity')} value={p.overlayOpacity} step={0.05} min={0.05} max={1} onChange={p.onOverlayOpacity} />
         )}
         {p.canAlign && (
           <>
@@ -425,7 +451,7 @@ export function AlignRow(p: AlignProps) {
       </div>
       {p.canAlign && (
         <div className="cad-viewer-measure-bar cad-viewer-analysis-bar" role="group" aria-label={t('cad.align.datums')}>
-          <span className="cad-viewer-chip cad-viewer-ref-name">{t('cad.align.datums')}</span>
+          <span className="cad-viewer-row-label">{t('cad.align.datums')}</span>
           {POINT_DATUM_NAMES.map((n) => {
             const d = p.datums[n];
             const picking = p.datumPicking === n;
@@ -445,7 +471,7 @@ export function AlignRow(p: AlignProps) {
             );
           })}
           <span className="cad-viewer-sep" />
-          <span className="cad-viewer-chip cad-viewer-ref-name" title={t('cad.align.holesTitle')}>
+          <span className="cad-viewer-row-label" title={t('cad.align.holesTitle')}>
             {t('cad.align.holes')}
           </span>
           {HOLE_DATUM_NAMES.map((n) => {
@@ -516,43 +542,51 @@ export function AlignRow(p: AlignProps) {
           <span className="cad-viewer-align-error">{t('cad.align.failed', { error: p.state.message })}</span>
         ) : (
           <>
-            {p.info && (
-              <span>
-                {t(`cad.align.method.${p.info.method}` as MessageKey)}
-                {p.info.method === 'datum' && p.info.datum_mode ? ` (${t(`cad.align.mode.${p.info.datum_mode}` as MessageKey)})` : ''}
-                {typeof p.info.rms === 'number' ? `  RMS ${fmtNum(p.info.rms)}` : ''}
-              </span>
-            )}
-            {DATUM_NAMES.map((n) => {
-              const r = reports[n];
-              if (r?.type !== 'hole') return null;
-              const name = datumLabel(n, t);
+            {p.results.map(({ mark, info, stats: s }) => {
+              const reports = info?.method === 'datum' ? (info.datums ?? {}) : {};
               return (
-                <span key={`hole-${n}`} className={r.pin_larger_than_hole ? 'cad-viewer-align-error' : undefined}>
-                  {r.pin_larger_than_hole
-                    ? t('cad.align.holePinLarger', { name, pin: fmtNum(r.pin ?? NaN), hole: fmtNum(r.diameter ?? NaN) })
-                    : r.shape
-                    ? t('cad.align.holeResultProfile', { name, offset: fmtNum(r.offset ?? NaN), clearance: fmtNum(r.clearance ?? NaN) })
-                    : t('cad.align.holeResult', {
-                        name,
-                        offset: fmtNum(r.offset ?? NaN),
-                        clearance: fmtNum(r.clearance ?? NaN),
-                        nominal: fmtNum(r.nominal_diameter ?? NaN)
+                <span key={mark} className="cad-viewer-align-model">
+                  {info && (
+                    <span>
+                      {mark} {t(`cad.align.method.${info.method}` as MessageKey)}
+                      {info.method === 'datum' && info.datum_mode ? ` (${t(`cad.align.mode.${info.datum_mode}` as MessageKey)})` : ''}
+                      {typeof info.rms === 'number' ? `  RMS ${fmtNum(info.rms)}` : ''}
+                    </span>
+                  )}
+                  {DATUM_NAMES.map((n) => {
+                    const r = reports[n];
+                    if (r?.type !== 'hole') return null;
+                    const name = datumLabel(n, t);
+                    return (
+                      <span key={`hole-${n}`} className={r.pin_larger_than_hole ? 'cad-viewer-align-error' : undefined}>
+                        {r.pin_larger_than_hole
+                          ? t('cad.align.holePinLarger', { name, pin: fmtNum(r.pin ?? NaN), hole: fmtNum(r.diameter ?? NaN) })
+                          : r.shape
+                          ? t('cad.align.holeResultProfile', { name, offset: fmtNum(r.offset ?? NaN), clearance: fmtNum(r.clearance ?? NaN) })
+                          : t('cad.align.holeResult', {
+                              name,
+                              offset: fmtNum(r.offset ?? NaN),
+                              clearance: fmtNum(r.clearance ?? NaN),
+                              nominal: fmtNum(r.nominal_diameter ?? NaN)
+                            })}
+                      </span>
+                    );
+                  })}
+                  {s && (
+                    <span>
+                      {info ? '' : `${mark} `}
+                      {t('cad.align.stats', {
+                        mean: fmtNum(s.mean ?? NaN),
+                        std: fmtNum(s.std ?? NaN),
+                        min: fmtNum(s.min ?? NaN),
+                        max: fmtNum(s.max ?? NaN),
+                        within: pct(s.within_tolerance_ratio)
                       })}
+                    </span>
+                  )}
                 </span>
               );
             })}
-            {s && (
-              <span>
-                {t('cad.align.stats', {
-                  mean: fmtNum(s.mean ?? NaN),
-                  std: fmtNum(s.std ?? NaN),
-                  min: fmtNum(s.min ?? NaN),
-                  max: fmtNum(s.max ?? NaN),
-                  within: pct(s.within_tolerance_ratio)
-                })}
-              </span>
-            )}
           </>
         )}
       </div>

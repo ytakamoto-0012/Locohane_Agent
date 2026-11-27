@@ -1296,7 +1296,7 @@ def test_point_to_edge_measurement_is_accepted() -> None:
 
 
 # ---------------------------------------------------------------------------
-# reference（基準モデルとの位置合わせ・偏差。src/cad/reference.py・src/cad/align.py）
+# compare_models（② ③ ④ の ① への位置合わせ・偏差。src/cad/reference.py・src/cad/align.py）
 # ---------------------------------------------------------------------------
 
 
@@ -1327,79 +1327,116 @@ def _write_stl(path, triangles: np.ndarray) -> str:
 
 
 @pytest.mark.asyncio
-async def test_reference_bestfit_and_realign_from_the_viewer(env, tmp_path) -> None:
+async def test_compare_models_bestfit_and_realign_from_the_viewer(env, tmp_path) -> None:
     pos, tris = _box_mesh(40, 20, 10)
-    ref = _write_stl(tmp_path / "nominal.stl", pos[tris])
+    nominal = _write_stl(tmp_path / "nominal.stl", pos[tris])
     T_true = np.eye(4)
     T_true[:3, 3] = [1.0, -0.5, 0.25]
     scan = _write_stl(tmp_path / "scan.stl", _moved(T_true, pos)[tris])
+    wide = _write_stl(tmp_path / "wide.stl", (pos * [1.01, 1, 1])[tris])
 
     async def on_show(props):
         data = props["data"]
         assert props["can_align"] is True and props["deviation_tolerance"] == pytest.approx(0.1)
-        # ビューアへ渡すパッケージに、法線・曲率と基準モデル・偏差が入る。
-        assert data["analysis"]["k1"] and data["reference"]["indices"] and data["deviation"]["values"]
-        res = await cad_viewer.align_viewer_model({"save_id": props["save_id"], "method": "reset"})
-        assert res["ok"] and res["alignment"]["method"] == "none"
-        package = cad_viewer.viewer_package(res["values_id"])
+        # ① は基準（偏差を持たない）。② ③ はそれぞれの頂点の ① からの偏差を持つ。ブラウザへは ① の細かい三角形を送らない。
+        assert "baseSurface" not in data and "deviation" not in data
+        assert len(data["comparisons"]) == 2
+        assert all(c["indices"] and c["deviation"]["values"] for c in data["comparisons"])
+        res = await cad_viewer.align_viewer_model({"save_id": props["save_id"], "models": [0], "method": "reset"})
+        assert res["ok"] and [r["model"] for r in res["results"]] == [0] and res["results"][0]["alignment"]["method"] == "none"
+        package = cad_viewer.viewer_package(res["results"][0]["values_id"])
         values = np.frombuffer(package.path.read_bytes(), dtype="<f4")
         assert np.abs(values).max() > 0.2  # 合わせる前はずれている
-        res = await cad_viewer.align_viewer_model({"save_id": props["save_id"], "method": "bestfit", "tolerance": 0.05})
-        assert res["ok"] and res["stats"]["within_tolerance_ratio"] == 1.0
-        assert np.allclose(res["transform"]["translation"], T_true[:3, 3], atol=1e-3)
+        res = await cad_viewer.align_viewer_model({"save_id": props["save_id"], "models": [0], "method": "bestfit", "tolerance": 0.05})
+        r = res["results"][0]
+        assert res["ok"] and r["stats"]["within_tolerance_ratio"] == 1.0
+        # 変換は ② → ①（② は ① を T_true の逆で動かしたもの）。
+        assert np.allclose(r["transform"]["translation"], T_true[:3, 3], atol=1e-3)
         bad = await cad_viewer.align_viewer_model({"save_id": props["save_id"], "method": "datum"})
         assert bad["ok"] is False and "datum" in bad["error"]
-        return res["values_id"]
+        none = await cad_viewer.align_viewer_model({"save_id": props["save_id"], "models": [5], "method": "bestfit"})
+        assert none["ok"] is False
+        return r["values_id"]
 
     _viewer.on_show = on_show
     _viewer.response = {"submitted": True, "selected": [{"kind": "face", "id": 0}], "deviation_tolerance": 0.05}
-    out = json.loads(await _call(file_path=scan, reference=ref, align="none"))
+    out = json.loads(await _call(file_path=nominal, compare_models=[scan, wide], align="none"))
     cmp = out["comparison"]
-    assert cmp["alignment"]["method"] == "bestfit"
-    assert cmp["deviation"]["tolerance"] == 0.05 and cmp["deviation"]["within_tolerance_ratio"] == 1.0
-    assert set(cmp["selected_faces"]) == {"0"}
-    assert out["model"]["curvature"]["method"] == "mesh"
+    assert cmp["base"].endswith("nominal.stl") and cmp["tolerance"] == 0.05
+    second, third = cmp["models"]
+    assert second["model"] == "②" and second["path"].endswith("scan.stl")
+    assert second["alignment"]["method"] == "bestfit" and second["deviation"]["within_tolerance_ratio"] == 1.0
+    assert set(second["selected_faces"]) == {"0"}
+    # ③ は x が 1.01 倍: ① の外に最大 0.4 出る（正 = 肉が多い）。
+    assert third["model"] == "③" and third["alignment"]["method"] == "none"
+    assert third["deviation"]["max"] == pytest.approx(0.4, abs=1e-3) and third["deviation"]["min"] >= -1e-6
     # 閉じたら偏差の値のファイルは片付ける。合わせ直した位置は自動保存したビューア用データに残る。
     assert cad_viewer.viewer_package(_viewer.on_show_result) is None
     saved = json.loads(open(out["viewer_data"], encoding="utf-8").read())
-    assert np.allclose(np.array(saved["deviation"]["transform"])[:3, 3], T_true[:3, 3], atol=1e-3)
+    assert np.allclose(np.array(saved["comparisons"][0]["deviation"]["transform"])[:3, 3], T_true[:3, 3], atol=1e-3)
 
 
 @pytest.mark.asyncio
-async def test_reference_swap_models_reopens_with_roles_reversed(env, tmp_path) -> None:
+async def test_compare_models_swap_makes_the_chosen_model_the_base(env, tmp_path) -> None:
     pos, tris = _box_mesh(40, 20, 10)
-    ref = _write_stl(tmp_path / "nominal.stl", pos[tris])
+    nominal = _write_stl(tmp_path / "nominal.stl", pos[tris])
     scan = _write_stl(tmp_path / "scan.stl", (pos * [1.01, 1, 1])[tris])
+    wide = _write_stl(tmp_path / "wide.stl", (pos * [1.02, 1, 1])[tris])
 
     async def on_show(props):
-        # 1 回目は「①⇔② 入れ替え」、2 回目（入れ替えて開き直したビューア）で確定する。
+        # 1 回目は ③ を「① にする」、2 回目（入れ替えて開き直したビューア）で確定する。
         if len(_viewer.shown) == 1:
-            _viewer.response = {"submitted": False, "selected": [], "swap_models": True}
+            _viewer.response = {"submitted": False, "selected": [], "swap_models": 1}
         else:
             _viewer.response = {"submitted": True, "selected": [{"kind": "face", "id": 0}]}
         return props["data"]["bbox"]["size"][0]
 
     _viewer.on_show = on_show
-    text = await _call(file_path=scan, reference=ref, align="none")
+    text = await _call(file_path=nominal, compare_models=[scan, wide], align="none")
     assert len(_viewer.shown) == 2
     first, second = (s["data"] for s in _viewer.shown)
-    # 1 回目は scan（幅 40.4）が ①、2 回目は nominal（幅 40）が ① で、scan が ② になる。
-    assert first["bbox"]["size"][0] == pytest.approx(40.4) and second["bbox"]["size"][0] == pytest.approx(40)
-    assert second["reference"]["bbox"]["size"][0] == pytest.approx(40.4) and second["deviation"]["values"]
-    assert "swapped the models" in text and "nominal.stl" in text.split("swapped the models", 1)[1].splitlines()[0]
+    # 1 回目は nominal（幅 40）が ①、2 回目は wide（幅 40.8）が ① で、nominal が ③ の位置に入る。
+    assert first["bbox"]["size"][0] == pytest.approx(40) and second["bbox"]["size"][0] == pytest.approx(40.8)
+    assert second["comparisons"][1]["bbox"]["size"][0] == pytest.approx(40) and second["comparisons"][1]["deviation"]["values"]
+    assert second["comparisons"][0]["bbox"]["size"][0] == pytest.approx(40.4)
+    assert "swapped ① and ③" in text
     # 入れ替えは「閉じた」とチャットに出さない。
     assert len(_viewer.echoed) == 1
     out = json.loads(text.split("\n", 1)[1])
-    assert out["comparison"]["reference"]["path"].endswith("scan.stl")
+    assert out["comparison"]["base"].endswith("wide.stl")
+    assert [m["path"].rsplit("\\", 1)[-1].rsplit("/", 1)[-1] for m in out["comparison"]["models"]] == ["scan.stl", "nominal.stl"]
 
 
 @pytest.mark.asyncio
-async def test_reference_errors(env, tmp_path) -> None:
+async def test_compare_models_errors(env, tmp_path) -> None:
     pos, tris = _box_mesh(10, 10, 10)
     scan = _write_stl(tmp_path / "scan.stl", pos[tris])
-    assert (await _call(file_path=scan, reference=str(tmp_path / "none.stl"))).startswith("Error: reference: the file does not exist")
+    out = await _call(file_path=scan, compare_models=[str(tmp_path / "none.stl")])
+    assert out.startswith("Error: compare_models ②: the file does not exist")
     dxf = tmp_path / "a.dxf"
     dxf.write_text("0\nEOF\n")
-    assert "a DXF is 2D" in await _call(file_path=scan, reference=str(dxf))
-    assert "align must be" in await cad_viewer._show_cad_viewer("q", scan, "", None, {}, "", scan, "nope")
+    assert "a DXF is 2D" in await _call(file_path=scan, compare_models=[scan, str(dxf)])
+    assert "at most 3 models" in await _call(file_path=scan, compare_models=[scan] * 4)
+    assert "align must be" in await cad_viewer._show_cad_viewer("q", scan, "", None, {}, "", [scan], "nope")
     assert _viewer.shown == []
+
+
+@pytest.mark.asyncio
+async def test_compare_models_swap_with_the_second_model_is_not_a_close(env, tmp_path) -> None:
+    # ② の位置は 0（False と取り違えて「閉じた」にしない）。
+    pos, tris = _box_mesh(40, 20, 10)
+    nominal = _write_stl(tmp_path / "nominal.stl", pos[tris])
+    scan = _write_stl(tmp_path / "scan.stl", (pos * [1.01, 1, 1])[tris])
+
+    async def on_show(props):
+        if len(_viewer.shown) == 1:
+            _viewer.response = {"submitted": False, "selected": [], "swap_models": 0}
+        else:
+            _viewer.response = {"submitted": True, "selected": []}
+        return None
+
+    _viewer.on_show = on_show
+    text = await _call(file_path=nominal, compare_models=[scan])
+    assert len(_viewer.shown) == 2 and "swapped ① and ②" in text
+    assert _viewer.shown[1]["data"]["bbox"]["size"][0] == pytest.approx(40.4)
+    assert len(_viewer.echoed) == 1

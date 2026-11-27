@@ -241,6 +241,7 @@ switch between "Face", "Edge" and "Vertex" ("Part" for an assembly), click to se
 For an open surface or STL, "Hole" finds the holes inside the faces: hovering a hole highlights the holes facing the same way, and a click selects them together.
 "Outer boundary" shows and selects the outer boundary of each group of connected faces.
 When the model has lines of length 100, 200 and 300 at right angles from one point, "Coordinates" switches the view and the coordinates to that local system.
+Up to 4 models (the base model ① plus scans or other versions ②–④) can be loaded together, overlaid or shown side by side in a split view (left / right, top / bottom or 2 × 2); ②–④ show their deviation from ① in color and can be re-aligned to ①.
 For details, see "3D viewer (CAD)" in [README_DETAIL.en.md](README_DETAIL.en.md).
 
 ### Resume past conversations

@@ -3,7 +3,7 @@
  * 「選択」タブ: 選んでいる要素のタグの一覧（中身は CadViewerBar から selectionPanel で受け取る）
  * 「表示」タブ:
  * - 表示: 面・エッジ・頂点の表示／非表示
- * - 比較モデル: 基準モデルと比べるときの ①（表示するモデル）・②（基準モデル）の表示／非表示・色
+ * - 比較モデル: ① 基準モデルと ②③④ 比較モデルの表示／非表示・色・① にする（入れ替え）
  * - 色: 選んだ面・部品の色（RGB）の表示と変更
  * - STEP: AP と版・PMI の一覧・製品の属性の表示と編集（CadStepPanel）
  * - 構成ツリー（STEP/IGES のアセンブリ）／レイヤー（DXF）: 部品ごとの表示／非表示・色・レイヤーの設定。名前のクリックで部品を選ぶ
@@ -14,6 +14,7 @@ import { useI18n } from '../../i18n';
 import type { MessageKey } from '../../i18n/messages';
 import {
   effectiveColor,
+  MODEL_MARKS,
   hexToRgb,
   rgbText,
   rgbToHex,
@@ -49,7 +50,7 @@ interface Props {
   onAttributeEdits: (edits: CadAttributeEdits) => void;
   /** PMI のクリックで、それが指す要素を選び、そこへ寄せる。 */
   onSelectItems: (items: CadSelection[]) => void;
-  /** 基準モデルと比べるときの ①（表示するモデル）と ②（基準モデル）の表示・色。基準モデルが無ければ省く。 */
+  /** ① 基準モデルと ②③④ 比較モデルの表示・色。比較モデルが無ければ省く。 */
   compare?: CompareModels;
   /** 「選択」タブの中身（選んでいる要素のタグの一覧。CadViewerBar が作る）。 */
   selectionPanel: ReactNode;
@@ -61,15 +62,22 @@ export interface CompareModels {
   onModelVisible: (v: boolean) => void;
   modelColor: string;
   onModelColor: (hex: string) => void;
-  referenceName: string;
-  referenceVisible: boolean;
-  onReferenceVisible: (v: boolean) => void;
-  referenceColor: string;
-  onReferenceColor: (hex: string) => void;
-  referenceOpacity: number;
-  onReferenceOpacity: (v: number) => void;
-  /** ① と ② を入れ替えて開き直す。できないとき（偏差の無いビューア・閉じている途中）は省く。 */
-  onSwap?: () => void;
+  /** ②③④ の順。読めなかったモデルは error を持つ（表示・色は変えられない）。 */
+  others: CompareRow[];
+  /** 重ねて表示するときの比較モデルの不透明度（すべての比較モデルで共通）。 */
+  opacity: number;
+  onOpacity: (v: number) => void;
+  /** i 番目（0 = ②）を ① にして開き直す。できないとき（偏差の無いビューア・閉じている途中）は省く。 */
+  onSwap?: (i: number) => void;
+}
+
+export interface CompareRow {
+  name: string;
+  visible: boolean;
+  onVisible: (v: boolean) => void;
+  color: string;
+  onColor: (hex: string) => void;
+  error?: string;
 }
 
 interface TreeNode {
@@ -303,25 +311,15 @@ function TreeRow({
 const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
 
 /**
- * 比較モデル: ①（表示するモデル）と ②（基準モデル）を、アセンブリの部品のように並べて表示・非表示と色を変える。
- * ① の色はファイルの色・既定色の代わりに付く（面・部品ごとに変えた色は残る）。② は半透明で重ね、濃さも変えられる。
+ * 比較モデル: ① 基準モデルと ②③④ 比較モデルを、アセンブリの部品のように並べて表示・非表示と色を変える。
+ * ① の色はファイルの色・既定色の代わりに付く（面・部品ごとに変えた色は残る）。②③④ は半透明で重ね、濃さも変えられる。
+ * 比較モデルの行の「① にする」で、そのモデルを ① にして開き直す。
  */
 function CompareSection({ c }: { c: CompareModels }) {
   const { t } = useI18n();
-  const both = [c.modelVisible, c.referenceVisible];
-  const rows = [
-    { key: 'model', mark: '①', name: c.modelName, visible: c.modelVisible, onVisible: c.onModelVisible, color: c.modelColor, onColor: c.onModelColor, role: t('cad.side.compareModel') },
-    {
-      key: 'reference',
-      mark: '②',
-      name: c.referenceName,
-      visible: c.referenceVisible,
-      onVisible: c.onReferenceVisible,
-      color: c.referenceColor,
-      onColor: c.onReferenceColor,
-      role: t('cad.side.compareReference')
-    }
-  ];
+  const usable = c.others.map((o) => !o.error);
+  const all = [c.modelVisible, ...c.others.filter((_, i) => usable[i]).map((o) => o.visible)];
+  const marks = c.others.map((_, i) => MODEL_MARKS[i + 1]).join('');
   return (
     <section>
       <h4>{t('cad.side.compare')}</h4>
@@ -330,48 +328,80 @@ function CompareSection({ c }: { c: CompareModels }) {
           <div className="cad-tree-row">
             <span className="cad-tree-toggle" />
             <TriCheckbox
-              checked={both.some(Boolean)}
-              mixed={both.some(Boolean) && !both.every(Boolean)}
+              checked={all.some(Boolean)}
+              mixed={all.some(Boolean) && !all.every(Boolean)}
               onChange={(v) => {
                 c.onModelVisible(v);
-                c.onReferenceVisible(v);
+                c.others.forEach((o, i) => usable[i] && o.onVisible(v));
               }}
               label={t('cad.side.visible')}
             />
-            <span className="cad-tree-name">{t('cad.side.compareAll')}</span>
-            <span className="cad-tree-count">2</span>
+            <span className="cad-tree-name">{t('cad.side.compareAll', { marks })}</span>
+            <span className="cad-tree-count">{all.length}</span>
           </div>
           <ul role="group">
-            {rows.map((r) => (
-              <li key={r.key} role="treeitem">
-                <div className="cad-tree-row" style={{ paddingLeft: '12px' }}>
-                  <span className="cad-tree-toggle" />
-                  <input type="checkbox" checked={r.visible} aria-label={t('cad.side.visible')} onChange={(e) => r.onVisible(e.target.checked)} />
-                  <input
-                    type="color"
-                    className="cad-swatch"
-                    value={r.color}
-                    title={rgbText(r.color)}
-                    aria-label={t('cad.side.color')}
-                    onChange={(e) => r.onColor(e.target.value)}
-                  />
-                  <span className="cad-tree-name" title={`${r.role}: ${r.name}`}>
-                    {r.mark} {baseName(r.name) || r.role}
-                  </span>
-                </div>
-              </li>
-            ))}
+            <li role="treeitem">
+              <div className="cad-tree-row" style={{ paddingLeft: '12px' }}>
+                <span className="cad-tree-toggle" />
+                <input type="checkbox" checked={c.modelVisible} aria-label={t('cad.side.visible')} onChange={(e) => c.onModelVisible(e.target.checked)} />
+                <input
+                  type="color"
+                  className="cad-swatch"
+                  value={c.modelColor}
+                  title={rgbText(c.modelColor)}
+                  aria-label={t('cad.side.color')}
+                  onChange={(e) => c.onModelColor(e.target.value)}
+                />
+                <span className="cad-tree-name" title={`${t('cad.side.compareModel')}: ${c.modelName}`}>
+                  ① {baseName(c.modelName) || t('cad.side.compareModel')}
+                </span>
+              </div>
+            </li>
+            {c.others.map((o, i) => {
+              const mark = MODEL_MARKS[i + 1];
+              const role = t('cad.side.compareReference', { mark });
+              return (
+                <li key={mark} role="treeitem">
+                  <div className="cad-tree-row" style={{ paddingLeft: '12px' }}>
+                    <span className="cad-tree-toggle" />
+                    {o.error ? (
+                      <span className="cad-tree-name cad-viewer-align-error" title={t('cad.side.compareError', { mark, error: o.error })}>
+                        {mark} {baseName(o.name)} ⚠
+                      </span>
+                    ) : (
+                      <>
+                        <input type="checkbox" checked={o.visible} aria-label={t('cad.side.visible')} onChange={(e) => o.onVisible(e.target.checked)} />
+                        <input
+                          type="color"
+                          className="cad-swatch"
+                          value={o.color}
+                          title={rgbText(o.color)}
+                          aria-label={t('cad.side.color')}
+                          onChange={(e) => o.onColor(e.target.value)}
+                        />
+                        <span className="cad-tree-name" title={`${role}: ${o.name}`}>
+                          {mark} {baseName(o.name) || role}
+                        </span>
+                        {c.onSwap && (
+                          <button
+                            type="button"
+                            className="cad-viewer-chip cad-compare-swap"
+                            title={t('cad.side.swapTitle', { mark })}
+                            onClick={() => c.onSwap?.(i)}
+                          >
+                            {t('cad.side.swap')}
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </li>
       </ul>
-      {c.onSwap && (
-        <div className="cad-sidebar-row">
-          <button type="button" className="cad-viewer-chip" title={t('cad.side.swapTitle')} onClick={c.onSwap}>
-            {t('cad.side.swap')}
-          </button>
-        </div>
-      )}
-      {c.referenceVisible && (
+      {c.others.some((o, i) => usable[i] && o.visible) && (
         <label className="cad-sidebar-row" title={t('cad.align.overlayTitle')}>
           {t('cad.align.opacity')}
           <input
@@ -379,9 +409,9 @@ function CompareSection({ c }: { c: CompareModels }) {
             min={0.05}
             max={1}
             step={0.05}
-            value={c.referenceOpacity}
+            value={c.opacity}
             aria-label={t('cad.align.opacity')}
-            onChange={(e) => c.onReferenceOpacity(Number(e.target.value))}
+            onChange={(e) => c.onOpacity(Number(e.target.value))}
           />
         </label>
       )}

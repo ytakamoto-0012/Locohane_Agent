@@ -140,6 +140,8 @@ class SurfaceIndex:
         if not keep.any():
             raise AlignError("the reference model has only degenerate triangles")
         self.a, self.b, self.c = p[keep, 0], p[keep, 1], p[keep, 2]
+        # 残した三角形の、元の並び（triangles）での番号（nearest_triangles で返す）。
+        self.triangle_ids = np.flatnonzero(keep)
         self.normals = cross[keep] / area2[keep, None]
         self.areas = area2[keep] / 2
         # 角の頂点の擬似法線（同じ位置の頂点をまとめ、つながる三角形の法線を面積で平均）。最近点が稜線・角の上にあって
@@ -197,6 +199,15 @@ class SurfaceIndex:
 
     def closest(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """点 (q,3) の (符号付き距離 (q,), 最近点 (q,3), 最近点の三角形の外向きの法線 (q,3))。"""
+        return self._closest(points, None)
+
+    def nearest_triangles(self, points: np.ndarray) -> np.ndarray:
+        """点 (q,3) の最近点が載る三角形の、元の並び（作ったときの triangles）での番号 (q,)。"""
+        out = np.empty(len(np.asarray(points).reshape(-1, 3)), dtype=np.int64)
+        self._closest(points, out)
+        return out
+
+    def _closest(self, points: np.ndarray, tri_out: np.ndarray | None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
         dist = np.empty(len(pts))
         near = np.empty((len(pts), 3))
@@ -240,6 +251,8 @@ class SurfaceIndex:
             dist[s : s + len(q)] = np.where(d > self.diag * 1e-12, sign * d, 0.0)
             near[s : s + len(q)] = cpb
             normal[s : s + len(q)] = n
+            if tri_out is not None:
+                tri_out[s : s + len(q)] = self.triangle_ids[tri]
         return dist, near, normal
 
     def sample_points(self, n: int, rng: np.random.Generator) -> np.ndarray:
@@ -1018,4 +1031,38 @@ def face_deviation_stats(target: TargetMesh, values: np.ndarray, faces: Sequence
             continue
         verts = np.unique(target.triangles[tris].ravel())
         out[str(int(f))] = deviation_stats(values[verts], weights[verts], tolerance)
+    return out
+
+
+def base_face_deviation_stats(
+    base: TargetMesh,
+    base_index: SurfaceIndex,
+    compared: TargetMesh,
+    values: np.ndarray,
+    T: np.ndarray,
+    faces: Sequence[int],
+    tolerance: float | None = None,
+) -> dict[str, Any]:
+    """① の選んだ面ごとの、比較モデルの偏差の統計。
+
+    比較モデルの三角形の重心（T で ① の座標へ動かしたもの。値は 3 つの頂点の平均、重みは三角形の面積）のうち、
+    ① の表面の最近点がその面に載るものを使う（頂点は面の境目に載りやすく、どの面か決まらないため重心で見る）。
+    base_index は base（① の表示用の三角形。面ごとの範囲を持つ）と同じ三角形で作った索引。
+    """
+    wanted = sorted({int(f) for f in faces if 0 <= int(f) < len(base.face_ranges)})
+    if not wanted or not len(compared.triangles):
+        return {}
+    face_of_tri = np.full(len(base.triangles), -1, dtype=np.int64)
+    for f, (s, c) in enumerate(base.face_ranges):
+        if int(c) > 0:
+            face_of_tri[int(s) : int(s) + int(c)] = f
+    centroids = compared.positions[compared.triangles].mean(axis=1)
+    tri = base_index.nearest_triangles(apply(T, centroids))
+    face = face_of_tri[np.clip(tri, 0, len(face_of_tri) - 1)]
+    v = np.asarray(values, dtype=np.float64)[compared.triangles].mean(axis=1)
+    out: dict[str, Any] = {}
+    for f in wanted:
+        m = face == f
+        if m.any():
+            out[str(f)] = deviation_stats(v[m], compared.areas[m], tolerance)
     return out

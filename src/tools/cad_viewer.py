@@ -237,27 +237,37 @@ async def _resolve_compare_with(value: str) -> str:
     return str(path)
 
 
-# 基準モデル（reference）に使える形式。ビューア用データはその中の三角形をそのまま使う（元のファイルは読まない）。
+# 比較モデル（compare_models）に使える形式。ビューア用データはその中の三角形をそのまま使う（元のファイルは読まない）。
+# 比較モデル ② ③ ④ の印（LLM へ返す概要・注意で使う。src/cad/reference.py の MARKS と同じ）。
+_MARKS = ("②", "③", "④")
 _REFERENCE_FORMATS = ("STEP", "IGES", "BREP", "BIN", "STL", "VIEWER_JSON")
 AlignMode = Literal["none", "bestfit"]
 
 
-def _resolve_reference(value: str) -> str:
-    """reference（絶対パスか @N）を絶対パスにする。使えなければ "Error: ..." を返す。"""
-    path, err = _resolve_input_path(value)
-    if path is None:
-        return f"Error: reference: {err}"
-    if not path.is_file():
-        return f"Error: reference: the file does not exist: {path}"
-    if format_of(path) not in _REFERENCE_FORMATS:
-        return f"Error: reference must be a STEP/IGES/BREP/BIN/STL file or viewer_data (got {path.suffix!r}; a DXF is 2D)."
-    return str(path)
+def _resolve_compare_models(values: list[str] | str | None) -> list[str] | str:
+    """compare_models（絶対パスか @N。最大 MAX_COMPARISONS 個）を絶対パスの並びにする。使えなければ "Error: ..." を返す。"""
+    if isinstance(values, str):
+        values = [values]
+    items = [str(v).strip() for v in (values or []) if str(v or "").strip()]
+    if len(items) > len(_MARKS):
+        return f"Error: compare_models takes at most {len(_MARKS)} models (②③④); got {len(items)}."
+    out: list[str] = []
+    for mark, value in zip(_MARKS, items):
+        path, err = _resolve_input_path(value)
+        if path is None:
+            return f"Error: compare_models {mark}: {err}"
+        if not path.is_file():
+            return f"Error: compare_models {mark}: the file does not exist: {path}"
+        if format_of(path) not in _REFERENCE_FORMATS:
+            return f"Error: compare_models {mark} must be a STEP/IGES/BREP/BIN/STL file or viewer_data (got {path.suffix!r}; a DXF is 2D)."
+        out.append(str(path))
+    return out
 
 
-def _swap_reference_source(data: dict, data_path: Path) -> str:
-    """①⇔② の入れ替えで基準モデルにする、今のモデルのファイル。
+def _model_source(data: dict, data_path: Path) -> str:
+    """モデルを入れ替えるとき、今の ① を比較モデルとして渡すファイル。
 
-    元の CAD ファイルがあればそれ（基準は表示用より細かく三角形に分けるため）、無ければ（CadQuery のコード等）
+    元の CAD ファイルがあればそれ（比較モデルは表示用より細かく三角形に分けるため）、無ければ（CadQuery のコード等）
     今のビューア用データ。
     """
     src = (data.get("source") or {}).get("path")
@@ -268,6 +278,15 @@ def _swap_reference_source(data: dict, data_path: Path) -> str:
     return str(data_path)
 
 
+def _initial_tolerance(data: dict) -> float:
+    """ビューアの偏差の公差の初めの値（比較モデルの偏差に入っている公差。無ければ [cad_viewer] deviation_tolerance）。"""
+    for entry in data.get("comparisons") or []:
+        tol = ((entry or {}).get("deviation") or {}).get("tolerance") if isinstance(entry, dict) else None
+        if isinstance(tol, (int, float)) and not isinstance(tol, bool) and tol > 0:
+            return float(tol)
+    return _deviation_tolerance()
+
+
 def _deviation_tolerance() -> float:
     try:
         tol = float(_setting("cad_viewer_deviation_tolerance", 0.1))
@@ -276,24 +295,31 @@ def _deviation_tolerance() -> float:
     return tol if tol > 0 else 0.1
 
 
-async def _attach_reference(data: dict, data_path: Path, reference: str, align: str) -> tuple[dict, Path] | str:
-    """ビューア用データに基準モデルとの位置合わせ・偏差を足したもの（サブプロセス run_cad.py --reference）と、その JSON。"""
+async def _attach_comparisons(data: dict, data_path: Path, models: list[str], align: str) -> tuple[dict, Path] | str:
+    """ビューア用データに比較モデル ② ③ ④ を ① に合わせた位置・偏差を足したもの（サブプロセス run_cad.py --compare）と、その JSON。"""
     workdir = _resolve_exec_workdir()
-    out = _new_data_path(workdir, prefix="cad_view_reference")
+    out = _new_data_path(workdir, prefix="cad_view_compare")
     options = {
         **_options(),
-        "reference": reference,
+        "compare_models": models,
         "align": align,
         "reference_deflection_ratio": _setting("cad_viewer_reference_deflection_ratio", 0.0002),
         "deviation_tolerance": _deviation_tolerance(),
     }
-    cmd = [_state._SCRIPT_PYTHON, str(_RUN_CAD), "--reference", str(data_path), "--out", str(out), "--options", json.dumps(options)]
+    cmd = [_state._SCRIPT_PYTHON, str(_RUN_CAD), "--compare", str(data_path), "--out", str(out), "--options", json.dumps(options)]
     failed = await _run(cmd, workdir)
     if failed:
         return failed
     made = await asyncio.to_thread(_load_data, out)
     if isinstance(made, str):
         return made
+    # CadQuery のコードの形は、ビューア用データの隣の .brep を読み直す（保存・比較）。新しい JSON の隣にも写す。
+    brep = data_path.with_suffix(".brep")
+    if brep.is_file() and not out.with_suffix(".brep").exists():
+        try:
+            shutil.copyfile(brep, out.with_suffix(".brep"))
+        except OSError:
+            logger.debug("show_cad_viewer: could not copy %s", brep, exc_info=True)
     return made[0], made[1]
 
 
@@ -309,7 +335,7 @@ async def show_cad_viewer(
     code: str = "",
     select: list[SelectKind] | None = None,
     compare_with: str = "",
-    reference: str = "",
+    compare_models: list[str] | None = None,
     align: AlignMode = "none",
 ) -> tuple[str, dict | None]:
     """Show a 3D model in an interactive viewer in the chat, and return the elements the user selects.
@@ -350,17 +376,18 @@ async def show_cad_viewer(
       solid counts and size, and warnings. The viewer shows added material in green and removed
       material in red.
 
-    reference: a reference (nominal) model to measure the shown model against, e.g. the CAD model
-      for a scanned STL, or another version of a part (a STEP/IGES/BREP/BIN/STL file or viewer_data,
-      absolute path or @N). Unlike compare_with, it works for STL too and gives a deviation map: the
-      signed distance from every point of the shown model to the reference surface (positive = outside
-      the reference = extra material). The viewer overlays the reference and can align the models:
-      best fit, best fit on the selected faces, or datums A/B/C (+ optional D; picked points and up to
-      2 datum holes with round pins, 3-2-1 like a checking fixture).
-      The result then has "comparison" (alignment method, transform, RMS, deviation statistics with
-      the tolerance, and deviation per selected face).
-    align: how to place the model on the reference before measuring when the viewer opens:
-      "none" (keep the coordinates; use this when both are in the same coordinate system) or
+    compare_models: up to 3 models (②, ③, ④) to compare with the shown model, which is ① the base
+      (nominal) model: e.g. file_path = the CAD model and compare_models = scanned STLs, or other versions
+      of a part (STEP/IGES/BREP/BIN/STL files or viewer_data, absolute paths or @N). Unlike compare_with,
+      it works for STL too and gives a deviation map on each of ②③④: the signed distance from every point
+      of that model to the surface of ① (positive = outside ① = extra material). Every comparison is
+      against ①, never between ②③④. The viewer overlays them on ① or shows them side by side in a split
+      view, and can align each of ②③④ to ①: best fit, best fit on the selected faces of ①, or datums
+      A/B/C (+ optional D, picked on ①; points and up to 2 datum holes with round pins, 3-2-1 like a
+      checking fixture). The result then has "comparison" (per model: alignment method, transform, RMS,
+      deviation statistics with the tolerance, and deviation per selected face of ①).
+    align: how to place ②③④ on ① before measuring when the viewer opens:
+      "none" (keep the coordinates; use this when all are in the same coordinate system) or
       "bestfit" (least-squares best fit, for a scan in its own coordinates). The user can re-align
       in the viewer.
 
@@ -395,9 +422,9 @@ async def show_cad_viewer(
             mesh whose flat faces have hole mouths).
         compare_with: The previous version of the model to compare with (see above). Leave empty
             for no comparison.
-        reference: The reference model for the deviation map and alignment (see above). Leave empty
-            for none.
-        align: "none" or "bestfit" (see above). Used only with reference.
+        compare_models: The models ②③④ to measure against ① for the deviation maps and alignment
+            (see above). Leave empty for none.
+        align: "none" or "bestfit" (see above). Used only with compare_models.
 
     Returns:
         A short JSON summary whose size does not depend on how many elements were selected:
@@ -408,7 +435,7 @@ async def show_cad_viewer(
         holes and bosses of solids and closed meshes grouped by shape (round = diameter; rectangle,
         roundedRectangle, polygon with sides and acrossFlats, other = width x height) and depth, holes = holes inside an open surface or mesh
         grouped by diameter and normal, and local_axes = local coordinate systems found as three
-        perpendicular lines), diff when compare_with was given, comparison when reference was given,
+        perpendicular lines), diff when compare_with was given, comparison when compare_models was given,
         local_axis when the user viewed the
         model in a local coordinate system (then selected elements and measurements also have
         'local' values), and
@@ -432,7 +459,7 @@ async def show_cad_viewer(
         ("Error: the user closed the 3D viewer ..."), or there is no answer within the timeout.
     """
     shot: dict[str, Any] = {}
-    text = await _show_cad_viewer(question, file_path, code, select, shot, compare_with, reference, align)
+    text = await _show_cad_viewer(question, file_path, code, select, shot, compare_with, compare_models or [], align)
     return text, shot.get("artifact")
 
 
@@ -443,7 +470,7 @@ async def _show_cad_viewer(
     select: list[str] | None,
     shot: dict[str, Any],
     compare_with: str = "",
-    reference: str = "",
+    compare_models: list[str] | str | None = None,
     align: str = "none",
 ) -> str:
     """show_cad_viewer の本体。指示付きの確定で画面を撮っていれば、LLM へ見せる画像を shot["artifact"] に入れる。"""
@@ -461,11 +488,9 @@ async def _show_cad_viewer(
         previous = await _resolve_compare_with(compare_with.strip())
         if previous.startswith("Error:"):
             return previous
-    reference_path = ""
-    if (reference or "").strip():
-        reference_path = _resolve_reference(reference.strip())
-        if reference_path.startswith("Error:"):
-            return reference_path
+    models = _resolve_compare_models(compare_models)
+    if isinstance(models, str):
+        return models
     if align not in ("none", "bestfit"):
         return f"Error: align must be 'none' or 'bestfit' (got {align!r})."
     # 大きな CAD ファイルは形を読んでビューア用データにするまで 1 分以上かかることがあるので、その間は準備中と出しておく
@@ -476,18 +501,21 @@ async def _show_cad_viewer(
             made = await _viewer_data_from_code(code, previous)
         else:
             made = await _viewer_data_from_file(file_path, previous)
-        if not isinstance(made, str) and reference_path:
-            # 基準モデルとの位置合わせ・偏差は、できたビューア用データに後から足す（キャッシュには入れない）。
-            with_ref = await _attach_reference(made[0], made[1], reference_path, align)
-            if isinstance(with_ref, str):
-                made = with_ref
+        if not isinstance(made, str) and models:
+            # 比較モデルの位置合わせ・偏差は、できたビューア用データに後から足す（キャッシュには入れない）。
+            with_cmp = await _attach_comparisons(made[0], made[1], models, align)
+            if isinstance(with_cmp, str):
+                made = with_cmp
             else:
-                made = (with_ref[0], with_ref[1], made[2])
+                made = (with_cmp[0], with_cmp[1], made[2])
     finally:
         await _remove_notice(notice)
     if isinstance(made, str):
         return made
     data, data_path, notes = made
+    # 前の版のビューア用データの基準モデル・偏差（① の頂点の偏差。向きが今と逆）は使わない。
+    data.pop("reference", None)
+    data.pop("deviation", None)
 
     kinds = _available_kinds(data, select)
     if not kinds:
@@ -540,15 +568,21 @@ async def _show_cad_viewer(
             extra.append("Notes on the exported file (tell the user if they matter): " + " / ".join(target.notes))
     if isinstance(answer, str):
         return "\n".join([answer, *extra])
-    if reference_path and answer[0].get("swap_models"):
-        # ビューアの「①⇔② 入れ替え」: 基準モデルを表示するモデルに、今のモデルを基準モデルにして開き直す。
+    swap = _swap_target(answer[0].get("swap_models"), data)
+    if swap is not None:
+        # ビューアの「① にする」: 比較モデル（② ③ ④ のどれか）を ① 基準モデルに、今の ① をその位置の比較モデルにして開き直す。
         # 位置を合わせていたら、入れ替えた後も合わせる（変換の向きが逆になるので合わせ直す）。
         swapped_align = "bestfit" if align == "bestfit" or (align_state is not None and align_state.changed) else "none"
-        new_reference = _swap_reference_source(data, data_path)
-        text = await _show_cad_viewer(question, reference_path, "", select, shot, "", new_reference, swapped_align)
+        sources = [str((c.get("source") or {}).get("path") or "") for c in data.get("comparisons") or []]
+        new_base = sources[swap]
+        new_models = list(sources)
+        new_models[swap] = _model_source(data, data_path)
+        text = await _show_cad_viewer(question, new_base, "", select, shot, "", new_models, swapped_align)
         swapped = (
-            f"The user swapped the models in the viewer: the shown model (selection, deviation) is now {reference_path} "
-            f"and the reference model is {new_reference}."
+            f"The user swapped ① and {_MARKS[swap]} in the viewer: the base model ① (selection; deviations are measured against it) "
+            f"is now {new_base}, and the compared models are "
+            + ", ".join(f"{_MARKS[i]} {p}" for i, p in enumerate(new_models))
+            + "."
         )
         # 何度も入れ替えたときに古い順に並ぶよう、開き直した結果（その中の入れ替えの注意）より前に置く。
         return "\n".join([swapped, text, *extra])
@@ -587,7 +621,7 @@ def _finish_answer_body(
 ) -> str:
     """ビューアの答えを受け取った後の処理（自動保存・画面の保存・選択結果の書き出し）。同期処理なのでスレッドで呼ぶ。"""
     res, picked, colors, message = answer
-    if align_state is not None and align_state.changed and align_state.values is not None:
+    if align_state is not None and align_state.changed:
         # ビューアで合わせ直した位置と偏差を、自動保存するビューア用データにも残す（開き直すとその位置から始まる）。
         _store_alignment(data, align_state)
         res = {**res, "_alignment_changed": True}
@@ -629,7 +663,7 @@ def _finish_answer_body(
         comparison = _comparison_summary(data, align_state, picked, res.get("deviation_tolerance"))
     except Exception as e:  # noqa: BLE001 - 比較の要約を作れなくても選択は返す
         logger.warning("show_cad_viewer: could not summarize the comparison", exc_info=True)
-        comparison = {"error": f"could not summarize the comparison with the reference model ({type(e).__name__}: {e})"}
+        comparison = {"error": f"could not summarize the comparison with the compared models ({type(e).__name__}: {e})"}
     return _format_result(
         data,
         picked,
@@ -778,7 +812,7 @@ def _view_edits(data: dict, payload: dict[str, Any], colors: list[dict[str, Any]
     saved_visible = view_state.get("visible") if isinstance(view_state.get("visible"), dict) else {}
     before_visible = {"face": True, "edge": True, "vertex": True, **saved_visible}
     changed = bool(colors) or set(hidden_parts) != _initial_hidden(data) or any(before_visible.get(k) != v for k, v in visible.items())
-    # ビューアで基準モデルとの位置を合わせ直した（data["deviation"] は _store_alignment で書き換えてある）。
+    # ビューアで比較モデルの位置を合わせ直した（data["comparisons"] は _store_alignment で書き換えてある）。
     changed = changed or bool(payload.get("_alignment_changed"))
     attrs = _valid_attributes(data, payload.get("attributes"))
     # ビューアで「縫合」をした（data の穴・外周・面のまとまりは sew_viewer_data が求め直してある）。
@@ -968,8 +1002,24 @@ async def _save_locked(target: _SaveTarget, payload: dict[str, Any]) -> dict[str
 
 
 @dataclass
+class _CompareState:
+    """比較モデル 1 つ（② ③ ④ のどれか）の ① への位置合わせ。"""
+
+    number: int  # data["comparisons"] の位置（0 = ②）
+    transform: Any  # np.ndarray (4,4)。このモデル → ①
+    initial_transform: Any
+    alignment: dict[str, Any]
+    values: Any = None  # np.ndarray（このモデルの頂点ごとの偏差）。None なら comparisons[i]["deviation"]["values"] のまま
+    changed: bool = False
+    values_id: str = ""
+    values_path: Path | None = None
+    target: Any = None  # src.cad.align.TargetMesh（このモデルの三角形。偏差を塗る側）
+    surface: Any = None  # src.cad.align.SurfaceIndex（このモデルの表面。① の面・データムを当てる側）
+
+
+@dataclass
 class _AlignState:
-    """基準モデルとの位置合わせ（ビューアを出している間だけ _ALIGN_STATES に置く。キーは save_id）。
+    """比較モデルの ① への位置合わせ（ビューアを出している間だけ _ALIGN_STATES に置く。キーは save_id）。
 
     ビューアの「位置合わせ」（app.py の action_callback "cad_viewer_align"）は、ここで覚えた今の変換から
     詰め直して偏差を求め直す。偏差の値はブラウザが GET /locohane/cad/data/{values_id} で取りに来る
@@ -979,17 +1029,19 @@ class _AlignState:
     data: dict
     thread_id: str
     workdir: Path
-    transform: Any  # np.ndarray (4,4)
-    initial_transform: Any
-    alignment: dict[str, Any]
     tolerance: float
-    values: Any = None  # np.ndarray（対象の頂点ごとの偏差）。None なら data["deviation"]["values"] のまま
-    changed: bool = False
-    values_id: str = ""
-    values_path: Path | None = None
-    index: Any = None  # src.cad.align.SurfaceIndex（初めて合わせ直すときに作る）
-    target: Any = None  # src.cad.align.TargetMesh
+    models: list[_CompareState]
+    base_index: Any = None  # src.cad.align.SurfaceIndex（偏差を測る ① の表面。初めて合わせ直すときに作る）
+    base_target: Any = None  # src.cad.align.TargetMesh（① の表示用の三角形。選んだ面・データムで合わせるとき）
+    base_faces_index: Any = None  # ① の表示用の三角形の索引（選んだ面ごとの偏差）
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    @property
+    def changed(self) -> bool:
+        return any(m.changed for m in self.models)
+
+    def model(self, number: int) -> _CompareState | None:
+        return next((m for m in self.models if m.number == number), None)
 
 
 _ALIGN_STATES: dict[str, _AlignState] = {}
@@ -997,27 +1049,54 @@ _ALIGN_STATES: dict[str, _AlignState] = {}
 _ALIGN_MAX_FACES = 200_000
 
 
-def _new_align_state(data: dict, thread_id: str) -> _AlignState | None:
-    """基準モデルとの偏差があるビューア用データなら、位置合わせの状態を作る。"""
-    dev = data.get("deviation") or {}
-    if not data.get("reference") or not dev.get("values") or dev.get("error"):
+def _comparison_entries(data: dict) -> list[dict]:
+    raw = data.get("comparisons")
+    return [c if isinstance(c, dict) else {} for c in raw] if isinstance(raw, list) else []
+
+
+def _usable_comparison(entry: dict) -> bool:
+    dev = entry.get("deviation") if isinstance(entry.get("deviation"), dict) else {}
+    return not entry.get("error") and bool(entry.get("indices")) and bool(dev.get("values"))
+
+
+def _swap_target(raw: Any, data: dict) -> int | None:
+    """ビューアの「① にする」で選んだ比較モデルの位置（0 = ②）。使えなければ None。
+
+    前の版のビューアは true を送る（② と入れ替える）。
+    """
+    entries = _comparison_entries(data)
+    number = 0 if raw is True else raw
+    if not isinstance(number, int) or isinstance(number, bool) or not 0 <= number < len(entries):
         return None
+    path = (entries[number].get("source") or {}).get("path")
+    return number if isinstance(path, str) and path and Path(path).is_file() else None
+
+
+def _new_align_state(data: dict, thread_id: str) -> _AlignState | None:
+    """① からの偏差がある比較モデルがあれば、位置合わせの状態を作る。"""
     import numpy as np
 
     from ..cad.align import as_matrix
 
-    T = as_matrix(dev.get("transform"))
-    if T is None:
-        T = np.eye(4)
-    tol = dev.get("tolerance")
+    models: list[_CompareState] = []
+    tolerance: float | None = None
+    for number, entry in enumerate(_comparison_entries(data)):
+        if not _usable_comparison(entry):
+            continue
+        dev = entry["deviation"]
+        T = as_matrix(dev.get("transform"))
+        if T is None:
+            T = np.eye(4)
+        tol = dev.get("tolerance")
+        if tolerance is None and isinstance(tol, (int, float)) and not isinstance(tol, bool) and tol > 0:
+            tolerance = float(tol)
+        models.append(
+            _CompareState(number=number, transform=T, initial_transform=T.copy(), alignment=dict(dev.get("alignment") or {"method": "none"}))
+        )
+    if not models:
+        return None
     return _AlignState(
-        data=data,
-        thread_id=thread_id,
-        workdir=_resolve_exec_workdir(),
-        transform=T,
-        initial_transform=T.copy(),
-        alignment=dict(dev.get("alignment") or {"method": "none"}),
-        tolerance=float(tol) if isinstance(tol, (int, float)) and tol > 0 else _deviation_tolerance(),
+        data=data, thread_id=thread_id, workdir=_resolve_exec_workdir(), tolerance=tolerance or _deviation_tolerance(), models=models
     )
 
 
@@ -1030,6 +1109,7 @@ def _face_ids(raw: Any, n_faces: int) -> list[int]:
 
 def _align_compute(
     state: _AlignState,
+    model: _CompareState,
     method: str,
     faces: list[int],
     datums: dict[str, Any],
@@ -1037,27 +1117,38 @@ def _align_compute(
     datum_mode: str = "priority",
     pad_radius: float = 0.0,
 ) -> dict[str, Any]:
-    """位置合わせと偏差の計算（重いのでスレッドで呼ぶ）。"""
+    """比較モデル 1 つを ① に合わせ直し、偏差を求め直す（重いのでスレッドで呼ぶ）。
+
+    ベストフィットは比較モデルを ① の表面に当てる。① の選んだ面・① の上で拾ったデータムで合わせるときは、① を比較モデルの
+    表面に当てた変換（① → 比較モデル）を求めて逆にする（面・データムは ① の座標なので）。
+    """
     import numpy as np
 
     from ..cad.align import SurfaceIndex, align, deviation_stats, deviations, describe_transform
-    from ..cad.reference import mesh_arrays, target_mesh
+    from ..cad.reference import base_index, comparison_mesh, mesh_arrays, target_mesh
 
-    if state.index is None:
-        ref = state.data["reference"]
-        pos, idx = mesh_arrays({"mesh": {"positions": ref["positions"], "indices": ref["indices"]}})
-        state.index = SurfaceIndex(pos, idx)
-        state.target = target_mesh(state.data)
+    entry = _comparison_entries(state.data)[model.number]
+    if state.base_index is None:
+        state.base_index = base_index(state.data)
+    if model.target is None:
+        model.target = comparison_mesh(entry)
     if method == "reset":
         T, info = np.eye(4), {"method": "none"}
     elif method == "initial":
-        T, info = state.initial_transform.copy(), dict((state.data.get("deviation") or {}).get("alignment") or {"method": "none"})
+        T, info = model.initial_transform.copy(), dict((entry.get("deviation") or {}).get("alignment") or {"method": "none"})
+    elif method == "bestfit":
+        T, info = align(model.target, state.base_index, "bestfit", start=model.transform)
     else:
-        T, info = align(
-            state.target,
-            state.index,
+        if model.surface is None:
+            pos, idx = mesh_arrays({"mesh": entry})
+            model.surface = SurfaceIndex(pos, idx)
+        if state.base_target is None:
+            state.base_target = target_mesh(state.data)
+        T_inv, info = align(
+            state.base_target,
+            model.surface,
             method,
-            start=state.transform,
+            start=np.linalg.inv(model.transform),
             faces=faces,
             datums=datums,
             datum_dof=dof,
@@ -1065,36 +1156,46 @@ def _align_compute(
             pad_radius=pad_radius,
             d_weight=float(_setting("cad_viewer_datum_d_weight", 0.3)),
         )
-    values = deviations(state.target, state.index, T)
-    stats = deviation_stats(values, state.target.vertex_weights(), state.tolerance)
+        T = np.linalg.inv(T_inv)
+    values = deviations(model.target, state.base_index, T)
+    stats = deviation_stats(values, model.target.vertex_weights(), state.tolerance)
     path = state.workdir / f"cad_deviation_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.f32"
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.part")
     tmp.write_bytes(np.ascontiguousarray(values, dtype="<f4").tobytes())
     os.replace(tmp, path)
-    state.transform, state.alignment, state.values, state.changed = T, info, values, True
+    model.transform, model.alignment, model.values, model.changed = T, info, values, True
     return {"path": path, "transform": describe_transform(T), "alignment": info, "stats": stats}
 
 
 async def align_viewer_model(payload: dict[str, Any]) -> dict[str, Any]:
     """ビューアの「位置合わせ」（app.py の action_callback "cad_viewer_align"）。
 
-    payload: {save_id, method: "bestfit" | "faces" | "datum" | "reset" | "initial", faces: [面の ID],
-    datums: {A〜D（D は任意）: {type: "point", point: [x, y, z]}, H1・H2（基準穴、任意）: {type: "hole", center, axis, diameter, pin}},
+    payload: {save_id, models: [合わせる比較モデルの位置（0 = ②）。省くとすべて], method: "bestfit" | "faces" | "datum" | "reset" | "initial",
+    faces: [① の面の ID], datums: {A〜D（D は任意）: {type: "point", point: [x, y, z]}, H1・H2（基準穴、任意）: {type: "hole", center, axis, diameter, pin}。① の座標},
     datum_mode: "priority" | "average", pad_radius: 点のデータムの当て面の半径（0 以下で自動）, dof: {A, B, C}, tolerance}。
 
     Returns:
-        {"ok": True, "values_id", "transform", "alignment", "stats"} か {"ok": False, "error"}。
+        {"ok": True, "results": [{"model", "values_id", "transform", "alignment", "stats"}, ...], "errors": [{"model", "error"}, ...]}
+        （合わせられたモデルが 1 つも無ければ {"ok": False, "error"}）。
     """
     save_id = str(payload.get("save_id") or "")
     state = _ALIGN_STATES.get(save_id)
     if state is None:
-        return {"ok": False, "error": "This viewer has no reference model, or is no longer waiting for an answer."}
+        return {"ok": False, "error": "This viewer has no models to compare, or is no longer waiting for an answer."}
     if (cl.user_session.get("thread_id") or "_no_session") != state.thread_id:
         return {"ok": False, "error": "This viewer belongs to another conversation."}
     method = str(payload.get("method") or "")
     if method not in ("bestfit", "faces", "datum", "reset", "initial"):
         return {"ok": False, "error": f"unknown alignment method {method!r}"}
+    raw_models = payload.get("models")
+    if isinstance(raw_models, list):
+        numbers = dict.fromkeys(n for n in raw_models if isinstance(n, int) and not isinstance(n, bool))
+        models = [m for m in (state.model(n) for n in numbers) if m is not None]
+    else:
+        models = list(state.models)
+    if not models:
+        return {"ok": False, "error": "Choose the compared models (②③④) to align."}
     n_faces = len(state.data.get("faces") or [])
     faces = _face_ids(payload.get("faces"), n_faces)
     raw_datums = payload.get("datums") if isinstance(payload.get("datums"), dict) else {}
@@ -1112,97 +1213,147 @@ async def align_viewer_model(payload: dict[str, Any]) -> dict[str, Any]:
         state.tolerance = float(tol)
     if state.lock.locked():
         return {"ok": False, "error": "The alignment is still running. Wait until it finishes."}
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     async with state.lock:
-        try:
-            out = await asyncio.to_thread(_align_compute, state, method, faces, datums, dof, datum_mode, pad_radius)
-        except Exception as e:  # noqa: BLE001 - 点が足りない等は AlignError、壊れたデータでも落とさない
-            logger.info("show_cad_viewer: alignment failed: %s", e)
-            return {"ok": False, "error": str(e)}
-        old_id, old_path = state.values_id, state.values_path
-        state.values_id = uuid.uuid4().hex
-        state.values_path = out["path"]
-        _VIEWER_PACKAGES[state.values_id] = ViewerPackage(path=out["path"], thread_id=state.thread_id)
-        if old_id:
-            _VIEWER_PACKAGES.pop(old_id, None)
-        if old_path is not None:
-            old_path.unlink(missing_ok=True)
-    logger.info("show_cad_viewer: aligned by %s: %s", method, out["alignment"])
-    return {"ok": True, "values_id": state.values_id, "transform": out["transform"], "alignment": out["alignment"], "stats": out["stats"]}
+        for model in models:
+            try:
+                out = await asyncio.to_thread(_align_compute, state, model, method, faces, datums, dof, datum_mode, pad_radius)
+            except Exception as e:  # noqa: BLE001 - 点が足りない等は AlignError、壊れたデータでも落とさない
+                logger.info("show_cad_viewer: alignment of %s failed: %s", _MARKS[model.number], e)
+                errors.append({"model": model.number, "error": str(e)})
+                continue
+            old_id, old_path = model.values_id, model.values_path
+            model.values_id = uuid.uuid4().hex
+            model.values_path = out["path"]
+            _VIEWER_PACKAGES[model.values_id] = ViewerPackage(path=out["path"], thread_id=state.thread_id)
+            if old_id:
+                _VIEWER_PACKAGES.pop(old_id, None)
+            if old_path is not None:
+                old_path.unlink(missing_ok=True)
+            logger.info("show_cad_viewer: aligned %s by %s: %s", _MARKS[model.number], method, out["alignment"])
+            results.append(
+                {"model": model.number, "values_id": model.values_id, "transform": out["transform"], "alignment": out["alignment"], "stats": out["stats"]}
+            )
+    if not results:
+        return {"ok": False, "error": " / ".join(f"{_MARKS[e['model']]}: {e['error']}" for e in errors)}
+    return {"ok": True, "results": results, "errors": errors}
 
 
 def _store_alignment(data: dict, state: _AlignState) -> None:
-    """合わせ直した変換・偏差を data["deviation"] に書く（自動保存するビューア用データに残すため）。"""
+    """合わせ直した変換・偏差を comparisons[i]["deviation"] に書く（自動保存するビューア用データに残すため）。"""
     import numpy as np
 
     from ..cad.align import describe_transform
     from ..cad.mesh_data import b64
 
-    dev = dict(data.get("deviation") or {})
-    dev.update(
-        values=b64(np.asarray(state.values, dtype=np.float32), "f4"),
-        transform=describe_transform(state.transform)["matrix"],
-        alignment=state.alignment,
-        tolerance=state.tolerance,
-    )
-    data["deviation"] = dev
+    entries = data.get("comparisons")
+    if not isinstance(entries, list):
+        return
+    for model in state.models:
+        if not model.changed or model.values is None or not 0 <= model.number < len(entries):
+            continue
+        entry = dict(entries[model.number])
+        dev = dict(entry.get("deviation") or {})
+        dev.update(
+            values=b64(np.asarray(model.values, dtype=np.float32), "f4"),
+            transform=describe_transform(model.transform)["matrix"],
+            alignment=model.alignment,
+            tolerance=state.tolerance,
+        )
+        entry["deviation"] = dev
+        entries[model.number] = entry
 
 
 def _drop_align_state(state: _AlignState | None) -> None:
     """ビューアを閉じたら、偏差の値のファイルを消す。"""
     if state is None:
         return
-    if state.values_id:
-        _VIEWER_PACKAGES.pop(state.values_id, None)
-    if state.values_path is not None:
-        try:
-            state.values_path.unlink(missing_ok=True)
-        except OSError:
-            logger.debug("show_cad_viewer: could not remove %s", state.values_path, exc_info=True)
+    for model in state.models:
+        if model.values_id:
+            _VIEWER_PACKAGES.pop(model.values_id, None)
+        if model.values_path is not None:
+            try:
+                model.values_path.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("show_cad_viewer: could not remove %s", model.values_path, exc_info=True)
 
 
 def _comparison_summary(data: dict, state: _AlignState | None, picked: list[tuple[str, int]], tolerance: Any) -> dict[str, Any] | None:
-    """LLM へ返す基準モデルとの比較の概要（位置合わせ・偏差の統計・選んだ面ごとの偏差）。"""
-    dev = data.get("deviation") or {}
-    ref = data.get("reference") or {}
-    if dev.get("error"):
-        return {"error": dev["error"]}
-    if not ref or not dev:
+    """LLM へ返す、② ③ ④ と ① の比較の概要（モデルごとの位置合わせ・偏差の統計・① の選んだ面ごとの偏差）。"""
+    entries = _comparison_entries(data)
+    if not entries:
         return None
     import numpy as np
 
-    from ..cad.align import as_matrix, deviation_stats, describe_transform, face_deviation_stats
-    from ..cad.reference import _decode, target_mesh
+    from ..cad.align import SurfaceIndex, as_matrix, base_face_deviation_stats, deviation_stats, describe_transform
+    from ..cad.reference import _decode, comparison_mesh, mesh_arrays, target_mesh
 
     tol = float(tolerance) if isinstance(tolerance, (int, float)) and not isinstance(tolerance, bool) and tolerance > 0 else None
     if tol is None:
-        tol = state.tolerance if state is not None else float(dev.get("tolerance") or _deviation_tolerance())
-    if state is not None and state.values is not None:
-        values, T, alignment = state.values, state.transform, state.alignment
-    else:
-        values = _decode(dev["values"], "f4").astype(np.float64)
-        T = as_matrix(dev.get("transform"))
-        T = np.eye(4) if T is None else T
-        alignment = dev.get("alignment") or {"method": "none"}
-    target = state.target if state is not None and state.target is not None else target_mesh(data)
-    tf = describe_transform(T)
+        first = next((e["deviation"].get("tolerance") for e in entries if _usable_comparison(e)), None)
+        tol = state.tolerance if state is not None else float(first or _deviation_tolerance())
+    faces = [eid for kind, eid in picked if kind == "face"][:50]
+    models: list[dict[str, Any]] = []
+    for number, entry in enumerate(entries):
+        item: dict[str, Any] = {"model": _MARKS[number], "path": (entry.get("source") or {}).get("path", "")}
+        if not _usable_comparison(entry):
+            item["error"] = str(entry.get("error") or (entry.get("deviation") or {}).get("error") or "no deviation for this model")
+            models.append(item)
+            continue
+        dev = entry["deviation"]
+        m = state.model(number) if state is not None else None
+        if m is not None and m.values is not None:
+            values, T, alignment = m.values, m.transform, m.alignment
+        else:
+            values = _decode(dev["values"], "f4").astype(np.float64)
+            T = as_matrix(dev.get("transform"))
+            T = np.eye(4) if T is None else T
+            alignment = dev.get("alignment") or {"method": "none"}
+        target = m.target if m is not None and m.target is not None else comparison_mesh(entry)
+        tf = describe_transform(T)
+        item["format"] = (entry.get("source") or {}).get("format", "")
+        item["alignment"] = {**alignment, "translation": tf["translation"], "rotation_deg": tf["rotation_deg"], "matrix": tf["matrix"]}
+        item["deviation"] = deviation_stats(values, target.vertex_weights(), tol)
+        if entry.get("chordTolerance"):
+            item["chord_tolerance"] = entry["chordTolerance"]
+        if faces:
+            if state is not None and state.base_target is not None:
+                base = state.base_target
+            else:
+                base = target_mesh(data)
+                if state is not None:
+                    state.base_target = base
+            if state is not None and state.base_faces_index is not None:
+                index = state.base_faces_index
+            else:
+                pos, idx = mesh_arrays(data)
+                index = SurfaceIndex(pos, idx)
+                if state is not None:
+                    state.base_faces_index = index
+            item["selected_faces"] = base_face_deviation_stats(base, index, target, np.asarray(values, dtype=np.float64), T, faces, tol)
+        models.append(item)
     out: dict[str, Any] = {
-        "reference": (ref.get("source") or {}),
-        "alignment": {**alignment, "translation": tf["translation"], "rotation_deg": tf["rotation_deg"], "matrix": tf["matrix"]},
-        "deviation": deviation_stats(values, target.vertex_weights(), tol),
+        "base": (data.get("source") or {}).get("path") or "your CadQuery code",
         "units": data.get("units", "unknown"),
+        "tolerance": tol,
+        "models": models,
         "note": (
-            "Deviation = signed distance from each point of the shown model (moved by alignment.matrix, which maps the shown "
-            "model's coordinates to the reference's) to the reference surface; positive = outside the reference (extra material), "
-            "negative = inside (missing material). Statistics are area-weighted. within_tolerance_ratio is the area ratio within "
-            "±tolerance."
+            "① is the base (nominal) model. For each compared model (②③④), deviation = signed distance from each point of "
+            "that model (moved by alignment.matrix, which maps that model's coordinates to ①'s) to the surface of ①; "
+            "positive = outside ① (extra material), negative = inside (missing material). Statistics are area-weighted. "
+            "within_tolerance_ratio is the area ratio within ±tolerance. selected_faces are faces of ① (points of the "
+            "compared model whose nearest point on ① is on that face)."
         ),
     }
-    if ref.get("chordTolerance"):
-        out["reference_chord_tolerance"] = ref["chordTolerance"]
-        out["note"] += " The CAD reference was split into triangles with chords up to reference_chord_tolerance, which bounds the accuracy."
-    faces = [eid for kind, eid in picked if kind == "face"][:50]
-    if faces:
-        out["selected_faces"] = face_deviation_stats(target, np.asarray(values, dtype=np.float64), faces, tol)
+    base_chord = (data.get("baseSurface") or {}).get("chordTolerance") if isinstance(data.get("baseSurface"), dict) else None
+    if base_chord or any(m.get("chord_tolerance") for m in models):
+        if base_chord:
+            out["base_chord_tolerance"] = base_chord
+        out["note"] += (
+            " CAD models were split into triangles with chords up to base_chord_tolerance (①) / chord_tolerance (each model), "
+            "which bounds the accuracy."
+        )
     return out
 
 
@@ -1806,7 +1957,7 @@ async def _ask_selection(
                 "timeout_seconds": max(0, seconds),
                 # 基準モデルとの位置合わせをビューアからやり直せるか（app.py の cad_viewer_align）と、偏差の公差の既定値。
                 "can_align": can_align,
-                "deviation_tolerance": float((data.get("deviation") or {}).get("tolerance") or _deviation_tolerance()),
+                "deviation_tolerance": _initial_tolerance(data),
                 # 点のデータムの当て面の半径の既定値（モデルの単位。0 ならビューアが基準モデルの大きさから決める）。
                 "datum_pad_radius": float(_setting("cad_viewer_datum_pad_radius", 0.0)),
             },
@@ -1819,8 +1970,11 @@ async def _ask_selection(
             await element.remove()
         except Exception:  # noqa: BLE001 - 後片付けの失敗でツールの結果を失わせない
             logger.warning("Could not remove the 3D viewer element", exc_info=True)
-        # ①⇔② の入れ替え（すぐ開き直す）は、閉じたとは出さない。
-        if res is not None and not (isinstance(res, dict) and res.get("swap_models")):
+        # ① と比較モデルの入れ替え（すぐ開き直す）は、閉じたとは出さない。
+        # （0 = ② と False を取り違えないよう、型で見分ける。）
+        swap_raw = res.get("swap_models") if isinstance(res, dict) else None
+        is_swap = swap_raw is True or (isinstance(swap_raw, int) and not isinstance(swap_raw, bool))
+        if res is not None and not is_swap:
             if res.get("submitted", True):
                 try:
                     answer = _echo_text(

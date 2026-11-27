@@ -44,7 +44,11 @@ import {
   type DatumMode,
   type DatumName,
   type Datums,
-  type DatumScenePick
+  type DatumScenePick,
+  MODEL_MARKS,
+  splitGrid,
+  splitLayoutsFor,
+  type SplitLayout
 } from './cad/cadData';
 import type { CadScene, CadSceneColors, ViewName } from './cad/CadScene';
 import {
@@ -130,9 +134,11 @@ function sceneColors(): CadSceneColors {
   };
 }
 
-/** 基準モデルと比べるときの、表示するモデル ① と基準モデル ② の初めの色。 */
-const COMPARE_MODEL_COLOR = '#2fa84f';
-const COMPARE_REFERENCE_COLOR = '#e5484d';
+/**
+ * 比較するときの、① 基準モデルと ②③④ 比較モデルの初めの色（① 緑・② 赤・③ 青・④ 黄）。選択のオレンジ・ホバーの水色・
+ * 計測の紫と見分けられ、重ねても区別しやすい色にしてある。
+ */
+const COMPARE_COLORS = ['#2fa84f', '#e5484d', '#3e7bfa', '#e0b000'];
 
 /** 選んだ要素の色（3D 表示・選択中タグ・部品ツリーで共通。styles.css の --cad-selected と同じ値）。 */
 const SELECTED_COLOR = '#ff7a00';
@@ -245,7 +251,7 @@ export function CadViewerBar() {
       sewDefault={props.sew_tolerance ?? 0.5}
       deadlineAt={deadlineAt}
       canAlign={!!props.can_align}
-      deviationToleranceDefault={props.deviation_tolerance ?? data.deviation?.tolerance ?? 0.1}
+      deviationToleranceDefault={props.deviation_tolerance ?? data.comparisons?.find((c) => c.deviation?.tolerance)?.deviation?.tolerance ?? 0.1}
       datumPadRadiusDefault={defaultPadRadius(props.datum_pad_radius, data)}
       onSubmit={(selected, colors, message, view, screenshot, measurements) =>
         askUser.callback({
@@ -259,7 +265,7 @@ export function CadViewerBar() {
         })
       }
       onCancel={(colors, view) => askUser.callback({ submitted: false, selected: [], colors, ...view })}
-      onSwap={() => askUser.callback({ submitted: false, selected: [], swap_models: true })}
+      onSwap={(model) => askUser.callback({ submitted: false, selected: [], swap_models: model })}
     />
   );
   if (props.data_id) {
@@ -365,8 +371,8 @@ interface PanelProps {
     measurements: MeasureResult[]
   ) => void;
   onCancel: (colors: CadColorChanges, view: CadViewState) => void;
-  /** ① と ② を入れ替えて開き直す（backend が役割を逆にしたビューア用データを作り、ビューアを出し直す）。 */
-  onSwap: () => void;
+  /** 比較モデル model（0 = ②）を ① にして開き直す（backend が役割を入れ替えたビューア用データを作り、ビューアを出し直す）。 */
+  onSwap: (model: number) => void;
 }
 
 /** 確定・閉じる・保存のときに返す表示の状態（backend は変更があればビューア用データに反映して自動で保存する）。 */
@@ -563,8 +569,10 @@ function CadViewerPanel({
   const hasParts = (data.parts?.length ?? 0) > 0;
   // 狭い画面ではサイドバーが 3D 表示の場所を取るため、最初は閉じておく（ボタンで開ける）。
   // サイドバーには選択中の要素の一覧（「選択」タブ）もあるので、広い画面では部品の有無にかかわらず開いておく。
-  // 基準モデル（reference）があれば、表示するモデル ① と基準モデル ② をアセンブリのように並べて表示・非表示と色を変えられる。
-  const hasRefModel = !!data.reference?.indices;
+  // 比較モデル ②③④（compare_models）があれば、① 基準モデルと一緒にアセンブリのように並べて表示・非表示と色を変えられる。
+  const comparisons = useMemo(() => (data.comparisons ?? []).slice(0, 3), [data]);
+  const usable = useMemo(() => comparisons.map((c) => !c.error && !!c.indices && !!c.positions), [comparisons]);
+  const hasRefModel = usable.some(Boolean);
   const [sidebarOpen, setSidebarOpen] = useState(() => !isNarrowScreen());
   // STEP の属性の編集（製品名 → 編集後の一覧）。
   const [attributeEdits, setAttributeEdits] = useState<CadAttributeEdits>({});
@@ -573,7 +581,8 @@ function CadViewerPanel({
   const [diffVisible, setDiffVisible] = useState(true);
   // 表面の解析表示（ゼブラ・曲率・偏差）。曲率は src/cad/analysis.py の主曲率、偏差は基準モデルとの符号付き距離。
   const hasCurvature = !!data.analysis?.k1;
-  const hasReference = !!data.reference && !!data.deviation?.values;
+  // ① からの偏差を持つ比較モデルがあるか（偏差の表示・位置合わせ）。
+  const hasReference = comparisons.some((c, i) => usable[i] && !!c.deviation?.values);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('normal');
   const [zebra, setZebra] = useState<ZebraSettings>(() => defaultZebra(data.bbox));
   // ゼブラの平面の光源の「基準点」: 次にクリックした点を基準点にする（その 1 回だけ）。
@@ -585,20 +594,30 @@ function CadViewerPanel({
   const [rangeLinked, setRangeLinked] = useState(true);
   const [tolerance, setTolerance] = useState(deviationToleranceDefault);
   const [scalarHover, setScalarHover] = useState<number | null>(null);
-  // 基準モデルとの位置合わせ。偏差の値は位置を合わせ直すたびに backend から取り直す。
+  // 偏差の表示中、マウスの下の比較モデル（1〜3 = ②③④）とその点の偏差。
+  const [compareHover, setCompareHover] = useState<{ model: number; value: number } | null>(null);
+  // 比較モデルの ① への位置合わせ。偏差の値は位置を合わせ直すたびに backend から取り直す。
   const [alignOpen, setAlignOpen] = useState(false);
-  // 比べるときは両方を最初から見せる（① 緑・② 赤の半透明。色はサイドバーの「比較モデル」で変えられる）。
-  const [referenceVisible, setReferenceVisible] = useState(hasRefModel);
-  const [referenceOpacity, setReferenceOpacity] = useState(0.35);
-  const [referenceColor, setReferenceColor] = useState(COMPARE_REFERENCE_COLOR);
+  // 比べるときはすべてを最初から見せる（① 緑・② 赤・③ 青・④ 黄。②③④ は半透明。色はサイドバーの「比較モデル」で変えられる）。
+  const [compareVisible, setCompareVisible] = useState<boolean[]>(() => usable.slice());
+  const [compareOpacity, setCompareOpacity] = useState(0.35);
+  const [compareColors, setCompareColors] = useState<string[]>(() => COMPARE_COLORS.slice(1));
   const [modelVisible, setModelVisible] = useState(true);
-  const [modelColor, setModelColor] = useState(COMPARE_MODEL_COLOR);
-  const [deviationValues, setDeviationValues] = useState<Float32Array | null>(() =>
-    data.deviation?.values ? decodeFloat32(data.deviation.values) : null
+  const [modelColor, setModelColor] = useState(COMPARE_COLORS[0]);
+  // 比較モデルごとの、頂点ごとの ① からの偏差と、位置合わせの記録・偏差の統計（②③④ の順）。
+  const [deviationValues, setDeviationValues] = useState<(Float32Array | null)[]>(() =>
+    comparisons.map((c, i) => (usable[i] && c.deviation?.values ? decodeFloat32(c.deviation.values) : null))
   );
-  const [alignInfo, setAlignInfo] = useState<CadAlignmentInfo | null>(data.deviation?.alignment ?? null);
-  const [alignStats, setAlignStats] = useState<CadDeviationStats | null>(data.deviation?.stats ?? null);
+  const [alignInfos, setAlignInfos] = useState<(CadAlignmentInfo | null)[]>(() => comparisons.map((c) => c.deviation?.alignment ?? null));
+  const [alignStatsList, setAlignStatsList] = useState<(CadDeviationStats | null)[]>(() => comparisons.map((c) => c.deviation?.stats ?? null));
   const [alignState, setAlignState] = useState<AlignState>({ kind: 'idle' });
+  // 位置を合わせ直す比較モデル（data.comparisons の位置、-1 = すべて）。
+  const [alignTarget, setAlignTarget] = useState(-1);
+  // 画面分割と、画面ごとに映すモデル（0 = ①、1〜3 = ②③④）。初めは ①②③④ の順。
+  const shownModels = useMemo(() => [0, ...usable.flatMap((u, i) => (u ? [i + 1] : []))], [usable]);
+  const splitLayouts = useMemo(() => splitLayoutsFor(shownModels.length), [shownModels]);
+  const [split, setSplit] = useState<SplitLayout>('single');
+  const [paneModels, setPaneModels] = useState<number[]>(() => [...shownModels, ...[0, 0, 0, 0]].slice(0, 4));
   // データム（A〜D は点、H1・H2 は基準穴。D・穴は任意）と、次にクリックして拾うデータム・D の扱い・点の当て面の半径。
   // 拾うもの（点・穴）は枠で決まる。
   const [datums, setDatums] = useState<Datums>({});
@@ -621,21 +640,33 @@ function CadViewerPanel({
     const [min, max] = autoRange(curvValues, curvatureKind !== 'absmax');
     return { min: curvatureKind === 'absmax' ? 0 : min, max, auto: true };
   }, [curvRange, curvValues, curvatureKind]);
+  // 偏差の範囲を自動で決めるときは、すべての比較モデルの値をまとめて見る（色の意味をそろえるため、範囲は共通）。
+  const allDeviation = useMemo(() => {
+    const list = deviationValues.filter((v): v is Float32Array => !!v);
+    if (list.length <= 1) return list[0] ?? null;
+    const out = new Float32Array(list.reduce((n, v) => n + v.length, 0));
+    let at = 0;
+    for (const v of list) {
+      out.set(v, at);
+      at += v.length;
+    }
+    return out;
+  }, [deviationValues]);
   const effDevRange = useMemo<RangeState>(() => {
     if (devRange && !devRange.auto) return devRange;
-    if (!deviationValues) return { min: -1, max: 1, auto: true };
-    const [min, max] = autoRange(deviationValues, true, 0.01, 0.99);
+    if (!allDeviation) return { min: -1, max: 1, auto: true };
+    const [min, max] = autoRange(allDeviation, true, 0.01, 0.99);
     const m = Math.max(max, tolerance * 3);
     return { min: Math.min(min, -m), max: m, auto: true };
-  }, [devRange, deviationValues, tolerance]);
+  }, [devRange, allDeviation, tolerance]);
   const surfaceDisplay = useMemo<SurfaceDisplay>(() => {
     if (analysisMode === 'zebra') return { mode: 'zebra', zebra };
     if (analysisMode === 'curvature' && curvValues)
       return { mode: 'scalar', scalar: { values: curvValues, min: effCurvRange.min, max: effCurvRange.max, tolerance: 0, scheme: 'rainbow' } };
-    if (analysisMode === 'deviation' && deviationValues)
-      return { mode: 'scalar', scalar: { values: deviationValues, min: effDevRange.min, max: effDevRange.max, tolerance, scheme: 'deviation' } };
+    // 偏差は ① でなく比較モデルの上に描く（setDeviationDisplay）。① はふつうの表示。
     return { mode: 'normal' };
-  }, [analysisMode, zebra, curvValues, effCurvRange, deviationValues, effDevRange, tolerance]);
+  }, [analysisMode, zebra, curvValues, effCurvRange]);
+  const deviationOn = analysisMode === 'deviation' && hasReference;
   const [kindVisible, setKindVisible] = useState({ face: true, edge: true, vertex: true, ...data.viewState?.visible });
   const [hiddenParts, setHiddenParts] = useState<Set<number>>(() => initialHiddenParts(data));
   // 「非表示」で 1 つずつ隠した面・エッジ・頂点・穴・外周（selectionKey の集合）。部品は hiddenParts に入れる。
@@ -801,7 +832,8 @@ function CadViewerPanel({
             onMeasurePick: measurePick,
             onPmiClick: (id) => selectPmiRef.current(id),
             onDatumPick: (p) => datumPickRef.current(p),
-            onScalarHover: setScalarHover
+            onScalarHover: setScalarHover,
+            onComparisonHover: setCompareHover
           },
           sceneColors()
         );
@@ -895,9 +927,24 @@ function CadViewerPanel({
     if (surfaceDisplay.mode !== 'scalar') setScalarHover(null);
   }, [surfaceDisplay, status]);
   useEffect(() => {
-    // 「面」のチェックを外したら ② もワイヤー表示（② の色の線）にする。
-    sceneRef.current?.setReferenceOverlay({ visible: referenceVisible, opacity: referenceOpacity, color: referenceColor, wire: !kindVisible.face });
-  }, [referenceVisible, referenceOpacity, referenceColor, kindVisible.face, status]);
+    // 「面」のチェックを外したら ②③④ もワイヤー表示（それぞれの色の線）にし、「エッジ」の表示に合わせて折れ目の線も描く。
+    comparisons.forEach((_, i) =>
+      sceneRef.current?.setComparisonOverlay(i, {
+        visible: compareVisible[i],
+        opacity: compareOpacity,
+        color: compareColors[i],
+        wire: !kindVisible.face,
+        edges: kindVisible.edge
+      })
+    );
+  }, [comparisons, compareVisible, compareOpacity, compareColors, kindVisible.face, kindVisible.edge, status]);
+  useEffect(() => {
+    sceneRef.current?.setDeviationDisplay(deviationOn ? { min: effDevRange.min, max: effDevRange.max, tolerance } : null);
+    if (!deviationOn) setCompareHover(null);
+  }, [deviationOn, effDevRange, tolerance, status]);
+  useEffect(() => {
+    sceneRef.current?.setSplit(split, paneModels);
+  }, [split, paneModels, status]);
   useEffect(() => {
     sceneRef.current?.setMeasureTool(measureTool);
   }, [measureTool, status]);
@@ -956,18 +1003,20 @@ function CadViewerPanel({
     if (!item && mode === 'hole' && boxMode === 'off') return t('cad.hintHole', { deg: fmt(holeAngle) });
     if (!item && mode === 'outer' && boxMode === 'off') return t('cad.hintOuter');
     // 曲率・偏差の表示中は、マウスの下の値（曲率は曲率半径も）を先に出す。
-    if (scalarHover !== null && (analysisMode === 'curvature' || analysisMode === 'deviation')) {
-      const value =
-        analysisMode === 'deviation'
-          ? t('cad.deviation.value', { value: `${scalarHover > 0 ? '+' : ''}${fmtNum(scalarHover)}` })
-          : t('cad.curvature.value', {
-              value: fmtNum(scalarHover),
-              radius: Math.abs(scalarHover) > 1e-9 && curvatureKind !== 'gauss' ? fmtNum(1 / Math.abs(scalarHover)) : '∞'
-            });
+    if (compareHover && deviationOn) {
+      const v = compareHover.value;
+      const value = t('cad.deviation.value', { mark: MODEL_MARKS[compareHover.model] ?? '', value: `${v > 0 ? '+' : ''}${fmtNum(v)}` });
+      return item ? `${value}  ${item}` : value;
+    }
+    if (scalarHover !== null && analysisMode === 'curvature') {
+      const value = t('cad.curvature.value', {
+        value: fmtNum(scalarHover),
+        radius: Math.abs(scalarHover) > 1e-9 && curvatureKind !== 'gauss' ? fmtNum(1 / Math.abs(scalarHover)) : '∞'
+      });
       return item ? `${value}  ${item}` : value;
     }
     return item || t(boxMode === 'off' ? 'cad.hint' : 'cad.hintBox');
-  }, [hover, data, label, t, colors, boxMode, pivotPicking, basePickingOn, datumPickingOn, datumPicking, datumKind, measureTool, measureError, pending, localAxis, holeAngle, holeSizeTol, mode, topologyVersion, scalarHover, analysisMode, curvatureKind]);
+  }, [hover, data, label, t, colors, boxMode, pivotPicking, basePickingOn, datumPickingOn, datumPicking, datumKind, measureTool, measureError, pending, localAxis, holeAngle, holeSizeTol, mode, topologyVersion, scalarHover, analysisMode, curvatureKind, compareHover, deviationOn]);
 
   const selectAll = () => {
     const ids = sceneRef.current?.selectableIds(mode) ?? [];
@@ -1205,10 +1254,10 @@ function CadViewerPanel({
     setClosing('cancel');
     onCancel(colorChanges(), viewState());
   };
-  const swap = () => {
+  const swap = (model: number) => {
     if (closing) return;
     setClosing('swap');
-    onSwap();
+    onSwap(model);
   };
   const submit = () => {
     if (closing) return;
@@ -1255,15 +1304,20 @@ function CadViewerPanel({
       setSaveState({ kind: 'error', message: err instanceof Error ? err.message : t('cad.saveFailed') });
     }
   };
-  // 基準モデルへの位置合わせをやり直す（app.py の cad_viewer_align）。偏差の値は返ってきた ID で取りに行く。
+  // 比較モデルの ① への位置合わせをやり直す（app.py の cad_viewer_align）。偏差の値は返ってきた ID で取りに行く。
   const selectedFaceIds = useMemo(() => selection.filter((s) => s.kind === 'face').map((s) => s.id), [selection]);
+  const alignModels = useMemo(
+    () => comparisons.flatMap((c, i) => (usable[i] && c.deviation?.values ? [i] : [])),
+    [comparisons, usable]
+  );
   const runAlign = async (method: 'bestfit' | 'faces' | 'datum' | 'reset' | 'initial') => {
     if (!saveId || alignState.kind === 'busy') return;
     setAlignState({ kind: 'busy' });
+    const models = alignTarget >= 0 ? [alignTarget] : alignModels;
     const action: IAction = {
       id: '',
       name: 'cad_viewer_align',
-      payload: { save_id: saveId, method, faces: selectedFaceIds, datums, datum_mode: datumMode, pad_radius: padRadius, tolerance },
+      payload: { save_id: saveId, models, method, faces: selectedFaceIds, datums, datum_mode: datumMode, pad_radius: padRadius, tolerance },
       label: '',
       tooltip: '',
       forId: '',
@@ -1276,13 +1330,31 @@ function CadViewerPanel({
         setAlignState({ kind: 'error', message: String(r?.error ?? t('cad.align.failedUnknown')) });
         return;
       }
-      const values = await fetchCadFloat32(BACKEND_URL, String(r.values_id));
-      setDeviationValues(values);
-      setAlignInfo((r.alignment as CadAlignmentInfo) ?? null);
-      setAlignStats((r.stats as CadDeviationStats) ?? null);
-      const matrix = (r.transform as { matrix?: unknown } | undefined)?.matrix;
-      if (isMatrix4(matrix)) sceneRef.current?.setReferenceOverlay({ matrix });
-      setAlignState({ kind: 'idle' });
+      type AlignResultPayload = { model: number; values_id: string; transform?: { matrix?: unknown }; alignment?: CadAlignmentInfo; stats?: CadDeviationStats };
+      const results = (Array.isArray(r.results) ? r.results : []) as AlignResultPayload[];
+      const fetched = await Promise.all(results.map((x) => fetchCadFloat32(BACKEND_URL, String(x.values_id))));
+      const valuesNext = [...deviationValues];
+      const infosNext = [...alignInfos];
+      const statsNext = [...alignStatsList];
+      results.forEach((x, k) => {
+        if (!(x.model >= 0 && x.model < comparisons.length)) return;
+        valuesNext[x.model] = fetched[k];
+        infosNext[x.model] = x.alignment ?? null;
+        statsNext[x.model] = x.stats ?? null;
+        sceneRef.current?.setComparisonValues(x.model, fetched[k]);
+        const matrix = x.transform?.matrix;
+        if (isMatrix4(matrix)) sceneRef.current?.setComparisonOverlay(x.model, { matrix });
+      });
+      setDeviationValues(valuesNext);
+      setAlignInfos(infosNext);
+      setAlignStatsList(statsNext);
+      // 一部のモデルだけ合わせられなかったときは、その理由を出す。
+      const errors = (Array.isArray(r.errors) ? r.errors : []) as { model: number; error: string }[];
+      setAlignState(
+        errors.length
+          ? { kind: 'error', message: errors.map((e) => `${MODEL_MARKS[e.model + 1] ?? ''} ${e.error}`).join(' / ') }
+          : { kind: 'idle' }
+      );
       // 合わせたら偏差の色を見せる。
       setAnalysisMode('deviation');
     } catch (err) {
@@ -1658,6 +1730,21 @@ function CadViewerPanel({
               {t('cad.align')}
             </button>
           )}
+          {splitLayouts.length > 1 && (
+            <select
+              className="cad-viewer-chip cad-viewer-split-select"
+              value={split}
+              title={t('cad.splitTitle')}
+              aria-label={t('cad.split')}
+              onChange={(e) => setSplit(e.target.value as SplitLayout)}
+            >
+              {splitLayouts.map((l) => (
+                <option key={l} value={l}>
+                  {l === 'single' ? `${t('cad.split')}: ${t('cad.split.single')}` : t(`cad.split.${l}` as MessageKey)}
+                </option>
+              ))}
+            </select>
+          )}
           <button
             type="button"
             className={`cad-viewer-chip${sidebarOpen ? ' active' : ''}`}
@@ -1696,14 +1783,17 @@ function CadViewerPanel({
                     onModelVisible: setModelVisible,
                     modelColor,
                     onModelColor: setModelColor,
-                    referenceName: data.reference?.source?.path ?? data.reference?.source?.format ?? '',
-                    referenceVisible,
-                    onReferenceVisible: setReferenceVisible,
-                    referenceColor,
-                    onReferenceColor: setReferenceColor,
-                    referenceOpacity,
-                    onReferenceOpacity: setReferenceOpacity,
-                    // 入れ替えは backend で作り直すので、位置合わせを受け付けるビューア（基準モデルとの偏差がある）だけ。
+                    others: comparisons.map((c, i) => ({
+                      name: c.source?.path ?? c.source?.format ?? '',
+                      visible: compareVisible[i],
+                      onVisible: (v: boolean) => setCompareVisible((cur) => cur.map((x, k) => (k === i ? v : x))),
+                      color: compareColors[i],
+                      onColor: (hex: string) => setCompareColors((cur) => cur.map((x, k) => (k === i ? hex : x))),
+                      ...(usable[i] ? {} : { error: c.error ?? '' })
+                    })),
+                    opacity: compareOpacity,
+                    onOpacity: setCompareOpacity,
+                    // 入れ替えは backend で作り直すので、位置合わせを受け付けるビューア（① からの偏差がある）だけ。
                     onSwap: canAlign && saveId && !closing ? swap : undefined
                   }
                 : undefined
@@ -1721,17 +1811,49 @@ function CadViewerPanel({
               {hiddenCount ? t('cad.hiddenSpace', { count: hiddenCount }) : t('cad.hiddenSpaceEmpty')}
             </div>
           )}
-          {status === 'ready' && surfaceDisplay.mode === 'scalar' && (
+          {status === 'ready' && split !== 'single' && (
+            // 画面分割の枠と、画面ごとに映すモデルの選択（3D 表示は CadScene が 1 つの canvas に分けて描く）。
+            <div
+              className="cad-viewer-panes"
+              style={{
+                gridTemplateColumns: `repeat(${splitGrid(split).cols}, 1fr)`,
+                gridTemplateRows: `repeat(${splitGrid(split).rows}, 1fr)`
+              }}
+            >
+              {Array.from({ length: splitGrid(split).cols * splitGrid(split).rows }, (_, i) => (
+                <div key={i} className="cad-viewer-pane">
+                  <select
+                    className="cad-viewer-pane-model"
+                    value={paneModels[i] ?? 0}
+                    title={t('cad.split.paneModel')}
+                    aria-label={t('cad.split.paneModel')}
+                    style={{ borderColor: (paneModels[i] ?? 0) === 0 ? modelColor : compareColors[(paneModels[i] ?? 1) - 1] }}
+                    onChange={(e) => {
+                      const m = Number(e.target.value);
+                      setPaneModels((cur) => cur.map((x, k) => (k === i ? m : x)));
+                    }}
+                  >
+                    {shownModels.map((m) => {
+                      const src = m === 0 ? data.source.path : comparisons[m - 1]?.source?.path;
+                      const name = (src ?? '').split(/[\\/]/).pop() || t(m === 0 ? 'cad.side.compareModel' : 'cad.side.compareReference', { mark: MODEL_MARKS[m] });
+                      return (
+                        <option key={m} value={m}>
+                          {MODEL_MARKS[m]} {name}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+              ))}
+            </div>
+          )}
+          {status === 'ready' && (deviationOn || surfaceDisplay.mode === 'scalar') && (
             <ScalarLegend
-              title={
-                analysisMode === 'deviation'
-                  ? t('cad.deviation.legend')
-                  : t(`cad.curvature.${curvatureKind}` as MessageKey)
-              }
-              min={surfaceDisplay.scalar.min}
-              max={surfaceDisplay.scalar.max}
-              tolerance={surfaceDisplay.scalar.tolerance}
-              scheme={surfaceDisplay.scalar.scheme}
+              title={deviationOn ? t('cad.deviation.legend') : t(`cad.curvature.${curvatureKind}` as MessageKey)}
+              min={deviationOn ? effDevRange.min : surfaceDisplay.mode === 'scalar' ? surfaceDisplay.scalar.min : 0}
+              max={deviationOn ? effDevRange.max : surfaceDisplay.mode === 'scalar' ? surfaceDisplay.scalar.max : 1}
+              tolerance={deviationOn ? tolerance : surfaceDisplay.mode === 'scalar' ? surfaceDisplay.scalar.tolerance : 0}
+              scheme={deviationOn ? 'deviation' : surfaceDisplay.mode === 'scalar' ? surfaceDisplay.scalar.scheme : 'rainbow'}
             />
           )}
           {status === 'loading' && <div className="cad-viewer-overlay">{t('cad.loading')}</div>}
@@ -1856,14 +1978,16 @@ function CadViewerPanel({
                 <AlignRow
                   canAlign={canAlign && !!saveId}
                   state={alignState}
-                  info={alignInfo}
-                  stats={alignStats}
+                  results={alignModels.map((i) => ({ mark: MODEL_MARKS[i + 1], info: alignInfos[i], stats: alignStatsList[i] }))}
+                  targets={alignModels.map((i) => ({ model: i, mark: MODEL_MARKS[i + 1], name: comparisons[i]?.source?.path ?? '' }))}
+                  target={alignTarget}
+                  onTarget={setAlignTarget}
                   datums={datums}
                   selectedFaces={selectedFaceIds.length}
-                  referenceVisible={referenceVisible}
-                  onReferenceVisible={setReferenceVisible}
-                  referenceOpacity={referenceOpacity}
-                  onReferenceOpacity={setReferenceOpacity}
+                  overlayVisible={compareVisible.some((v, i) => v && usable[i])}
+                  onOverlayVisible={(v) => setCompareVisible(usable.map((u) => u && v))}
+                  overlayOpacity={compareOpacity}
+                  onOverlayOpacity={setCompareOpacity}
                   datumPicking={datumPickingOn ? datumPicking : null}
                   onPickDatum={pickDatum}
                   onPin={setPin}
@@ -1876,7 +2000,6 @@ function CadViewerPanel({
                     setDatumPicking(null);
                   }}
                   onAlign={(m) => void runAlign(m)}
-                  referenceName={data.reference?.source?.path ?? data.reference?.source?.format ?? ''}
                 />
               </section>
             )}
@@ -1902,10 +2025,12 @@ function CadViewerPanel({
             {t('cad.diffLegend')}
           </span>
         )}
-        {data.deviation?.error && (
-          <span className="cad-viewer-legend cad-viewer-align-error" title={data.deviation.error}>
-            {t('cad.deviation.error', { error: data.deviation.error })}
-          </span>
+        {comparisons.map((c, i) =>
+          c.error ? (
+            <span key={`cmp-error-${i}`} className="cad-viewer-legend cad-viewer-align-error" title={c.error}>
+              {t('cad.deviation.error', { mark: MODEL_MARKS[i + 1], error: c.error })}
+            </span>
+          ) : null
         )}
         <span className="cad-viewer-summary">{summary}</span>
       </div>

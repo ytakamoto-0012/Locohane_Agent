@@ -1,14 +1,24 @@
-"""基準モデル（show_cad_viewer の reference）を読み、位置合わせと偏差をビューア用データに付ける。
+"""比較モデル（show_cad_viewer の compare_models）を読み、① 基準モデルへの位置合わせと偏差をビューア用データに付ける。
 
-サブプロセス（src/cad/run_cad.py）で動く。基準が STL・ビューア用データなら numpy だけで読み、CAD（STEP 等）なら
-cadquery で三角形に分ける（偏差の誤差を抑えるため、表示用より細かく。[cad_viewer].reference_deflection_ratio）。
+① はビューアに出すモデル（file_path・code）で、② ③ ④（最大 MAX_COMPARISONS 個）はそれと比べるモデル。偏差は
+② ③ ④ それぞれの各頂点から ① の表面までの符号付き距離（① の外向きの法線の側 = 肉が多いが正）で、② ③ ④ の側に塗る。
+位置合わせも ② ③ ④ を ① に合わせる（① の座標は動かさないので、選択・計測の座標は変わらない）。
+
+サブプロセス（src/cad/run_cad.py）で動く。比較モデルが STL・ビューア用データなら numpy だけで読み、CAD（STEP 等）なら
+cadquery で三角形に分ける。① が CAD（元のファイル、CadQuery のコードなら隣の .brep）なら、偏差の誤差を抑えるため
+① も表示用より細かく分けた三角形（[cad_viewer].reference_deflection_ratio）を偏差の表面に使い、baseSurface に残す。
 
 ビューア用データに足すもの（src/cad/mesh_data.py の docstring）::
 
-    "reference": {"positions": <float32 base64>, "indices": <uint32 base64>, "source": {"format", "path"},
-                  "triangles": 数, "bbox": {...}, "chordTolerance": 三角形の弦の許容差（CAD のとき）},
-    "deviation": {"values": <float32 base64、対象の頂点ごとの符号付き距離>, "transform": 4×4,
-                  "alignment": {"method", "rms", ...}, "stats": {...}, "tolerance": 公差}
+    "comparisons": [
+        {"positions": <float32 base64>, "indices": <uint32 base64>, "source": {"format", "path"},
+         "triangles": 数, "bbox": {...}, "chordTolerance": 三角形の弦の許容差（CAD のとき）,
+         "deviation": {"values": <float32 base64、このモデルの頂点ごとの符号付き距離>, "transform": 4×4（このモデル → ①）,
+                       "alignment": {"method", "rms", ...}, "stats": {...}, "tolerance": 公差}}
+        | {"source": {"path"}, "error": "読めなかった理由"},
+        ...  # ② ③ ④ の順
+    ],
+    "baseSurface": {"positions", "indices", "chordTolerance"}  # ① を細かく分けた三角形（① が CAD のときだけ。ブラウザへは送らない）
 """
 
 from __future__ import annotations
@@ -124,40 +134,75 @@ def _tessellate_cad(path: Path, fmt: str, ratio: float, angular_deg: float, max_
     return np.concatenate(pos_list), np.concatenate(idx_list), lin
 
 
-def attach_reference(data: dict[str, Any], raw: dict[str, Any]) -> None:
-    """options の reference があれば、基準モデルと（align に応じて位置を合わせた）偏差を data に付ける。
+# 一度に比べられるモデルの数（② ③ ④）。
+MAX_COMPARISONS = 3
+# 細かく三角形に分け直せる ① の形式。
+_CAD_FORMATS = ("STEP", "IGES", "BREP", "BIN")
+# ② ③ ④ の印（LLM へ返す概要・注意で使う）。
+MARKS = ("②", "③", "④")
 
-    基準が読めなくても形の表示はできるので、失敗は data["deviation"] = {"error": ...} にして続ける。
-    """
-    ref_path = raw.get("reference")
-    if not ref_path:
-        return
-    method = str(raw.get("align") or "none")
-    tolerance = float(raw.get("deviation_tolerance") or 0.1)
-    try:
-        ref = load_reference(
-            ref_path,
-            deflection_ratio=float(raw.get("reference_deflection_ratio") or 0.0002),
-            angular_deg=min(float(raw.get("angular_deflection_deg") or 20.0), 10.0),
-            max_triangles=int(raw.get("max_triangles", 1_000_000)),
-        )
-        index = SurfaceIndex(ref["positions"], ref["indices"])
-        target = target_mesh(data)
-        if not len(target.triangles):
-            raise ReferenceModelError("the model has no faces (triangles) to compare with the reference")
-        T, info = align(target, index, method if method in ("none", "bestfit") else "none")
-        values = deviations(target, index, T)
-    except ImportError as e:
-        data["deviation"] = {"error": f"cadquery is not installed ({e}), so a CAD reference model cannot be read (an STL reference works)."}
-        return
-    except (ReferenceModelError, AlignError, TooManyTrianglesError, OSError) as e:
-        data["deviation"] = {"error": str(e)}
-        return
-    except Exception as e:  # noqa: BLE001 - OCP の C++ 例外は Python の別の型で来る
-        data["deviation"] = {"error": f"could not compare with the reference model ({type(e).__name__}: {e})"}
-        return
+
+def _base_cad_file(data: dict[str, Any], data_path: str | Path | None) -> Path | None:
+    """① を細かく分け直すための CAD ファイル（元のファイル。CadQuery のコードならビューア用データの隣の .brep）。"""
+    src = data.get("source") if isinstance(data.get("source"), dict) else {}
+    path = src.get("path")
+    if src.get("kind") == "file" and isinstance(path, str) and path:
+        p = Path(path)
+        if p.is_file() and format_of(p) in _CAD_FORMATS:
+            return p
+    if data_path is not None:
+        brep = Path(data_path).with_suffix(".brep")
+        if brep.is_file():
+            return brep
+    return None
+
+
+def base_surface(data: dict[str, Any], data_path: str | Path | None, raw: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, float | None]:
+    """偏差を測る ① の表面の三角形（CAD なら細かく分け直したもの、それ以外は表示用の mesh）と弦の許容差。"""
+    cad = _base_cad_file(data, data_path)
+    if cad is not None:
+        try:
+            ref = load_reference(
+                cad,
+                deflection_ratio=float(raw.get("reference_deflection_ratio") or 0.0002),
+                angular_deg=min(float(raw.get("angular_deflection_deg") or 20.0), 10.0),
+                max_triangles=int(raw.get("max_triangles", 1_000_000)),
+            )
+            return ref["positions"], ref["indices"], ref["chordTolerance"]
+        except Exception:  # noqa: BLE001 - 分け直せなければ表示用の三角形で測る（OCP の C++ 例外は別の型で来る）
+            pass
+    pos, idx = mesh_arrays(data)
+    return pos, idx, None
+
+
+def base_index(data: dict[str, Any]) -> SurfaceIndex:
+    """ビューア用データの ① の表面の索引（baseSurface があればそれ、無ければ表示用の mesh）。"""
+    surf = data.get("baseSurface")
+    if isinstance(surf, dict) and surf.get("positions") and surf.get("indices"):
+        pos, idx = mesh_arrays({"mesh": surf})
+    else:
+        pos, idx = mesh_arrays(data)
+    return SurfaceIndex(pos, idx)
+
+
+def comparison_mesh(entry: dict[str, Any]) -> TargetMesh:
+    """比較モデル（comparisons の 1 つ）の三角形（位置を合わせる側・偏差を塗る側）。"""
+    pos, idx = mesh_arrays({"mesh": entry})
+    return TargetMesh(pos, idx, [])
+
+
+def _comparison(path: str, index: SurfaceIndex, raw: dict[str, Any], method: str, tolerance: float) -> dict[str, Any]:
+    ref = load_reference(
+        path,
+        deflection_ratio=float(raw.get("reference_deflection_ratio") or 0.0002),
+        angular_deg=min(float(raw.get("angular_deflection_deg") or 20.0), 10.0),
+        max_triangles=int(raw.get("max_triangles", 1_000_000)),
+    )
+    target = TargetMesh(ref["positions"], ref["indices"], [])
+    T, info = align(target, index, method if method in ("none", "bestfit") else "none")
+    values = deviations(target, index, T)
     pos = ref["positions"].astype(np.float32)
-    data["reference"] = {
+    out: dict[str, Any] = {
         "positions": b64(pos, "f4"),
         "indices": b64(ref["indices"].astype(np.uint32), "u4"),
         "source": ref["source"],
@@ -165,11 +210,57 @@ def attach_reference(data: dict[str, Any], raw: dict[str, Any]) -> None:
         "bbox": bbox_of(pos),
     }
     if ref["chordTolerance"] is not None:
-        data["reference"]["chordTolerance"] = rnd(ref["chordTolerance"], 6)
-    data["deviation"] = {
+        out["chordTolerance"] = rnd(ref["chordTolerance"], 6)
+    out["deviation"] = {
         "values": b64(values, "f4"),
         "transform": describe_transform(T)["matrix"],
         "alignment": info,
         "tolerance": rnd(tolerance, 6),
         "stats": deviation_stats(values, target.vertex_weights(), tolerance),
     }
+    return out
+
+
+def _error_text(e: BaseException) -> str:
+    if isinstance(e, ImportError):
+        return f"cadquery is not installed ({e}), so a CAD model cannot be read for the comparison (an STL works)."
+    if isinstance(e, (ReferenceModelError, AlignError, TooManyTrianglesError, OSError)):
+        return str(e)
+    return f"could not compare with the base model ({type(e).__name__}: {e})"
+
+
+def attach_comparisons(data: dict[str, Any], raw: dict[str, Any], data_path: str | Path | None = None) -> None:
+    """options の compare_models（② ③ ④）があれば、それぞれを ① に合わせた位置と偏差を data["comparisons"] に付ける。
+
+    比較モデルが読めなくても形の表示はできるので、失敗はそのモデルの {"source", "error"} にして続ける（② ③ ④ の番号は保つ）。
+    """
+    paths = [str(p) for p in (raw.get("compare_models") or []) if p][:MAX_COMPARISONS]
+    # 前の版の基準モデル（① の偏差）は向きが逆なので使わない。
+    data.pop("reference", None)
+    data.pop("deviation", None)
+    data.pop("comparisons", None)
+    data.pop("baseSurface", None)
+    if not paths:
+        return
+    method = str(raw.get("align") or "none")
+    tolerance = float(raw.get("deviation_tolerance") or 0.1)
+    try:
+        pos, idx, chord = base_surface(data, data_path, raw)
+        index = SurfaceIndex(pos, idx)
+    except Exception as e:  # noqa: BLE001 - ① の三角形が無い等。どの比較もできない
+        msg = "the base model ① has no faces (triangles) to measure the deviation against" if isinstance(e, AlignError) else _error_text(e)
+        data["comparisons"] = [{"source": {"path": p}, "error": msg} for p in paths]
+        return
+    if chord is not None:
+        data["baseSurface"] = {
+            "positions": b64(pos.astype(np.float32), "f4"),
+            "indices": b64(idx.astype(np.uint32), "u4"),
+            "chordTolerance": rnd(chord, 6),
+        }
+    out: list[dict[str, Any]] = []
+    for p in paths:
+        try:
+            out.append(_comparison(p, index, raw, method, tolerance))
+        except Exception as e:  # noqa: BLE001 - OCP の C++ 例外は Python の別の型で来る
+            out.append({"source": {"path": p}, "error": _error_text(e)})
+    data["comparisons"] = out

@@ -2165,50 +2165,79 @@ switch the face display (press again for the normal display). Drawing is done by
   `[cad_viewer] surface_analysis = false` turns it off (the buttons are not shown). It takes about 6 seconds for a 1-million-triangle STL, and B-rep
   tessellation becomes 10-20% slower.
 
-**Deviation from a reference model and alignment** (`reference`, `align`, `src/cad/reference.py`, `src/cad/align.py`): give a reference model (the nominal
-CAD or another version: STEP, IGES, BREP, BIN, STL or viewer data) as `reference`, and the signed distance (deviation; positive on the side of the
-reference's outward normal = extra material) from every vertex of the shown model (e.g. a scanned STL) to the reference surface is computed, and
-"Deviation" and "Align" appear on the toolbar. Unlike `compare_with` (B-rep booleans with the previous version), it works for STL vs STL and STL vs CAD.
+**Deviation from the base model, alignment and split view** (`compare_models`, `align`, `src/cad/reference.py`, `src/cad/align.py`): the shape of
+`file_path` (or `code`) is **① the base model** (the nominal CAD etc.). Give up to 3 models to compare (scanned STLs, other versions; STEP, IGES, BREP, BIN,
+STL or viewer data) as `compare_models` (**② ③ ④**), and the tool computes, for each of ② ③ ④, the signed distance from every vertex to the surface of ①
+(deviation; positive = on the side of ①'s outward normal = extra material), and the toolbar gets "Deviation" and "Align". Every feature that needs a
+comparison (deviation, alignment, deviation per selected face) always uses ① as the base, however many models there are; ② ③ ④ are never compared with
+each other. Unlike `compare_with` (B-rep booleans with the previous version), it works between STLs and between STL and CAD.
 
-- **Deviation display**: "Deviation" draws values within the tolerance (±, `[cad_viewer] deviation_tolerance`, default 0.1, editable) in green, material
-  outside the reference in yellow to red and inside in cyan to blue. The range is Min / Max or "Auto" (1-99% of the values, at least 3 × the tolerance).
-  The deviation under the mouse is shown.
-- **Alignment**: `align` is `none` (default; keep the coordinates) or `bestfit` (best fit when opening). In the viewer's "Align" row: "Best fit"
-  (point-to-plane ICP of the whole model; tries the current position and 4 placements matching centroid and principal axes and refines the best),
-  "Fit selected faces" (local best fit from the current position), "Align by datums" with datums A, B, C and the optional D (best fit roughly first),
-  and "Position when opened" / "Original coordinates".
-  - The datums are the points A–D (D optional) and, in a separate slot, the datum holes "Hole 1" and "Hole 2" (optional, up to 2). Press a button and click
-    the model (A–D pick points, Hole 1 / Hole 2 pick holes; Esc to stop; the datums are drawn with their names). A **point** puts the surface
-    around the clicked point ("Pad R"; default `[cad_viewer] datum_pad_radius`, 0 = 1/50 of the reference diagonal), only the part connected to the point,
-    onto the reference surface (a checking-fixture pad). A **datum hole**: click a hole rim (open shapes), a circular edge or a cylindrical face to
-    get the center, axis and measured diameter; a round pin (diameter in "pin ⌀", initially the hole diameter) stands on the axis of the same hole of the
-    reference model (found by fitting a circle to its wall). Within the clearance (hole − pin) / 2 the hole can move; beyond it the hole rim is pushed onto
-    the pin. A pin larger than the hole aligns the centers without clearance. The result shows the hole offset from the pin axis, the clearance and the
-    reference hole diameter.
-    Rectangular, rounded-rectangular and regular-polygon holes (and round holes of closed meshes) are picked with their shape by clicking a hole wall or
-    rim. The pin starts as the thickest pin that fits (the short side, or across flats); within the hole shape shrunk by the pin radius the hole can
-    move (the clearance differs by direction) and beyond it the rim is pushed onto the pin. The reference hole center comes from fitting the same shape
-    to its wall. The mark draws the pin circle and the hole outline.
-  - "Priority" (default): in this order, A (pad) fixes 3, Hole 1 (round pin) 2, Hole 2 (second pin) 1, B 2 and C 1 degrees of freedom (a prioritized least
-    squares where later datums do not move what earlier ones fixed). When A and two holes fix all 6, B and C have no effect; without holes it is the 3-2-1 of
-    A, B and C. D joins the last stage with a lower weight (`[cad_viewer] datum_d_weight`, default 0.3) and does not move what earlier stages fixed. "Average": all
-    datums at the same weight in one least squares (6 DOF). Each datum's weight does not depend on its number of points.
-  It runs in app.py's action_callback `cad_viewer_align` (`align_viewer_model`, numpy and scipy's cKDTree in a thread of the app). The deviation values
-  are written to `_tmp_` as float32 and the browser fetches them with `GET /locohane/cad/data/{id}` (removed when the viewer closes).
-  Outlying matches (missing scan data, fixtures in the scan, etc.) beyond 3 × the median residual (MAD scaled) are ignored.
-- **Overlay**: "Overlay reference" shows the reference in translucent blue (opacity editable). The shown model's coordinates do not move; the reference
-  is moved by the inverse transform (so selection, measurement and box selection keep their coordinates).
-- **Closest points**: sample points on the reference triangles (1/400 of the diagonal apart, up to 4 million) go into a KD-tree; 8 candidates are looked
-  up and the exact closest point on those triangles (Ericson's method) gives the distance. When the closest point is on an edge or corner, the sign comes
-  from the triangle whose normal best matches the offset, or else from the corner's pseudo-normal. A CAD reference is tessellated finer than for display
-  (`[cad_viewer] reference_deflection_ratio`, default 0.0002 × the diagonal; the chord error becomes deviation error, reported as
-  `reference_chord_tolerance`). For 1 million triangles: about 2.5 s for the index, 2 s for a best fit and 3 s for the deviation of every vertex.
-- **What the AI gets**: `comparison` in the result has the reference file, the alignment (method, RMS, inlier ratio, translation, rotation angle and the 4×4
-  transform = shown model → reference), area-weighted deviation statistics (min, max, mean, σ, RMS, 95% of |deviation|, and the area ratios within,
-  outside and inside the tolerance; the tolerance is the viewer's value), and per-selected-face statistics (up to 50 faces). The re-aligned position and
-  deviation are also kept in `deviation` of the auto-saved viewer data (reopening starts there).
-- **How it works**: the reference is added after the shape becomes viewer data, by another subprocess (`run_cad.py --reference`; not part of the file
-  cache). If the reference cannot be read, the shape is still shown and `comparison.error` says why. A DXF (2D) cannot be a reference.
+- **Deviation display**: "Deviation" draws on ② ③ ④ the values within the tolerance (±, `[cad_viewer] deviation_tolerance`, default 0.1, editable) in green,
+  material outside in yellow to red and inside in cyan to blue (the range and tolerance are shared by all models). The range is the min / max fields or
+  "Auto" (1–99% of the values of all models, at least 3 × the tolerance). While overlaid, the faces of ① are not drawn (so the parts inside ① are not
+  hidden; the edges are drawn), and the deviation under the mouse is shown like "② deviation +0.12".
+- **Split view**: "Split view" in the toolbar splits the view left / right into 2–4 panes, top / bottom into 2–4 panes, or into 2 × 2 panes (only layouts
+  with no more panes than models are offered). The field at the top left of each pane chooses the model shown in it (① ② ③ ④; ①②③④ in order at first).
+  The view (rotation, pan, zoom, view buttons) is shared by all panes: dragging in any pane moves them all. In the panes showing ①, selection, box
+  selection, measuring and datum picking work; the other panes only show deviation values. Compared models are drawn opaque in split panes. Drawing
+  splits one canvas per pane (scissor) and separates the models by three.js layers (① = 0, ② ③ ④ = 1–3; `CadScene.setSplit`). ArcballControls gets
+  the position within the pane where the pointer went down (`getCursorNDC` is replaced). Measurement texts and PMI labels are put over the first pane showing ①.
+- **Alignment**: `align` is `none` (default, keep the coordinates) or `bestfit` (best fit each of ② ③ ④ to ① when opening). In the viewer's "Align" (right
+  panel), choose "Align" (All, ②, ③, ④) and then "Best fit" (the whole compared model onto the surface of ① by point-to-plane ICP; it tries the current
+  position and 4 placements matching the centroid and principal axes and refines the best), "Fit selected faces" (local best fit with only the selected
+  faces of ①, from the current position), "Align by datums" with datums A, B, C and an optional D (best fit roughly first), "Position when opened" or
+  "Original coordinates". The coordinates of ① do not move; the compared model is moved by its transform (that model → ①), so selection, measurement and
+  box selection coordinates stay the same. The selected faces and the datums are given on ①, so those two compute the transform that puts ① onto the
+  surface of the compared model and invert it.
+  - The datums are the point datums A–D (D optional) and, in separate slots, the datum holes "Hole 1" and "Hole 2" (optional, up to 2). Press the button and
+    click ① (A–D pick a point, Hole 1 / Hole 2 pick a hole; Esc stops; the datums are shown as named marks). A **point** puts the surface around the clicked
+    point ("Pad R"; default `[cad_viewer] datum_pad_radius`, 0 = 1/50 of the diagonal), only the part connected to the point, onto the surface of the compared
+    model (a checking-fixture pad). A **datum hole** takes the center, axis and measured diameter of a clicked hole rim (a hole of an open shape), circular edge
+    or cylindrical face, and stands a round pin ("pin ⌀"; the hole diameter at first) on the axis of the same hole of the compared model (a circle fitted to
+    the wall points parallel to the axis). Within the clearance ((hole − pin) / 2) the hole can move; beyond it the rim is pushed onto the pin. A pin larger
+    than the hole aligns the centers without clearance. The result shows the offset of the hole center from the pin axis, the clearance and the diameter of
+    the hole of the compared model. Rectangular, rounded-rectangle and regular-polygon holes (and round holes of closed meshes) are taken with their shape
+    by clicking the hole wall or rim. The first pin diameter is the thickest pin that fits (the short side of a rectangle, across flats of a polygon); within
+    the hole shape shrunk by the pin radius the hole can move (the clearance differs by direction), and beyond it is pushed back. The hole center on the
+    compared model is found by fitting the same shape to the wall points. The marks draw the pin circle and the hole outline.
+  - "Priority" (default): A (pad) fixes 3, Hole 1 (round pin) 2, Hole 2 (second pin) 1, B 2 and C 1 degrees of freedom, in this order (prioritized least
+    squares: directions fixed by an earlier stage do not move later). When A and two holes fix all 6, B and C have no effect; without holes it is the 3-2-1
+    of A, B and C. D joins the last stage with a lower weight (`[cad_viewer] datum_d_weight`, default 0.3) and does not move what earlier stages fixed.
+    "Average": all datums get the same weight in one 6-DOF least squares (averaging). The weight of a datum does not depend on its number of points.
+  The computation is app.py's action_callback `cad_viewer_align` (`align_viewer_model`; `models` in the payload chooses the models; numpy and scipy's
+  cKDTree in a thread of the app). The deviation values of each model are written to `_tmp_` as float32 and the browser fetches them by
+  `GET /locohane/cad/data/{id}` (deleted when the viewer closes). Outlier correspondences (missing scan data, fixtures in the scan, etc.) beyond 3 × the
+  median residual (MAD) are dropped.
+- **Overlay**: the compared models are overlaid on ① translucently from the start (also toggled by "Overlay compared models" in "Align" in the right
+  panel, with an opacity field).
+- **Compared models (sidebar)**: ① the base model and ② ③ ④ the compared models are listed like assembly parts to show / hide (also all at once) and
+  recolor. At first ① green, ② red, ③ blue, ④ yellow. ①'s color replaces the file colors and the default color; per-face / per-part colors and the selection /
+  hover colors still show. Hiding ① also removes it from picking and box selection. A compared model that could not be read is shown with ⚠ and the reason.
+  Colors and visibility are not returned to the AI (`CompareSection` in `CadSidebar.tsx`). ② ③ ④ have only triangles, so the creases of 20° or
+  more and the boundary are drawn as their edges (with "Edges" on, also over the faces, in a darker shade of the model's color, or dark gray during the
+  deviation display). Unchecking "Faces" shows ② ③ ④ as wireframes too (only the lines, in the model's color). "Make ①" on a compared model reopens the viewer with
+  that model as the base model ① and the current ① as the compared model in its place (②, ③ or ④); deviations are recomputed against the new ①, and if the
+  models had been aligned they are aligned again by best fit; selection and color changes start over. When ① has no original file (CadQuery code etc.),
+  its viewer data becomes the compared model. The AI's result says that the models were swapped and gives the current ① ② ③ ④ (`swap_models` in
+  `cad_viewer.py`; the viewer sends the compared model's position 0–2).
+- **Edge colors in wireframe**: when "Faces" is unchecked, edges are drawn in the color of the adjacent face (file color, changed color, or ①'s color).
+- **Closest points**: sample points on ①'s triangles (1/400 of the diagonal apart, up to 4 million) in a KD-tree give 8 candidates, and the exact closest
+  point on those triangles (Ericson's method) gives the distance. When the closest point is on an edge or corner, the sign comes from the triangle whose
+  normal agrees best with the offset, or else from the pseudo-normal of the corner. When ① is CAD (the original file, or the `.brep` next to it for
+  CadQuery code), the surface of ① used for deviation is tessellated finer than for display (`[cad_viewer] reference_deflection_ratio`, default
+  0.0002 × the diagonal; the chord error becomes deviation error) and kept as `baseSurface` in the viewer data (not sent to the browser). CAD compared models are
+  tessellated the same way (`base_chord_tolerance` and each model's `chord_tolerance` in the result). With 1 million triangles: index 2.5 s, best fit
+  2 s, deviation of all vertices about 3 s.
+- **Returned to the AI**: `comparison` in the result has the file of ① (`base`), the tolerance and `models` per compared model (`model` = ②③④, file,
+  alignment [method, RMS, inlier ratio, translation, rotation angle, 4×4 transform = that model → ①], deviation statistics [area-weighted min, max,
+  mean, σ, RMS, 95th percentile of |deviation|, area ratios within / outside / inside the tolerance; the tolerance is the viewer field's value], and the
+  deviation per selected face of ① [up to 50 faces; triangle centroids of the compared model whose nearest point on ① is on that face]; `error` for a model
+  that could not be read). A re-aligned position and deviation are also kept in `comparisons[i].deviation` of the automatically saved viewer data
+  (reopening starts from that position).
+- **How it works**: the compared models are added after the shape is turned into viewer data, by another subprocess (`run_cad.py --compare`; not in the
+  file cache). The viewer data's `comparisons` (in the order ② ③ ④; `{source, error}` for one that could not be read) has the triangles and `deviation`
+  (values, transform, record, statistics). If a compared model cannot be read, the shape is still shown and that model's `error` tells it. A DXF (2D) cannot
+  be a compared model. Viewer data of an earlier version with `reference` / `deviation` (deviation on ①'s vertices, the opposite direction) does not use them.
 
 **STEP attributes and PMI** (`src/cad/step_xcaf.py`, `src/cad/step_p21.py`): for a STEP file the viewer data has `step`, and `model.step` has a summary
 (AP and edition, originating system, PMI counts and up to 20 PMI texts, attribute counts and names, materials, layers, warnings).
@@ -2415,7 +2444,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[cad_viewer]` | `hole_normal_angle_deg` | Angle between normals for grouping holes as facing the same way (degrees, default 3; front or back alike; can be changed in the viewer) | `CAD_VIEWER_HOLE_NORMAL_ANGLE_DEG` |
 | `[cad_viewer]` | `hole_size_tolerance` | Hole size tolerance for grouping holes (model units, default 0.3; 0 or less starts with it off; the viewer's "Size ±" changes it) | `CAD_VIEWER_HOLE_SIZE_TOLERANCE` |
 | `[cad_viewer]` | `connected_face_angle_deg` | Largest bend at a seam that "Connected faces" spreads over (degrees, default 0, at most 180; 0 or less starts with it off; the viewer's "Bend ≤" changes it) | `CAD_VIEWER_CONNECTED_FACE_ANGLE_DEG` |
-| `[cad_viewer]` | `datum_pad_radius` | In "Align by datums", the radius around a picked point datum that is put onto the reference surface (model units, default 0 = 1/50 of the reference diagonal; the viewer's "Pad R" changes it) | `CAD_VIEWER_DATUM_PAD_RADIUS` |
+| `[cad_viewer]` | `datum_pad_radius` | In "Align by datums", the radius around a point datum picked on ① that is put onto the surface of the compared model (model units, default 0 = 1/50 of the diagonal; the viewer's "Pad R" changes it) | `CAD_VIEWER_DATUM_PAD_RADIUS` |
 | `[cad_viewer]` | `datum_d_weight` | Weight of datum D under "Priority" (A, B and C count as 1; default 0.3; not used by "Average") | `CAD_VIEWER_DATUM_D_WEIGHT` |
 | `[plan]` | `allow_badge_unlock` | Whether to allow switching the Plan Mode badge both ways | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | Whether to reset `plan_approved` unconditionally back to Plan Mode when `create_plan` is called again in the approved (Edit Automatically) state. If `false`, only the steps are replaced while keeping the approval | `PLAN_RESET_APPROVAL_ON_RECREATE` |

@@ -8,7 +8,7 @@
 
 - ヘッダー: {"data": 大きな項目を除いたビューア用データ, "blobs": [{"path", "type", "offset", "length"}, ...]}
 - type "bytes": base64 だった配列（三角形の座標・番号・色、エッジ・頂点・穴の縁の座標、比較の重ね表示）を
-  復号したそのままのバイト列。offset は 8 の倍数（ブラウザで Float32Array 等として直接見るため）。
+  復号したそのままのバイト列（比較モデルは path に並びの番号が入る。例 ["comparisons", 0, "positions"]）。offset は 8 の倍数（ブラウザで Float32Array 等として直接見るため）。
 - type "json": 要素の一覧（faces・edgeList・vertexList・parts・holeList・outerList）を JSON_CHUNK_ITEMS 件ずつに分けた JSON の配列。
   同じ path の塊を順につなげると元の一覧になる。
 
@@ -50,34 +50,49 @@ BYTES_PATHS = (
     ("analysis", "normals"),
     ("analysis", "k1"),
     ("analysis", "k2"),
-    ("reference", "positions"),
-    ("reference", "indices"),
-    ("deviation", "values"),
 )
+# 比較モデル ② ③ ④（comparisons の i 番目）のバイト列にする項目。
+COMPARISON_BYTES_KEYS = (("positions",), ("indices",), ("deviation", "values"))
+# ブラウザでは使わない項目（偏差を測る ① の細かい三角形。大きいので送らない）と、前の版の基準モデル・偏差
+# （① の頂点の偏差。今は比較モデルの側に持つ）。
+DROP_KEYS = ("baseSurface", "reference", "deviation")
 
 
 class PackageError(ValueError):
     """パッケージとして読めない。"""
 
 
-def _get(data: dict, path: tuple[str, ...]) -> Any:
+def _get(data: dict, path: tuple[str | int, ...]) -> Any:
     node: Any = data
     for key in path:
-        if not isinstance(node, dict) or key not in node:
+        if isinstance(key, int):
+            if not isinstance(node, list) or not 0 <= key < len(node):
+                return None
+        elif not isinstance(node, dict) or key not in node:
             return None
         node = node[key]
     return node
 
 
+def _bytes_paths(data: dict) -> list[tuple[str | int, ...]]:
+    """data の中の、バイト列にする base64 の配列の場所（比較モデルは並びの番号を含む）。"""
+    paths: list[tuple[str | int, ...]] = list(BYTES_PATHS)
+    comparisons = data.get("comparisons")
+    if isinstance(comparisons, list):
+        for i in range(len(comparisons)):
+            paths += [("comparisons", i, *keys) for keys in COMPARISON_BYTES_KEYS]
+    return paths
+
+
 def _copy_without(data: dict) -> dict:
-    """大きな項目（塊にするもの）を除いた浅いコピー（入れ子の dict は、除く項目がある分だけコピーする）。"""
-    out = {k: v for k, v in data.items() if k not in LIST_KEYS}
-    for path in BYTES_PATHS:
+    """大きな項目（塊にするもの）を除いた浅いコピー（入れ子の dict・list は、除く項目がある分だけコピーする）。"""
+    out = {k: v for k, v in data.items() if k not in LIST_KEYS and k not in DROP_KEYS}
+    for path in _bytes_paths(data):
         if not isinstance(_get(data, path), str):
             continue
-        node = out
+        node: Any = out
         for key in path[:-1]:
-            node[key] = dict(node[key])
+            node[key] = list(node[key]) if isinstance(node[key], list) else dict(node[key])
             node = node[key]
         node[path[-1]] = None
     return out
@@ -87,7 +102,7 @@ def write_package(data: dict, path: Path) -> int:
     """data をパッケージにして path へ書く（同じフォルダの一時ファイルに書いてから置き換える）。書いた大きさを返す。"""
     blobs: list[dict[str, Any]] = []
     payloads: list[bytes] = []
-    for bpath in BYTES_PATHS:
+    for bpath in _bytes_paths(data):
         value = _get(data, bpath)
         if isinstance(value, str):
             blobs.append({"path": list(bpath), "type": "bytes"})
@@ -151,7 +166,7 @@ def read_package(path: Path) -> dict:
         keys = blob["path"]
         node = data
         for key in keys[:-1]:
-            node = node.setdefault(key, {})
+            node = node[key] if isinstance(key, int) else node.setdefault(key, {})
         if blob["type"] == "bytes":
             node[keys[-1]] = base64.b64encode(chunk).decode("ascii")
         else:
