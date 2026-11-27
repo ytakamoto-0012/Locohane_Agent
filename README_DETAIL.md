@@ -446,7 +446,7 @@ Locohane/
 │   │   └── （read_skill.py/run_script.py/dispatch_agent.py 等、ツールごとに1ファイル）
 │   ├── path_memory.py       # パスメモリー（@N）レジストリの読み書き
 │   ├── memory.py            # 永続メモリーの読み書き・索引再構築
-│   ├── memory_recall.py     # ターンの始めの自動メモリー検索
+│   ├── memory_recall.py     # 会話の始めの自動メモリー検索
 │   ├── memory_review.py     # タスクの終わりの記録の見直し（記録係）
 │   ├── vector_db/            # ベクターDB（社内文書の意味検索。「ベクターDB（社内文書の意味検索）」節）
 │   │   ├── extract.py / chunking.py # 文書からのテキスト抽出・チャンク分割
@@ -1232,12 +1232,21 @@ YAML frontmatter 付き Markdown ファイルとして保存する。ロジッ�
 - **索引 `MEMORY.md`**: 共通の分は `data/memory/MEMORY.md`、ユーザーの分は `data/memory/users/<ユーザー>/MEMORY.md`。
   create/update/delete のたびに全再構築される（差分更新はしない設計）。索引はシステムプロンプトには載せない
   （以前は `{{memory}}` に一覧を差し込んでいたが、件数が増えるとプロンプトが膨らみ、会話を開く・最初の応答が遅くなっていた）。
-- **ターンの始めの自動検索**（`[memory] recall_enabled`、既定 true）: ユーザーの発言を受けるたびに、ハーネスがその本文で
+- **会話の始めの自動検索**（`[memory] recall_enabled`、既定 true）: 会話の最初の発言を受けたとき、ハーネスがその本文で
   関係しそうなメモリーを探し（`src/memory.py` の `relevant_memories`。ASCII の語と日本語等の文字 bigram の重なりを、珍しさ（IDF）で
-  重み付けして数える。名前・説明は本文の2倍。ひらがなだけの bigram と英語の機能語は手がかりにしない）、「`search_memory` を呼んで結果が返った」形（AIMessage の tool_call ＋ ToolMessage）で
-  発言の直後に入れる（`src/memory_recall.py`。チャット欄には「メモリー検索」のステップが出る）。LLM が検索を怠っても、覚えている
-  訂正・やり方が必ず目に入る。件数は `recall_max_results`（既定8。0で自動検索をしない）、本文の先頭の抜粋は `recall_excerpt_chars`
-  （既定300文字。「システムプロンプトに表示」のメモリーは本文が既に載っているので抜粋を付けない）。自動検索のメッセージはモデルの
+  重み付けして数える。名前・説明は本文の2倍。ひらがなだけの bigram と英語の機能語は手がかりにしない）、結果を発言の直後に入れる
+  （`src/memory_recall.py`）。LLM が検索を怠っても、覚えている訂正・やり方が必ず目に入る。同じ会話の2通目以降・作業中の追加指示・
+  スレッドを開き直して続けたとき（チェックポイントに履歴がある会話）は入れない（最初の結果が会話に残っているため。毎回入れると
+  関係の無いメモリーが会話に積み上がっていた）。入れ方は `recall_mode` で選ぶ。
+  - `explore`（既定）: 検索の候補（説明だけ）と依頼文を explore サブエージェントへ強制的に委譲し（`dispatch_agent` ツールをそのまま呼ぶ。
+    進捗表示・同時実行数の制限も通常の委譲と同じ）、explore が `read_memory` で読んで依頼に当てはまるものの要点だけを返す。
+    会話へは「`dispatch_agent(explore)` を呼んで結果が返った」形で入れる（tool_call の task は短い説明だけで、候補の一覧は会話に残さない）。
+    候補が1件も無ければ委譲しない（LLM を余分に動かさない）。委譲に失敗したら何も入れずに続ける。委譲のぶん最初の応答が遅くなる。
+  - `direct`: 「`search_memory` を呼んで結果が返った」形（AIMessage の tool_call ＋ ToolMessage）で検索結果をそのまま入れる
+    （チャット欄には「メモリー検索」のステップが出る）。本文の先頭の抜粋は `recall_excerpt_chars`
+    （既定300文字。「システムプロンプトに表示」のメモリーは本文が既に載っているので抜粋を付けない）。
+
+  件数は `recall_max_results`（既定8。0で自動検索をしない。explore では候補の数）。自動検索のメッセージはモデルの
   応答ではないため、トークン上限の判定・思考レベルの切り替え・ツール呼び出しのループ検知では数えない。
   評価（`evals/run_case.py`）も同じ関数で入れ、トランスクリプトでは `HarnessMemoryRecall` として区別する（`tool_called_*` で数えない）。`search_memory` は空白区切りの語をすべて含むものを返し（全角・半角は無視）、
   完全に当たらなければ似た語のメモリーを「近いもの」として返す。
@@ -2153,8 +2162,11 @@ three.js はビューアを開いたときだけ読み込む（`frontend/src/com
   「水平蛍光灯」（モデルを囲む横向きのトンネル＝半径はモデル半径の 3 倍の天井と壁に並んだ蛍光灯。外観検査の蛍光灯の映り込み。真下 ±30 度は床で暗い）、
   「垂直蛍光灯」（モデルを囲む縦の筒に縦に並んだ蛍光灯）。トンネル・筒の中からの反射は必ずどこかに当たるので、どの向きの面にも縞が出る。
   縞が画面の 1 ピクセルより細かく詰まるところは、ちらつかないよう平均の明るさに寄せる。
-  本数・幅（明るい部分の割合）・角度（縞の向き）を変えられ、照明を「視点に固定」（回すと縞が流れる）か「モデルに固定」（ワールドの +Z を上、
+  本数（1〜1000）・幅（明るい部分の割合）・角度（縞の向き）を変えられ、照明を「視点に固定」（回すと縞が流れる）か「モデルに固定」（ワールドの +Z を上、
   −Y を手前にした部屋の照明）にできる。縞が切れる＝段差（G0 の不連続）、折れる＝接線の不連続（G1）、曲がり方が急に変わる＝曲率の不連続（G2）。
+  「光源を表示」を押すと、照明の形（ドームは半径 3R の球、蛍光灯は半径 3R・軸に沿って ±4R の筒。R はモデル半径）と、その上の明るい縞
+  （蛍光灯）の並び・床の暗い範囲・軸の向き（矢印）を 3D 空間に重ねて描く（`ZebraLightGuide`。縞はモデルと同じシェーダーの式で描くので、
+  本数・幅・角度・固定の切り替えがそのまま映る）。全体は縮小すると見える。モデルの縞が隠れないよう、手前側の壁は薄く、奥側の壁は濃く描く。
 - **曲率**: 平均曲率・ガウス曲率・最大／最小主曲率・曲率の大きさ（|k| の最大）を虹色のカラーマップで描き、右下に凡例を出す。符号は
   「外向きの法線に対して凸 = 正」（球の外面 +1/R、穴の内面 −1/R）。範囲は最小・最大の欄で変えられ、「自動」で値の分布の 2〜98% から決め直す
   （曲率の大きさ以外は 0 を中心にそろえる）。「±連動」（既定でオン。曲率の大きさ以外と偏差で出る）にしておくと、最小・最大の片方を
@@ -2481,7 +2493,7 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[token_ratio]` | `<セクション>.<キー>`（例: `subagent.token_guard_soft_threshold`） | 自動入力先の閾値の、基準値に対する比率（空欄なら連動させない） | - |
 | `[memory]` | `user_visibility` / `feedback_visibility` / `project_visibility` / `reference_visibility` / `glossary_visibility` | 種類ごとの永続メモリーの公開範囲。`private` の種類は常に個人用、`shared` の種類は LLM が振り分け基準で選ぶ（既定は `user` だけ `private`。「永続メモリー」参照） | `MEMORY_<TYPE>_VISIBILITY` |
 | `[memory]` | `shared_criteria` / `private_criteria` | LLM に渡す「どの種類で保存するか」の基準（公開範囲は種類で決まり LLM は選ばない。言語は問わず、改行可。空欄なら既定の文言。設定ダッシュボードの「AIで清書」で表示言語の箇条書きに整えられる） | `MEMORY_SHARED_CRITERIA` / `MEMORY_PRIVATE_CRITERIA` |
-| `[memory]` | `recall_enabled` / `recall_max_results` / `recall_excerpt_chars` | ターンの始めの自動メモリー検索の有効/無効（既定 true）・見せる最大件数（既定8）・本文の抜粋の文字数（既定300、0で説明だけ）。「永続メモリー」参照 | `MEMORY_RECALL_ENABLED` / `MEMORY_RECALL_MAX_RESULTS` / `MEMORY_RECALL_EXCERPT_CHARS` |
+| `[memory]` | `recall_enabled` / `recall_mode` / `recall_max_results` / `recall_excerpt_chars` | 会話の始め（最初の発言だけ）の自動メモリー検索の有効/無効（既定 true）・入れ方（既定 `explore` = explore サブエージェントに委譲して要点だけ入れる、`direct` = 検索結果をそのまま入れる）・最大件数（既定8）・本文の抜粋の文字数（既定300、0で説明だけ。direct のみ）。「永続メモリー」参照 | `MEMORY_RECALL_ENABLED` / `MEMORY_RECALL_MODE` / `MEMORY_RECALL_MAX_RESULTS` / `MEMORY_RECALL_EXCERPT_CHARS` |
 | `[memory]` | `review_enabled` / `review_min_tool_calls` / `review_max_iterations` / `review_timeout_seconds` | タスクの終わりの記録の見直しの有効/無効（既定 true）・見直す最小のツール呼び出し回数（既定1、0で毎ターン）・記録係のモデル呼び出しの上限（既定4）・時間の上限（既定300秒、0以下で無制限）。「永続メモリー」参照 | `MEMORY_REVIEW_ENABLED` / `MEMORY_REVIEW_MIN_TOOL_CALLS` / `MEMORY_REVIEW_MAX_ITERATIONS` / `MEMORY_REVIEW_TIMEOUT_SECONDS` |
 | `[memory]` | `system_prompt_max_chars` | 設定ダッシュボードで「システムプロンプトに表示」にしたメモリーの本文を載せる合計の上限（既定6000文字）| `MEMORY_SYSTEM_PROMPT_MAX_CHARS` |
 | `[memory]` | `user_ranks` / `default_rank` | メモリーの優先順位に使うユーザーのランク（`{"ユーザー名": ランク}`。0以上の整数で大きいほど上位。食い違うメモリーはランクの高い方に従う。設定ダッシュボードの「ユーザー」画面でも設定できる）と、未設定のユーザー・共通のメモリーのランク（既定1）。「永続メモリー」参照 | `MEMORY_USER_RANKS` / `MEMORY_DEFAULT_RANK` |

@@ -1262,6 +1262,9 @@ class Config:
     memory_recall_enabled: bool
     memory_recall_max_results: int
     memory_recall_excerpt_chars: int
+    # 自動検索の結果の入れ方。explore = explore サブエージェントに候補を読ませ、当てはまる要点だけを入れる／
+    # direct = 検索結果（説明・抜粋の一覧）をそのまま入れる。
+    memory_recall_mode: str
     # ツールを使ったタスクの終わりに、メモリーが保存されていなければ記録係に見直させるか（src/memory_review.py）。
     memory_review_enabled: bool
     # 見直しを行う最小のツール呼び出し回数（メインエージェント分。0 ならツールを使わない会話でも見直す）。
@@ -2507,6 +2510,17 @@ def _as_vector_db_backend(value: str | None) -> str:
     text = str(value or "").strip().lower()
     if text not in VECTOR_DB_BACKENDS:
         raise ValueError(f"[vector_db].backend must be one of {'/'.join(VECTOR_DB_BACKENDS)}: {value!r}")
+    return text
+
+
+MEMORY_RECALL_MODES = ("explore", "direct")  # src/memory_recall.py の RECALL_MODES と同じ
+
+
+def _as_memory_recall_mode(value: str | None) -> str:
+    """[memory].recall_mode の値を検証する（MEMORY_RECALL_MODES のいずれか、大文字小文字は問わない）。"""
+    text = str(value or "").strip().lower()
+    if text not in MEMORY_RECALL_MODES:
+        raise ValueError(f"[memory].recall_mode must be one of {'/'.join(MEMORY_RECALL_MODES)}: {value!r}")
     return text
 
 
@@ -3886,6 +3900,9 @@ def load_config(
         ),
         memory_recall_excerpt_chars=_non_negative_int(
             os.getenv("MEMORY_RECALL_EXCERPT_CHARS", memory_section.get("recall_excerpt_chars", 300)), "[memory].recall_excerpt_chars"
+        ),
+        memory_recall_mode=_as_memory_recall_mode(
+            os.getenv("MEMORY_RECALL_MODE", memory_section.get("recall_mode", "explore"))
         ),
         memory_review_enabled=_as_bool(os.getenv("MEMORY_REVIEW_ENABLED", memory_section.get("review_enabled", "true"))),
         memory_review_min_tool_calls=_non_negative_int(

@@ -831,12 +831,17 @@ DESCRIPTIONS: dict[str, str] = {
         'The rank of users not in user_ranks, and of common memories (those from before memories became per user, and those created without an owner on the settings dashboard).'
     ),
     'memory.recall_enabled': (
-        'Automatic search at the start of a turn (true/false). Every time the user sends a message, the harness searches the memories related to it and puts the result in the conversation as if search_memory had been called (even if the AI forgets to search, the corrections and approaches it remembers are always shown to it).\n'
+        'Automatic search at the start of a conversation (true/false). When the first message of a conversation arrives, the harness searches the memories related to it and puts the result in the conversation (even if the AI forgets to search, the corrections and approaches it remembers are always shown to it). It is not done again for later messages of the same conversation, or when a thread is reopened and continued.\n'
         'The list of memories is not put in the system prompt (it grows with the number of memories), so with false the memories are used only when the AI calls search_memory itself.'
+    ),
+    'memory.recall_mode': (
+        'How the automatic search result is put in the conversation (explore / direct).\n'
+        'explore: the candidates found by the search are read by the explore sub-agent, and only the points of the memories that apply to the request are put in, as the result of dispatch_agent(explore) (memories unrelated to the request do not stay in the conversation; no delegation when there are no candidates; the first answer takes about one more LLM call).\n'
+        'direct: the search result (a list of descriptions and body excerpts) is put in as is, as the result of search_memory.'
     ),
     'memory.recall_max_results': ('The maximum number of memories shown by the automatic search. 0 turns the automatic search off (the same as recall_enabled = false).'),
     'memory.recall_excerpt_chars': (
-        'How many characters of the start of each memory body the automatic search adds (0 shows only the description).'
+        'How many characters of the start of each memory body the automatic search adds (0 shows only the description; used only with recall_mode = direct).'
     ),
     'memory.review_enabled': (
         'Review of what to remember at the end of a task (true/false). When a task that used tools ends and no memory was saved or updated during the turn, the harness shows the record of the turn to a recorder (a small AI that has only the memory tools) and has it save corrections, approaches that worked, terms, etc.\n'

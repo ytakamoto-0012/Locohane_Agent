@@ -7,6 +7,7 @@ src/memory_recall.py、src/memory_review.py、src/system_prompt_builder.py の f
 from __future__ import annotations
 
 import asyncio
+import importlib
 import time
 import types
 
@@ -127,6 +128,75 @@ def test_build_recall_messages_without_hits_still_searches(tmp_path):
     messages, count = memory_recall.build_recall_messages(config, "zzzz qqqq", "alice")
     assert count == 0 and len(messages) == 2
     assert "No related memories" in messages[1].content
+
+
+def _explore_config(tmp_path, **kw):
+    return types.SimpleNamespace(
+        memory_dir=tmp_path, memory_recall_enabled=True, memory_recall_max_results=5, memory_recall_mode="explore", **kw
+    )
+
+
+def test_abuild_recall_messages_delegates_to_explore(tmp_path, monkeypatch):
+
+    dispatch_module = importlib.import_module("src.tools.dispatch_agent")
+
+    _seed(tmp_path)
+    seen = {}
+
+    class _FakeTool:
+        async def ainvoke(self, call):
+            seen.update(call)
+            return ToolMessage(content="- monthly-report (mine): 売上は税抜で集計する", tool_call_id=call["id"])
+
+    monkeypatch.setattr(dispatch_module, "dispatch_agent", _FakeTool())
+    messages, count = asyncio.run(memory_recall.abuild_recall_messages(_explore_config(tmp_path), "月次レポートをお願い", "alice"))
+    assert count >= 1
+    assert seen["args"]["agent_type"] == "explore"
+    # 候補の一覧と依頼文は explore への task にだけ入り、会話の tool_call には短い説明だけが残る。
+    assert "monthly-report" in seen["args"]["task"] and "月次レポートをお願い" in seen["args"]["task"]
+    call, result = messages
+    assert call.tool_calls[0]["name"] == "dispatch_agent" and "monthly-report" not in call.tool_calls[0]["args"]["task"]
+    assert result.name == "dispatch_agent" and result.tool_call_id == call.tool_calls[0]["id"]
+    assert "税抜" in result.content
+    assert memory_recall.is_recall_message(call) and memory_recall.is_recall_message(result)
+
+
+def test_abuild_recall_messages_explore_skips_without_candidates(tmp_path, monkeypatch):
+
+    dispatch_module = importlib.import_module("src.tools.dispatch_agent")
+
+    _seed(tmp_path)
+
+    class _FailTool:
+        async def ainvoke(self, call):
+            raise AssertionError("must not delegate without candidates")
+
+    monkeypatch.setattr(dispatch_module, "dispatch_agent", _FailTool())
+    assert asyncio.run(memory_recall.abuild_recall_messages(_explore_config(tmp_path), "zzzz qqqq", "alice")) == ([], 0)
+
+
+def test_abuild_recall_messages_explore_error_inserts_nothing(tmp_path, monkeypatch):
+
+    dispatch_module = importlib.import_module("src.tools.dispatch_agent")
+
+    _seed(tmp_path)
+
+    class _ErrorTool:
+        async def ainvoke(self, call):
+            return ToolMessage(content="Error: the sub-agent run failed: x", tool_call_id=call["id"])
+
+    monkeypatch.setattr(dispatch_module, "dispatch_agent", _ErrorTool())
+    assert asyncio.run(memory_recall.abuild_recall_messages(_explore_config(tmp_path), "月次レポート", "alice")) == ([], 0)
+
+
+def test_abuild_recall_messages_direct_mode(tmp_path):
+
+    _seed(tmp_path)
+    config = types.SimpleNamespace(
+        memory_dir=tmp_path, memory_recall_enabled=True, memory_recall_max_results=5, memory_recall_excerpt_chars=50, memory_recall_mode="direct"
+    )
+    messages, count = asyncio.run(memory_recall.abuild_recall_messages(config, "月次レポートをお願い", "alice"))
+    assert count >= 1 and messages[0].tool_calls[0]["name"] == "search_memory"
 
 
 def test_written_since(tmp_path):

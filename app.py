@@ -148,7 +148,7 @@ from src.llm.thinking_control import unknown_tool_names
 from src.log_rotation import LineCountRotatingFileHandler
 from src.mcp_client import get_mcp_status, init_mcp_tools, shutdown_mcp_tools
 from src import memory as memory_store
-from src.memory_recall import build_recall_messages
+from src.memory_recall import abuild_recall_messages
 from src.memory_review import run_memory_review, should_review
 from src import ask_reconnect
 from src.ask_relay import pending_asks as _pending_asks, resolve_pending_ask
@@ -4773,15 +4773,17 @@ def _should_retry_after_loop(
 
 
 async def _memory_recall_messages(text: str) -> list:
-    """ターンの始めの自動メモリー検索（src/memory_recall.py）。結果を Step で見せ、会話へ足すメッセージを返す。
+    """会話の始めの自動メモリー検索（src/memory_recall.py）。結果を Step で見せ、会話へ足すメッセージを返す。
 
-    メモリーの一覧はシステムプロンプトに載せないため、ユーザーの発言ごとにハーネスが必ず検索する
-    （LLM が search_memory を呼び忘れても、覚えている訂正・やり方が目に入るように）。
+    メモリーの一覧はシステムプロンプトに載せないため、会話の最初の発言でハーネスが必ず検索する
+    （LLM が search_memory を呼び忘れても、覚えている訂正・やり方が目に入るように）。最初の発言かどうかは
+    呼び出し元（on_message）が判定する。[memory] recall_mode = explore では explore サブエージェントへ委譲し、
+    その要点だけを入れる（dispatch_agent の進捗表示はそちらが出す）。
     検索に失敗しても依頼の処理は続ける（空リストを返す）。
     """
     viewer = cl.user_session.get(skill_drafts.SESSION_USER_KEY)
     try:
-        messages, _count = await asyncio.to_thread(build_recall_messages, _config, text, viewer)
+        messages, _count = await abuild_recall_messages(_config, text, viewer)
     except Exception:  # noqa: BLE001 - 検索できなくても依頼の処理は続ける
         logging.getLogger(__name__).warning("Automatic memory search failed", exc_info=True)
         return []
@@ -4790,7 +4792,7 @@ async def _memory_recall_messages(text: str) -> list:
             # 親を指定しないとルート直下の Step になり、このターンの他の Step（@cl.on_message の実行ランの下へ
             # 入る。_resolve_parent_id 参照）の後ろ＝一覧の最後尾に表示されてしまうため、同じ実行ランの下へ入れる。
             parent = cl.context.current_step
-            step = cl.Step(name=tool_label("search_memory"), type="tool", parent_id=parent.id if parent else None)
+            step = cl.Step(name=tool_label(messages[1].name or "search_memory"), type="tool", parent_id=parent.id if parent else None)
             step.start = utc_now()
             step.input = messages[0].tool_calls[0]["args"]
             step.output = _display_step_text(messages[1].content)
@@ -4799,6 +4801,19 @@ async def _memory_recall_messages(text: str) -> list:
         except Exception:  # noqa: BLE001 - 表示に失敗しても検索結果は LLM へ渡す
             logging.getLogger(__name__).debug("Failed to show the automatic memory search step", exc_info=True)
     return messages
+
+
+async def _thread_has_history(graph, config: dict) -> bool:
+    """この会話のチェックポイントに、もうメッセージがあるか（自動メモリー検索を最初の発言だけにするため）。
+
+    読めなかったときは履歴ありとみなす（同じ会話に検索結果を重ねて入れるより、入れない方が害が小さい）。
+    """
+    try:
+        state = await graph.aget_state(config)
+    except Exception:  # noqa: BLE001 - 判定できなくても発言の処理は続ける
+        logging.getLogger(__name__).warning("Failed to read the thread state for the memory recall check", exc_info=True)
+        return True
+    return bool(state and state.values.get("messages"))
 
 
 # 実行中の記録の見直し（_start_memory_review_in_background）。タスクが途中で GC されないよう参照を持つ。
@@ -5003,9 +5018,14 @@ async def _on_message_impl(message: cl.Message) -> None:
     if not human_message.id:
         human_message.id = str(uuid.uuid4())
     memory_writes = memory_store.start_write_tracking()
-    # ターンの始めの自動メモリー検索（src/memory_recall.py）。検索した結果を発言の直後に入れる。
+    # 会話の始めの自動メモリー検索（src/memory_recall.py）。検索した結果を発言の直後に入れる。
+    # 会話の最初の発言だけで行う（チェックポイントに履歴があれば＝同じ会話の2通目以降・スレッドを開き直して
+    # 続けたときは、最初の結果が会話に残っているため入れ直さない）。
     # 生の UNC パスを @N に置き換えた後の本文で検索する（検索語として見せる query に生のパスが戻らないように）。
-    inputs = {"messages": [human_message, *await _memory_recall_messages(processed_text)]}
+    recall_messages: list = []
+    if not await _thread_has_history(graph, config):
+        recall_messages = await _memory_recall_messages(processed_text)
+    inputs = {"messages": [human_message, *recall_messages]}
     turn_totals = {"input": 0, "output": 0, "total": 0}  # このターンのトークン使用量
     # 無言終了（tool_calls も回答テキストも無いまま終わる）を検知した場合、
     # 最終回答を促して自動的にリトライする（下のループ末尾を参照。
@@ -5882,8 +5902,8 @@ async def _on_message_impl(message: cl.Message) -> None:
             await turn_injections.show(user_injection.event_payload(leftover)["injections"])
             # 最終回答の後なので、ターン途中の割り込みと違い新しいユーザー発話として扱う
             # （mark_user_turn: [llm].reasoning_preserve で前のターンの thinking を送り続けないため）。
-            leftover_recall = await _memory_recall_messages(register_raw_unc_paths_in_text("\n".join(i.text for i in leftover)))
-            inputs = {"messages": [mark_user_turn(user_injection.to_human_message(leftover, injection_token)), *leftover_recall]}
+            # 同じ会話の続きなので、自動メモリー検索は入れない（会話の最初の発言だけ。上の recall_messages 参照）。
+            inputs = {"messages": [mark_user_turn(user_injection.to_human_message(leftover, injection_token))]}
             continue
         if injection_token is not None:
             user_injection.close_thread(thread_id, injection_token)

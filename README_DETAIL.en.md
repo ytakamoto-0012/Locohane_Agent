@@ -442,7 +442,7 @@ Locohane/
 │   │   └── (read_skill.py/run_script.py/dispatch_agent.py, etc., one file per tool)
 │   ├── path_memory.py       # reading and writing the path memory (@N) registry
 │   ├── memory.py            # reading and writing persistent memory, rebuilding the index
-│   ├── memory_recall.py     # automatic memory search at the start of a turn
+│   ├── memory_recall.py     # automatic memory search at the start of a conversation
 │   ├── memory_review.py     # review of what to remember at the end of a task (recorder)
 │   ├── vector_db/            # vector DB (semantic search of internal documents; the "Vector DB (semantic search of internal documents)" section)
 │   │   ├── extract.py / chunking.py # extracting text from documents, splitting into chunks
@@ -1226,14 +1226,25 @@ The logic is centralized in `src/memory.py`, and the 6 tools in `src/tools/memor
   user. It is fully rebuilt on every create/update/delete (by design, no differential updates). The index is not put in
   the system prompt (it used to be inserted into `{{memory}}`, but it grew with the number of memories and made opening a
   chat and the first response slow).
-- **Automatic search at the start of a turn** (`[memory] recall_enabled`, default true): for every user message the harness
-  searches the related memories with its text (`relevant_memories` in `src/memory.py`: overlaps of ASCII words and character
-  bigrams of Japanese etc., weighted by rarity (IDF); name and description count double; hiragana-only bigrams and English
-  function words are ignored) and puts the result right after the
-  message as if `search_memory` had been called (an AIMessage tool_call plus a ToolMessage; `src/memory_recall.py`; a
-  "Search memory" step appears in the chat). Even if the LLM forgets to search, the corrections and approaches it remembers are
-  always shown to it. `recall_max_results` (default 8; 0 turns the search off) hits, each with `recall_excerpt_chars` (default
-  300) characters of its body (none for memories shown in the system prompt, whose content is already there). The injected
+- **Automatic search at the start of a conversation** (`[memory] recall_enabled`, default true): for the first message of a
+  conversation the harness searches the related memories with its text (`relevant_memories` in `src/memory.py`: overlaps of
+  ASCII words and character bigrams of Japanese etc., weighted by rarity (IDF); name and description count double;
+  hiragana-only bigrams and English function words are ignored) and puts the result right after the message
+  (`src/memory_recall.py`). Even if the LLM forgets to search, the corrections and approaches it remembers are always shown to
+  it. It is not done for later messages of the same conversation, additional instructions during work, or when a thread is
+  reopened and continued (a conversation that already has history in the checkpoint): the first result is still in the
+  conversation, and doing it every time piled up unrelated memories. `recall_mode` chooses how the result goes in:
+  - `explore` (default): the candidates (descriptions only) and the request are force-delegated to the explore sub-agent (the
+    `dispatch_agent` tool is called as is, so progress display and the concurrency limit are the same as a normal delegation);
+    explore reads them with `read_memory` and returns only the points that apply to the request. It goes in as if
+    `dispatch_agent(explore)` had been called (the task in the tool_call is a short description; the candidate list does not
+    stay in the conversation). No delegation when there are no candidates; if the delegation fails nothing is put in. The
+    first answer is slower by the delegation.
+  - `direct`: the search result goes in as is, as if `search_memory` had been called (an AIMessage tool_call plus a
+    ToolMessage; a "Search memory" step appears in the chat), each hit with `recall_excerpt_chars` (default 300) characters of
+    its body (none for memories shown in the system prompt, whose content is already there).
+
+  `recall_max_results` (default 8; 0 turns the search off; the number of candidates with explore). The injected
   messages are not model responses, so the token guards, the thinking level control and the tool call loop guard skip them.
   Evaluations (`evals/run_case.py`) use the same function and mark it as `HarnessMemoryRecall` in the transcript (not counted
   by `tool_called_*`). `search_memory` matches memories containing all
@@ -2104,9 +2115,13 @@ switch the face display (press again for the normal display). Drawing is done by
   zebra), "Horizontal tubes" (tube lights on the ceiling and walls of a horizontal tunnel around the model, radius 3 × the model radius; the tube-light
   reflection used in car-body inspection; ±30 degrees around straight down is a dark floor) and "Vertical tubes" (a ring of vertical tubes around the
   model). Every reflection from inside the tunnel / ring hits it, so faces facing any direction get stripes. Where stripes are denser than a pixel they
-  fade to the average brightness. Count, width (share of the light part) and angle (stripe direction) can be changed,
+  fade to the average brightness. Count (1 to 1000), width (share of the light part) and angle (stripe direction) can be changed,
   and the lights can be fixed to the view (stripes move as you rotate) or to the model (room lights with world +Z up and −Y in front).
   Broken stripes = a step (G0 break), kinked = a tangent break (G1), a sudden change of bend = a curvature break (G2).
+  "Show lights" draws the lights in 3D (`ZebraLightGuide`): their shape (a sphere of radius 3R for the dome, a tube of radius 3R and ±4R along the axis
+  for the tube lights; R is the model radius), the bright stripes (tubes) on it, the dark floor and the axis (arrow). The stripes use the same shader
+  formula as the model, so count, width, angle and the view / model fixing show up as they are. Zoom out to see all of it. The near wall is drawn faint
+  and the far wall strong so the stripes on the model stay visible.
 - **Curvature**: mean, Gaussian, max / min principal curvature and curvature magnitude (max |k|) as a rainbow color map with a legend at the bottom right.
   The sign is "convex toward the outward normal = positive" (+1/R on the outside of a sphere, −1/R inside a hole). The range can be typed in Min / Max, and
   "Auto" sets it again from 2-98% of the values (centered on 0 except for the magnitude). The value and radius of curvature under the mouse are shown below.
@@ -2436,7 +2451,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[context_compaction]` | `pre_note_warning_text` | Text of the warning message injected when the above threshold is reached | `CONTEXT_COMPACTION_PRE_NOTE_WARNING_TEXT` |
 | `[memory]` | `user_visibility` / `feedback_visibility` / `project_visibility` / `reference_visibility` | Visibility of persistent memories per type. A `private` type is always private; for a `shared` type the LLM chooses by the criteria (by default only `user` is `private`; see "Persistent memory") | `MEMORY_<TYPE>_VISIBILITY` |
 | `[memory]` | `shared_criteria` / `private_criteria` | Criteria given to the LLM (any language, line breaks allowed; the default wording if empty; "Polish with AI" on the settings dashboard turns them into a bullet list in the display language) | `MEMORY_SHARED_CRITERIA` / `MEMORY_PRIVATE_CRITERIA` |
-| `[memory]` | `recall_enabled` / `recall_max_results` / `recall_excerpt_chars` | Automatic memory search at the start of a turn on/off (default true), the maximum number of hits shown (default 8) and the length of the body excerpt (default 300; 0 shows only the description). See "Persistent memory" | `MEMORY_RECALL_ENABLED` / `MEMORY_RECALL_MAX_RESULTS` / `MEMORY_RECALL_EXCERPT_CHARS` |
+| `[memory]` | `recall_enabled` / `recall_mode` / `recall_max_results` / `recall_excerpt_chars` | Automatic memory search at the start of a conversation (first message only) on/off (default true), how it goes in (default `explore` = delegated to the explore sub-agent, only the points that apply; `direct` = the search result as is), the maximum number of hits (default 8) and the length of the body excerpt (default 300; 0 shows only the description; direct only). See "Persistent memory" | `MEMORY_RECALL_ENABLED` / `MEMORY_RECALL_MODE` / `MEMORY_RECALL_MAX_RESULTS` / `MEMORY_RECALL_EXCERPT_CHARS` |
 | `[memory]` | `review_enabled` / `review_min_tool_calls` / `review_max_iterations` / `review_timeout_seconds` | Review of what to remember at the end of a task on/off (default true), the minimum number of tool calls to review (default 1; 0 reviews every turn), the maximum model calls of the recorder (default 4) and its time limit (default 300 seconds; 0 or less means no limit). See "Persistent memory" | `MEMORY_REVIEW_ENABLED` / `MEMORY_REVIEW_MIN_TOOL_CALLS` / `MEMORY_REVIEW_MAX_ITERATIONS` / `MEMORY_REVIEW_TIMEOUT_SECONDS` |
 | `[memory]` | `system_prompt_max_chars` | The total limit of the bodies of memories set to "Show in the system prompt" on the settings dashboard (default 6000 characters) | `MEMORY_SYSTEM_PROMPT_MAX_CHARS` |
 | `[memory]` | `user_ranks` / `default_rank` | User ranks used to prioritize memories (`{"username": rank}`; an integer of 0 or more, larger is more senior; when memories disagree, the higher rank is followed; can also be set on the "Users" screen of the settings dashboard), and the rank of users without one and of common memories (default 1). See "Persistent memory" | `MEMORY_USER_RANKS` / `MEMORY_DEFAULT_RANK` |

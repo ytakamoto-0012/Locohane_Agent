@@ -512,7 +512,7 @@ async def _run(
     from src.llm import ThinkingLoopDetected, init_llm_concurrency, mark_user_turn
     from src import skill_drafts
     from src.memory import rebuild_all_indexes
-    from src.memory_recall import build_recall_messages
+    from src.memory_recall import abuild_recall_messages
     from src.skills import scan_skills
     from src.system_prompt_builder import build_prompts, fill_session_parts
     from src.subagent import add_tool_call_observer, remove_tool_call_observer
@@ -757,8 +757,10 @@ async def _run(
                 async with time_box:
                     for turn_index, turn in enumerate(case.turns):
                         timing_handler.reset()
-                        # 本番（app.py の _memory_recall_messages）と同じく、ターンの始めにメモリーを自動検索して入れる。
-                        recall_messages, _ = build_recall_messages(config, turn, skill_drafts.draft_owner_name(None))
+                        # 本番（app.py の _memory_recall_messages）と同じく、会話の最初の発言だけメモリーを自動検索して入れる。
+                        recall_messages: list = []
+                        if turn_index == 0:
+                            recall_messages, _ = await abuild_recall_messages(config, turn, skill_drafts.draft_owner_name(None))
                         try:
                             result = await ainvoke_ensuring_final_text(
                                 graph,
