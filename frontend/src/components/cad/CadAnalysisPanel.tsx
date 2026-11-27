@@ -69,6 +69,11 @@ interface SettingsProps {
   range: RangeState;
   onRange: (r: RangeState) => void;
   onAutoRange: () => void;
+  /** 0 を中心にそろえる値か（曲率の大きさ以外の曲率・偏差）。true のときだけ「連動」を出す。 */
+  linkable: boolean;
+  /** 連動: 最小・最大の片方を変えると、もう片方を 0 を挟んで同じ大きさ（±）にそろえる。 */
+  linked: boolean;
+  onLinked: (v: boolean) => void;
   tolerance: number;
   onTolerance: (v: number) => void;
   units: string;
@@ -135,14 +140,45 @@ export function AnalysisSettingsRow(p: SettingsProps) {
         />
       )}
       <span className="cad-viewer-sep" />
-      <NumberField label={t('cad.range.min')} value={p.range.min} step={rangeStep(p.range)} onChange={(v) => p.onRange({ ...p.range, min: v, auto: false })} />
-      <NumberField label={t('cad.range.max')} value={p.range.max} step={rangeStep(p.range)} onChange={(v) => p.onRange({ ...p.range, max: v, auto: false })} />
+      <NumberField label={t('cad.range.min')} value={p.range.min} step={rangeStep(p.range)} onChange={(v) => p.onRange(changeRange(p, 'min', v))} />
+      <NumberField label={t('cad.range.max')} value={p.range.max} step={rangeStep(p.range)} onChange={(v) => p.onRange(changeRange(p, 'max', v))} />
+      {p.linkable && (
+        <button
+          type="button"
+          className={`cad-viewer-chip${p.linked ? ' active' : ''}`}
+          aria-pressed={p.linked}
+          title={t('cad.range.linkTitle')}
+          onClick={() => {
+            const next = !p.linked;
+            p.onLinked(next);
+            // 連動にしたら、今の範囲の大きい方の側に合わせて ± にそろえる。
+            if (next) {
+              const m = Math.max(Math.abs(p.range.min), Math.abs(p.range.max));
+              if (p.range.min !== -m || p.range.max !== m) p.onRange({ min: -m, max: m, auto: p.range.auto });
+            }
+          }}
+        >
+          {t('cad.range.link')}
+        </button>
+      )}
       <button type="button" className={`cad-viewer-chip${p.range.auto ? ' active' : ''}`} title={t('cad.range.autoTitle')} onClick={p.onAutoRange}>
         {t('cad.range.auto')}
       </button>
       {p.units !== 'unknown' && <span className="cad-viewer-unit">{p.mode === 'curvature' ? `1/${p.units}` : p.units}</span>}
     </div>
   );
+}
+
+/**
+ * 範囲の最小・最大の片方を変えた後の範囲。連動していれば、もう片方を 0 を挟んで同じ大きさにする
+ * （最小に正の値・最大に負の値を入れたときは、その大きさで ± にそろえる）。
+ */
+function changeRange(p: { range: RangeState; linkable: boolean; linked: boolean }, side: 'min' | 'max', v: number): RangeState {
+  if (p.linkable && p.linked) {
+    const m = Math.abs(v);
+    return { min: -m, max: m, auto: false };
+  }
+  return side === 'min' ? { ...p.range, min: v, auto: false } : { ...p.range, max: v, auto: false };
 }
 
 function rangeStep(r: RangeState): number {

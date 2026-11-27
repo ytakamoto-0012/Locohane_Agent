@@ -60,6 +60,8 @@ export interface CadVisibility {
   hiddenItems?: ReadonlySet<string>;
   /** 非表示領域: true なら隠したものだけを映し、見えていたものを隠す（CAD の「表示/非表示空間の切り替え」）。 */
   swapped?: boolean;
+  /** false なら表示するモデル（基準モデルと比べるときの ①）を丸ごと隠す（当たり判定・範囲選択の対象にもしない）。省くと表示。 */
+  model?: boolean;
 }
 
 /**

@@ -120,6 +120,10 @@ function sceneColors(): CadSceneColors {
   };
 }
 
+/** 基準モデルと比べるときの、表示するモデル ① と基準モデル ② の初めの色。 */
+const COMPARE_MODEL_COLOR = '#2fa84f';
+const COMPARE_REFERENCE_COLOR = '#e5484d';
+
 /** 選んだ要素の色（3D 表示・選択中タグ・部品ツリーで共通。styles.css の --cad-selected と同じ値）。 */
 const SELECTED_COLOR = '#ff7a00';
 
@@ -522,7 +526,9 @@ function CadViewerPanel({
   measureRef.current = { tool: measureTool, pending };
   const hasParts = (data.parts?.length ?? 0) > 0;
   // 狭い画面ではサイドバーが 3D 表示の場所を取るため、最初は閉じておく（ボタンで開ける）。
-  const [sidebarOpen, setSidebarOpen] = useState((hasParts || !!data.step) && !isNarrowScreen());
+  // 基準モデル（reference）があれば、表示するモデル ① と基準モデル ② をアセンブリのように並べて表示・非表示と色を変えられる。
+  const hasRefModel = !!data.reference?.indices;
+  const [sidebarOpen, setSidebarOpen] = useState((hasParts || !!data.step || hasRefModel) && !isNarrowScreen());
   // STEP の属性の編集（製品名 → 編集後の一覧）。
   const [attributeEdits, setAttributeEdits] = useState<CadAttributeEdits>({});
   // 前の版からの変化の重ね表示（compare_with で比べたときだけ）。
@@ -536,12 +542,18 @@ function CadViewerPanel({
   const [curvatureKind, setCurvatureKind] = useState<CurvatureKind>('mean');
   const [curvRange, setCurvRange] = useState<RangeState | null>(null);
   const [devRange, setDevRange] = useState<RangeState | null>(null);
+  // 範囲の最小・最大を 0 を挟んで連動させるか（曲率の大きさ以外の曲率・偏差）。
+  const [rangeLinked, setRangeLinked] = useState(true);
   const [tolerance, setTolerance] = useState(deviationToleranceDefault);
   const [scalarHover, setScalarHover] = useState<number | null>(null);
   // 基準モデルとの位置合わせ。偏差の値は位置を合わせ直すたびに backend から取り直す。
   const [alignOpen, setAlignOpen] = useState(false);
-  const [referenceVisible, setReferenceVisible] = useState(false);
+  // 比べるときは両方を最初から見せる（① 緑・② 赤の半透明。色はサイドバーの「比較モデル」で変えられる）。
+  const [referenceVisible, setReferenceVisible] = useState(hasRefModel);
   const [referenceOpacity, setReferenceOpacity] = useState(0.35);
+  const [referenceColor, setReferenceColor] = useState(COMPARE_REFERENCE_COLOR);
+  const [modelVisible, setModelVisible] = useState(true);
+  const [modelColor, setModelColor] = useState(COMPARE_MODEL_COLOR);
   const [deviationValues, setDeviationValues] = useState<Float32Array | null>(() =>
     data.deviation?.values ? decodeFloat32(data.deviation.values) : null
   );
@@ -792,11 +804,14 @@ function CadViewerPanel({
     sceneRef.current?.setLocalAxis(localAxis);
   }, [localAxis, status]);
   useEffect(() => {
-    sceneRef.current?.setVisibility({ ...kindVisible, hiddenParts, hiddenItems, swapped: hiddenSpace });
-  }, [kindVisible, hiddenParts, hiddenItems, hiddenSpace, status]);
+    sceneRef.current?.setVisibility({ ...kindVisible, hiddenParts, hiddenItems, swapped: hiddenSpace, model: modelVisible });
+  }, [kindVisible, hiddenParts, hiddenItems, hiddenSpace, modelVisible, status]);
   useEffect(() => {
     sceneRef.current?.setColorOverrides(colors);
   }, [colors, status]);
+  useEffect(() => {
+    sceneRef.current?.setModelColor(hasRefModel ? modelColor : null);
+  }, [hasRefModel, modelColor, status]);
   useEffect(() => {
     sceneRef.current?.setDiffVisible(diffVisible);
   }, [diffVisible, status]);
@@ -805,8 +820,8 @@ function CadViewerPanel({
     if (surfaceDisplay.mode !== 'scalar') setScalarHover(null);
   }, [surfaceDisplay, status]);
   useEffect(() => {
-    sceneRef.current?.setReferenceOverlay({ visible: referenceVisible, opacity: referenceOpacity });
-  }, [referenceVisible, referenceOpacity, status]);
+    sceneRef.current?.setReferenceOverlay({ visible: referenceVisible, opacity: referenceOpacity, color: referenceColor });
+  }, [referenceVisible, referenceOpacity, referenceColor, status]);
   useEffect(() => {
     sceneRef.current?.setMeasureTool(measureTool);
   }, [measureTool, status]);
@@ -1568,6 +1583,9 @@ function CadViewerPanel({
         range={analysisMode === 'deviation' ? effDevRange : effCurvRange}
         onRange={(r) => (analysisMode === 'deviation' ? setDevRange(r) : setCurvRange(r))}
         onAutoRange={() => (analysisMode === 'deviation' ? setDevRange(null) : setCurvRange(null))}
+        linkable={analysisMode === 'deviation' || curvatureKind !== 'absmax'}
+        linked={rangeLinked}
+        onLinked={setRangeLinked}
         tolerance={tolerance}
         onTolerance={setTolerance}
         units={data.units}
@@ -1606,6 +1624,24 @@ function CadViewerPanel({
             onHoverPart={(id) => sceneRef.current?.setExternalHover(id === null ? null : { kind: 'part', id })}
             attributeEdits={attributeEdits}
             onAttributeEdits={setAttributeEdits}
+            compare={
+              hasRefModel
+                ? {
+                    modelName: data.source.path ?? data.source.format ?? '',
+                    modelVisible,
+                    onModelVisible: setModelVisible,
+                    modelColor,
+                    onModelColor: setModelColor,
+                    referenceName: data.reference?.source?.path ?? data.reference?.source?.format ?? '',
+                    referenceVisible,
+                    onReferenceVisible: setReferenceVisible,
+                    referenceColor,
+                    onReferenceColor: setReferenceColor,
+                    referenceOpacity,
+                    onReferenceOpacity: setReferenceOpacity
+                  }
+                : undefined
+            }
             onSelectItems={(items) => {
               // PMI のクリック: 指す要素を選び、そこへ寄せる（選べない種類の要素も、寄せる範囲には含める）。
               boxPick(items.filter((s) => kinds.includes(s.kind)), false);
@@ -1648,9 +1684,19 @@ function CadViewerPanel({
             {t('cad.timeoutLeft', { min: Math.floor(remaining / 60), sec: String(remaining % 60).padStart(2, '0') })}
           </span>
         )}
-        {sewText && (mode === 'hole' || mode === 'outer') && <span className="cad-viewer-legend">{sewText}</span>}
-        <span className="cad-viewer-hover">{hoverText}</span>
-        {hasDiff && diffVisible && <span className="cad-viewer-legend">{t('cad.diffLegend')}</span>}
+        {sewText && (mode === 'hole' || mode === 'outer') && (
+          <span className="cad-viewer-legend" title={sewText}>
+            {sewText}
+          </span>
+        )}
+        <span className="cad-viewer-hover" title={hoverText || undefined}>
+          {hoverText}
+        </span>
+        {hasDiff && diffVisible && (
+          <span className="cad-viewer-legend" title={t('cad.diffLegend')}>
+            {t('cad.diffLegend')}
+          </span>
+        )}
         {data.deviation?.error && (
           <span className="cad-viewer-legend cad-viewer-align-error" title={data.deviation.error}>
             {t('cad.deviation.error', { error: data.deviation.error })}

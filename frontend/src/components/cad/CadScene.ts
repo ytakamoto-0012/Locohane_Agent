@@ -191,6 +191,7 @@ export class CadScene {
   private externalHover: CadSelection | null = null;
   private visibility: CadVisibility = { face: true, edge: true, vertex: true, hiddenParts: new Set() };
   private colorOverrides: CadColorOverrides = { faces: new Map(), parts: new Map() };
+  private modelColor: string | null = null;
   private boxMode: BoxMode = 'off';
   private readonly boxEl: HTMLDivElement;
   private downAt: { x: number; y: number } | null = null;
@@ -433,10 +434,11 @@ export class CadScene {
    * 基準モデルの重ね表示。matrix は対象 → 基準の 4×4（行ごと）で、基準の方をその逆で動かして重ねる。
    * 省いた項目は変えない。
    */
-  setReferenceOverlay(opts: { visible?: boolean; opacity?: number; matrix?: number[][] }): void {
+  setReferenceOverlay(opts: { visible?: boolean; opacity?: number; color?: string; matrix?: number[][] }): void {
     const m = this.referenceMesh;
     if (!m) return;
     if (opts.visible !== undefined) m.visible = opts.visible;
+    if (opts.color) (m.material as THREE.MeshStandardMaterial).color.set(opts.color);
     if (opts.opacity !== undefined) {
       const mat = m.material as THREE.MeshStandardMaterial;
       mat.opacity = Math.max(0.05, Math.min(1, opts.opacity));
@@ -1072,6 +1074,9 @@ export class CadScene {
    * 非表示領域（swapped）では隠したものだけを映し、背景の色も変えて今どちらを見ているか分かるようにする。
    */
   setVisibility(visibility: CadVisibility): void {
+    // モデルを丸ごと隠す（基準モデルとの比較で ① を隠す）ときは、面・エッジ・頂点の表示も消したものとして扱う
+    // （当たり判定は種類ごとの表示を見るので、それで隠したモデルに当たらなくなる）。
+    if (visibility.model === false) visibility = { ...visibility, face: false, edge: false, vertex: false };
     this.visibility = visibility;
     if (this.mesh) {
       this.mesh.visible = visibility.face;
@@ -1375,7 +1380,11 @@ export class CadScene {
   resize(): void {
     const w = Math.max(this.container.clientWidth, 1);
     const h = Math.max(this.container.clientHeight, 1);
-    this.renderer.setSize(w, h, false);
+    const size = this.renderer.getSize(new THREE.Vector2());
+    const changed = size.x !== w || size.y !== h;
+    // 大きさを変えると canvas の中身が消える。ResizeObserver は requestAnimationFrame の後に呼ばれるので、次のフレームで
+    // 描くと消えた画面が 1 フレーム映り、大きさが行き来すると（下の行の折り返しなど）画面がちらつく。変わったときはすぐ描き直す。
+    if (changed) this.renderer.setSize(w, h, false);
     // 縦の見える範囲はそのままで、横を画面の縦横比に合わせる。
     const halfV = this.radius;
     this.camera.top = halfV;
@@ -1391,7 +1400,8 @@ export class CadScene {
       (layer.highlight.material as LineMaterial).resolution.set(w, h);
     }
     (this.localAxesLine?.material as LineMaterial | undefined)?.resolution.set(w, h);
-    this.requestRender();
+    if (changed) this.render();
+    else this.requestRender();
   }
 
   dispose(): void {
@@ -1482,6 +1492,13 @@ export class CadScene {
     this.refreshColors();
   }
 
+  /** モデル（基準モデルと比べるときの ①）の面の色（#rrggbb）。null でファイルの色・テーマの既定色に戻す。 */
+  setModelColor(hex: string | null): void {
+    if (hex === this.modelColor) return;
+    this.modelColor = hex;
+    this.refreshColors();
+  }
+
   private partHidden(part: number | undefined): boolean {
     return part !== undefined && this.visibility.hiddenParts.has(part);
   }
@@ -1520,6 +1537,7 @@ export class CadScene {
   /** 要素が今見えているか（種類の表示と、部品・要素を隠す設定、非表示領域か）。 */
   private visible(kind: CadKind, id: number): boolean {
     const v = this.visibility;
+    if (v.model === false) return false;
     if ((kind === 'face' && !v.face) || (kind === 'edge' && !v.edge) || (kind === 'vertex' && !v.vertex)) return false;
     return this.shown(kind, id);
   }
@@ -1540,6 +1558,9 @@ export class CadScene {
       return c;
     };
     const parts = this.data.parts ?? [];
+    // 基準モデルと比べるときのモデル ① の色。ファイルの色・テーマの既定色の代わりに使う（面・部品ごとに変えた色はそのまま）。
+    const modelColor = this.modelColor ? colorOf(this.modelColor) : null;
+    const baseFace = modelColor ?? face;
 
     if (this.mesh) {
       const attr = this.mesh.geometry.getAttribute('color') as THREE.BufferAttribute;
@@ -1551,11 +1572,11 @@ export class CadScene {
         let changed = overrideOf(overrides.faces, id);
         if (changed === undefined) changed = overrideOf(overrides.parts, part);
         // ファイルの色（頂点色）は、色を持つ面だけに使う（色の無い面はテーマの既定色）。
-        if (state === null && changed === undefined && this.baseFaceColors && this.data.faces[id]?.color) {
+        if (state === null && changed === undefined && !modelColor && this.baseFaceColors && this.data.faces[id]?.color) {
           arr.set(this.baseFaceColors.subarray(lo * 3, hi * 3), lo * 3);
           return;
         }
-        const c = pick(state, changed ? colorOf(changed) : face);
+        const c = pick(state, changed ? colorOf(changed) : baseFace);
         for (let v = lo; v < hi; v++) {
           arr[v * 3] = c.r;
           arr[v * 3 + 1] = c.g;

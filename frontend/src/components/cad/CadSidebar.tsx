@@ -1,6 +1,7 @@
 /**
  * 3D ビューア（CadViewerBar）の左のサイドバー。
  * - 表示: 面・エッジ・頂点の表示／非表示
+ * - 比較モデル: 基準モデルと比べるときの ①（表示するモデル）・②（基準モデル）の表示／非表示・色
  * - 色: 選んだ面・部品の色（RGB）の表示と変更
  * - STEP: AP と版・PMI の一覧・製品の属性の表示と編集（CadStepPanel）
  * - 構成ツリー（STEP/IGES のアセンブリ）／レイヤー（DXF）: 部品ごとの表示／非表示・色・レイヤーの設定。名前のクリックで部品を選ぶ
@@ -45,6 +46,23 @@ interface Props {
   onAttributeEdits: (edits: CadAttributeEdits) => void;
   /** PMI のクリックで、それが指す要素を選び、そこへ寄せる。 */
   onSelectItems: (items: CadSelection[]) => void;
+  /** 基準モデルと比べるときの ①（表示するモデル）と ②（基準モデル）の表示・色。基準モデルが無ければ省く。 */
+  compare?: CompareModels;
+}
+
+export interface CompareModels {
+  modelName: string;
+  modelVisible: boolean;
+  onModelVisible: (v: boolean) => void;
+  modelColor: string;
+  onModelColor: (hex: string) => void;
+  referenceName: string;
+  referenceVisible: boolean;
+  onReferenceVisible: (v: boolean) => void;
+  referenceColor: string;
+  onReferenceColor: (hex: string) => void;
+  referenceOpacity: number;
+  onReferenceOpacity: (v: number) => void;
 }
 
 interface TreeNode {
@@ -116,6 +134,7 @@ export function CadSidebar(props: Props) {
             </label>
           ))}
       </section>
+      {props.compare && <CompareSection c={props.compare} />}
       <ColorSection {...props} />
       <CadStepPanel
         data={data}
@@ -245,6 +264,88 @@ function TreeRow({
         {layerInfo.length > 0 && <span className="cad-tree-count">{layerInfo.join(' · ')}</span>}
       </div>
     </li>
+  );
+}
+
+const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
+
+/**
+ * 比較モデル: ①（表示するモデル）と ②（基準モデル）を、アセンブリの部品のように並べて表示・非表示と色を変える。
+ * ① の色はファイルの色・既定色の代わりに付く（面・部品ごとに変えた色は残る）。② は半透明で重ね、濃さも変えられる。
+ */
+function CompareSection({ c }: { c: CompareModels }) {
+  const { t } = useI18n();
+  const both = [c.modelVisible, c.referenceVisible];
+  const rows = [
+    { key: 'model', mark: '①', name: c.modelName, visible: c.modelVisible, onVisible: c.onModelVisible, color: c.modelColor, onColor: c.onModelColor, role: t('cad.side.compareModel') },
+    {
+      key: 'reference',
+      mark: '②',
+      name: c.referenceName,
+      visible: c.referenceVisible,
+      onVisible: c.onReferenceVisible,
+      color: c.referenceColor,
+      onColor: c.onReferenceColor,
+      role: t('cad.side.compareReference')
+    }
+  ];
+  return (
+    <section>
+      <h4>{t('cad.side.compare')}</h4>
+      <ul className="cad-tree" role="tree">
+        <li role="treeitem" aria-expanded={true}>
+          <div className="cad-tree-row">
+            <span className="cad-tree-toggle" />
+            <TriCheckbox
+              checked={both.some(Boolean)}
+              mixed={both.some(Boolean) && !both.every(Boolean)}
+              onChange={(v) => {
+                c.onModelVisible(v);
+                c.onReferenceVisible(v);
+              }}
+              label={t('cad.side.visible')}
+            />
+            <span className="cad-tree-name">{t('cad.side.compareAll')}</span>
+            <span className="cad-tree-count">2</span>
+          </div>
+          <ul role="group">
+            {rows.map((r) => (
+              <li key={r.key} role="treeitem">
+                <div className="cad-tree-row" style={{ paddingLeft: '12px' }}>
+                  <span className="cad-tree-toggle" />
+                  <input type="checkbox" checked={r.visible} aria-label={t('cad.side.visible')} onChange={(e) => r.onVisible(e.target.checked)} />
+                  <input
+                    type="color"
+                    className="cad-swatch"
+                    value={r.color}
+                    title={rgbText(r.color)}
+                    aria-label={t('cad.side.color')}
+                    onChange={(e) => r.onColor(e.target.value)}
+                  />
+                  <span className="cad-tree-name" title={`${r.role}: ${r.name}`}>
+                    {r.mark} {baseName(r.name) || r.role}
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </li>
+      </ul>
+      {c.referenceVisible && (
+        <label className="cad-sidebar-row" title={t('cad.align.overlayTitle')}>
+          {t('cad.align.opacity')}
+          <input
+            type="range"
+            min={0.05}
+            max={1}
+            step={0.05}
+            value={c.referenceOpacity}
+            aria-label={t('cad.align.opacity')}
+            onChange={(e) => c.onReferenceOpacity(Number(e.target.value))}
+          />
+        </label>
+      )}
+    </section>
   );
 }
 

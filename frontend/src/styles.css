@@ -1451,10 +1451,17 @@
   min-height: 1.4em;
 }
 
-.cad-viewer-hover {
+/* 下の行は折り返さない（ホバーの文言で行の数が変わると 3D 表示の高さが変わり、描き直しで画面がちらつくため）。
+   入りきらない文言は省略し、title で全文を見せる。 */
+.cad-viewer-status > * {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.cad-viewer-hover {
+  flex: 1 1 auto;
 }
 
 .cad-viewer-summary {
