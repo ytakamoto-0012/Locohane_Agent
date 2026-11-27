@@ -64,6 +64,8 @@ export interface CompareModels {
   onReferenceColor: (hex: string) => void;
   referenceOpacity: number;
   onReferenceOpacity: (v: number) => void;
+  /** ① と ② を入れ替えて開き直す。できないとき（偏差の無いビューア・閉じている途中）は省く。 */
+  onSwap?: () => void;
 }
 
 interface TreeNode {
@@ -332,6 +334,13 @@ function CompareSection({ c }: { c: CompareModels }) {
           </ul>
         </li>
       </ul>
+      {c.onSwap && (
+        <div className="cad-sidebar-row">
+          <button type="button" className="cad-viewer-chip" title={t('cad.side.swapTitle')} onClick={c.onSwap}>
+            {t('cad.side.swap')}
+          </button>
+        </div>
+      )}
       {c.referenceVisible && (
         <label className="cad-sidebar-row" title={t('cad.align.overlayTitle')}>
           {t('cad.align.opacity')}

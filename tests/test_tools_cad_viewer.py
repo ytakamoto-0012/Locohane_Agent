@@ -1365,6 +1365,34 @@ async def test_reference_bestfit_and_realign_from_the_viewer(env, tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_reference_swap_models_reopens_with_roles_reversed(env, tmp_path) -> None:
+    pos, tris = _box_mesh(40, 20, 10)
+    ref = _write_stl(tmp_path / "nominal.stl", pos[tris])
+    scan = _write_stl(tmp_path / "scan.stl", (pos * [1.01, 1, 1])[tris])
+
+    async def on_show(props):
+        # 1 回目は「①⇔② 入れ替え」、2 回目（入れ替えて開き直したビューア）で確定する。
+        if len(_viewer.shown) == 1:
+            _viewer.response = {"submitted": False, "selected": [], "swap_models": True}
+        else:
+            _viewer.response = {"submitted": True, "selected": [{"kind": "face", "id": 0}]}
+        return props["data"]["bbox"]["size"][0]
+
+    _viewer.on_show = on_show
+    text = await _call(file_path=scan, reference=ref, align="none")
+    assert len(_viewer.shown) == 2
+    first, second = (s["data"] for s in _viewer.shown)
+    # 1 回目は scan（幅 40.4）が ①、2 回目は nominal（幅 40）が ① で、scan が ② になる。
+    assert first["bbox"]["size"][0] == pytest.approx(40.4) and second["bbox"]["size"][0] == pytest.approx(40)
+    assert second["reference"]["bbox"]["size"][0] == pytest.approx(40.4) and second["deviation"]["values"]
+    assert "swapped the models" in text and "nominal.stl" in text.split("swapped the models", 1)[1].splitlines()[0]
+    # 入れ替えは「閉じた」とチャットに出さない。
+    assert len(_viewer.echoed) == 1
+    out = json.loads(text.split("\n", 1)[1])
+    assert out["comparison"]["reference"]["path"].endswith("scan.stl")
+
+
+@pytest.mark.asyncio
 async def test_reference_errors(env, tmp_path) -> None:
     pos, tris = _box_mesh(10, 10, 10)
     scan = _write_stl(tmp_path / "scan.stl", pos[tris])

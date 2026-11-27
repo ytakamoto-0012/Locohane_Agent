@@ -35,6 +35,8 @@ import { ZebraLightGuide, applySurfaceDisplay, createSurfaceMaterial, updateSurf
 
 /** 基準モデル（偏差の比較相手）を重ねて描くときの色。 */
 const REFERENCE_COLOR = '#4f7fe0';
+// 基準モデルのワイヤー表示で線にする折れ目の角度（度）。曲面の細かい三角形の境目は線にしない。
+const REFERENCE_EDGE_ANGLE = 20;
 
 export interface CadSceneColors {
   background: string;
@@ -269,6 +271,9 @@ export class CadScene {
   private scalarValues: Float32Array | null = null;
   // 基準モデル（偏差の比較相手）。座標は基準のまま、対象 → 基準の変換の逆で動かして重ねる（対象の座標は動かさない）。
   private referenceMesh: THREE.Mesh | null = null;
+  private referenceGroup: THREE.Group | null = null;
+  // 基準モデルのワイヤー表示の線（referenceEdges で初めて使うときに作る）。
+  private referenceLines: THREE.LineSegments | null = null;
   // 最後に当たった面の三角形（マウスの下の値を出すため）。
   private lastMeshHit: THREE.Intersection | null = null;
 
@@ -436,13 +441,34 @@ export class CadScene {
       side: THREE.DoubleSide
     });
     const mesh = new THREE.Mesh(geometry, material);
-    mesh.matrixAutoUpdate = false;
     mesh.renderOrder = 1;
-    mesh.visible = false;
+    // 面と線（ワイヤー表示）をまとめて動かす。
+    const group = new THREE.Group();
+    group.matrixAutoUpdate = false;
+    group.visible = false;
+    group.add(mesh);
     this.referenceMesh = mesh;
-    this.scene.add(mesh);
+    this.referenceGroup = group;
+    this.scene.add(group);
     const T = this.data.deviation?.transform;
     if (isMatrix4(T)) this.setReferenceOverlay({ matrix: T });
+  }
+
+  /**
+   * 基準モデルのワイヤー表示の線。三角形しか無いので、隣の三角形との角度が REFERENCE_EDGE_ANGLE 度以上の折れ目と
+   * 外周を線にする（CAD のエッジに近い線になる）。重いので初めて使うときに作る。
+   */
+  private referenceEdges(): THREE.LineSegments | null {
+    if (this.referenceLines) return this.referenceLines;
+    const mesh = this.referenceMesh;
+    if (!mesh || !this.referenceGroup) return null;
+    const geometry = new THREE.EdgesGeometry(mesh.geometry, REFERENCE_EDGE_ANGLE);
+    const material = new THREE.LineBasicMaterial({ color: (mesh.material as THREE.MeshStandardMaterial).color.clone() });
+    const lines = new THREE.LineSegments(geometry, material);
+    lines.renderOrder = 1;
+    this.referenceLines = lines;
+    this.referenceGroup.add(lines);
+    return lines;
   }
 
   /** 基準モデルがあるか。 */
@@ -454,11 +480,21 @@ export class CadScene {
    * 基準モデルの重ね表示。matrix は対象 → 基準の 4×4（行ごと）で、基準の方をその逆で動かして重ねる。
    * 省いた項目は変えない。
    */
-  setReferenceOverlay(opts: { visible?: boolean; opacity?: number; color?: string; matrix?: number[][] }): void {
+  setReferenceOverlay(opts: { visible?: boolean; opacity?: number; color?: string; matrix?: number[][]; wire?: boolean }): void {
     const m = this.referenceMesh;
-    if (!m) return;
-    if (opts.visible !== undefined) m.visible = opts.visible;
-    if (opts.color) (m.material as THREE.MeshStandardMaterial).color.set(opts.color);
+    const g = this.referenceGroup;
+    if (!m || !g) return;
+    if (opts.visible !== undefined) g.visible = opts.visible;
+    if (opts.wire !== undefined) {
+      // ワイヤー表示（面を描かず、折れ目の線を ② の色で描く）。
+      m.visible = !opts.wire;
+      const lines = opts.wire ? this.referenceEdges() : this.referenceLines;
+      if (lines) lines.visible = opts.wire;
+    }
+    if (opts.color) {
+      (m.material as THREE.MeshStandardMaterial).color.set(opts.color);
+      if (this.referenceLines) (this.referenceLines.material as THREE.LineBasicMaterial).color.set(opts.color);
+    }
     if (opts.opacity !== undefined) {
       const mat = m.material as THREE.MeshStandardMaterial;
       mat.opacity = Math.max(0.05, Math.min(1, opts.opacity));
@@ -466,8 +502,8 @@ export class CadScene {
     }
     if (opts.matrix && isMatrix4(opts.matrix)) {
       const T = new THREE.Matrix4().set(...(opts.matrix.flat() as [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number]));
-      m.matrix.copy(T.invert());
-      m.matrixWorldNeedsUpdate = true;
+      g.matrix.copy(T.invert());
+      g.matrixWorldNeedsUpdate = true;
     }
     this.requestRender();
   }
@@ -1695,6 +1731,25 @@ export class CadScene {
     if (this.lines && this.edgePositions) {
       const attr = this.lines.geometry.getAttribute('color') as THREE.BufferAttribute;
       const arr = attr.array as Float32Array;
+      const wire = !this.visibility.face;
+      // エッジの隣の面（映している面を優先）の、選択・ホバーを除いた色。面の無いエッジは null。
+      const fileColor = new THREE.Color();
+      const faceColorOf = (fid: number): THREE.Color => {
+        let changed = overrideOf(overrides.faces, fid);
+        if (changed === undefined) changed = overrideOf(overrides.parts, this.data.faces[fid]?.part);
+        if (changed) return colorOf(changed);
+        if (changed === undefined && !modelColor && this.baseFaceColors && this.data.faces[fid]?.color) {
+          const lo = this.faceVertexRanges[fid]?.[0] ?? 0;
+          return fileColor.fromArray(this.baseFaceColors, lo * 3);
+        }
+        return baseFace;
+      };
+      const wireColorOf = (id: number): THREE.Color | null => {
+        const fs = this.data.edgeList[id]?.faces;
+        if (!Array.isArray(fs) || !fs.length) return null;
+        const fid = fs.find((f) => this.shown('face', f)) ?? fs[0];
+        return faceColorOf(fid);
+      };
       const hiPos: number[] = [];
       const hiCol: number[] = [];
       this.data.edges.ranges.forEach(([s, n], id) => {
@@ -1704,7 +1759,9 @@ export class CadScene {
         const layerPart = pi !== undefined && parts[pi]?.layer ? parts[pi] : undefined;
         const layerOverride = overrideOf(overrides.parts, pi);
         const layerColor = layerPart ? (layerOverride !== undefined ? layerOverride : (layerPart.color ?? null)) : null;
-        const c = pick(state, layerColor ? colorOf(layerColor) : edge);
+        // 面を映さない（ワイヤー表示）ときは、エッジを隣の面の色で描く（面の色の違いが線で分かるように）。
+        const base = layerColor ? colorOf(layerColor) : wire ? (wireColorOf(id) ?? edge) : edge;
+        const c = pick(state, base);
         for (let v = s * 2; v < (s + n) * 2; v++) {
           arr[v * 3] = c.r;
           arr[v * 3 + 1] = c.g;

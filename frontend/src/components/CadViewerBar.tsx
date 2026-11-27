@@ -247,6 +247,7 @@ export function CadViewerBar() {
         })
       }
       onCancel={(colors, view) => askUser.callback({ submitted: false, selected: [], colors, ...view })}
+      onSwap={() => askUser.callback({ submitted: false, selected: [], swap_models: true })}
     />
   );
   if (props.data_id) {
@@ -348,6 +349,8 @@ interface PanelProps {
     measurements: MeasureResult[]
   ) => void;
   onCancel: (colors: CadColorChanges, view: CadViewState) => void;
+  /** ① と ② を入れ替えて開き直す（backend が役割を逆にしたビューア用データを作り、ビューアを出し直す）。 */
+  onSwap: () => void;
 }
 
 /** 確定・閉じる・保存のときに返す表示の状態（backend は変更があればビューア用データに反映して自動で保存する）。 */
@@ -471,14 +474,15 @@ function CadViewerPanel({
   canAlign,
   deviationToleranceDefault,
   onSubmit,
-  onCancel
+  onCancel,
+  onSwap
 }: PanelProps) {
   const { t } = useI18n();
   const client = useContext(ChainlitContext);
   const sessionId = useRecoilValue(sessionIdState);
   const [saveState, setSaveState] = useState<SaveState>({ kind: 'idle' });
-  // 確定・キャンセルを押した後、backend がビューアを閉じるまでの間（二度押しを防ぎ、処理中と分かるようにする）。
-  const [closing, setClosing] = useState<'submit' | 'cancel' | null>(null);
+  // 確定・キャンセル・入れ替えを押した後、backend がビューアを閉じるまでの間（二度押しを防ぎ、処理中と分かるようにする）。
+  const [closing, setClosing] = useState<'submit' | 'cancel' | 'swap' | null>(null);
   // 選択と一緒に AI へ返す指示（「この面に φ5 の穴を開けて」等）。
   const [message, setMessage] = useState('');
   const hostRef = useRef<HTMLDivElement>(null);
@@ -836,8 +840,9 @@ function CadViewerPanel({
     if (surfaceDisplay.mode !== 'scalar') setScalarHover(null);
   }, [surfaceDisplay, status]);
   useEffect(() => {
-    sceneRef.current?.setReferenceOverlay({ visible: referenceVisible, opacity: referenceOpacity, color: referenceColor });
-  }, [referenceVisible, referenceOpacity, referenceColor, status]);
+    // 「面」のチェックを外したら ② もワイヤー表示（② の色の線）にする。
+    sceneRef.current?.setReferenceOverlay({ visible: referenceVisible, opacity: referenceOpacity, color: referenceColor, wire: !kindVisible.face });
+  }, [referenceVisible, referenceOpacity, referenceColor, kindVisible.face, status]);
   useEffect(() => {
     sceneRef.current?.setMeasureTool(measureTool);
   }, [measureTool, status]);
@@ -1140,6 +1145,11 @@ function CadViewerPanel({
     if (closing) return;
     setClosing('cancel');
     onCancel(colorChanges(), viewState());
+  };
+  const swap = () => {
+    if (closing) return;
+    setClosing('swap');
+    onSwap();
   };
   const submit = () => {
     if (closing) return;
@@ -1640,7 +1650,9 @@ function CadViewerPanel({
                     referenceColor,
                     onReferenceColor: setReferenceColor,
                     referenceOpacity,
-                    onReferenceOpacity: setReferenceOpacity
+                    onReferenceOpacity: setReferenceOpacity,
+                    // 入れ替えは backend で作り直すので、位置合わせを受け付けるビューア（基準モデルとの偏差がある）だけ。
+                    onSwap: canAlign && saveId && !closing ? swap : undefined
                   }
                 : undefined
             }
@@ -1675,7 +1687,7 @@ function CadViewerPanel({
           {closing && (
             <div className="cad-viewer-overlay cad-viewer-closing" role="status">
               <span className="cad-viewer-spinner" aria-hidden="true" />
-              {t(closing === 'submit' ? 'cad.submitting' : 'cad.closing')}
+              {t(closing === 'submit' ? 'cad.submitting' : closing === 'swap' ? 'cad.side.swapping' : 'cad.closing')}
             </div>
           )}
         </div>

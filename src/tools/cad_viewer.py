@@ -253,6 +253,20 @@ def _resolve_reference(value: str) -> str:
     return str(path)
 
 
+def _swap_reference_source(data: dict, data_path: Path) -> str:
+    """①⇔② の入れ替えで基準モデルにする、今のモデルのファイル。
+
+    元の CAD ファイルがあればそれ（基準は表示用より細かく三角形に分けるため）、無ければ（CadQuery のコード等）
+    今のビューア用データ。
+    """
+    src = (data.get("source") or {}).get("path")
+    if isinstance(src, str) and src:
+        p = Path(src)
+        if p.is_absolute() and p.is_file() and format_of(p) in _REFERENCE_FORMATS:
+            return str(p)
+    return str(data_path)
+
+
 def _deviation_tolerance() -> float:
     try:
         tol = float(_setting("cad_viewer_deviation_tolerance", 0.1))
@@ -522,6 +536,18 @@ async def _show_cad_viewer(
             extra.append("Notes on the exported file (tell the user if they matter): " + " / ".join(target.notes))
     if isinstance(answer, str):
         return "\n".join([answer, *extra])
+    if reference_path and answer[0].get("swap_models"):
+        # ビューアの「①⇔② 入れ替え」: 基準モデルを表示するモデルに、今のモデルを基準モデルにして開き直す。
+        # 位置を合わせていたら、入れ替えた後も合わせる（変換の向きが逆になるので合わせ直す）。
+        swapped_align = "bestfit" if align == "bestfit" or (align_state is not None and align_state.changed) else "none"
+        new_reference = _swap_reference_source(data, data_path)
+        text = await _show_cad_viewer(question, reference_path, "", select, shot, "", new_reference, swapped_align)
+        swapped = (
+            f"The user swapped the models in the viewer: the shown model (selection, deviation) is now {reference_path} "
+            f"and the reference model is {new_reference}."
+        )
+        # 何度も入れ替えたときに古い順に並ぶよう、開き直した結果（その中の入れ替えの注意）より前に置く。
+        return "\n".join([swapped, text, *extra])
     # ビューアを閉じる合図（clear_ask・remove_element）は送信の待ち行列に入っただけで、イベントループに戻るまで
     # ブラウザへ届かない。この後の書き出し（大きな CAD ではビューア用データが数十 MB）を同期で行うと、その間
     # ビューアが閉じずに固まって見えるので、一度ループに譲ってから重い処理をスレッドで行う。
@@ -1759,7 +1785,8 @@ async def _ask_selection(
             await element.remove()
         except Exception:  # noqa: BLE001 - 後片付けの失敗でツールの結果を失わせない
             logger.warning("Could not remove the 3D viewer element", exc_info=True)
-        if res is not None:
+        # ①⇔② の入れ替え（すぐ開き直す）は、閉じたとは出さない。
+        if res is not None and not (isinstance(res, dict) and res.get("swap_models")):
             if res.get("submitted", True):
                 try:
                     answer = _echo_text(
