@@ -348,8 +348,8 @@ async def show_cad_viewer(
       "bestfit" (least-squares best fit, for a scan in its own coordinates). The user can re-align
       in the viewer.
 
-    The viewer can also show the model with zebra stripes (reflection lines from a dome or rows of
-    horizontal / vertical tube lights) and a curvature color map (mean, Gaussian, max / min principal
+    The viewer can also show the model with zebra stripes (reflection lines from a dome, or from
+    horizontal / vertical tube lights on a cylinder or a flat panel) and a curvature color map (mean, Gaussian, max / min principal
     curvature) to check surface quality; no parameter is needed for these.
 
     Element IDs are 0-based in CadQuery order: face i is

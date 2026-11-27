@@ -6,7 +6,7 @@ import { useI18n } from '../../i18n';
 import type { MessageKey } from '../../i18n/messages';
 import type { CadAlignmentInfo, CadDeviationStats } from './cadData';
 import { fmtNum } from './measure';
-import { CURVATURE_KINDS, MAX_ZEBRA_STRIPES, legendGradient, type CurvatureKind, type ScalarScheme, type ZebraLight, type ZebraSettings } from './surfaceShading';
+import { CURVATURE_KINDS, MAX_ZEBRA_STRIPES, legendGradient, type CurvatureKind, type ScalarScheme, type ZebraLight, type ZebraOrientation, type ZebraSettings } from './surfaceShading';
 
 export type AnalysisMode = 'normal' | 'zebra' | 'curvature' | 'deviation';
 export type DatumName = 'A' | 'B' | 'C';
@@ -14,7 +14,15 @@ export type Datums = Record<DatumName, number[]>;
 const DATUM_NAMES: DatumName[] = ['A', 'B', 'C'];
 /** データムごとに決める自由度（src/cad/align.py の DATUM_DOF と同じ 3-2-1）。 */
 const DATUM_DOF: Record<DatumName, number> = { A: 3, B: 2, C: 1 };
-const ZEBRA_LIGHTS: ZebraLight[] = ['dome', 'horizontal', 'vertical'];
+const ZEBRA_LIGHTS: ZebraLight[] = ['dome', 'cylinder', 'plane'];
+const ZEBRA_ORIENTATIONS: ZebraOrientation[] = ['horizontal', 'vertical'];
+const ZEBRA_ROT_AXES: [string, 'rotXDeg' | 'rotYDeg' | 'rotZDeg'][] = [
+  ['X', 'rotXDeg'],
+  ['Y', 'rotYDeg'],
+  ['Z', 'rotZDeg']
+];
+/** 平面の光源の位置の欄（ZebraSettings.planePos の順: 右・上・手前）。 */
+const ZEBRA_POS_FIELDS = ['x', 'y', 'z'] as const;
 
 /** 数の入力欄（空・数でない入力は無視する）。 */
 function NumberField({
@@ -100,6 +108,24 @@ export function AnalysisSettingsRow(p: SettingsProps) {
             {t(`cad.zebra.light.${l}` as MessageKey)}
           </button>
         ))}
+        {z.light !== 'dome' && (
+          <>
+            <span className="cad-viewer-sep" />
+            {ZEBRA_ORIENTATIONS.map((o) => (
+              <button
+                key={o}
+                type="button"
+                role="radio"
+                aria-checked={z.orientation === o}
+                title={t(`cad.zebra.orient.${o}Title` as MessageKey)}
+                className={`cad-viewer-chip${z.orientation === o ? ' active' : ''}`}
+                onClick={() => p.onZebra({ ...z, orientation: o })}
+              >
+                {t(`cad.zebra.orient.${o}` as MessageKey)}
+              </button>
+            ))}
+          </>
+        )}
         <span className="cad-viewer-sep" />
         <NumberField
           label={t('cad.zebra.stripes')}
@@ -110,7 +136,37 @@ export function AnalysisSettingsRow(p: SettingsProps) {
           onChange={(v) => p.onZebra({ ...z, stripes: Math.round(v) })}
         />
         <NumberField label={t('cad.zebra.width')} title={t('cad.zebra.widthTitle')} value={z.width} step={0.05} min={0.05} max={0.95} onChange={(v) => p.onZebra({ ...z, width: v })} />
-        <NumberField label={t('cad.zebra.angle')} title={t('cad.zebra.angleTitle')} value={z.angleDeg} step={15} min={-180} max={180} onChange={(v) => p.onZebra({ ...z, angleDeg: v })} />
+        <span className="cad-viewer-sep" />
+        {ZEBRA_ROT_AXES.map(([axis, key]) => (
+          <NumberField
+            key={key}
+            label={t('cad.zebra.rot', { axis })}
+            title={t('cad.zebra.rotTitle', { axis })}
+            value={z[key]}
+            step={15}
+            min={-180}
+            max={180}
+            onChange={(v) => p.onZebra({ ...z, [key]: v })}
+          />
+        ))}
+        {z.light === 'plane' &&
+          ZEBRA_POS_FIELDS.map((f, i) => (
+            <NumberField
+              key={f}
+              label={t(`cad.zebra.pos.${f}` as MessageKey)}
+              title={t('cad.zebra.posTitle')}
+              value={z.planePos[i]}
+              step={0.5}
+              min={-50}
+              max={50}
+              onChange={(v) => {
+                const pos: [number, number, number] = [...z.planePos];
+                pos[i] = v;
+                p.onZebra({ ...z, planePos: pos });
+              }}
+            />
+          ))}
+        <span className="cad-viewer-sep" />
         <button
           type="button"
           className={`cad-viewer-chip${z.viewFixed ? ' active' : ''}`}

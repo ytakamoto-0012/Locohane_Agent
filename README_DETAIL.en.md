@@ -2112,15 +2112,22 @@ switch the face display (press again for the normal display). Drawing is done by
 (only a summary in `model.curvature`).
 
 - **Zebra**: black-and-white stripes from where the reflected view ray hits virtual lights. Lights are "Dome" (parallel stripes painted on a dome; the usual
-  zebra), "Horizontal tubes" (tube lights on the ceiling and walls of a horizontal tunnel around the model, radius 3 × the model radius; the tube-light
-  reflection used in car-body inspection; ±30 degrees around straight down is a dark floor) and "Vertical tubes" (a ring of vertical tubes around the
-  model). Every reflection from inside the tunnel / ring hits it, so faces facing any direction get stripes. Where stripes are denser than a pixel they
-  fade to the average brightness. Count (1 to 1000), width (share of the light part) and angle (stripe direction) can be changed,
-  and the lights can be fixed to the view (stripes move as you rotate) or to the model (room lights with world +Z up and −Y in front).
+  zebra), "Cylinder" (tube lights inside a cylinder around the model, radius 3 × the model radius) and "Plane" (parallel tube lights on a square panel
+  with side 8 × the model radius). For the cylinder and plane, "Horizontal" / "Vertical" sets which way the tubes run. The horizontal cylinder is the
+  ceiling and walls of a sideways tunnel (the tube-light reflection used in car-body inspection; ±30 degrees around straight down is a dark floor), the
+  vertical cylinder a ring of upright tubes. Every reflection from inside the cylinder hits it, so faces facing any direction get stripes; with the plane,
+  reflections that miss the panel are dark. Where stripes are denser than a pixel they fade to the average brightness.
+  Count (1 to 1000), width (share of the light part) and rotation about X / Y / Z (degrees, applied X then Y then Z; the dome and cylinder turn about the
+  model center, the plane about the panel center) can be changed, and the lights can be fixed to the view (stripes move as you rotate; the rotation axes
+  are screen right / up / toward you) or to the model (room lights with world +Z up and −Y in front; the rotation axes are world X / Y / Z). For the plane,
+  the position (right / up / distance: offset from the model center along the lights' right / up / front before rotation, in model radii; default 3
+  toward you) places the panel, which faces the model with its front direction as the normal.
   Broken stripes = a step (G0 break), kinked = a tangent break (G1), a sudden change of bend = a curvature break (G2).
   "Show lights" draws the lights in 3D (`ZebraLightGuide`): their shape (a sphere of radius 3R for the dome, a tube of radius 3R and ±4R along the axis
-  for the tube lights; R is the model radius), the bright stripes (tubes) on it, the dark floor and the axis (arrow). The stripes use the same shader
-  formula as the model, so count, width, angle and the view / model fixing show up as they are. Zoom out to see all of it. The near wall is drawn faint
+  for the cylinder, a panel with side 8R for the plane; R is the model radius; the shape itself is very faint), the center line of each tube (bright
+  stripe) on it and the axis (arrow; for the plane, from the panel toward the model). The lines use the same shader formula as the model (with
+  `ZEBRA_LINES` defined to draw center lines instead of bands; wide bands would hide the model), so count, width, rotation, position and the
+  view / model fixing show up as they are. Zoom out to see all of it. Lines on the near side are drawn faint
   and the far wall strong so the stripes on the model stay visible.
 - **Curvature**: mean, Gaussian, max / min principal curvature and curvature magnitude (max |k|) as a rainbow color map with a legend at the bottom right.
   The sign is "convex toward the outward normal = positive" (+1/R on the outside of a sphere, −1/R inside a hole). The range can be typed in Min / Max, and
