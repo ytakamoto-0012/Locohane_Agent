@@ -142,6 +142,26 @@ export function AnalysisSettingsRow(p: SettingsProps) {
           onChange={(v) => p.onZebra({ ...z, stripes: Math.round(v) })}
         />
         <NumberField label={t('cad.zebra.width')} title={t('cad.zebra.widthTitle')} value={z.width} step={0.05} min={0.05} max={0.95} onChange={(v) => p.onZebra({ ...z, width: v })} />
+        <button
+          type="button"
+          className={`cad-viewer-chip${z.soft ? ' active' : ''}`}
+          aria-pressed={z.soft}
+          title={t('cad.zebra.softTitle')}
+          onClick={() => p.onZebra({ ...z, soft: !z.soft })}
+        >
+          {t('cad.zebra.soft')}
+        </button>
+        {z.soft && (
+          <NumberField
+            label={t('cad.zebra.softness')}
+            title={t('cad.zebra.softnessTitle')}
+            value={z.softness}
+            step={0.1}
+            min={0.05}
+            max={1}
+            onChange={(v) => p.onZebra({ ...z, softness: v })}
+          />
+        )}
         <span className="cad-viewer-sep" />
         {ZEBRA_ROT_AXES.map(([axis, key]) => (
           <NumberField

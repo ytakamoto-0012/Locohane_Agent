@@ -1216,6 +1216,7 @@ async def test_viewer_offers_holes_of_an_open_stl(env, tmp_path) -> None:
     assert shown["hole_normal_angle_deg"] == 3.0
     # 穴サイズ誤差・縫合トレランスの初めの値と、3D ビューア専用のタイムアウト（既定 1 時間）も渡す。
     assert shown["hole_size_tolerance"] == 0.3 and shown["sew_tolerance"] == 0.5
+    assert shown["connected_face_angle_deg"] == 0.0
     assert shown["timeout_seconds"] == 3600
     assert len(shown["data"]["outerList"]) == 1
     assert len(shown["data"]["holeList"]) == 2

@@ -2019,7 +2019,9 @@ and does not stop at the top or bottom; in exchange, the up direction is not kep
   (for a tube open at both ends one opening becomes the outer boundary; when the outer border does not close, or a box has only one hole in one face, no outer
   boundary is made rather than turning a hole into one). `model.holes` has the hole count, tolerance, number of outer boundaries and counts grouped by diameter
   and normal (up to 12 groups). In the viewer data they are `holeList` (hole info), `holes` (border segments and `ranges`) and `faceComponents` (the group
-  number of each face; also for closed shapes, used by "Connected faces").
+  number of each face; also for closed shapes, used by "Connected faces"), plus `faceAdjacency` (`{"faces": [face a, face b, …], "angles": [degrees, …]}`:
+  the pairs of neighboring faces and the bend at their seam, from the vertex normals in `analysis.normals` when present, otherwise from the triangles at the seam,
+  as the median over the seam edges; used by "Bend ≤" of "Connected faces").
 - **Outer boundaries**: the borders found as outer boundaries above (one per group of connected faces) can be checked with the "Outer boundary" kind (next to
   "Hole"). In that mode they are drawn in dark yellow; hovering near a line turns it light blue and a click selects / deselects one at a time (no grouping by
   direction). Faces whose gap is within the topology tolerance are surrounded by one outer boundary, so you can see whether they were judged connected.
@@ -2036,7 +2038,10 @@ and does not stop at the top or bottom; in exchange, the up direction is not kep
   With `[cad_viewer] sew_on_open = true` it sews when the viewer opens (part of the cache key).
 - **Connected faces**: in the face mode, "Connected faces" selects every visible face connected to the selected faces (or to the faces around selected holes /
   outer boundaries, or of selected parts): faces with the same `faceComponents`, connected through edges, the topology tolerance or sewing. Older viewer data
-  without `faceComponents` follows faces sharing edges.
+  without `faceComponents` follows faces sharing edges. With "Bend ≤" checked, only the next faces whose seam bends by that angle or less are followed
+  (degrees; 0 = smooth, 90 = a right angle; `faceAdjacency`), for example to select only fillets and tangent surfaces. The initial value is
+  `[cad_viewer] connected_face_angle_deg` (default 0 = unchecked at first, so all connected faces are selected regardless of the angle). Older viewer data
+  without `faceAdjacency` does not show the field.
 - **Show PMI**: when the STEP has PMI, "Show PMI" shows dimensions, geometric tolerances and datums as 3D labels (dimensions blue, tolerances green, datums brown).
   Each label sits on a leader line out from the average of the face centers, edge middles or part face centers it points to, away from the model center, and
   follows rotation and zoom (`CadScene.setPmiLabels`; HTML text and SVG lines on top). Labels whose elements are all hidden are not shown. Clicking a label
@@ -2117,6 +2122,9 @@ switch the face display (press again for the normal display). Drawing is done by
   ceiling and walls of a sideways tunnel (the tube-light reflection used in car-body inspection; ±30 degrees around straight down is a dark floor), the
   vertical cylinder a ring of upright tubes. Every reflection from inside the cylinder hits it, so faces facing any direction get stripes; with the plane,
   reflections that miss the panel are dark. Where stripes are denser than a pixel they fade to the average brightness.
+  "Soft" blurs the borders between white and black into a gradual shading (like tube lights seen through frosted glass; the stripes stay where they are).
+  "Softness" (0.05–1) sets the width of the change at each border as a fraction of the narrower of the bright and dark bands (at 1 the change reaches the
+  middle of the bands; with width 0.5 it is close to a sine wave).
   Count (1 to 1000), width (share of the light part) and rotation about X / Y / Z (degrees, applied X then Y then Z; the dome and cylinder turn about the
   model center, the plane about its anchor (panel center or bottom tube)) can be changed, and the lights can be fixed to the view (stripes move as you rotate; the rotation axes
   are screen right / up / toward you) or to the model (room lights with world +Z up and −Y in front; the rotation axes are world X / Y / Z). The plane panel's
@@ -2387,6 +2395,7 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[cad_viewer]` | `sew_on_open` | Whether to sew with `sew_tolerance` when the viewer opens (default `false`; "Sew" in the viewer can do it later) | `CAD_VIEWER_SEW_ON_OPEN` |
 | `[cad_viewer]` | `hole_normal_angle_deg` | Angle between normals for grouping holes as facing the same way (degrees, default 3; front or back alike; can be changed in the viewer) | `CAD_VIEWER_HOLE_NORMAL_ANGLE_DEG` |
 | `[cad_viewer]` | `hole_size_tolerance` | Hole size tolerance for grouping holes (model units, default 0.3; 0 or less starts with it off; the viewer's "Size ±" changes it) | `CAD_VIEWER_HOLE_SIZE_TOLERANCE` |
+| `[cad_viewer]` | `connected_face_angle_deg` | Largest bend at a seam that "Connected faces" spreads over (degrees, default 0, at most 180; 0 or less starts with it off; the viewer's "Bend ≤" changes it) | `CAD_VIEWER_CONNECTED_FACE_ANGLE_DEG` |
 | `[cad_viewer]` | `datum_pad_radius` | In "Align by datums", the radius around a picked point datum that is put onto the reference surface (model units, default 0 = 1/50 of the reference diagonal; the viewer's "Pad R" changes it) | `CAD_VIEWER_DATUM_PAD_RADIUS` |
 | `[cad_viewer]` | `datum_d_weight` | Weight of datum D under "Priority" (A, B and C count as 1; default 0.3; not used by "Average") | `CAD_VIEWER_DATUM_D_WEIGHT` |
 | `[plan]` | `allow_badge_unlock` | Whether to allow switching the Plan Mode badge both ways | `PLAN_ALLOW_BADGE_UNLOCK` |

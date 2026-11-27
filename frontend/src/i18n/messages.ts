@@ -196,6 +196,10 @@ export const ja = {
   'cad.unsewTitle': '縫合しない状態（トポロジートレランスだけ）で穴・外周を求め直す',
   'cad.connectedFaces': '連続面',
   'cad.connectedFacesTitle': '選んでいる面（穴・外周・部品ならその面）とつながっている面（エッジ・トポロジートレランス・縫合でつながる面）の、見えている面をすべて選ぶ',
+  'cad.connectedAngle': '折れ角 ≤',
+  'cad.connectedAngleToggle': '「連続面」を境目の折れ角で絞る',
+  'cad.connectedAngleTitle':
+    '「連続面」で、境目の折れ角（度。0 = 同じ向きで滑らかにつながる、90 = 直角に折れる）がこの角度以下の隣の面だけをたどる（フィレット・接する曲面のつながりだけを選ぶとき等）。チェックを外すと角度によらず、つながった面をすべて選ぶ',
   'cad.pmiLabels': 'PMI 表示',
   'cad.pmiLabelsTitle': '寸法・幾何公差・データムを、指す面・エッジの近くに 3D のラベルで表示する／隠す（ラベルのクリックで指す要素を選ぶ）',
   'cad.timeoutLeft': 'あと {min}:{sec} でビューアを自動で閉じます（確定・閉じる前の変更は保存されません）',
@@ -322,6 +326,12 @@ export const ja = {
   'cad.zebra.gloss': '艶',
   'cad.zebra.glossTitle':
     '塗装面のような艶を重ねる（左上手前のキーライトのハイライト、縁ほど強い映り込み、上が明るく下が暗い周りの映り込み）。縞の位置は変わらない。ハイライトと縞を見分けにくいときは切る',
+  'cad.zebra.soft': 'ぼかし',
+  'cad.zebra.softTitle':
+    '白と黒の縞の境界をぼかして、なだらかな明暗にする（すりガラス越しの蛍光灯のような見え方）。縞の位置は変わらない。くっきりした縞では目立ちにくい、ゆるやかな曲がり・うねりを見るときに使う',
+  'cad.zebra.softness': 'ぼかし量',
+  'cad.zebra.softnessTitle':
+    'ぼかしの強さ（0.05〜1）。境界ごとの明暗の移り変わりの幅を、明るい帯と暗い帯の狭い方の幅に対する割合で決める。1 で帯の真ん中まで移り変わる（幅 0.5 なら正弦波に近い明暗）',
   'cad.curvature.kind': '種類',
   'cad.curvature.kindTitle': '表示する曲率の種類',
   'cad.curvature.mean': '平均曲率',
@@ -712,6 +722,10 @@ const en: Record<MessageKey, string> = {
   'cad.unsewTitle': 'Find the holes and outer boundaries again without sewing (topology tolerance only)',
   'cad.connectedFaces': 'Connected faces',
   'cad.connectedFacesTitle': 'Select every visible face connected to the selected faces (or to the faces of selected holes, outer boundaries or parts) through edges, the topology tolerance or sewing',
+  'cad.connectedAngle': 'Bend ≤',
+  'cad.connectedAngleToggle': 'Limit "Connected faces" by the bend at the seams',
+  'cad.connectedAngleTitle':
+    'With "Connected faces", follow only the next faces whose seam bends by this angle or less (degrees; 0 = the faces continue smoothly in the same direction, 90 = they meet at a right angle), for example to select only fillets and tangent surfaces. Uncheck to select all connected faces regardless of the angle',
   'cad.pmiLabels': 'Show PMI',
   'cad.pmiLabelsTitle': 'Show / hide dimensions, geometric tolerances and datums as 3D labels near the faces and edges they are on (click a label to select its elements)',
   'cad.timeoutLeft': 'The viewer closes automatically in {min}:{sec} (changes not confirmed or closed are not saved)',
@@ -841,6 +855,12 @@ const en: Record<MessageKey, string> = {
   'cad.zebra.gloss': 'Gloss',
   'cad.zebra.glossTitle':
     'Add a painted-surface gloss (a highlight from a key light at the upper left, stronger reflection toward the edges, and a surrounding reflection that is bright above and dark below). The stripes stay where they are. Turn it off if the highlight is hard to tell from a stripe',
+  'cad.zebra.soft': 'Soft',
+  'cad.zebra.softTitle':
+    'Blur the borders between the white and black stripes into a gradual shading (like tube lights seen through frosted glass). The stripes stay where they are. Use it to see gentle bends and waviness that sharp stripes hide',
+  'cad.zebra.softness': 'Softness',
+  'cad.zebra.softnessTitle':
+    'How strong the blur is (0.05–1): the width of the change from light to dark at each border, as a fraction of the narrower of the bright and dark bands. At 1 the change reaches the middle of the bands (with width 0.5, close to a sine wave)',
   'cad.curvature.kind': 'Type',
   'cad.curvature.kindTitle': 'Which curvature to show',
   'cad.curvature.mean': 'Mean curvature',

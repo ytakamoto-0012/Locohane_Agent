@@ -52,6 +52,13 @@ export interface ZebraSettings {
   showLights: boolean;
   /** true なら塗装面のような艶（視点に固定したキーライトのハイライト・縁の映り込み・上下の明暗の映り込み）を重ねる。 */
   gloss: boolean;
+  /** true なら白と黒の境界をぼかす（蛍光灯をすりガラス越しに見たような、なだらかな明暗）。 */
+  soft: boolean;
+  /**
+   * ぼかしの強さ（0.05〜1）。境界ごとの明暗の移り変わりの幅を、明るい帯と暗い帯の狭い方の幅に対する割合で表す
+   * （1 で帯の真ん中まで移り変わる。幅 0.5 なら正弦波に近い明暗）。
+   */
+  softness: number;
 }
 
 /** 縞（蛍光灯）の数の上限。 */
@@ -70,7 +77,9 @@ export const DEFAULT_ZEBRA: ZebraSettings = {
   planeAnchor: 'center',
   viewFixed: true,
   showLights: false,
-  gloss: true
+  gloss: true,
+  soft: false,
+  softness: 0.6
 };
 
 /** モデルの大きさに合わせた既定のゼブラの設定（平面の光源は、原点から手前（視点に固定の Z）へモデル半径の 3 倍）。 */
@@ -202,15 +211,18 @@ uniform vec3 uRight;
 uniform vec3 uCenter;
 uniform float uRadius;
 uniform vec3 uPlanePos;   // 平面の光源（パネルの中心）の、モデルの中心からの位置（ワールド）
+uniform float uSoft;      // 境界のぼかし（0 = くっきり。0〜1 は明るい帯と暗い帯の狭い方の幅に対する、移り変わりの幅の割合）
 
-// 縞の値 s（整数ごとに 1 本）を、幅 uWidth の明るい帯にする（画面上で 1 ピクセル程度ぼかしてギザギザを抑える）。
+// 縞の値 s（整数ごとに 1 本）を、幅 uWidth の明るい帯（中心は fract(s) = uWidth / 2）にする。境界は画面上で 1 ピクセル
+// 程度ぼかしてギザギザを抑え、uSoft が 0 より大きければ、その割合の幅でなだらかに移り変わらせる。
 // 縞が 1 ピクセルより細かく詰まるところ（曲がりの強い丸め・かすめる反射）は、ちらつかないよう平均の明るさに寄せる。
 float band(float s) {
-  float f = fract(s);
   float w = fwidth(s);
   float aa = clamp(w, 1e-4, 0.5);
-  float rise = clamp(smoothstep(0.0, aa, f) - smoothstep(uWidth, uWidth + aa, f), 0.0, 1.0);
-  return mix(rise, uWidth, smoothstep(0.35, 0.9, w));
+  float t = max(aa, uSoft * min(uWidth, 1.0 - uWidth));
+  float d = abs(fract(s - 0.5 * uWidth + 0.5) - 0.5);  // 帯の中心からの距離（0〜0.5）
+  float lit = 1.0 - smoothstep(0.5 * (uWidth - t), 0.5 * (uWidth + t), d);
+  return mix(lit, uWidth, smoothstep(0.35, 0.9, w));
 }
 
 // 縞の値 s の明るい帯の中心（fract(s) = uWidth / 2）に、画面上で 1〜2 ピクセルの線を引く（光源の表示用。帯の幅は描かない）。
@@ -391,6 +403,7 @@ export function createSurfaceMaterial(): THREE.ShaderMaterial {
       uVertical: { value: 0 },
       uStripes: { value: DEFAULT_ZEBRA.stripes },
       uWidth: { value: DEFAULT_ZEBRA.width },
+      uSoft: { value: 0 },
       uUp: { value: new THREE.Vector3(0, 0, 1) },
       uFront: { value: new THREE.Vector3(0, -1, 0) },
       uRight: { value: new THREE.Vector3(1, 0, 0) },
@@ -478,6 +491,7 @@ export function applySurfaceDisplay(material: THREE.ShaderMaterial, display: Sur
     u.uStripes.value = Math.max(1, Math.min(MAX_ZEBRA_STRIPES, z.stripes));
     u.uWidth.value = Math.max(0.05, Math.min(0.95, z.width));
     u.uGloss.value = z.gloss ? 1 : 0;
+    u.uSoft.value = z.soft ? Math.max(0.05, Math.min(1, z.softness)) : 0;
   } else if (display.mode === 'scalar') {
     const s = display.scalar;
     u.uMode.value = 2;
@@ -564,6 +578,7 @@ export class ZebraLightGuide {
         uVertical: su.uVertical,
         uStripes: su.uStripes,
         uWidth: su.uWidth,
+        uSoft: su.uSoft,
         uUp: su.uUp,
         uFront: su.uFront,
         uRight: su.uRight,

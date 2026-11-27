@@ -268,6 +268,59 @@ def test_closed_shape_still_has_face_components(tmp_path) -> None:
     data = _faces_data(faces)
     assert "holeList" not in data
     assert data["faceComponents"] == [0] * 6
+    # 隣り合う面の組（箱の辺 12 本）と、その境目の折れ角（どれも直角）。
+    adj = data["faceAdjacency"]
+    assert len(adj["faces"]) == 2 * 12 and len(adj["angles"]) == 12
+    assert adj["angles"] == pytest.approx([90.0] * 12, abs=1e-3)
+
+
+def _adjacency(data: dict) -> dict[tuple[int, int], float]:
+    adj = data["faceAdjacency"]
+    f = adj["faces"]
+    return {(f[2 * k], f[2 * k + 1]): a for k, a in enumerate(adj["angles"])}
+
+
+def test_face_adjacency_angles_for_flat_bent_and_sewn_seams() -> None:
+    # 面 0・1 は同じ平面で並ぶ（0°）。面 2 は面 1 の右の縁から 30° 持ち上がる。面 3 は面 0 から 0.3 離れた同じ平面（縫合でつながる）。
+    flat0, flat1 = _tile(0, 0), _tile(1, 0)
+    c, s = math.cos(math.radians(30)), math.sin(math.radians(30))
+    bent = [np.array([[20 + p[0] * c, p[1], p[0] * s] for p in t]) for t in _plate(10, 10)]
+    away = [t + [0, -10.3, 0] for t in _plate(8, 10)]
+    plain = _adjacency(_faces_data([flat0, flat1, bent, away], hole_tolerance=0.1))
+    assert set(plain) == {(0, 1), (1, 2)}
+    assert plain[(0, 1)] == pytest.approx(0.0, abs=1e-3)
+    assert plain[(1, 2)] == pytest.approx(30.0, abs=1e-2)
+    sewn = _adjacency(_faces_data([flat0, flat1, bent, away], hole_tolerance=0.1, sew_tolerance=0.5))
+    assert sewn[(0, 3)] == pytest.approx(0.0, abs=1e-3)
+
+
+def test_face_adjacency_uses_vertex_normals_when_present() -> None:
+    # 粗い三角形では曲面の境目の角度が大きく出る。頂点の法線（src/cad/analysis.py）があれば、それで滑らかな境目は 0° になる。
+    from src.cad.mesh_data import b64
+    from src.cad.topology import apply_holes
+
+    flat = _tile(0, 0)
+    # 面 1: x = 10 から始まる半径 10 の円筒（接平面は面 0 と同じ）を 4 分割（1 段 22.5°）。
+    r, steps = 10.0, 4
+    ring = [(10 + r * math.sin(math.radians(22.5 * k)), r - r * math.cos(math.radians(22.5 * k))) for k in range(steps + 1)]
+    curved = []
+    for k in range(steps):
+        (x0, z0), (x1, z1) = ring[k], ring[k + 1]
+        for j in range(10):
+            y0, y1 = float(j), float(j + 1)
+            curved += [np.array([[x0, y0, z0], [x1, y0, z1], [x1, y1, z1]]), np.array([[x0, y0, z0], [x1, y1, z1], [x0, y1, z0]])]
+    data = _faces_data([flat, curved], hole_tolerance=0.1)
+    by_triangles = _adjacency(data)[(0, 1)]
+    assert by_triangles == pytest.approx(11.25, abs=0.1)
+    pos = np.frombuffer(__import__("base64").b64decode(data["mesh"]["positions"]), "<f4").reshape(-1, 3).astype(float)
+    n_flat = len(np.unique(np.round(np.asarray(flat, float).reshape(-1, 3), 9), axis=0))
+    normals = np.zeros_like(pos)
+    normals[:n_flat] = [0, 0, 1]
+    ang = np.arcsin(np.clip((pos[n_flat:, 0] - 10) / r, -1, 1))
+    normals[n_flat:] = np.stack([-np.sin(ang), np.zeros_like(ang), np.cos(ang)], axis=1)
+    data["analysis"] = {"normals": b64(np.rint(normals * 32767), "i2")}
+    apply_holes(data, 0.1)
+    assert _adjacency(data)[(0, 1)] == pytest.approx(0.0, abs=0.1)
 
 
 def _lines(origin, x, y, z, lengths=(100, 200, 300), reverse_y=False):

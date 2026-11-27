@@ -3490,7 +3490,7 @@ async def on_cad_viewer_sew(action: cl.Action) -> dict:
         action: payload に save_id・tolerance が入る。
 
     Returns:
-        {"ok": True, "holeList", "holes", "outerList", "outers", "faceComponents", "stats"} か {"ok": False, "error"}。
+        {"ok": True, "holeList", "holes", "outerList", "outers", "faceComponents", "faceAdjacency", "stats"} か {"ok": False, "error"}。
     """
     from src.tools.cad_viewer import sew_viewer_data
 

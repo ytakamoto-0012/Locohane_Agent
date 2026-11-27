@@ -22,6 +22,7 @@ STL を同じ処理で扱う。run_cad.py が形をビューア用データに�
    許容差以下のループ、縫合したときは複数の面にまたがり幅が縫合トレランス以下のループは隙間として除く。
 5. 面のまとまり（部分）: 1 の組と 2・3 の突き合わせでつながった面を 1 つにまとめる（``faceComponents``。面ごとの番号）。
    B-rep のエッジの共有は使わない（縫い合わせた IGES で、重なった 2 枚の面がエッジを共有していることがあるため）。
+   同じ組から、隣り合う面の組とその境目の折れ角（度）も求める（``faceAdjacency``。ビューアの「連続面」の角度の閾値に使う）。
 6. まとまりごとに、まとまりの外接箱の端（2 か所以上。厚みの無い向きは数えない）に届くループのうち、届く端が多く外接箱の
    大きいものを外周（``outerList``・``outers``）とし、残りを穴とする（両端の開いた筒では片方の口が外周、もう片方が穴になる）。
    外周の線が途切れて閉じていないときに、一番大きい穴を外周にしないため。
@@ -120,7 +121,7 @@ def _decode(value: Any, dtype: str, width: int) -> np.ndarray:
 
 
 # apply_holes が書き換えるビューア用データのキー（縫合をやり直すとき、前の結果を消してから入れる）。
-TOPOLOGY_KEYS = ("holeList", "holes", "outerList", "outers", "faceComponents")
+TOPOLOGY_KEYS = ("holeList", "holes", "outerList", "outers", "faceComponents", "faceAdjacency")
 
 
 def apply_holes(data: dict[str, Any], tolerance: float, sew_tolerance: float = 0.0) -> dict[str, Any] | None:
@@ -138,9 +139,10 @@ def apply_holes(data: dict[str, Any], tolerance: float, sew_tolerance: float = 0
     found = find_boundary_holes(data, tolerance, sew_tolerance)
     if found is None:
         return None
-    # 面のまとまり（「連続する面」の選択に使う）は、閉じた形でも入れる。
-    if found.get("faceComponents") is not None:
-        data["faceComponents"] = found["faceComponents"]
+    # 面のまとまりと隣り合う面の折れ角（「連続する面」の選択に使う）は、閉じた形でも入れる。
+    for key in ("faceComponents", "faceAdjacency"):
+        if found.get(key) is not None:
+            data[key] = found[key]
     if tolerance > 0 and found.get("holes") is not None:
         data["holeList"] = found["holeList"]
         data["holes"] = found["holes"]
@@ -173,6 +175,8 @@ def find_boundary_holes(data: dict[str, Any], tolerance: float, sew_tolerance: f
         tris.match_within_tolerance()
     comp = _face_components(len(faces), tris.face_pairs(tri_face))
     out: dict[str, Any] = {"faceComponents": _renumber(comp).tolist()}
+    normals = _vertex_normals(data, len(positions))
+    out["faceAdjacency"] = tris.face_adjacency(tri_face, normals)
     if not find_holes or not len(tris.a):
         return out
     loops, open_chains = tris.loops()
@@ -314,6 +318,18 @@ def _triangle_faces(face_ranges: Sequence[Sequence[int]], n_tris: int) -> np.nda
     return out
 
 
+def _vertex_normals(data: dict[str, Any], n_vertices: int) -> np.ndarray | None:
+    """ゼブラ・曲率の表示に使う頂点ごとの法線（src/cad/analysis.py。int16 × 32767）。無い・数が合わなければ None。"""
+    raw = (data.get("analysis") or {}).get("normals")
+    if not raw:
+        return None
+    try:
+        n = _decode(raw, "i2", 3).astype(np.float64) / 32767.0
+    except (ValueError, TypeError):
+        return None
+    return n if len(n) == n_vertices else None
+
+
 def _triangle_normals(positions: np.ndarray, indices: np.ndarray) -> np.ndarray:
     """三角形ごとの面積ベクトル（向きは三角形の回り方。大きさは面積の 2 倍）。"""
     p = positions[indices]
@@ -360,8 +376,11 @@ class _Boundary:
         owner = np.repeat(tri_ids, 3)
         side = self._sides(a, b, c)
         paired = np.zeros(len(a), dtype=bool)
-        # 面をまたいでつながる辺の両側の三角形の組（面のまとまりに使う）。
+        # 面をまたいでつながる辺の両側の三角形の組（面のまとまりに使う）と、その辺どうし（辺の番号の組。境目の角度に使う）。
         self.cross_pairs: list[tuple[int, int]] = []
+        self.cross_edges: list[tuple[int, int]] = []
+        # 辺ごとの（まとめた）頂点・元の頂点の番号・面の側・持ち主の三角形（境目の角度を求めるときに使う）。
+        self._ea, self._eb, self._eoa, self._eob, self._eside, self._eowner = a, b, oa, ob, side, owner
 
         # 1. 同じ面の三角形どうし: 元の頂点の番号が同じ辺（面ごとに三角形を作るので、面の中の辺は頂点を共有する）。
         if len(a):
@@ -387,6 +406,7 @@ class _Boundary:
                 paired[i[opposite]] = True
                 paired[j[opposite]] = True
                 self.cross_pairs += list(zip(owner[i[opposite]].tolist(), owner[j[opposite]].tolist()))
+                self.cross_edges += list(zip(i[opposite].tolist(), j[opposite].tolist()))
             # 3 本以上（重なった面の上でさらに面がつながる等）は、反対側にあるものどうしを、同じ部品どうしを先に、
             # 近い順に組にする（別の部品のパッチが面の境目に重なっていても、部品の面どうしの境目を組にする）。
             for s, n in zip(starts[sizes > 2].tolist(), sizes[sizes > 2].tolist()):
@@ -403,8 +423,11 @@ class _Boundary:
                         continue
                     paired[x] = paired[y] = True
                     self.cross_pairs.append((int(owner[x]), int(owner[y])))
+                    self.cross_edges.append((int(x), int(y)))
 
         boundary = ~paired
+        # 境界の辺の、元の辺（self._ea 等）での番号。
+        self.boundary_index = np.flatnonzero(boundary)
         self.a = a[boundary]
         self.b = b[boundary]
         self.side = side[boundary]
@@ -523,6 +546,63 @@ class _Boundary:
             if fa >= 0 and fb >= 0 and fa != fb:
                 out.append((fa, fb))
         return out
+
+    def face_adjacency(self, tri_face: np.ndarray, normals: np.ndarray | None = None) -> dict[str, list]:
+        """隣り合う面の組と、その境目の折れ角（度。0 = 滑らかにつながる、90 = 直角に折れる、180 = 折り返す）。
+
+        face_pairs と同じ組（面をまたぐ辺と、突き合わせ・縫合で除いた辺）の辺ごとに角度を求め、面の組ごとの中央値にする
+        （頂点の法線が乱れる所が少しあっても、境目全体の様子で決まるように）。normals（元の頂点ごとの単位法線。
+        src/cad/analysis.py）があれば辺の両端の法線のなす角（面の表裏によらない）を使い、無い・壊れている辺は両側の三角形の
+        面の側の向き（_sides）から求める（粗い三角形では曲面の境目で数度大きく出る）。法線は向きの符号を見ないので、
+        三角形の向きで 90° を超える（折り返す）と分かる辺は 180° − 角度 にする。
+
+        Returns:
+            {"faces": [面a0, 面b0, 面a1, 面b1, ...]（a < b）, "angles": [角度0, 角度1, ...]}。
+        """
+        pairs = list(self.cross_edges)
+        for i in np.flatnonzero(self.partner >= 0).tolist():
+            pairs.append((int(self.boundary_index[i]), int(self.boundary_index[self.partner[i]])))
+        if not pairs:
+            return {"faces": [], "angles": []}
+        xy = np.asarray(pairs, dtype=np.int64)
+        x, y = xy[:, 0], xy[:, 1]
+        fa = tri_face[self._eowner[x]]
+        fb = tri_face[self._eowner[y]]
+        keep = (fa >= 0) & (fb >= 0) & (fa != fb)
+        x, y, fa, fb = x[keep], y[keep], fa[keep], fb[keep]
+        if not len(x):
+            return {"faces": [], "angles": []}
+        side_cos = np.clip(-np.einsum("ij,ij->i", self._eside[x], self._eside[y]), -1.0, 1.0)
+        angle = np.degrees(np.arccos(side_cos))
+        if normals is not None and len(normals) and max(int(self._eoa.max()), int(self._eob.max())) < len(normals):
+            # 相手の辺のどちらの端が、こちらの辺の始点に近いか（縫合した辺は端の点が一致しない）。
+            pa = self.points[self._ea[x]]
+            same = np.linalg.norm(pa - self.points[self._ea[y]], axis=1) <= np.linalg.norm(pa - self.points[self._eb[y]], axis=1)
+            y_first = np.where(same, self._eoa[y], self._eob[y])
+            y_second = np.where(same, self._eob[y], self._eoa[y])
+            angs = []
+            valid = np.ones(len(x), dtype=bool)
+            for n, m in ((normals[self._eoa[x]], normals[y_first]), (normals[self._eob[x]], normals[y_second])):
+                ln = np.linalg.norm(n, axis=1) * np.linalg.norm(m, axis=1)
+                valid &= ln > 0.25
+                c = np.divide(np.abs(np.einsum("ij,ij->i", n, m)), ln, out=np.ones(len(ln)), where=ln > 0)
+                angs.append(np.degrees(np.arccos(np.clip(c, 0.0, 1.0))))
+            by_normal = (angs[0] + angs[1]) / 2
+            by_normal = np.where(angle > 90.0, 180.0 - by_normal, by_normal)
+            angle = np.where(valid, by_normal, angle)
+        lo, hi = np.minimum(fa, fb), np.maximum(fa, fb)
+        key = lo * (int(hi.max()) + 1) + hi
+        order = np.argsort(key, kind="stable")
+        sorted_key = key[order]
+        starts = np.flatnonzero(np.r_[True, sorted_key[1:] != sorted_key[:-1]])
+        ends = np.r_[starts[1:], len(sorted_key)]
+        faces_out: list[int] = []
+        angles_out: list[float] = []
+        for s, e in zip(starts.tolist(), ends.tolist()):
+            k = order[s]
+            faces_out += [int(lo[k]), int(hi[k])]
+            angles_out.append(round(float(np.median(angle[order[s:e]])), 2))
+        return {"faces": faces_out, "angles": angles_out}
 
     # --- ループ ---
 

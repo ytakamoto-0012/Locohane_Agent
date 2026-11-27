@@ -11,6 +11,7 @@ import {
   decodeFloat32,
   fetchCadFloat32,
   fetchCadPackage,
+  hasFaceAngles,
   isMatrix4,
   dropUnchangedPartColors,
   effectiveColor,
@@ -236,6 +237,7 @@ export function CadViewerBar() {
       screenshotLongSide={props.screenshot_long_side ?? 0}
       holeAngleDefault={props.hole_normal_angle_deg ?? 3}
       holeSizeDefault={props.hole_size_tolerance ?? 0.3}
+      connectedAngleDefault={props.connected_face_angle_deg ?? 0}
       sewDefault={props.sew_tolerance ?? 0.5}
       deadlineAt={deadlineAt}
       canAlign={!!props.can_align}
@@ -337,6 +339,8 @@ interface PanelProps {
   holeAngleDefault: number;
   /** 穴をまとめるときの穴サイズ誤差の初めの値（モデルの単位。0 以下なら初めは条件を外す）。 */
   holeSizeDefault: number;
+  /** 「連続面」の折れ角の上限の初めの値（度。0 以下なら初めは条件を外す）。 */
+  connectedAngleDefault: number;
   /** 「縫合」の欄の初めの値（モデルの単位）。 */
   sewDefault: number;
   /** backend が答えを待つ期限（Date.now() の値。0 = 無期限）。残りが少なくなったら残り時間を出す。 */
@@ -485,6 +489,7 @@ function CadViewerPanel({
   screenshotLongSide,
   holeAngleDefault,
   holeSizeDefault,
+  connectedAngleDefault,
   sewDefault,
   deadlineAt,
   canAlign,
@@ -520,6 +525,9 @@ function CadViewerPanel({
   const [holeSizeOn, setHoleSizeOn] = useState(holeSizeDefault > 0);
   const [holeSize, setHoleSize] = useState(holeSizeDefault > 0 ? holeSizeDefault : 0.3);
   const holeSizeTol = holeSizeOn ? holeSize : null;
+  // 「連続面」で隣の面へ広げる境目の折れ角の上限（使うか・値。度）。
+  const [connectedAngleOn, setConnectedAngleOn] = useState(connectedAngleDefault > 0);
+  const [connectedAngle, setConnectedAngle] = useState(connectedAngleDefault > 0 ? Math.min(connectedAngleDefault, 180) : 10);
   // 「縫合」: 縫合トレランス、求め直しの状態、このビューアで縫合したか（確定・閉じるときに backend へ伝える）。
   // 縫合で穴・外周が無くなっても欄は残す（縫合をやめて戻せるように）。
   const [canSew] = useState(() => !!saveId && !!(data.holes || data.holeList?.length || data.outerList?.length));
@@ -1013,10 +1021,12 @@ function CadViewerPanel({
     return out;
   }, [selection, data, topologyVersion]);
   const canConnected = mode === 'face' && startFaces.size > 0;
+  // 折れ角の閾値は、隣り合う面の折れ角があるデータ（縫合で求め直しても入る）のときだけ使える。
+  const faceAngles = hasFaceAngles(data);
   const selectConnected = () => {
     const visible = new Set(sceneRef.current?.selectableIds('face') ?? []);
     boxPick(
-      connectedFaces(data, startFaces)
+      connectedFaces(data, startFaces, faceAngles && connectedAngleOn ? connectedAngle : null)
         .filter((id) => visible.has(id))
         .map((id) => ({ kind: 'face' as const, id })),
       false
@@ -1431,6 +1441,27 @@ function CadViewerPanel({
             >
               {t('cad.connectedFaces')}
             </button>
+          )}
+          {kinds.includes('face') && faceAngles && (
+            <label className="cad-viewer-chip cad-viewer-hole-size" title={t('cad.connectedAngleTitle')}>
+              <input
+                type="checkbox"
+                checked={connectedAngleOn}
+                aria-label={t('cad.connectedAngleToggle')}
+                onChange={(e) => setConnectedAngleOn(e.target.checked)}
+              />
+              {t('cad.connectedAngle')}
+              <NumberInput
+                min={0}
+                max={180}
+                step={1}
+                value={connectedAngle}
+                disabled={!connectedAngleOn}
+                aria-label={t('cad.connectedAngleTitle')}
+                onChange={setConnectedAngle}
+              />
+              °
+            </label>
           )}
           <span className="cad-viewer-sep" />
           {hiddenSpace ? (

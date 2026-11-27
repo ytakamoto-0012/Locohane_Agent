@@ -1158,6 +1158,8 @@ class Config:
         cad_viewer_hole_size_tolerance: 穴をまとめるときの穴サイズ誤差の既定値（モデルの単位。[cad_viewer].hole_size_tolerance）。
             基準の穴の法線の向きから見た周りの穴の縁と、その穴自身の法線の向きから見た縁のずれがこれ以内の穴だけをまとめる。
             0 以下なら開いたときは条件を外しておく。ビューアで変えられる。
+        cad_viewer_connected_face_angle_deg: ビューアの「連続面」で隣の面へ広げる境目の折れ角の上限の既定値
+            （度。[cad_viewer].connected_face_angle_deg。上限 180）。0 以下なら開いたときは条件を外しておく。ビューアで変えられる。
         cad_viewer_sew_tolerance: 面の縫合の縫合トレランス（モデルの単位。[cad_viewer].sew_tolerance）。別の面どうしの縁が
             これ以下の距離で並んでいれば縫い合わせる（ビューアの「縫合」の初めの値）。
         cad_viewer_sew_on_open: 開いたときに cad_viewer_sew_tolerance で縫合しておくか（[cad_viewer].sew_on_open）。
@@ -1709,6 +1711,7 @@ class Config:
     cad_viewer_hole_topology_tolerance: float = 0.1
     cad_viewer_hole_normal_angle_deg: float = 3.0
     cad_viewer_hole_size_tolerance: float = 0.3
+    cad_viewer_connected_face_angle_deg: float = 0.0
     cad_viewer_sew_tolerance: float = 0.5
     cad_viewer_sew_on_open: bool = False
     cad_viewer_local_axis_lengths: tuple[float, float, float] | None = (100.0, 200.0, 300.0)
@@ -4860,6 +4863,9 @@ def load_config(
             "[cad_viewer].hole_normal_angle_deg",
         ),
         cad_viewer_hole_size_tolerance=float(os.getenv("CAD_VIEWER_HOLE_SIZE_TOLERANCE", cad_viewer.get("hole_size_tolerance", 0.3))),
+        cad_viewer_connected_face_angle_deg=min(
+            180.0, float(os.getenv("CAD_VIEWER_CONNECTED_FACE_ANGLE_DEG", cad_viewer.get("connected_face_angle_deg", 0)))
+        ),
         cad_viewer_sew_tolerance=max(0.0, float(os.getenv("CAD_VIEWER_SEW_TOLERANCE", cad_viewer.get("sew_tolerance", 0.5)))),
         cad_viewer_sew_on_open=_as_bool(os.getenv("CAD_VIEWER_SEW_ON_OPEN", cad_viewer.get("sew_on_open", False))),
         cad_viewer_local_axis_lengths=_cad_axis_lengths(

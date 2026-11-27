@@ -828,7 +828,7 @@ async def sew_viewer_data(payload: dict[str, Any]) -> dict[str, Any]:
     書き換える。穴・外周の ID は変わる。形のファイルは変えない。
 
     Returns:
-        {"ok": True, "holeList", "holes", "outerList", "outers", "faceComponents", "stats"} か {"ok": False, "error"}。
+        {"ok": True, "holeList", "holes", "outerList", "outers", "faceComponents", "faceAdjacency", "stats"} か {"ok": False, "error"}。
     """
     save_id = str(payload.get("save_id") or "")
     target = _SAVE_TARGETS.get(save_id)
@@ -1793,6 +1793,8 @@ async def _ask_selection(
                 "hole_normal_angle_deg": float(_setting("cad_viewer_hole_normal_angle_deg", 3.0)),
                 # 穴をまとめるときの穴サイズ誤差の既定値（モデルの単位。0 以下なら初めは条件を外す）。
                 "hole_size_tolerance": float(_setting("cad_viewer_hole_size_tolerance", 0.3)),
+                # 「連続面」で隣の面へ広げる境目の折れ角の上限の既定値（度。0 以下なら初めは条件を外す）。
+                "connected_face_angle_deg": float(_setting("cad_viewer_connected_face_angle_deg", 0.0)),
                 # 「縫合」の欄の初めの値（モデルの単位）。
                 "sew_tolerance": float(_setting("cad_viewer_sew_tolerance", 0.5)),
                 # 待つ秒数（0 = 無期限）。ビューアは残りが少なくなったら残り時間を出す（出し直したときはそこから数える）。

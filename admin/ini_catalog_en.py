@@ -1559,6 +1559,13 @@ DESCRIPTIONS: dict[str, str] = {
         'along the hole\'s own normal are grouped (the more a hole is tilted and the larger it is, the more its apparent border shifts).\n'
         'It can be changed or turned off in the viewer\'s "Size ±" field (this is the value when the viewer opens). 0 or less starts with it turned off.'
     ),
+    'cad_viewer.connected_face_angle_deg': (
+        'For "Connected faces" in the viewer, the largest bend (degrees) across a seam that the selection spreads over to the next face '
+        '(0 = the faces continue smoothly in the same direction, 90 = they meet at a right angle). Only faces that meet at this angle or less are followed '
+        '(for example to select only fillets and tangent surfaces).\n'
+        'It can be changed or turned off in the viewer\'s "Bend ≤" field (this is the value when the viewer opens). 0 or less starts with it turned off '
+        '(all connected faces are selected regardless of the angle).'
+    ),
     'cad_viewer.local_axis_lengths': (
         'Lengths of the three straight lines that run at right angles from one point and are recognized as a local AXIS (local coordinate system), in X, Y, Z order (model units).\n'
         'When found, the viewer\'s "Coordinates" switches to it, and confirming also returns local coordinates to the AI. Empty or off does not look for it.'

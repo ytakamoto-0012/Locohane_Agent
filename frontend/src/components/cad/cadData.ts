@@ -248,6 +248,11 @@ export interface CadData {
   outerList?: CadItemInfo[];
   /** 面ごとの、つながった面のまとまりの番号（src/cad/topology.py。縫合・許容差での突き合わせを含む）。 */
   faceComponents?: number[];
+  /**
+   * 隣り合う面の組（faces[2k], faces[2k+1]）と、その境目の折れ角 angles[k]（度。0 = 滑らか、90 = 直角。src/cad/topology.py の
+   * face_adjacency）。「連続面」の角度の閾値に使う。
+   */
+  faceAdjacency?: { faces: number[]; angles: number[] };
   /** モデルの中の直交する 3 本の線で決まるローカル座標系（src/cad/topology.py の find_local_axes）。 */
   localAxes?: CadLocalAxis[];
   /** 前の版との比較（show_cad_viewer の compare_with）。added / removed は増えた・削った部分の三角形。 */
@@ -378,6 +383,8 @@ export interface CadViewerProps {
   hole_normal_angle_deg?: number;
   /** 穴をまとめるときの穴サイズ誤差の既定値（モデルの単位、[cad_viewer].hole_size_tolerance。0 以下なら初めは外す）。 */
   hole_size_tolerance?: number;
+  /** 「連続面」で隣の面へ広げる境目の折れ角の上限の既定値（度、[cad_viewer].connected_face_angle_deg。0 以下なら初めは外す）。 */
+  connected_face_angle_deg?: number;
   /** 「縫合」の欄の初めの値（モデルの単位、[cad_viewer].sew_tolerance）。 */
   sew_tolerance?: number;
   /** backend が答えを待つ秒数（[cad_viewer].timeout_seconds。0 = 無期限）。残りが少なくなったら残り時間を出す。 */
@@ -391,13 +398,13 @@ export interface CadViewerProps {
 }
 
 /** 「縫合」（app.py の action_callback "cad_viewer_sew"）が返す、求め直した穴・外周・面のまとまり。 */
-export type CadTopology = Pick<CadData, 'holeList' | 'holes' | 'outerList' | 'outers' | 'faceComponents'> & {
+export type CadTopology = Pick<CadData, 'holeList' | 'holes' | 'outerList' | 'outers' | 'faceComponents' | 'faceAdjacency'> & {
   stats?: Record<string, number>;
 };
 
 /** data の穴・外周・面のまとまりを topology に置き換える（無い項目は消す）。data そのものを書き換える。 */
 export function replaceTopology(data: CadData, topology: CadTopology): void {
-  for (const key of ['holeList', 'holes', 'outerList', 'outers', 'faceComponents'] as const) {
+  for (const key of ['holeList', 'holes', 'outerList', 'outers', 'faceComponents', 'faceAdjacency'] as const) {
     if (topology[key] === undefined) delete data[key];
     else (data as unknown as Record<string, unknown>)[key] = topology[key];
   }
@@ -507,13 +514,47 @@ export function holeGroup(data: CadData, id: number, deg: number, sizeTol: numbe
   return out;
 }
 
+/** 「連続面」の折れ角の閾値を使えるデータか（隣り合う面の折れ角がある）。 */
+export function hasFaceAngles(data: CadData): boolean {
+  const adj = data.faceAdjacency;
+  return !!adj && Array.isArray(adj.faces) && Array.isArray(adj.angles) && adj.faces.length === 2 * adj.angles.length;
+}
+
 /**
  * 面 ids とつながった面（同じ面のまとまり。faceComponents）すべての ID（昇順）。まとまりが無いデータ（古い
  * ビューア用データ）では、エッジを共有する面をたどる。
+ * maxAngle（度。null で使わない）を渡すと、境目の折れ角（faceAdjacency）がその角度以下の隣の面だけをたどる
+ * （折れ角の無い古いデータでは使わない）。
  */
-export function connectedFaces(data: CadData, ids: Iterable<number>): number[] {
+export function connectedFaces(data: CadData, ids: Iterable<number>, maxAngle: number | null = null): number[] {
   const comps = data.faceComponents;
   const start = [...ids].filter((i) => i >= 0 && i < data.faces.length);
+  if (maxAngle !== null && Number.isFinite(maxAngle) && hasFaceAngles(data)) {
+    const { faces, angles } = data.faceAdjacency!;
+    const near = new Map<number, number[]>();
+    const link = (f: number, g: number) => {
+      const list = near.get(f);
+      if (list) list.push(g);
+      else near.set(f, [g]);
+    };
+    angles.forEach((a, k) => {
+      // 丸めた角度なので少し甘くする（0° のとき滑らかな境目が外れないように）。
+      if (!(a <= maxAngle + 1e-6)) return;
+      link(faces[2 * k], faces[2 * k + 1]);
+      link(faces[2 * k + 1], faces[2 * k]);
+    });
+    const seen = new Set(start);
+    const stack = [...start];
+    while (stack.length) {
+      for (const g of near.get(stack.pop()!) ?? []) {
+        if (!seen.has(g)) {
+          seen.add(g);
+          stack.push(g);
+        }
+      }
+    }
+    return [...seen].sort((a, b) => a - b);
+  }
   if (comps && comps.length === data.faces.length) {
     const want = new Set(start.map((i) => comps[i]));
     const out: number[] = [];
