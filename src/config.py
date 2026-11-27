@@ -1175,6 +1175,9 @@ class Config:
             三角形に分ける許容差（形の対角線に対する割合。[cad_viewer].reference_deflection_ratio）。
         cad_viewer_deviation_tolerance: 偏差の公差（±、モデルの単位。[cad_viewer].deviation_tolerance）。
             偏差のカラーマップで公差内を緑にし、統計に公差内の割合を入れる。ビューアで変えられる。
+        cad_viewer_datum_pad_radius: データムで合わせるとき、点のデータムで基準の表面に当てる範囲（クリックした点の周りの
+            半径、モデルの単位。[cad_viewer].datum_pad_radius）。0 以下なら基準モデルの対角線の 1/50。ビューアで変えられる。
+        cad_viewer_datum_d_weight: データム D を「優先」で使うときの D の重み（A・B・C を 1 として。[cad_viewer].datum_d_weight）。
         show_cad_viewer_timeout_seconds: 3D ビューアで利用者が確定・閉じるのを待つ秒数（3D ビューア専用。
             [cad_viewer].timeout_seconds、既定 3600。無ければ以前の [user_response_timeouts].show_cad_viewer_seconds）。
             0 以下は無期限待ち。ブラウザを閉じたまま待ち続けないよう、既定は有限。
@@ -1714,6 +1717,8 @@ class Config:
     cad_viewer_surface_analysis: bool = True
     cad_viewer_reference_deflection_ratio: float = 0.0002
     cad_viewer_deviation_tolerance: float = 0.1
+    cad_viewer_datum_pad_radius: float = 0.0
+    cad_viewer_datum_d_weight: float = 0.3
     show_cad_viewer_timeout_seconds: int = 3600
 
     # --- AI の人物設定（[persona]。system_prompt.md の {{persona}}、render_persona_block 参照） ---
@@ -4877,6 +4882,8 @@ def load_config(
             os.getenv("CAD_VIEWER_DEVIATION_TOLERANCE", cad_viewer.get("deviation_tolerance", 0.1)),
             "[cad_viewer].deviation_tolerance",
         ),
+        cad_viewer_datum_pad_radius=max(0.0, float(os.getenv("CAD_VIEWER_DATUM_PAD_RADIUS", cad_viewer.get("datum_pad_radius", 0)))),
+        cad_viewer_datum_d_weight=max(0.0, float(os.getenv("CAD_VIEWER_DATUM_D_WEIGHT", cad_viewer.get("datum_d_weight", 0.3)))),
         # 3D ビューア専用のタイムアウト。以前の [user_response_timeouts] show_cad_viewer_seconds は、
         # [cad_viewer] timeout_seconds が無いときだけ使う。環境変数はほかの設定と同じく ini より優先し、
         # 以前の SHOW_CAD_VIEWER_TIMEOUT_SECONDS も CAD_VIEWER_TIMEOUT_SECONDS が無ければ使う（同梱の config.ini には

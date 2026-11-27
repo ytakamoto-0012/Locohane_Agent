@@ -4,17 +4,24 @@
  */
 import { useI18n } from '../../i18n';
 import type { MessageKey } from '../../i18n/messages';
-import type { CadAlignmentInfo, CadDeviationStats } from './cadData';
+import {
+  DATUM_NAMES,
+  MAX_DATUM_HOLES,
+  type CadAlignmentInfo,
+  type CadDeviationStats,
+  type DatumMode,
+  type DatumName,
+  type Datums
+} from './cadData';
 import { fmtNum } from './measure';
 import { NumberInput } from './NumberInput';
 import { CURVATURE_KINDS, MAX_ZEBRA_STRIPES, legendGradient, type CurvatureKind, type ScalarScheme, type ZebraLight, type ZebraOrientation, type ZebraSettings } from './surfaceShading';
 
 export type AnalysisMode = 'normal' | 'zebra' | 'curvature' | 'deviation';
-export type DatumName = 'A' | 'B' | 'C';
-export type Datums = Record<DatumName, number[]>;
-const DATUM_NAMES: DatumName[] = ['A', 'B', 'C'];
-/** データムごとに決める自由度（src/cad/align.py の DATUM_DOF と同じ 3-2-1）。 */
-const DATUM_DOF: Record<DatumName, number> = { A: 3, B: 2, C: 1 };
+export type DatumKind = 'point' | 'hole';
+/** データムごとに決める自由度（src/cad/align.py の DATUM_DOF と同じ 3-2-1。D は優先なら最後の段に低い重みで加わる）。 */
+const DATUM_DOF: Record<Exclude<DatumName, 'D'>, number> = { A: 3, B: 2, C: 1 };
+const DATUM_MODES: DatumMode[] = ['priority', 'average'];
 const ZEBRA_LIGHTS: ZebraLight[] = ['dome', 'cylinder', 'plane'];
 const ZEBRA_ORIENTATIONS: ZebraOrientation[] = ['horizontal', 'vertical'];
 const ZEBRA_ROT_AXES: [string, 'rotXDeg' | 'rotYDeg' | 'rotZDeg'][] = [
@@ -325,7 +332,16 @@ interface AlignProps {
   onReferenceVisible: (v: boolean) => void;
   referenceOpacity: number;
   onReferenceOpacity: (v: number) => void;
-  onSetDatum: (name: DatumName) => void;
+  /** 次にクリックして拾うデータム（null なら拾っていない）と、拾うもの（点・基準穴）。 */
+  datumPicking: DatumName | null;
+  onPickDatum: (name: DatumName | null) => void;
+  datumKind: DatumKind;
+  onDatumKind: (k: DatumKind) => void;
+  onPin: (name: DatumName, diameter: number) => void;
+  datumMode: DatumMode;
+  onDatumMode: (m: DatumMode) => void;
+  padRadius: number;
+  onPadRadius: (v: number) => void;
   onClearDatums: () => void;
   onAlign: (method: 'bestfit' | 'faces' | 'datum' | 'reset' | 'initial') => void;
   referenceName: string;
@@ -335,7 +351,9 @@ interface AlignProps {
 export function AlignRow(p: AlignProps) {
   const { t } = useI18n();
   const busy = p.state.kind === 'busy';
-  const hasDatum = DATUM_NAMES.some((n) => p.datums[n].length > 0);
+  const hasDatum = DATUM_NAMES.some((n) => p.datums[n]);
+  const holeCount = DATUM_NAMES.filter((n) => p.datums[n]?.type === 'hole').length;
+  const reports = p.info?.method === 'datum' ? (p.info.datums ?? {}) : {};
   const pct = (v: number | undefined) => (typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : '—');
   const s = p.stats;
   return (
@@ -372,26 +390,6 @@ export function AlignRow(p: AlignProps) {
               {t('cad.align.faces', { count: p.selectedFaces })}
             </button>
             <span className="cad-viewer-sep" />
-            {DATUM_NAMES.map((n) => (
-              <button
-                key={n}
-                type="button"
-                className={`cad-viewer-chip${p.datums[n].length ? ' active' : ''}`}
-                disabled={busy || p.selectedFaces === 0}
-                title={t('cad.align.setDatumTitle', { name: n, dof: DATUM_DOF[n] })}
-                onClick={() => p.onSetDatum(n)}
-              >
-                {n}
-                {p.datums[n].length ? ` (${p.datums[n].length})` : ''}
-              </button>
-            ))}
-            <button type="button" className="cad-viewer-chip" disabled={busy || !hasDatum} title={t('cad.align.datumTitle')} onClick={() => p.onAlign('datum')}>
-              {t('cad.align.datum')}
-            </button>
-            <button type="button" className="cad-viewer-chip" disabled={busy || !hasDatum} onClick={p.onClearDatums}>
-              {t('cad.align.clearDatums')}
-            </button>
-            <span className="cad-viewer-sep" />
             <button type="button" className="cad-viewer-chip" disabled={busy} title={t('cad.align.initialTitle')} onClick={() => p.onAlign('initial')}>
               {t('cad.align.initial')}
             </button>
@@ -401,6 +399,85 @@ export function AlignRow(p: AlignProps) {
           </>
         )}
       </div>
+      {p.canAlign && (
+        <div className="cad-viewer-measure-bar cad-viewer-analysis-bar" role="group" aria-label={t('cad.align.datums')}>
+          <span className="cad-viewer-chip cad-viewer-ref-name">{t('cad.align.datums')}</span>
+          {(['point', 'hole'] as DatumKind[]).map((k) => (
+            <button
+              key={k}
+              type="button"
+              className={`cad-viewer-chip${p.datumKind === k ? ' active' : ''}`}
+              aria-pressed={p.datumKind === k}
+              disabled={busy}
+              title={t(`cad.align.kind.${k}Title` as MessageKey, { max: MAX_DATUM_HOLES })}
+              onClick={() => p.onDatumKind(k)}
+            >
+              {t(`cad.align.kind.${k}` as MessageKey)}
+            </button>
+          ))}
+          <span className="cad-viewer-sep" />
+          {DATUM_NAMES.map((n) => {
+            const d = p.datums[n];
+            const picking = p.datumPicking === n;
+            // 基準穴は 2 本まで（今の穴を拾い直すのはよい）。
+            const holeFull = p.datumKind === 'hole' && holeCount >= MAX_DATUM_HOLES && d?.type !== 'hole';
+            return (
+              <button
+                key={n}
+                type="button"
+                className={`cad-viewer-chip${d ? ' active' : ''}${picking ? ' picking' : ''}`}
+                aria-pressed={picking}
+                disabled={busy || (holeFull && !picking)}
+                title={
+                  n === 'D'
+                    ? t('cad.align.setDatumDTitle')
+                    : t('cad.align.setDatumTitle', { name: n, dof: DATUM_DOF[n] })
+                }
+                onClick={() => p.onPickDatum(picking ? null : n)}
+              >
+                {n === 'D' ? t('cad.align.datumD') : n}
+                {d ? (d.type === 'hole' ? ` ⌀${fmtNum(d.diameter)}` : ' ●') : ''}
+              </button>
+            );
+          })}
+          {DATUM_NAMES.map((n) => {
+            const d = p.datums[n];
+            return d?.type === 'hole' ? (
+              <NumberField
+                key={`pin-${n}`}
+                label={t('cad.align.pin', { name: n })}
+                title={t('cad.align.pinTitle', { name: n, hole: fmtNum(d.diameter) })}
+                value={d.pin}
+                step={0.01}
+                min={0.001}
+                onChange={(v) => p.onPin(n, v)}
+              />
+            ) : null;
+          })}
+          <NumberField label={t('cad.align.padRadius')} title={t('cad.align.padRadiusTitle')} value={p.padRadius} step={0.5} min={0.001} onChange={p.onPadRadius} />
+          <span className="cad-viewer-sep" />
+          {DATUM_MODES.map((m) => (
+            <button
+              key={m}
+              type="button"
+              className={`cad-viewer-chip${p.datumMode === m ? ' active' : ''}`}
+              aria-pressed={p.datumMode === m}
+              disabled={busy}
+              title={t(`cad.align.mode.${m}Title` as MessageKey)}
+              onClick={() => p.onDatumMode(m)}
+            >
+              {t(`cad.align.mode.${m}` as MessageKey)}
+            </button>
+          ))}
+          <span className="cad-viewer-sep" />
+          <button type="button" className="cad-viewer-chip" disabled={busy || !hasDatum} title={t('cad.align.datumTitle')} onClick={() => p.onAlign('datum')}>
+            {t('cad.align.datum')}
+          </button>
+          <button type="button" className="cad-viewer-chip" disabled={busy || !hasDatum} onClick={p.onClearDatums}>
+            {t('cad.align.clearDatums')}
+          </button>
+        </div>
+      )}
       <div className="cad-viewer-align-result" role="status">
         {busy ? (
           <>
@@ -414,9 +491,26 @@ export function AlignRow(p: AlignProps) {
             {p.info && (
               <span>
                 {t(`cad.align.method.${p.info.method}` as MessageKey)}
+                {p.info.method === 'datum' && p.info.datum_mode ? ` (${t(`cad.align.mode.${p.info.datum_mode}` as MessageKey)})` : ''}
                 {typeof p.info.rms === 'number' ? `  RMS ${fmtNum(p.info.rms)}` : ''}
               </span>
             )}
+            {DATUM_NAMES.map((n) => {
+              const r = reports[n];
+              if (r?.type !== 'hole') return null;
+              return (
+                <span key={`hole-${n}`} className={r.pin_larger_than_hole ? 'cad-viewer-align-error' : undefined}>
+                  {r.pin_larger_than_hole
+                    ? t('cad.align.holePinLarger', { name: n, pin: fmtNum(r.pin ?? NaN), hole: fmtNum(r.diameter ?? NaN) })
+                    : t('cad.align.holeResult', {
+                        name: n,
+                        offset: fmtNum(r.offset ?? NaN),
+                        clearance: fmtNum(r.clearance ?? NaN),
+                        nominal: fmtNum(r.nominal_diameter ?? NaN)
+                      })}
+                </span>
+              );
+            })}
             {s && (
               <span>
                 {t('cad.align.stats', {

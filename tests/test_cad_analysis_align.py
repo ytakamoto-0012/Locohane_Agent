@@ -156,18 +156,25 @@ def test_bestfit_recovers_a_rigid_move() -> None:
     assert np.abs(d).max() < 1e-2
 
 
-def test_datum_alignment_fixes_dof_in_priority_order() -> None:
+def _pt(T_true: np.ndarray, p: list[float]) -> dict:
+    """基準の座標の点 p を、対象（T_true で動かした形）の上の点のデータムにする。"""
+    return {"type": "point", "point": _moved(T_true, np.array([p], float))[0].tolist()}
+
+
+def test_point_datums_fix_dof_in_priority_order() -> None:
     pos, tris, ranges, _normals = _box(100, 60, 20)
     index = A.SurfaceIndex(pos, tris)
     # 対象の底面（A）だけを 0.5 下げた（反った）形: データム A で合わせると底面が基準に合い、上面が +0.5 ずれる。
     target_pos = pos.copy()
-    bottom = np.arange(ranges[0][0] * 0, 4)  # 底面の 4 頂点（_box の 1 つめの面）
+    bottom = np.arange(4)  # 底面の 4 頂点（_box の 1 つめの面）
     target_pos[bottom, 2] -= 0.5
     T_true = np.eye(4)
     T_true[:3, 3] = [0.3, -0.2, 0.4]
     target = A.TargetMesh(_moved(T_true, target_pos), tris, ranges)
-    T, info = A.align(target, index, "datum", start=np.eye(4), datums={"A": [0], "B": [2], "C": [5]})
-    assert info["method"] == "datum" and info["datums"]["A"]["dof"] == 3
+    datums = {"A": _pt(T_true, [50, 30, -0.5]), "B": _pt(T_true, [50, 0, 10]), "C": _pt(T_true, [0, 30, 10])}
+    T, info = A.align(target, index, "datum", start=np.eye(4), datums=datums, pad_radius=8)
+    assert info["method"] == "datum" and info["datum_mode"] == "priority"
+    assert info["datums"]["A"]["dof"] == 3 and info["datums"]["A"]["type"] == "point"
     d = A.deviations(target, index, T)
     top = target.triangles[ranges[1][0] : ranges[1][0] + 2].ravel()
     assert np.allclose(d[bottom], 0, atol=1e-4)
@@ -176,6 +183,110 @@ def test_datum_alignment_fixes_dof_in_priority_order() -> None:
         A.align(target, index, "datum", start=np.eye(4), datums={})
     with pytest.raises(A.AlignError):
         A.align(target, index, "faces", start=np.eye(4), faces=[])
+
+
+def test_point_datum_pad_uses_only_the_surface_connected_to_the_point() -> None:
+    pos, tris, ranges, _normals = _box(100, 60, 2)  # 厚さ 2 の板
+    target = A.TargetMesh(pos, tris, ranges)
+    # 板の真ん中: 半径 5 の中には裏面（距離 2）も入るが、上面とは半径の外の側面を通じてしかつながらないので入らない。
+    pts = target.pad_points(np.array([50.0, 30, 2]), 5.0, 500, np.random.default_rng(0))
+    assert len(pts) > 100 and np.allclose(pts[:, 2], 2.0)
+    assert np.all(np.linalg.norm(pts - [50, 30, 2], axis=1) <= 5 + 1e-9)
+
+
+def _plate_with_holes(holes: list[tuple[float, float]], r: float = 5.0) -> tuple[np.ndarray, np.ndarray]:
+    """z=0 の板（100×100）と、板から下へ深さ 10 の穴の壁（中心 holes、半径 r）。板の三角形は穴の上も覆う（試験用）。"""
+    pos = [[0, 0, 0], [100, 0, 0], [100, 100, 0], [0, 100, 0]]
+    tris = [[0, 1, 2], [0, 2, 3]]
+    seg = 64
+    for cx, cy in holes:
+        base = len(pos)
+        for i in range(seg):
+            a = 2 * np.pi * i / seg
+            pos += [[cx + r * np.cos(a), cy + r * np.sin(a), 0], [cx + r * np.cos(a), cy + r * np.sin(a), -10]]
+        for i in range(seg):
+            j = (i + 1) % seg
+            t0, b0, t1, b1 = base + 2 * i, base + 2 * i + 1, base + 2 * j, base + 2 * j + 1
+            tris += [[t0, b0, b1], [t0, b1, t1]]
+    return np.array(pos, float), np.array(tris, dtype=np.int64)
+
+
+def _hole(T_true: np.ndarray, c: tuple[float, float], dia: float, pin: float) -> dict:
+    center = _moved(T_true, np.array([[c[0], c[1], 0.0]]))[0]
+    axis = np.linalg.inv(T_true)[:3, :3] @ [0, 0, 1]
+    return {"type": "hole", "center": center.tolist(), "axis": axis.tolist(), "diameter": dia, "pin": pin}
+
+
+def test_fit_reference_hole_finds_the_hole_center_and_radius() -> None:
+    pos, tris = _plate_with_holes([(30, 40)])
+    index = A.SurfaceIndex(pos, tris)
+    got = A.fit_reference_hole(index, np.array([31.5, 39.0, 0]), np.array([0, 0, 1.0]), 5.0)
+    assert got is not None
+    c, r = got
+    assert np.allclose(c, [30, 40, 0], atol=0.05) and r == pytest.approx(5.0, abs=0.05)
+    # 穴の無いところでは見つからない。
+    assert A.fit_reference_hole(index, np.array([70.0, 70, 0]), np.array([0, 0, 1.0]), 5.0) is None
+
+
+def test_two_datum_holes_with_round_pins_recover_the_position() -> None:
+    pos, tris = _plate_with_holes([(30, 40), (80, 40)])
+    index = A.SurfaceIndex(pos, tris)
+    T_true = np.eye(4)
+    T_true[:3, :3] = A.rotation(np.radians([0, 0, 1.5]))
+    T_true[:3, 3] = [1.2, -0.8, 0.3]
+    target = A.TargetMesh(_moved(T_true, pos), tris, [[0, len(tris)]])
+    datums = {
+        "A": _pt(T_true, [55, 80, 0]),
+        "B": _hole(T_true, (30, 40), 10.0, 10.0),  # 隙間なしのピン: 穴の中心をピンの軸に合わせる
+        "C": _hole(T_true, (80, 40), 10.0, 10.0),
+    }
+    T, info = A.align(target, index, "datum", start=np.eye(4), datums=datums, pad_radius=15)
+    assert info["datums"]["B"]["type"] == "hole" and info["datums"]["B"]["offset"] < 1e-3
+    assert np.allclose(T, T_true, atol=1e-3)
+    with pytest.raises(A.AlignError):  # 基準穴は 2 本まで
+        A.align(target, index, "datum", start=np.eye(4), datums={**datums, "D": _hole(T_true, (30, 40), 10.0, 10.0)})
+
+
+def test_datum_hole_pin_with_clearance_stops_at_the_pin() -> None:
+    pos, tris = _plate_with_holes([(30, 40)])
+    index = A.SurfaceIndex(pos, tris)
+    T_true = np.eye(4)
+    T_true[:3, 3] = [2.0, 0, 0]  # 穴が x に 2 ずれた位置から
+    target = A.TargetMesh(_moved(T_true, pos), tris, [[0, len(tris)]])
+    datums = {"A": _pt(T_true, [60, 80, 0]), "B": _hole(T_true, (30, 40), 10.0, 9.0)}  # 直径 9 のピン: 隙間 0.5
+    T, info = A.align(target, index, "datum", start=np.eye(4), datums=datums, pad_radius=15)
+    hole = info["datums"]["B"]
+    assert hole["clearance"] == pytest.approx(0.5) and hole["offset"] == pytest.approx(0.5, abs=0.02)
+    # 隙間の中なら動かさない。
+    T_true[:3, 3] = [0.3, 0, 0]
+    target = A.TargetMesh(_moved(T_true, pos), tris, [[0, len(tris)]])
+    datums = {"A": _pt(T_true, [60, 80, 0]), "B": _hole(T_true, (30, 40), 10.0, 9.0)}
+    T, info = A.align(target, index, "datum", start=np.eye(4), datums=datums, pad_radius=15)
+    assert info["datums"]["B"]["offset"] == pytest.approx(0.3, abs=0.02)
+
+
+def test_datum_d_by_priority_or_average() -> None:
+    pos, tris, ranges, _normals = _box(100, 60, 20)
+    index = A.SurfaceIndex(pos, tris)
+    target_pos = pos.copy()
+    target_pos[np.arange(4), 2] -= 0.5  # 底面が反っている
+    target = A.TargetMesh(target_pos, tris, ranges)
+    datums = {
+        "A": {"type": "point", "point": [50, 30, -0.5]},
+        "B": {"type": "point", "point": [50, 0, 10]},
+        "C": {"type": "point", "point": [0, 30, 10]},
+        "D": {"type": "point", "point": [50, 30, 20]},  # 上面
+    }
+    T, info = A.align(target, index, "datum", start=np.eye(4), datums=datums, pad_radius=8)
+    # 優先: D は最後の段（C の 1 自由度）にだけ効くので、A で決めた高さ（底面が基準に合う）は変わらない。
+    assert info["datums"]["D"]["weight"] == pytest.approx(A.DATUM_D_WEIGHT)
+    d = A.deviations(target, index, T)
+    assert np.allclose(d[np.arange(4)], 0, atol=1e-3)
+    # 平均: 底面と上面の両方に同じ重みで当てるので、反りを上下に分け合う。
+    T, info = A.align(target, index, "datum", start=np.eye(4), datums=datums, pad_radius=8, datum_mode="average")
+    assert info["datum_mode"] == "average"
+    d = A.deviations(target, index, T)
+    assert 0.05 < float(np.abs(d[np.arange(4)]).mean()) < 0.45
 
 
 def test_as_matrix_rejects_non_rigid_or_broken_transforms() -> None:

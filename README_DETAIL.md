@@ -2199,9 +2199,17 @@ B-rep のブール演算）と違い、STL どうし・STL と CAD でも使え�
   部分を水色〜青で描く。範囲は最小・最大の欄か「自動」（分布の 1〜99%、公差の 3 倍以上）。マウスを乗せた点の偏差を出す。
 - **位置合わせ**: `align` が `none`（既定。座標のまま）か `bestfit`（開くときにベストフィット）。ビューアの「位置合わせ」（右のパネル）で、
   「ベストフィット」（対象全体を point-to-plane の ICP で最小二乗。今の位置と、重心・主軸を合わせた 4 通りを試して合いの良いものから詰める）、
-  「選んだ面で合わせる」（部分ベストフィット。今の位置から）、データム A・B・C（選んだ面を設定）による「データムで合わせる」
-  （A で 3・B で 2・C で 1 自由度を決める 3-2-1。先の段が決めた向きは後の段で動かさない優先度付きの最小二乗。検査具の当て面・ピン穴・
-  長穴で押さえた位置に当たる。先にベストフィットで大まかに合わせておく）、「開いたときの位置」「元の座標」で合わせ直す。
+  「選んだ面で合わせる」（部分ベストフィット。今の位置から）、データム A・B・C と任意の D による「データムで合わせる」
+  （先にベストフィットで大まかに合わせておく）、「開いたときの位置」「元の座標」で合わせ直す。
+  - データムは「点」か「基準穴」を選んでから A〜D のボタンを押し、モデルをクリックして設定する（Esc でやめる。設定した点・穴は名前付きの印で出る）。
+    **点**はクリックした点の周り（「当て面 R」の半径。既定 `[cad_viewer] datum_pad_radius`、0 なら基準モデルの対角線の 1/50）のうち、
+    点が載る表面とつながった部分を基準の表面に当てる（検査具の当て面）。**基準穴**（2 本まで）は穴の縁（開いた形の穴）・円のエッジ・円筒面を
+    クリックして穴の中心・軸・実測の径を取り、基準モデルの同じ穴（軸に平行な壁の点に円を当てはめて求める）の軸に丸ピン（「ピン⌀」で直径を指定。
+    初めは穴の径）を立てる。穴とピンの隙間（(穴径 − ピン径) / 2）の中では穴は動け、はみ出す分だけ穴の縁をピンに当てる。ピンが穴より太いときは
+    隙間なしで中心を合わせる。結果にはピンの軸からの穴の中心のずれ・隙間・基準の穴の径を出す。
+  - 「優先」（既定）: A で 3・B で 2・C で 1 自由度を決める 3-2-1（先の段が決めた向きは後の段で動かさない優先度付きの最小二乗）。D は最後の段に
+    低い重み（`[cad_viewer] datum_d_weight`、既定 0.3）で加わり、A・B で決めた向きは動かさない。「平均」: すべてのデータムを同じ重みにして
+    1 段（6 自由度）の最小二乗で合わせる（平均化）。各データムの重みは点の数によらない。
   計算は app.py の action_callback `cad_viewer_align`（`align_viewer_model`。numpy と scipy の cKDTree でアプリの中のスレッドで行う）。
   偏差の値は float32 の並びを `_tmp_` に書き、ブラウザが `GET /locohane/cad/data/{id}` で取りに来る（ビューアを閉じたら消す）。
   外れた対応（測定の抜け・治具の写り込み等）は残差の中央値の 3 倍（MAD 換算）を超えたものを外す。
@@ -2254,7 +2262,7 @@ ASCII 以外の文字は `\X2\` で書き、本文を ASCII だけにする。�
 PMI は AP242 でだけ書け、AP203・AP214 で書くときや、OCCT が PMI を書けなかったとき（NIST の CTC-01 等、実際の CAD が書いた PMI の一部）は、
 PMI を除いて書きその旨を `notes` で伝える（元のファイルの PMI はそのまま）。STEP 以外（IGES・BREP・CadQuery コード）の保存も同じスキーマの設定に従う。
 
-**設定**: `[cad_viewer]`（`enabled`・`timeout_seconds`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`・`screenshot_enabled`・`screenshot_long_side_pixels`・`step_write_schema`・`cache_dir`・`cache_max_mb`・`hole_topology_tolerance`・`sew_tolerance`・`sew_on_open`・`hole_normal_angle_deg`・`hole_size_tolerance`・`local_axis_lengths`・`local_axis_length_tolerance`・`local_axis_angle_tolerance_deg`・`surface_analysis`・`reference_deflection_ratio`・`deviation_tolerance`）。
+**設定**: `[cad_viewer]`（`enabled`・`timeout_seconds`・`max_triangles`・`linear_deflection_ratio`・`angular_deflection_deg`・`stl_region_angle_deg`・`screenshot_enabled`・`screenshot_long_side_pixels`・`step_write_schema`・`cache_dir`・`cache_max_mb`・`hole_topology_tolerance`・`sew_tolerance`・`sew_on_open`・`hole_normal_angle_deg`・`hole_size_tolerance`・`local_axis_lengths`・`local_axis_length_tolerance`・`local_axis_angle_tolerance_deg`・`surface_analysis`・`reference_deflection_ratio`・`deviation_tolerance`・`datum_pad_radius`・`datum_d_weight`）。
 メインエージェントから直接呼べるよう `[main_agent_tool_guard] allow_entries` に登録済み。
 
 **タイムアウト**: 3D ビューア専用の `[cad_viewer] timeout_seconds`（既定 3600 秒）だけ「確定」「閉じる」を待ち、過ぎるとビューアを閉じて AI へ時間切れを返す
@@ -2423,6 +2431,8 @@ Claude Code から `/tune-prompt system_prompt` のように実行する。
 | `[cad_viewer]` | `sew_on_open` | 開いたときに `sew_tolerance` で縫合しておくか（既定 `false`。ビューアの「縫合」で後から縫合できる） | `CAD_VIEWER_SEW_ON_OPEN` |
 | `[cad_viewer]` | `hole_normal_angle_deg` | 穴にマウスを乗せたとき、同じ向きとしてまとめる法線の角度差（度、既定 3。表裏は問わない。ビューアで変えられる） | `CAD_VIEWER_HOLE_NORMAL_ANGLE_DEG` |
 | `[cad_viewer]` | `hole_size_tolerance` | 穴をまとめるときの穴サイズ誤差（モデルの単位、既定 0.3。0 以下なら初めは外す。ビューアの「サイズ ±」で変えられる） | `CAD_VIEWER_HOLE_SIZE_TOLERANCE` |
+| `[cad_viewer]` | `datum_pad_radius` | 「データムで合わせる」で点のデータムを基準の表面に当てる範囲（クリックした点の周りの半径、モデルの単位、既定 0 = 基準モデルの対角線の 1/50。ビューアの「当て面 R」で変えられる） | `CAD_VIEWER_DATUM_PAD_RADIUS` |
+| `[cad_viewer]` | `datum_d_weight` | データム D を「優先」で使うときの D の重み（A・B・C を 1 として、既定 0.3。「平均」では使わない） | `CAD_VIEWER_DATUM_D_WEIGHT` |
 | `[plan]` | `allow_badge_unlock` | Plan Mode バッジの双方向切り替えを許可するか | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | 承認済み（Edit Automatically）状態で`create_plan`を再度呼んだ際、`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態を維持したままstepsだけ差し替える | `PLAN_RESET_APPROVAL_ON_RECREATE` |
 | `[plan]` | `reset_approval_on_new_message` | 新しいユーザーメッセージを受け取るたびに`plan_approved`を無条件でリセットしてPlan Modeへ戻すか。`false`なら承認状態をメッセージをまたいで維持する（`thinking_loop_guard`のリトライ上限到達後、ユーザーが続行メッセージを送っても再承認が不要になる） | `PLAN_RESET_APPROVAL_ON_NEW_MESSAGE` |

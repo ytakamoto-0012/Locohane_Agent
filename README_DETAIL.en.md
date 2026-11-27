@@ -2154,9 +2154,18 @@ reference's outward normal = extra material) from every vertex of the shown mode
   The deviation under the mouse is shown.
 - **Alignment**: `align` is `none` (default; keep the coordinates) or `bestfit` (best fit when opening). In the viewer's "Align" row: "Best fit"
   (point-to-plane ICP of the whole model; tries the current position and 4 placements matching centroid and principal axes and refines the best),
-  "Fit selected faces" (local best fit from the current position), datums A, B and C (set from the selected faces) with "Align by datums" (A fixes 3,
-  B 2 and C 1 degrees of freedom: 3-2-1, a prioritized least squares where later datums do not move what earlier ones fixed; the position given by the
-  pads, pin and slot of a checking fixture; best fit roughly first), and "Position when opened" / "Original coordinates".
+  "Fit selected faces" (local best fit from the current position), "Align by datums" with datums A, B, C and the optional D (best fit roughly first),
+  and "Position when opened" / "Original coordinates".
+  - Choose "Point" or "Datum hole", press A–D and click the model (Esc to stop; the datums are drawn with their names). A **point** puts the surface
+    around the clicked point ("Pad R"; default `[cad_viewer] datum_pad_radius`, 0 = 1/50 of the reference diagonal), only the part connected to the point,
+    onto the reference surface (a checking-fixture pad). A **datum hole** (up to 2): click a hole rim (open shapes), a circular edge or a cylindrical face to
+    get the center, axis and measured diameter; a round pin (diameter in "pin ⌀", initially the hole diameter) stands on the axis of the same hole of the
+    reference model (found by fitting a circle to its wall). Within the clearance (hole − pin) / 2 the hole can move; beyond it the hole rim is pushed onto
+    the pin. A pin larger than the hole aligns the centers without clearance. The result shows the hole offset from the pin axis, the clearance and the
+    reference hole diameter.
+  - "Priority" (default): A fixes 3, B 2 and C 1 degrees of freedom (3-2-1, a prioritized least squares where later datums do not move what earlier ones
+    fixed). D joins the last stage with a lower weight (`[cad_viewer] datum_d_weight`, default 0.3) and does not move what A and B fixed. "Average": all
+    datums at the same weight in one least squares (6 DOF). Each datum's weight does not depend on its number of points.
   It runs in app.py's action_callback `cad_viewer_align` (`align_viewer_model`, numpy and scipy's cKDTree in a thread of the app). The deviation values
   are written to `_tmp_` as float32 and the browser fetches them with `GET /locohane/cad/data/{id}` (removed when the viewer closes).
   Outlying matches (missing scan data, fixtures in the scan, etc.) beyond 3 × the median residual (MAD scaled) are ignored.
@@ -2207,7 +2216,7 @@ PMI can only be written in AP242; when writing AP203 / AP214, or when OCCT canno
 the file is written without PMI and `notes` says so (the original file keeps its PMI). Saving from other sources (IGES, BREP, CadQuery code) follows the
 same schema setting.
 
-**Settings**: `[cad_viewer]` (`enabled`, `timeout_seconds`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`, `screenshot_enabled`, `screenshot_long_side_pixels`, `step_write_schema`, `cache_dir`, `cache_max_mb`, `hole_topology_tolerance`, `sew_tolerance`, `sew_on_open`, `hole_normal_angle_deg`, `hole_size_tolerance`, `local_axis_lengths`, `local_axis_length_tolerance`, `local_axis_angle_tolerance_deg`, `surface_analysis`, `reference_deflection_ratio`, `deviation_tolerance`).
+**Settings**: `[cad_viewer]` (`enabled`, `timeout_seconds`, `max_triangles`, `linear_deflection_ratio`, `angular_deflection_deg`, `stl_region_angle_deg`, `screenshot_enabled`, `screenshot_long_side_pixels`, `step_write_schema`, `cache_dir`, `cache_max_mb`, `hole_topology_tolerance`, `sew_tolerance`, `sew_on_open`, `hole_normal_angle_deg`, `hole_size_tolerance`, `local_axis_lengths`, `local_axis_length_tolerance`, `local_axis_angle_tolerance_deg`, `surface_analysis`, `reference_deflection_ratio`, `deviation_tolerance`, `datum_pad_radius`, `datum_d_weight`).
 It is registered in `[main_agent_tool_guard] allow_entries` so the main agent can call it directly.
 
 **Timeout**: the viewer waits for "Confirm" or "Close" for `[cad_viewer] timeout_seconds` (a timeout only for the 3D viewer, default 3600 seconds); after it the viewer
@@ -2378,6 +2387,8 @@ The comments in config.ini are written in Japanese (authoritative). The settings
 | `[cad_viewer]` | `sew_on_open` | Whether to sew with `sew_tolerance` when the viewer opens (default `false`; "Sew" in the viewer can do it later) | `CAD_VIEWER_SEW_ON_OPEN` |
 | `[cad_viewer]` | `hole_normal_angle_deg` | Angle between normals for grouping holes as facing the same way (degrees, default 3; front or back alike; can be changed in the viewer) | `CAD_VIEWER_HOLE_NORMAL_ANGLE_DEG` |
 | `[cad_viewer]` | `hole_size_tolerance` | Hole size tolerance for grouping holes (model units, default 0.3; 0 or less starts with it off; the viewer's "Size ±" changes it) | `CAD_VIEWER_HOLE_SIZE_TOLERANCE` |
+| `[cad_viewer]` | `datum_pad_radius` | In "Align by datums", the radius around a picked point datum that is put onto the reference surface (model units, default 0 = 1/50 of the reference diagonal; the viewer's "Pad R" changes it) | `CAD_VIEWER_DATUM_PAD_RADIUS` |
+| `[cad_viewer]` | `datum_d_weight` | Weight of datum D under "Priority" (A, B and C count as 1; default 0.3; not used by "Average") | `CAD_VIEWER_DATUM_D_WEIGHT` |
 | `[plan]` | `allow_badge_unlock` | Whether to allow switching the Plan Mode badge both ways | `PLAN_ALLOW_BADGE_UNLOCK` |
 | `[plan]` | `reset_approval_on_recreate` | Whether to reset `plan_approved` unconditionally back to Plan Mode when `create_plan` is called again in the approved (Edit Automatically) state. If `false`, only the steps are replaced while keeping the approval | `PLAN_RESET_APPROVAL_ON_RECREATE` |
 | `[plan]` | `reset_approval_on_new_message` | Whether to reset `plan_approved` unconditionally back to Plan Mode on every new user message. If `false`, the approval is kept across messages (after `thinking_loop_guard` reaches its retry limit, re-approval is not needed even when the user sends a message to continue) | `PLAN_RESET_APPROVAL_ON_NEW_MESSAGE` |

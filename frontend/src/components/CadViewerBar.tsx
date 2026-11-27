@@ -36,7 +36,13 @@ import {
   type CadSavedHistory,
   type CadSelection,
   type CadTopology,
-  type CadViewerProps
+  type CadViewerProps,
+  DATUM_NAMES,
+  MAX_DATUM_HOLES,
+  type DatumMode,
+  type DatumName,
+  type Datums,
+  type DatumScenePick
 } from './cad/cadData';
 import type { CadScene, CadSceneColors, ViewName } from './cad/CadScene';
 import {
@@ -61,8 +67,7 @@ import {
   ScalarLegend,
   type AlignState,
   type AnalysisMode,
-  type Datums,
-  type DatumName,
+  type DatumKind,
   type RangeState
 } from './cad/CadAnalysisPanel';
 import { autoRange, defaultZebra, curvatureValues, type CurvatureKind, type SurfaceDisplay, type ZebraSettings } from './cad/surfaceShading';
@@ -235,6 +240,7 @@ export function CadViewerBar() {
       deadlineAt={deadlineAt}
       canAlign={!!props.can_align}
       deviationToleranceDefault={props.deviation_tolerance ?? data.deviation?.tolerance ?? 0.1}
+      datumPadRadiusDefault={defaultPadRadius(props.datum_pad_radius, data)}
       onSubmit={(selected, colors, message, view, screenshot, measurements) =>
         askUser.callback({
           submitted: true,
@@ -339,6 +345,8 @@ interface PanelProps {
   canAlign: boolean;
   /** 偏差の公差（±）の初めの値。 */
   deviationToleranceDefault: number;
+  /** 点のデータムの当て面の半径の初めの値（モデルの単位）。 */
+  datumPadRadiusDefault: number;
   /** screenshot: 指示があるときだけ撮った今の画面（PNG の data URL）。measurements: ビューアで測った結果。 */
   onSubmit: (
     selected: CadSelection[],
@@ -367,6 +375,14 @@ interface CadViewState {
   sewn?: boolean;
   /** 基準モデルとの偏差の公差（±）。基準モデルがあるときだけ（backend は統計をこの公差で求める）。 */
   deviation_tolerance?: number;
+}
+
+/** 点のデータムの当て面の半径の初めの値。設定が 0 以下なら形の対角線の 1/50（src/cad/align.py の PAD_RADIUS_RATIO）を 2 桁に丸める。 */
+function defaultPadRadius(setting: number | undefined, data: CadData): number {
+  if (typeof setting === 'number' && setting > 0) return setting;
+  const s = data.bbox?.size ?? [];
+  const diag = Math.hypot(s[0] ?? 0, s[1] ?? 0, s[2] ?? 0) || 1;
+  return Number((diag / 50).toPrecision(2));
 }
 
 // 残り時間を出し始める秒数（3D ビューア専用のタイムアウトの残りがこれを切ったら出す）。
@@ -473,6 +489,7 @@ function CadViewerPanel({
   deadlineAt,
   canAlign,
   deviationToleranceDefault,
+  datumPadRadiusDefault,
   onSubmit,
   onCancel,
   onSwap
@@ -570,7 +587,12 @@ function CadViewerPanel({
   const [alignInfo, setAlignInfo] = useState<CadAlignmentInfo | null>(data.deviation?.alignment ?? null);
   const [alignStats, setAlignStats] = useState<CadDeviationStats | null>(data.deviation?.stats ?? null);
   const [alignState, setAlignState] = useState<AlignState>({ kind: 'idle' });
-  const [datums, setDatums] = useState<Datums>({ A: [], B: [], C: [] });
+  // データム（点か基準穴。D は任意）と、次にクリックして拾うデータム・拾うもの・D の扱い・点の当て面の半径。
+  const [datums, setDatums] = useState<Datums>({});
+  const [datumPicking, setDatumPicking] = useState<DatumName | null>(null);
+  const [datumKind, setDatumKind] = useState<DatumKind>('point');
+  const [datumMode, setDatumMode] = useState<DatumMode>('priority');
+  const [padRadius, setPadRadius] = useState(datumPadRadiusDefault);
   const curvature = useMemo(() => {
     if (!data.analysis?.k1 || !data.analysis.k2) return null;
     return { k1: decodeFloat32(data.analysis.k1), k2: decodeFloat32(data.analysis.k2) };
@@ -711,6 +733,18 @@ function CadViewerPanel({
     [infoOf]
   );
   // PMI（3D ラベル・パネルの一覧）のクリック: 指す要素を選び、そこへ寄せる（選べない種類の要素も、寄せる範囲には含める）。
+  // データムを拾うモードでクリックした点・穴を、拾っているデータムにする（穴のピンの直径は初めは穴の径）。
+  const datumPickRef = useRef<(p: DatumScenePick) => void>(() => {});
+  datumPickRef.current = (p: DatumScenePick) => {
+    const name = datumPicking;
+    if (!name) return;
+    if (p.type === 'hole') {
+      const others = DATUM_NAMES.filter((n) => n !== name && datums[n]?.type === 'hole').length;
+      if (others >= MAX_DATUM_HOLES) return;
+    }
+    setDatums((cur) => ({ ...cur, [name]: p.type === 'hole' ? { ...p, pin: Number(p.diameter.toFixed(3)) } : p }));
+    setDatumPicking(null);
+  };
   const selectPmiRef = useRef<(id: string) => void>(() => {});
   selectPmiRef.current = (id: string) => {
     const item = pmiById(data).get(id);
@@ -729,6 +763,7 @@ function CadViewerPanel({
     if (tool) {
       setBoxMode('off');
       setPivotPicking(false);
+      setDatumPicking(null);
     }
   };
 
@@ -755,6 +790,7 @@ function CadViewerPanel({
             },
             onMeasurePick: measurePick,
             onPmiClick: (id) => selectPmiRef.current(id),
+            onDatumPick: (p) => datumPickRef.current(p),
             onScalarHover: setScalarHover
           },
           sceneColors()
@@ -791,6 +827,14 @@ function CadViewerPanel({
   useEffect(() => {
     sceneRef.current?.setZebraBasePicking(basePickingOn);
   }, [basePickingOn, status]);
+  // データムを拾えるのは位置合わせの欄を開いているときだけ。印も開いているときだけ出す。
+  const datumPickingOn = alignOpen && datumPicking !== null;
+  useEffect(() => {
+    sceneRef.current?.setDatumPicking(datumPickingOn ? datumKind : null);
+  }, [datumPickingOn, datumKind, status]);
+  useEffect(() => {
+    sceneRef.current?.setDatumOverlay(alignOpen ? DATUM_NAMES.flatMap((n) => (datums[n] ? [{ name: n, datum: datums[n]! }] : [])) : []);
+  }, [alignOpen, datums, status]);
   useEffect(() => {
     sceneRef.current?.setOriginAxesVisible(originAxes);
   }, [originAxes, status]);
@@ -885,6 +929,7 @@ function CadViewerPanel({
     void topologyVersion;
     if (pivotPicking) return t('cad.hintPivot');
     if (basePickingOn) return t('cad.hintZebraBase');
+    if (datumPickingOn && datumPicking) return t(datumKind === 'hole' ? 'cad.hintDatumHole' : 'cad.hintDatumPoint', { name: datumPicking });
     let item = hover ? describe(itemsOf(data, hover.kind)[hover.id], label(hover), effectiveColor(data, colors, hover), t, data, localAxis) : '';
     if (hover?.kind === 'hole') {
       const n = sceneRef.current?.holeGroupOf(hover.id).length ?? holeGroup(data, hover.id, holeAngle, holeSizeTol).length;
@@ -912,7 +957,7 @@ function CadViewerPanel({
       return item ? `${value}  ${item}` : value;
     }
     return item || t(boxMode === 'off' ? 'cad.hint' : 'cad.hintBox');
-  }, [hover, data, label, t, colors, boxMode, pivotPicking, basePickingOn, measureTool, measureError, pending, localAxis, holeAngle, holeSizeTol, mode, topologyVersion, scalarHover, analysisMode, curvatureKind]);
+  }, [hover, data, label, t, colors, boxMode, pivotPicking, basePickingOn, datumPickingOn, datumPicking, datumKind, measureTool, measureError, pending, localAxis, holeAngle, holeSizeTol, mode, topologyVersion, scalarHover, analysisMode, curvatureKind]);
 
   const selectAll = () => {
     const ids = sceneRef.current?.selectableIds(mode) ?? [];
@@ -1109,6 +1154,7 @@ function CadViewerPanel({
       chooseMeasureTool(null);
     } else if (pivotPicking) setPivotPicking(false);
     else if (basePickingOn) setZebraBasePicking(false);
+    else if (datumPickingOn) setDatumPicking(null);
     else if (boxMode !== 'off') setBoxMode('off');
     else if (selection.length) setSelection([]);
     else if (expanded) setExpanded(false);
@@ -1205,7 +1251,7 @@ function CadViewerPanel({
     const action: IAction = {
       id: '',
       name: 'cad_viewer_align',
-      payload: { save_id: saveId, method, faces: selectedFaceIds, datums, tolerance },
+      payload: { save_id: saveId, method, faces: selectedFaceIds, datums, datum_mode: datumMode, pad_radius: padRadius, tolerance },
       label: '',
       tooltip: '',
       forId: '',
@@ -1231,7 +1277,20 @@ function CadViewerPanel({
       setAlignState({ kind: 'error', message: err instanceof Error ? err.message : t('cad.align.failedUnknown') });
     }
   };
-  const setDatum = (name: DatumName) => setDatums((cur) => ({ ...cur, [name]: selectedFaceIds }));
+  // データムを拾い始める（null でやめる）。ほかのクリックで点を拾うモード（計測・回転中心・ゼブラの基準点）はやめる。
+  const pickDatum = (name: DatumName | null) => {
+    setDatumPicking(name);
+    if (name) {
+      chooseMeasureTool(null);
+      setPivotPicking(false);
+      setZebraBasePicking(false);
+    }
+  };
+  const setPin = (name: DatumName, pin: number) =>
+    setDatums((cur) => {
+      const d = cur[name];
+      return d?.type === 'hole' ? { ...cur, [name]: { ...d, pin } } : cur;
+    });
 
   const saveText =
     saveState.kind === 'saved'
@@ -1492,6 +1551,7 @@ function CadViewerPanel({
             onClick={() => {
               setPivotPicking((x) => !x);
               setZebraBasePicking(false);
+              setDatumPicking(null);
             }}
           >
             {t('cad.pivot')}
@@ -1730,6 +1790,7 @@ function CadViewerPanel({
                     setZebraBasePicking(on);
                     if (on) {
                       setPivotPicking(false);
+                      setDatumPicking(null);
                       chooseMeasureTool(null);
                       setBoxMode('off');
                     }
@@ -1770,8 +1831,19 @@ function CadViewerPanel({
                   onReferenceVisible={setReferenceVisible}
                   referenceOpacity={referenceOpacity}
                   onReferenceOpacity={setReferenceOpacity}
-                  onSetDatum={setDatum}
-                  onClearDatums={() => setDatums({ A: [], B: [], C: [] })}
+                  datumPicking={datumPickingOn ? datumPicking : null}
+                  onPickDatum={pickDatum}
+                  datumKind={datumKind}
+                  onDatumKind={setDatumKind}
+                  onPin={setPin}
+                  datumMode={datumMode}
+                  onDatumMode={setDatumMode}
+                  padRadius={padRadius}
+                  onPadRadius={setPadRadius}
+                  onClearDatums={() => {
+                    setDatums({});
+                    setDatumPicking(null);
+                  }}
                   onAlign={(m) => void runAlign(m)}
                   referenceName={data.reference?.source?.path ?? data.reference?.source?.format ?? ''}
                 />

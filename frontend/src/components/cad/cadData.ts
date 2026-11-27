@@ -287,8 +287,44 @@ export interface CadAlignmentInfo {
   inlier_ratio?: number;
   iterations?: number;
   points?: number;
+  datum_mode?: DatumMode;
+  /** データムで合わせたときの、データムごとの様子（src/cad/align.py の _datum_report）。 */
+  datums?: Partial<Record<DatumName, CadDatumReport>>;
   [key: string]: unknown;
 }
+
+export interface CadDatumReport {
+  type: 'point' | 'hole';
+  dof?: number;
+  weight?: number;
+  /** 点: 当て面の偏差の平均・RMS。 */
+  mean?: number;
+  rms?: number;
+  /** 穴: 穴の径・ピンの径・隙間・ピンの軸からの穴の中心のずれ・基準モデルの穴の径。 */
+  diameter?: number;
+  pin?: number;
+  clearance?: number;
+  offset?: number;
+  nominal_diameter?: number;
+  pin_larger_than_hole?: boolean;
+}
+
+/** データムの名前（D は任意）。 */
+export type DatumName = 'A' | 'B' | 'C' | 'D';
+export const DATUM_NAMES: DatumName[] = ['A', 'B', 'C', 'D'];
+/** D の扱い: priority は A・B・C を優先し D を低い重みで、average は全データムを同じ重みで合わせる。 */
+export type DatumMode = 'priority' | 'average';
+/** 基準穴は 2 本まで（src/cad/align.py の MAX_HOLES）。 */
+export const MAX_DATUM_HOLES = 2;
+
+/** シーンで拾ったデータム（モデルの座標）。穴は中心・軸・実測の径。 */
+export type DatumScenePick =
+  | { type: 'point'; point: [number, number, number] }
+  | { type: 'hole'; center: [number, number, number]; axis: [number, number, number]; diameter: number };
+
+/** 設定したデータム。穴にはピンの直径が付く（初めは穴の径）。 */
+export type DatumPick = (DatumScenePick & { type: 'point' }) | (DatumScenePick & { type: 'hole'; pin: number });
+export type Datums = Partial<Record<DatumName, DatumPick>>;
 
 /** 偏差の統計（src/cad/align.py の deviation_stats。面積で重み付け）。 */
 export interface CadDeviationStats {
@@ -350,6 +386,8 @@ export interface CadViewerProps {
   can_align?: boolean;
   /** 偏差の公差の既定値（±、[cad_viewer].deviation_tolerance）。 */
   deviation_tolerance?: number;
+  /** 点のデータムの当て面の半径の既定値（モデルの単位、[cad_viewer].datum_pad_radius。0 以下なら基準モデルの対角線の 1/50）。 */
+  datum_pad_radius?: number;
 }
 
 /** 「縫合」（app.py の action_callback "cad_viewer_sew"）が返す、求め直した穴・外周・面のまとまり。 */

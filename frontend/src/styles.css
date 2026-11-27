@@ -817,6 +817,17 @@
   font-weight: 600;
 }
 
+/* 位置合わせで、次のクリックで拾うデータム。 */
+.cad-viewer-chip.picking {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 位置合わせのデータムの名前（CadScene.ts の DATUM_COLOR）。 */
+.cad-viewer-measure-label.cad-viewer-datum-label {
+  color: #0b7285;
+}
+
 /* 穴の法線の角度差の欄・座標系の切り替え（チップの中に入力欄を置く）。 */
 .cad-viewer-num,
 .cad-viewer-hole-angle,

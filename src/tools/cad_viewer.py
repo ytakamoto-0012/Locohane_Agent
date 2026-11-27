@@ -354,7 +354,8 @@ async def show_cad_viewer(
       absolute path or @N). Unlike compare_with, it works for STL too and gives a deviation map: the
       signed distance from every point of the shown model to the reference surface (positive = outside
       the reference = extra material). The viewer overlays the reference and can align the models:
-      best fit, best fit on the selected faces, or datums A/B/C (3-2-1, like a checking fixture).
+      best fit, best fit on the selected faces, or datums A/B/C (+ optional D; picked points and up to
+      2 datum holes with round pins, 3-2-1 like a checking fixture).
       The result then has "comparison" (alignment method, transform, RMS, deviation statistics with
       the tolerance, and deviation per selected face).
     align: how to place the model on the reference before measuring when the viewer opens:
@@ -1024,7 +1025,15 @@ def _face_ids(raw: Any, n_faces: int) -> list[int]:
     return sorted(set(out))
 
 
-def _align_compute(state: _AlignState, method: str, faces: list[int], datums: dict[str, list[int]], dof: dict[str, int]) -> dict[str, Any]:
+def _align_compute(
+    state: _AlignState,
+    method: str,
+    faces: list[int],
+    datums: dict[str, Any],
+    dof: dict[str, int],
+    datum_mode: str = "priority",
+    pad_radius: float = 0.0,
+) -> dict[str, Any]:
     """位置合わせと偏差の計算（重いのでスレッドで呼ぶ）。"""
     import numpy as np
 
@@ -1041,7 +1050,18 @@ def _align_compute(state: _AlignState, method: str, faces: list[int], datums: di
     elif method == "initial":
         T, info = state.initial_transform.copy(), dict((state.data.get("deviation") or {}).get("alignment") or {"method": "none"})
     else:
-        T, info = align(state.target, state.index, method, start=state.transform, faces=faces, datums=datums, datum_dof=dof)
+        T, info = align(
+            state.target,
+            state.index,
+            method,
+            start=state.transform,
+            faces=faces,
+            datums=datums,
+            datum_dof=dof,
+            datum_mode=datum_mode,
+            pad_radius=pad_radius,
+            d_weight=float(_setting("cad_viewer_datum_d_weight", 0.3)),
+        )
     values = deviations(state.target, state.index, T)
     stats = deviation_stats(values, state.target.vertex_weights(), state.tolerance)
     path = state.workdir / f"cad_deviation_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.f32"
@@ -1057,7 +1077,8 @@ async def align_viewer_model(payload: dict[str, Any]) -> dict[str, Any]:
     """ビューアの「位置合わせ」（app.py の action_callback "cad_viewer_align"）。
 
     payload: {save_id, method: "bestfit" | "faces" | "datum" | "reset" | "initial", faces: [面の ID],
-    datums: {A: [...], B: [...], C: [...]}, dof: {A, B, C}, tolerance}。
+    datums: {A: {type: "point", point: [x, y, z]} か {type: "hole", center, axis, diameter, pin}, B, C, D（任意）},
+    datum_mode: "priority" | "average", pad_radius: 点のデータムの当て面の半径（0 以下で自動）, dof: {A, B, C}, tolerance}。
 
     Returns:
         {"ok": True, "values_id", "transform", "alignment", "stats"} か {"ok": False, "error"}。
@@ -1074,9 +1095,13 @@ async def align_viewer_model(payload: dict[str, Any]) -> dict[str, Any]:
     n_faces = len(state.data.get("faces") or [])
     faces = _face_ids(payload.get("faces"), n_faces)
     raw_datums = payload.get("datums") if isinstance(payload.get("datums"), dict) else {}
-    datums = {k: _face_ids(raw_datums.get(k), n_faces) for k in ("A", "B", "C")}
+    # 中身（点・穴の数値）は src/cad/align.py の _parse_datum が確かめる。
+    datums = {k: raw_datums[k] for k in ("A", "B", "C", "D") if isinstance(raw_datums.get(k), dict)}
     raw_dof = payload.get("dof") if isinstance(payload.get("dof"), dict) else {}
     dof = {k: int(v) for k, v in raw_dof.items() if k in ("A", "B", "C") and isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 6}
+    datum_mode = "average" if payload.get("datum_mode") == "average" else "priority"
+    raw_pad = payload.get("pad_radius")
+    pad_radius = float(raw_pad) if isinstance(raw_pad, (int, float)) and not isinstance(raw_pad, bool) and math.isfinite(raw_pad) else 0.0
     tol = payload.get("tolerance")
     if isinstance(tol, (int, float)) and not isinstance(tol, bool) and math.isfinite(tol) and tol > 0:
         state.tolerance = float(tol)
@@ -1084,7 +1109,7 @@ async def align_viewer_model(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "The alignment is still running. Wait until it finishes."}
     async with state.lock:
         try:
-            out = await asyncio.to_thread(_align_compute, state, method, faces, datums, dof)
+            out = await asyncio.to_thread(_align_compute, state, method, faces, datums, dof, datum_mode, pad_radius)
         except Exception as e:  # noqa: BLE001 - 点が足りない等は AlignError、壊れたデータでも落とさない
             logger.info("show_cad_viewer: alignment failed: %s", e)
             return {"ok": False, "error": str(e)}
@@ -1775,6 +1800,8 @@ async def _ask_selection(
                 # 基準モデルとの位置合わせをビューアからやり直せるか（app.py の cad_viewer_align）と、偏差の公差の既定値。
                 "can_align": can_align,
                 "deviation_tolerance": float((data.get("deviation") or {}).get("tolerance") or _deviation_tolerance()),
+                # 点のデータムの当て面の半径の既定値（モデルの単位。0 ならビューアが基準モデルの大きさから決める）。
+                "datum_pad_radius": float(_setting("cad_viewer_datum_pad_radius", 0.0)),
             },
         )
         ask_message = cl.AskElementMessage(content=question, element=element, timeout=timeout)

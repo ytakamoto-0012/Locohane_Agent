@@ -9,9 +9,16 @@ p について、T·p から基準モデルの表面までの符号付き距離�
 - ``bestfit``: 対象全体を基準へ最小二乗で合わせる（point-to-plane の ICP。初めの位置は今の位置と、重心と主軸を
   合わせた 4 通りを試して、合いの良いものから詰める）。
 - ``faces``: 選んだ面だけを使って合わせる（部分ベストフィット）。今の位置から詰める。
-- ``datum``: 基準（データム）A・B・C の順に、各段で決める自由度の数を A=3・B=2・C=1（既定。3-2-1 の位置決め）に
-  限って合わせる。先の段が決めた向きは後の段で動かさない（優先度付きの最小二乗）。検査具の当て面（A）・ピン穴（B）・
-  長穴（C）で押さえたときの位置に当たる。
+- ``datum``: 基準（データム）A・B・C（と任意の D）で合わせる。データムはモデルの上の点か基準穴:
+
+  - 点: クリックした点の周り（半径 ``pad_radius``、つながった表面だけ）を基準の表面に当てる（検査具の当て面）。
+  - 基準穴（1 本か 2 本）: 穴（対象の穴の中心・軸・実測の径）に、基準モデルの同じ穴の軸に立てた丸ピン（直径を指定）を
+    通す。穴とピンの隙間（(穴径 − ピン径) / 2）の中では動けて、はみ出す分だけ穴の縁をピンに当てて押し戻す。
+
+  ``datum_mode="priority"``（既定）は A・B・C の順に、各段で決める自由度の数を A=3・B=2・C=1（3-2-1 の位置決め）に
+  限って合わせ、先の段が決めた向きは後の段で動かさない（優先度付きの最小二乗）。D は最後の段に低い重み
+  （``d_weight``）で加わり、A・B・C を優先したまま残りの向きにだけ効く。``"average"`` は全データムを同じ重みで
+  1 段（6 自由度）の最小二乗にする（平均化）。
 - ``none``: 合わせない（今の位置のまま偏差だけ求める）。
 
 ビューアは座標を動かさずに基準モデルの方を T⁻¹ で動かして重ねる（選択・計測の座標が変わらないように）。
@@ -39,8 +46,17 @@ ICP_POINTS = 20_000
 COARSE_POINTS = 2_000
 COARSE_ITERATIONS = 15
 ICP_ITERATIONS = 60
-# データムの既定の自由度（3-2-1）。
+# データムの既定の自由度（3-2-1）。D は優先のときは最後の段に加わり、平均のときは全データムで 6。
+DATUM_NAMES = ("A", "B", "C", "D")
 DATUM_DOF = {"A": 3, "B": 2, "C": 1}
+DATUM_MODES = ("priority", "average")
+# 優先のときの D の重み（A・B・C を 1 として）。
+DATUM_D_WEIGHT = 0.3
+# 点のデータムの当て面の半径の既定（基準の対角線に対する割合。pad_radius が 0 以下のとき）。
+PAD_RADIUS_RATIO = 1 / 50
+PAD_POINTS = 4000
+# 基準穴は 2 本まで。
+MAX_HOLES = 2
 METHODS = ("none", "bestfit", "faces", "datum")
 
 
@@ -273,6 +289,48 @@ class TargetMesh:
         w = np.repeat(self.areas / 3, 3)
         return np.bincount(self.triangles.ravel(), weights=w, minlength=len(self.positions))
 
+    def pad_points(self, point: np.ndarray, radius: float, n: int, rng: np.random.Generator) -> np.ndarray:
+        """点 point の周り（半径 radius）の、point が載る三角形とつながった表面の上の点（面積に比例して n 点ほど）。
+
+        つながりで限るので、薄い板の裏側・近くの別の壁は入らない。点のデータム（当て面）に使う。
+        """
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+
+        from .analysis import weld
+
+        p = self.positions[self.triangles]  # (t,3,3)
+        cen = p.mean(axis=1)
+        reach = np.max(np.linalg.norm(p - cen[:, None], axis=2), axis=1)
+        near = np.flatnonzero(np.linalg.norm(cen - point, axis=1) - reach <= radius)
+        if not len(near):
+            return np.zeros((0, 3))
+        q = np.repeat(point[None], len(near), axis=0)
+        d = np.linalg.norm(closest_on_triangles(q, p[near, 0], p[near, 1], p[near, 2]) - q, axis=1)
+        keep = d <= radius
+        near, d = near[keep], d[keep]
+        if not len(near):
+            return np.zeros((0, 3))
+        seed = int(np.argmin(d))
+        # 頂点を共有する三角形どうしをつなぐ（STL は三角形ごとに頂点を持つので、同じ位置の頂点をまとめてから）。
+        _upos, inv = weld(self.positions[self.triangles[near]].reshape(-1, 3).astype(np.float32))
+        rows = np.repeat(np.arange(len(near)), 3)
+        inc = coo_matrix((np.ones(len(rows)), (rows, inv)), shape=(len(near), int(inv.max()) + 1)).tocsr()
+        _n, label = connected_components(inc @ inc.T, directed=False)
+        tris = near[label == label[seed]]
+        # 三角形の上に取って半径の外を捨てる。三角形が半径より大きい（CAD の平面等）と多くを捨てるので、残った割合に合わせて取り直す。
+        out = np.zeros((0, 3))
+        m = n
+        for _ in range(4):
+            pts = self.sample(m, rng, tris)
+            pts = pts[np.linalg.norm(pts - point, axis=1) <= radius]
+            out = np.concatenate([out, pts])
+            if len(out) >= n // 2:
+                break
+            rate = max(len(pts) / max(m, 1), 1e-4)
+            m = int(min((n - len(out)) / rate * 1.2, 400_000))
+        return out[:n]
+
 
 # ---------------------------------------------------------------------------
 # 変換
@@ -415,6 +473,223 @@ def icp(
     }
 
 
+# ---------------------------------------------------------------------------
+# データム（点の当て面・基準穴の丸ピン）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PadDatum:
+    """点のデータム: クリックした点の周りの表面（対象の座標）を基準の表面に当てる。"""
+
+    name: str
+    point: np.ndarray
+    radius: float
+    points: np.ndarray
+
+
+@dataclass
+class HoleDatum:
+    """基準穴: 対象の穴（中心・軸・実測の径）に、基準モデルの同じ穴の軸に立てた丸ピン（直径 pin）を通す。"""
+
+    name: str
+    center: np.ndarray
+    axis: np.ndarray
+    diameter: float
+    pin: float
+
+    @property
+    def clearance(self) -> float:
+        """穴とピンの隙間（半径の差）。ピンが穴より太ければ 0（隙間なしで中心を合わせる）。"""
+        return max(0.0, (self.diameter - self.pin) / 2)
+
+
+def _plane_basis(a: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """a に直交する 2 本の単位ベクトル。"""
+    h = np.array([1.0, 0, 0]) if abs(a[0]) < 0.9 else np.array([0, 1.0, 0])
+    u = np.cross(a, h)
+    u /= np.linalg.norm(u)
+    return u, np.cross(a, u)
+
+
+def fit_reference_hole(index: SurfaceIndex, center: np.ndarray, axis: np.ndarray, radius: float) -> tuple[np.ndarray, float] | None:
+    """基準モデルの、center（基準の座標に移した対象の穴の中心）の近くにある穴の中心（center を通り軸に直交する平面の上）と半径。
+
+    軸に平行な向きの壁（法線が軸にほぼ直交する表面）の見本の点を、軸に直交する平面へ写して円を当てはめる（Kåsa 法）。
+    穴の周りの点が半周に満たない・点が足りないときは None。
+    """
+    a = axis / np.linalg.norm(axis)
+    u, v = _plane_basis(a)
+    c = center.astype(np.float64)
+    r_guess = max(radius, index.diag * 1e-4)
+    for _pass in range(2):
+        ids = np.asarray(index.tree.query_ball_point(c, r=2.5 * r_guess), dtype=np.int64)
+        if len(ids) < 12:
+            return None
+        pts = index.samples[ids]
+        n = index.normals[index.owner[ids]]
+        rel = pts - c
+        axial = rel @ a
+        x, y = rel @ u, rel @ v
+        rd = np.hypot(x, y)
+        keep = (np.abs(n @ a) < 0.5) & (np.abs(axial) <= 2.5 * r_guess)
+        keep &= (rd > 0.3 * r_guess) & (rd < 2.0 * r_guess) if _pass == 0 else (np.abs(rd - r_guess) < 0.3 * r_guess)
+        if keep.sum() < 12:
+            return None
+        x, y = x[keep], y[keep]
+        M = np.stack([x, y, np.ones_like(x)], axis=1)
+        sol, *_ = np.linalg.lstsq(M, -(x**2 + y**2), rcond=None)
+        cx, cy = -sol[0] / 2, -sol[1] / 2
+        r2 = cx**2 + cy**2 - sol[2]
+        if not np.isfinite(r2) or r2 <= 0:
+            return None
+        # 半周以上を囲む点があるか（8 つに分けた向きのうち 5 つ以上に点がある）。
+        sectors = np.unique(((np.arctan2(y - cy, x - cx) + math.pi) / (2 * math.pi) * 8).astype(int) % 8)
+        if len(sectors) < 5:
+            return None
+        c = c + cx * u + cy * v
+        r_guess = float(math.sqrt(r2))
+    return c, r_guess
+
+
+def _datum_rows(
+    datum: PadDatum | HoleDatum, T: np.ndarray, center: np.ndarray, scale: float, index: SurfaceIndex, floor: float
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """データム 1 つの、今の変換 T での (ヤコビアン (n,6), 残差 (n,))。拘束しない（穴がピンとの隙間の中）なら None。"""
+    if isinstance(datum, PadDatum):
+        q = apply(T, datum.points)
+        d, _near, n = index.closest(q)
+        w = _trim(d, floor)
+        if w.sum() < 3:
+            return None
+        J = np.hstack([np.cross(q - center, n) / scale, n]) * w[:, None]
+        return J, -d * w
+    q = apply(T, datum.center[None])[0]
+    a = T[:3, :3] @ datum.axis
+    fit = fit_reference_hole(index, q, a, datum.diameter / 2)
+    if fit is None:
+        raise AlignError(f"no hole was found on the reference model near datum hole {datum.name}")
+    c0, _r = fit
+    a = a / np.linalg.norm(a)
+    e = (q - c0) - ((q - c0) @ a) * a
+    dist = float(np.linalg.norm(e))
+    clear = datum.clearance
+    band = max(clear * 0.05, index.diag * 1e-6)
+    if clear <= index.diag * 1e-6:
+        # 隙間なし: 穴の中心をピンの軸に合わせる（軸に直交する 2 つの向き）。
+        dirs = np.stack(_plane_basis(a))
+        res = dirs @ e
+    elif dist > clear - band:
+        # 穴の縁がピンに当たる（はみ出す）分だけ押し戻す。縁の近くでは、それ以上外へ出ないよう今の位置で止める。
+        dirs = (e / dist)[None]
+        res = np.array([max(dist - clear, 0.0)])
+    else:
+        return None
+    J = np.hstack([np.cross(np.repeat((q - center)[None], len(dirs), axis=0), dirs) / scale, dirs])
+    return J, -res
+
+
+def datum_icp(
+    index: SurfaceIndex,
+    stages: list[tuple[list[tuple[PadDatum | HoleDatum, float]], int]],
+    T0: np.ndarray,
+    iterations: int = ICP_ITERATIONS,
+) -> tuple[np.ndarray, int]:
+    """段ごとの（(データム, 重み) の並び, 決める自由度）でデータムに合わせる変換と、繰り返した回数。
+
+    1 つの段に複数のデータムがあるとき、各データムの行は 重み / √(行の数) を掛けて、点の数によらず重みどおりに効かせる。
+    """
+    T = T0.copy()
+    scale = index.diag / 2
+    floor = index.diag * 1e-4
+    anchors = [d.points if isinstance(d, PadDatum) else d.center[None] for st, _cap in stages for d, _w in st]
+    it = 0
+    for it in range(1, iterations + 1):
+        center = np.concatenate([apply(T, p) for p in anchors]).mean(axis=0)
+        rows = []
+        for members, cap in stages:
+            Js, rs = [], []
+            for datum, weight in members:
+                got = _datum_rows(datum, T, center, scale, index, floor)
+                if got is None:
+                    continue
+                J, r = got
+                k = weight / math.sqrt(max(len(r), 1))
+                Js.append(J * k)
+                rs.append(r * k)
+            if Js:
+                rows.append((np.vstack(Js), np.concatenate(rs), cap))
+        if not rows:
+            break
+        step = _solve_prioritized(rows, scale)
+        T = _increment(step[:3], step[3:], center) @ T
+        if float(np.linalg.norm(step[:3])) * scale + float(np.linalg.norm(step[3:])) < index.diag * 1e-8:
+            break
+    return T, it
+
+
+def _datum_report(datum: PadDatum | HoleDatum, T: np.ndarray, index: SurfaceIndex) -> dict[str, Any]:
+    """合わせた後のデータムの様子（点: 当て面の偏差、穴: ピンの軸からのずれ・隙間）。"""
+    if isinstance(datum, PadDatum):
+        d, _near, _n = index.closest(apply(T, datum.points))
+        return {
+            "type": "point",
+            "point": [rnd(v, 6) for v in datum.point],
+            "pad_radius": rnd(datum.radius, 6),
+            "points": int(len(d)),
+            "mean": rnd(float(d.mean()), 6),
+            "rms": rnd(float(np.sqrt(np.mean(d**2))), 6),
+        }
+    q = apply(T, datum.center[None])[0]
+    a = T[:3, :3] @ datum.axis
+    out: dict[str, Any] = {
+        "type": "hole",
+        "center": [rnd(v, 6) for v in datum.center],
+        "diameter": rnd(datum.diameter, 6),
+        "pin": rnd(datum.pin, 6),
+        "clearance": rnd(datum.clearance, 6),
+    }
+    if datum.pin > datum.diameter:
+        out["pin_larger_than_hole"] = True
+    fit = fit_reference_hole(index, q, a, datum.diameter / 2)
+    if fit is not None:
+        c0, r0 = fit
+        a = a / np.linalg.norm(a)
+        e = (q - c0) - ((q - c0) @ a) * a
+        out.update(nominal_center=[rnd(v, 6) for v in c0], nominal_diameter=rnd(2 * r0, 6), offset=rnd(float(np.linalg.norm(e)), 6))
+    return out
+
+
+def _parse_datum(name: str, raw: Any, target: TargetMesh, index: SurfaceIndex, pad_radius: float, rng: np.random.Generator) -> PadDatum | HoleDatum | None:
+    """ビューアから来たデータム（{type: "point", point} か {type: "hole", center, axis, diameter, pin}）。"""
+    if not isinstance(raw, dict):
+        return None
+
+    def vec(v: Any) -> np.ndarray | None:
+        try:
+            a = np.array(v, dtype=np.float64).reshape(3)
+        except (TypeError, ValueError):
+            return None
+        return a if np.all(np.isfinite(a)) else None
+
+    def num(v: Any) -> float | None:
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0 else None
+
+    if raw.get("type") == "hole":
+        c, a, dia, pin = vec(raw.get("center")), vec(raw.get("axis")), num(raw.get("diameter")), num(raw.get("pin"))
+        if c is None or a is None or dia is None or float(np.linalg.norm(a)) < 1e-12:
+            raise AlignError(f"datum hole {name} needs the center, axis and diameter of the hole")
+        return HoleDatum(name, c, a / np.linalg.norm(a), dia, pin if pin is not None else dia)
+    p = vec(raw.get("point"))
+    if p is None:
+        return None
+    radius = pad_radius if pad_radius > 0 else index.diag * PAD_RADIUS_RATIO
+    pts = target.pad_points(p, radius, PAD_POINTS, rng)
+    if len(pts) < 3:
+        raise AlignError(f"datum {name}: no surface of the model within {radius:.4g} of the picked point")
+    return PadDatum(name, p, radius, pts)
+
+
 def _pca(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     c = points.mean(axis=0)
     _, vecs = np.linalg.eigh(np.cov((points - c).T))
@@ -451,11 +726,18 @@ def align(
     *,
     start: np.ndarray | None = None,
     faces: Sequence[int] = (),
-    datums: dict[str, Sequence[int]] | None = None,
+    datums: dict[str, Any] | None = None,
     datum_dof: dict[str, int] | None = None,
+    datum_mode: str = "priority",
+    pad_radius: float = 0.0,
+    d_weight: float = DATUM_D_WEIGHT,
     seed: int = 0,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """位置合わせの変換（対象 → 基準）と、その記録（方法・合いの指標・使った面）。"""
+    """位置合わせの変換（対象 → 基準）と、その記録（方法・合いの指標・使った面・データム）。
+
+    datums は {"A": {"type": "point", "point": [x, y, z]} か {"type": "hole", "center", "axis", "diameter", "pin"}, ...}
+    （対象の座標。D は任意）。
+    """
     rng = np.random.default_rng(seed)
     T0 = np.eye(4) if start is None else start
     if method == "none":
@@ -485,23 +767,46 @@ def align(
         T, info = icp(index, [(src, 6)], T0)
         return T, {"method": "faces", "faces": sorted({int(f) for f in faces})[:200], "face_count": len(set(faces)), **info}
     if method == "datum":
+        if datum_mode not in DATUM_MODES:
+            raise AlignError(f"unknown datum mode {datum_mode!r}")
         dof = {**DATUM_DOF, **(datum_dof or {})}
-        groups: list[tuple[np.ndarray, int]] = []
+        parsed = {n: _parse_datum(n, (datums or {}).get(n), target, index, pad_radius, rng) for n in DATUM_NAMES}
+        given = {n: d for n, d in parsed.items() if d is not None}
+        if not given:
+            raise AlignError("pick the datums (A, and B / C / D if needed) before aligning by datums")
+        if sum(isinstance(d, HoleDatum) for d in given.values()) > MAX_HOLES:
+            raise AlignError(f"use at most {MAX_HOLES} datum holes")
+        stages: list[tuple[list[tuple[PadDatum | HoleDatum, float]], int]] = []
         used: dict[str, Any] = {}
-        for name in ("A", "B", "C"):
-            fs = list((datums or {}).get(name) or [])
-            if not fs:
-                continue
-            cap = int(max(0, min(6, dof.get(name, 0))))
-            pts = target.sample(max(ICP_POINTS // 3, 500), rng, target.triangles_of_faces(fs))
-            if len(pts) < 3 or cap == 0:
-                continue
-            groups.append((pts, cap))
-            used[name] = {"faces": sorted({int(f) for f in fs})[:200], "dof": cap}
-        if not groups:
-            raise AlignError("set the datum faces (A, and B / C if needed) before aligning by datums")
-        T, info = icp(index, groups, T0)
-        return T, {"method": "datum", "datums": used, **info}
+        if datum_mode == "average":
+            stages.append(([(d, 1.0) for d in given.values()], 6))
+            for n in given:
+                used[n] = {"weight": 1.0}
+        else:
+            for n in ("A", "B", "C"):
+                cap = int(max(0, min(6, dof.get(n, 0))))
+                if n in given and cap > 0:
+                    stages.append(([(given[n], 1.0)], cap))
+                    used[n] = {"dof": cap}
+            if "D" in given:
+                w = float(max(d_weight, 0.0))
+                if stages:
+                    # D は最後の段に低い重みで加わる（A・B・C で決めた向きは動かさない）。
+                    members, cap = stages[-1]
+                    stages[-1] = ([*members, (given["D"], w)], cap)
+                else:
+                    stages.append(([(given["D"], 1.0)], 6))
+                used["D"] = {"weight": w}
+        T, it = datum_icp(index, stages, T0)
+        for n in used:
+            used[n].update(_datum_report(given[n], T, index))
+        pts = np.concatenate([apply(T, d.points) for d in given.values() if isinstance(d, PadDatum)] or [np.zeros((0, 3))])
+        info: dict[str, Any] = {"method": "datum", "datum_mode": datum_mode, "datums": used, "iterations": it}
+        if len(pts):
+            d, _near, _n = index.closest(pts)
+            info["rms"] = rnd(float(np.sqrt(np.mean(d**2))), 6)
+            info["points"] = int(len(d))
+        return T, info
     raise AlignError(f"unknown alignment method {method!r}")
 
 

@@ -1580,6 +1580,15 @@ DESCRIPTIONS: dict[str, str] = {
     'cad_viewer.deviation_tolerance': (
         'Deviation tolerance (±, model units). The deviation color map shows values within it in green, and the statistics include the area ratio within it. It can be changed in the viewer (this is the value when it opens).'
     ),
+    'cad_viewer.datum_pad_radius': (
+        'In "Align by datums", the area that a point datum (A, B, C, D) puts onto the reference surface: the radius around the picked point (model units).\n'
+        'It is the size of a checking-fixture pad, and only the surface connected to the picked point is used. 0 or less means 1/50 of the diagonal of the reference model.\n'
+        'It can be changed in the viewer ("Pad R"; this is the value when it opens).'
+    ),
+    'cad_viewer.datum_d_weight': (
+        'The weight of datum D when datums are used by "Priority" (A, B and C count as 1). D joins the last stage (C) and does not move the directions fixed by A and B.\n'
+        'Not used by "Average" (all datums get the same weight).'
+    ),
     'plan.allow_badge_unlock': (
         'Behavior when clicking the Plan Mode / Edit Automatically badge shown near the send button.\n'
         'true : can switch both ways (including Plan Mode -> Edit Automatically).\n'

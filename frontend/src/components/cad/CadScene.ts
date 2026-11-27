@@ -28,7 +28,9 @@ import {
   type CadLocalAxis,
   type CadLoopKind,
   type CadSelection,
-  type CadVisibility
+  type CadVisibility,
+  type DatumPick,
+  type DatumScenePick
 } from './cadData';
 import { asVec3, onCircle, onSphere, unit, type MeasureDraw, type MeasurePick, type MeasureTool, type Vec3 } from './measure';
 import { ZebraLightGuide, applySurfaceDisplay, createSurfaceMaterial, updateSurfaceUniforms, type SurfaceDisplay } from './surfaceShading';
@@ -68,6 +70,14 @@ export interface CadSceneCallbacks {
   onMeasurePick?: (pick: MeasurePick) => void;
   /** PMI の 3D ラベル（setPmiLabels）をクリックした。id は PMI の ID。 */
   onPmiClick?: (id: string) => void;
+  /** データムを拾うモード（setDatumPicking）でクリックした点・穴。選択はしない。 */
+  onDatumPick?: (pick: DatumScenePick) => void;
+}
+
+/** 位置合わせのデータムの印（setDatumOverlay）。穴はピンの円も描く。 */
+export interface DatumMark {
+  name: string;
+  datum: DatumPick;
 }
 
 /** PMI の 3D ラベル（寸法・幾何公差・データム）。targets はそれが指す要素。 */
@@ -119,6 +129,10 @@ const LOCAL_AXIS_LABELS = ["X'", "Y'", "Z'"];
 // 計測の線・印の色（選択のオレンジ・ホバーの水色と見分けられる紫）。
 const MEASURE_COLOR = '#8e4ec6';
 const MEASURE_LINE_WIDTH = 2;
+// 位置合わせのデータムの印・ピンの円の色と、円の分割数。
+const DATUM_COLOR = '#0b7285';
+const DATUM_CIRCLE_SEGMENTS = 48;
+const fmtLabel = (v: number): string => String(Number(v.toFixed(3)));
 
 /** 視点。'xy+' は XY 平面を +Z 側から見る（X が右・Y が上）。'-' は裏側から見る（上の向きは同じ）。 */
 export type ViewName = 'iso' | 'xy+' | 'yz+' | 'zx+' | 'xy-' | 'yz-' | 'zx-';
@@ -251,7 +265,13 @@ export class CadScene {
   private measureHoverMarker: THREE.Points | null = null;
   // 計測の値の文字（HTML。画面上で同じ大きさ・くっきり出すため、描くたびに位置を合わせる）。
   private readonly labelLayer: HTMLDivElement;
-  private measureLabels: { el: HTMLDivElement; at: THREE.Vector3; text: string }[] = [];
+  private measureLabels: { el: HTMLDivElement; at: THREE.Vector3; text: string; color?: string }[] = [];
+  // 位置合わせのデータムを拾うモード（null なら拾わない）。クリックは選択でなく onDatumPick になる。
+  private datumPicking: 'point' | 'hole' | null = null;
+  // データムの印（点・ピンの円）。文字は measureLabels と同じ層に datumLabels として出す。
+  private datumLines: LineSegments2 | null = null;
+  private datumPoints: THREE.Points | null = null;
+  private datumLabels: { el: HTMLDivElement; at: THREE.Vector3; text: string; color?: string }[] = [];
   // PMI（寸法・幾何公差・データム）の 3D ラベル。指す要素の上の点（anchor）から引き出し線を引き、少し離して文字を出す。
   private readonly pmiLayer: HTMLDivElement;
   private readonly pmiSvg: SVGSVGElement;
@@ -853,6 +873,115 @@ export class CadScene {
     };
     this.measurePoints = points(7, MEASURE_COLOR);
     this.measureHoverMarker = points(10, this.colors.hover);
+    this.datumLines = new LineSegments2(
+      new LineSegmentsGeometry(),
+      new LineMaterial({ linewidth: MEASURE_LINE_WIDTH, color: DATUM_COLOR, depthTest: false, transparent: true })
+    );
+    this.datumLines.renderOrder = 5;
+    this.datumLines.visible = false;
+    this.scene.add(this.datumLines);
+    this.datumPoints = points(9, DATUM_COLOR);
+  }
+
+  /** データムを拾うモードにする（null でやめる）。point はクリックした点、hole は穴（穴の縁・円のエッジ・円筒面）を拾う。 */
+  setDatumPicking(kind: 'point' | 'hole' | null): void {
+    this.datumPicking = kind;
+    this.renderer.domElement.classList.toggle('cad-viewer-point-picking', kind !== null);
+    if (kind !== null) this.setBoxMode('off');
+    this.setHoverMarker(null);
+  }
+
+  /** 設定したデータムの印（点・穴の中心と、穴にはピンの直径の円）と名前を重ねて描く。 */
+  setDatumOverlay(marks: DatumMark[]): void {
+    const segs: number[] = [];
+    const pts: number[] = [];
+    for (const l of this.datumLabels) l.el.remove();
+    this.datumLabels = [];
+    for (const m of marks) {
+      const d = m.datum;
+      let at: Vec3;
+      let text = m.name;
+      if (d.type === 'point') {
+        at = d.point;
+      } else {
+        at = d.center;
+        text = `${m.name} ⌀${fmtLabel(d.pin)}`;
+        const a = new THREE.Vector3(...d.axis).normalize();
+        const h = Math.abs(a.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+        const u = new THREE.Vector3().crossVectors(a, h).normalize();
+        const v = new THREE.Vector3().crossVectors(a, u);
+        const c = new THREE.Vector3(...d.center);
+        const r = d.pin / 2;
+        const on = (k: number) => {
+          const t = (2 * Math.PI * k) / DATUM_CIRCLE_SEGMENTS;
+          return c.clone().addScaledVector(u, r * Math.cos(t)).addScaledVector(v, r * Math.sin(t));
+        };
+        for (let k = 0; k < DATUM_CIRCLE_SEGMENTS; k++) {
+          const p = on(k);
+          const q = on(k + 1);
+          segs.push(p.x, p.y, p.z, q.x, q.y, q.z);
+        }
+      }
+      pts.push(...at);
+      const el = document.createElement('div');
+      el.className = 'cad-viewer-measure-label cad-viewer-datum-label';
+      el.textContent = text;
+      this.labelLayer.appendChild(el);
+      this.datumLabels.push({ el, at: new THREE.Vector3(...at), text, color: DATUM_COLOR });
+    }
+    if (this.datumLines) {
+      this.datumLines.geometry.dispose();
+      const g = new LineSegmentsGeometry();
+      if (segs.length) g.setPositions(segs);
+      this.datumLines.geometry = g;
+      this.datumLines.visible = segs.length > 0;
+    }
+    if (this.datumPoints) {
+      this.datumPoints.geometry.dispose();
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts.length ? pts : [0, 0, 0]), 3));
+      this.datumPoints.geometry = g;
+      this.datumPoints.visible = pts.length > 0;
+    }
+    this.requestRender();
+  }
+
+  /**
+   * データムを拾うモードで、今の位置で拾うもの。点はクリックした面・エッジ・頂点の上の点。穴は、穴の縁（開いた形の
+   * holeList）・円のエッジ・円筒面の順に探し、中心・軸・径を返す（円筒面の中心はクリックした点を軸へ写した点）。
+   */
+  private datumPickAt(clientX: number, clientY: number): DatumScenePick | null {
+    if (this.datumPicking === 'point') {
+      const p = this.pointAt(clientX, clientY);
+      return p ? { type: 'point', point: [p.x, p.y, p.z] } : null;
+    }
+    const hole = this.data.holeList?.length ? this.pickAt(clientX, clientY, 'hole') : null;
+    if (hole) {
+      const info = this.data.holeList?.[hole.id];
+      const c = asVec3(info?.center);
+      const n = unit(asVec3(info?.normal) ?? [0, 0, 0]);
+      const dia = typeof info?.diameter === 'number' ? info.diameter : null;
+      if (c && n && dia) return { type: 'hole', center: c, axis: n, diameter: dia };
+    }
+    const edge = this.pickAt(clientX, clientY, 'edge');
+    if (edge) {
+      const info = this.data.edgeList[edge.id];
+      const c = asVec3(info?.circleCenter);
+      const a = unit(asVec3(info?.axisDirection) ?? [0, 0, 0]);
+      if (info?.geomType === 'CIRCLE' && c && a && typeof info.radius === 'number') return { type: 'hole', center: c, axis: a, diameter: info.radius * 2 };
+    }
+    const face = this.pickAt(clientX, clientY, 'face');
+    if (face) {
+      const info = this.data.faces[face.id];
+      const o = asVec3(info?.axisOrigin);
+      const a = unit(asVec3(info?.axisDirection) ?? [0, 0, 0]);
+      const p = this.pointAt(clientX, clientY);
+      if (info?.geomType === 'CYLINDER' && o && a && p && typeof info.radius === 'number') {
+        const t = (p.x - o[0]) * a[0] + (p.y - o[1]) * a[1] + (p.z - o[2]) * a[2];
+        return { type: 'hole', center: [o[0] + a[0] * t, o[1] + a[1] * t, o[2] + a[2] * t], axis: a, diameter: info.radius * 2 };
+      }
+    }
+    return null;
   }
 
   /**
@@ -927,11 +1056,11 @@ export class CadScene {
 
   /** 計測の文字を、各点の今の画面上の位置へ動かす（描くたびに呼ぶ）。 */
   private placeMeasureLabels(): void {
-    if (!this.measureLabels.length) return;
+    if (!this.measureLabels.length && !this.datumLabels.length) return;
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
     const v = new THREE.Vector3();
-    for (const l of this.measureLabels) {
+    for (const l of [...this.measureLabels, ...this.datumLabels]) {
       v.copy(l.at).project(this.camera);
       l.el.style.transform = `translate(${((v.x + 1) / 2) * w}px, ${((1 - v.y) / 2) * h}px) translate(-50%, -50%)`;
     }
@@ -1490,7 +1619,7 @@ export class CadScene {
 
   /** 計測の文字（HTML で重ねているので WebGL の画面には入らない）を、撮った画面にも描く。k は CSS ピクセルからの倍率。 */
   private drawMeasureLabels(ctx: CanvasRenderingContext2D, k: number): void {
-    if (!this.measureLabels.length) return;
+    if (!this.measureLabels.length && !this.datumLabels.length) return;
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
     const size = Math.max(9, Math.round(12 * Math.max(k, 0.75)));
@@ -1498,14 +1627,14 @@ export class CadScene {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     const v = new THREE.Vector3();
-    for (const l of this.measureLabels) {
+    for (const l of [...this.measureLabels, ...this.datumLabels]) {
       v.copy(l.at).project(this.camera);
       const x = ((v.x + 1) / 2) * w * k;
       const y = ((1 - v.y) / 2) * h * k;
       const tw = ctx.measureText(l.text).width + size * 0.8;
       ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
       ctx.fillRect(x - tw / 2, y - size * 0.75, tw, size * 1.5);
-      ctx.fillStyle = MEASURE_COLOR;
+      ctx.fillStyle = l.color ?? MEASURE_COLOR;
       ctx.fillText(l.text, x, y);
     }
   }
@@ -1528,6 +1657,7 @@ export class CadScene {
     (this.edgeHighlight?.material as LineMaterial | undefined)?.resolution.set(w, h);
     (this.originAxesLine?.material as LineMaterial | undefined)?.resolution.set(w, h);
     (this.measureLines?.material as LineMaterial | undefined)?.resolution.set(w, h);
+    (this.datumLines?.material as LineMaterial | undefined)?.resolution.set(w, h);
     (this.pmiGraphic?.material as LineMaterial | undefined)?.resolution.set(w, h);
     for (const layer of Object.values(this.loops)) {
       (layer.lines.material as LineMaterial).resolution.set(w, h);
@@ -2288,6 +2418,11 @@ export class CadScene {
       if (p) this.callbacks.onZebraBasePick?.([p.x, p.y, p.z]);
       return;
     }
+    if (this.datumPicking) {
+      const pick = this.datumPickAt(e.clientX, e.clientY);
+      if (pick) this.callbacks.onDatumPick?.(pick);
+      return;
+    }
     if (this.pivotPicking) {
       const p = this.pointAt(e.clientX, e.clientY);
       if (p) {
@@ -2320,6 +2455,12 @@ export class CadScene {
     }
     // ドラッグ（回転・移動）中は当たり判定をしない（重いモデルで操作が引っかかるため）。
     if (e.buttons !== 0) return;
+    if (this.datumPicking) {
+      // データムを拾うモードでは、拾う点（穴なら穴の中心）に印を出す。
+      const pick = this.datumPickAt(e.clientX, e.clientY);
+      this.setHoverMarker(pick ? (pick.type === 'point' ? pick.point : pick.center) : null);
+      return;
+    }
     let item: CadSelection | null;
     if (this.measureTool) {
       // 計測では、拾う要素を浮かせ、点を使う計測は拾う点（角・円の上などに合わせた点）に印を出す。
