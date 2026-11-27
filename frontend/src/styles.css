@@ -1293,12 +1293,22 @@
   white-space: nowrap;
 }
 
-/* PMI（寸法・幾何公差・データム）の 3D ラベル（CadScene.setPmiLabels）。色は CadScene.ts の PMI_COLORS と同じ。 */
+/* PMI（寸法・幾何公差・データム）の 3D ラベル（CadScene.setPmiLabels）。色はテーマで、ライトは黒・ダークは白
+   （CadViewerBar.tsx の sceneColors().pmi と同じ）。塗りは背景色をごく薄く敷き、下の形が透けて見えるようにする。 */
 .cad-viewer-pmi-labels {
   position: absolute;
   inset: 0;
   overflow: hidden;
   pointer-events: none;
+  --cad-pmi-color: #000;
+  --cad-pmi-fill: rgba(247, 247, 249, 0.35);
+  --cad-pmi-fill-hover: rgba(247, 247, 249, 0.95);
+}
+
+:root[data-theme='dark'] .cad-viewer-pmi-labels {
+  --cad-pmi-color: #fff;
+  --cad-pmi-fill: rgba(23, 23, 26, 0.35);
+  --cad-pmi-fill-hover: rgba(23, 23, 26, 0.95);
 }
 
 .cad-viewer-pmi-leaders {
@@ -1310,18 +1320,7 @@
 
 .cad-viewer-pmi-leader {
   stroke-width: 1;
-}
-
-.cad-viewer-pmi-leader.cad-viewer-pmi-dimension {
-  stroke: #1d6fd1;
-}
-
-.cad-viewer-pmi-leader.cad-viewer-pmi-tolerance {
-  stroke: #18794e;
-}
-
-.cad-viewer-pmi-leader.cad-viewer-pmi-datum {
-  stroke: #a35200;
+  stroke: var(--cad-pmi-color);
 }
 
 .cad-viewer-pmi-label {
@@ -1334,8 +1333,8 @@
   padding: 0 5px;
   border: 1px solid currentColor;
   border-radius: 3px;
-  /* 下の形が透けて見えるよう、塗りはごく薄く（マウスを乗せると白く塗る）。 */
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--cad-pmi-fill);
+  color: var(--cad-pmi-color);
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
@@ -1344,20 +1343,8 @@
 }
 
 .cad-viewer-pmi-label:hover {
-  background: #fff;
+  background: var(--cad-pmi-fill-hover);
   box-shadow: 0 0 0 2px rgba(31, 182, 212, 0.6);
-}
-
-.cad-viewer-pmi-label.cad-viewer-pmi-dimension {
-  color: #1d6fd1;
-}
-
-.cad-viewer-pmi-label.cad-viewer-pmi-tolerance {
-  color: #18794e;
-}
-
-.cad-viewer-pmi-label.cad-viewer-pmi-datum {
-  color: #a35200;
 }
 
 /* 3D ビューア専用のタイムアウトの残り時間（残りが 5 分を切ったら出す）。 */

@@ -116,7 +116,9 @@ function sceneColors(): CadSceneColors {
     vertex: dark ? '#f0f0f4' : '#1f2023',
     // 選択はオレンジで目立たせ、ホバーはそれと見分けられる水色にする。
     hover: '#1fb6d4',
-    selected: SELECTED_COLOR
+    selected: SELECTED_COLOR,
+    // PMI は CAD の注記と同じく背景に対して最も読みやすい色（styles.css の .cad-viewer-pmi-* と同じ）。
+    pmi: dark ? '#ffffff' : '#000000'
   };
 }
 

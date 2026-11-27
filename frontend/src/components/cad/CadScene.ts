@@ -45,6 +45,8 @@ export interface CadSceneColors {
   vertex: string;
   hover: string;
   selected: string;
+  /** PMI（注記の図形・ラベル・引き出し線）の色。背景に対して読みやすい色（ダークは白、ライトは黒）。 */
+  pmi: string;
 }
 
 export interface CadSceneCallbacks {
@@ -82,12 +84,17 @@ interface PmiLabelView extends PmiLabel {
   anchor: THREE.Vector3;
   /** 指す点から文字までの長さ（画面上のピクセル）。 */
   reach: number;
+  /** ラベルの大きさ（CSS ピクセル。初めて並べるときに測る）。 */
+  w?: number;
+  h?: number;
 }
 
-// PMI のラベルの色（寸法は青、幾何公差は緑、データムは茶。styles.css の .cad-viewer-pmi-* と同じ）と引き出し線の長さ（ピクセル）。
-const PMI_COLORS: Record<PmiLabel['kind'], string> = { dimension: '#1d6fd1', tolerance: '#18794e', datum: '#a35200' };
+// PMI のラベルの引き出し線の長さ（ピクセル）。ほかのラベルに重なるときは PMI_LEADER_STEP_PIXELS ずつ
+// 伸ばし、それでも重なれば横へずらす（PMI_LAYOUT_TRIES 通りまで試す）。
 const PMI_LEADER_PIXELS = 36;
 const PMI_LEADER_STEP_PIXELS = 18;
+const PMI_LAYOUT_TRIES = 24;
+const PMI_LABEL_GAP = 3;
 // PMI の図形（ファイルに線分で書かれた文字・引き出し線）の線の幅（ピクセル）。
 const PMI_GRAPHIC_LINE_WIDTH = 1.5;
 
@@ -905,15 +912,13 @@ export class CadScene {
     }
     this.pmiLabels = [];
     const positions: number[] = [];
-    const colors: number[] = [];
-    labels.forEach((label, i) => {
+    const c = new THREE.Color(this.colors.pmi);
+    labels.forEach((label) => {
       const anchor = this.anchorOf(label.targets);
       // 指す要素がすべて隠れた PMI は図形も出さない（何も指さない注記は出す）。
       if (label.graphic?.length && (anchor || !label.targets.length)) {
-        const c = new THREE.Color(PMI_COLORS[label.kind]);
         const n = Math.floor(label.graphic.length / 3) * 3;
         for (let k = 0; k < n; k++) positions.push(label.graphic[k]);
-        for (let k = 0; k < n / 3; k++) colors.push(c.r, c.g, c.b);
       }
       if (!anchor || label.graphicOnly) return;
       const el = document.createElement('div');
@@ -929,15 +934,14 @@ export class CadScene {
       line.setAttribute('class', `cad-viewer-pmi-leader cad-viewer-pmi-${label.kind}`);
       this.pmiSvg.appendChild(line);
       this.pmiLayer.appendChild(el);
-      // 近くのラベルが重なりにくいよう、引き出しの長さを 3 段に分ける。
-      this.pmiLabels.push({ ...label, el, line, anchor, reach: PMI_LEADER_PIXELS + (i % 3) * PMI_LEADER_STEP_PIXELS });
+      this.pmiLabels.push({ ...label, el, line, anchor, reach: PMI_LEADER_PIXELS });
     });
-    this.setPmiGraphic(positions, colors);
+    this.setPmiGraphic(positions, c);
     this.requestRender();
   }
 
   /** PMI の図形の線分を描き直す（空なら消す）。 */
-  private setPmiGraphic(positions: number[], colors: number[]): void {
+  private setPmiGraphic(positions: number[], color: THREE.Color): void {
     if (this.pmiGraphic) {
       this.scene.remove(this.pmiGraphic);
       this.pmiGraphic.geometry.dispose();
@@ -947,8 +951,7 @@ export class CadScene {
     if (positions.length < 6) return;
     const geometry = new LineSegmentsGeometry();
     geometry.setPositions(positions);
-    geometry.setColors(colors);
-    const material = new LineMaterial({ linewidth: PMI_GRAPHIC_LINE_WIDTH, vertexColors: true, depthTest: false, transparent: true });
+    const material = new LineMaterial({ linewidth: PMI_GRAPHIC_LINE_WIDTH, color, depthTest: false, transparent: true });
     material.resolution.set(Math.max(this.container.clientWidth, 1), Math.max(this.container.clientHeight, 1));
     this.pmiGraphic = new LineSegments2(geometry, material);
     this.pmiGraphic.renderOrder = 3;
@@ -1001,8 +1004,42 @@ export class CadScene {
     }
   }
 
-  /** PMI のラベルの画面上の位置（CSS ピクセル）。ax, ay は指す点、x, y は文字の中心。 */
+  /**
+   * PMI のラベルの画面上の位置（CSS ピクセル）。ax, ay は指す点、x, y は文字の中心。
+   * 先に置いたラベルに重なるときは、引き出しを伸ばし、それでも重なれば引き出しの向きと直角に左右へずらす。
+   */
   private pmiLayout(w: number, h: number): { label: PmiLabelView; ax: number; ay: number; x: number; y: number }[] {
+    const placed: { x0: number; y0: number; x1: number; y1: number }[] = [];
+    const hits = (r: { x0: number; y0: number; x1: number; y1: number }) =>
+      placed.some((p) => r.x0 < p.x1 && r.x1 > p.x0 && r.y0 < p.y1 && r.y1 > p.y0);
+    return this.pmiPositions(w, h).map((p) => {
+      const l = p.label;
+      if (l.w === undefined || l.h === undefined || !l.w) {
+        l.w = l.el.offsetWidth;
+        l.h = l.el.offsetHeight;
+      }
+      const hw = (l.w ?? 0) / 2 + PMI_LABEL_GAP;
+      const hh = (l.h ?? 0) / 2 + PMI_LABEL_GAP;
+      const rect = (x: number, y: number) => ({ x0: x - hw, y0: y - hh, x1: x + hw, y1: y + hh });
+      let best = { x: p.ax + p.dx * l.reach, y: p.ay + p.dy * l.reach };
+      for (let t = 0; t < PMI_LAYOUT_TRIES; t++) {
+        // t = 0, 1, 2 は同じ長さで「まっすぐ・左・右」、以降は長さを 1 段ずつ伸ばして繰り返す。
+        const step = Math.floor(t / 3);
+        const side = [0, 1, -1][t % 3] * (step + 1) * (hh * 2);
+        const r = l.reach + step * PMI_LEADER_STEP_PIXELS;
+        const cand = { x: p.ax + p.dx * r - p.dy * side, y: p.ay + p.dy * r + p.dx * side };
+        if (!hits(rect(cand.x, cand.y))) {
+          best = cand;
+          break;
+        }
+      }
+      placed.push(rect(best.x, best.y));
+      return { label: l, ax: p.ax, ay: p.ay, x: best.x, y: best.y };
+    });
+  }
+
+  /** PMI のラベルの指す点（画面上）と、引き出す向き（モデルの中心から外向き、単位ベクトル）。 */
+  private pmiPositions(w: number, h: number): { label: PmiLabelView; ax: number; ay: number; dx: number; dy: number }[] {
     const v = new THREE.Vector3();
     const c = new THREE.Vector3().copy(this.center).project(this.camera);
     const cx = ((c.x + 1) / 2) * w;
@@ -1023,7 +1060,7 @@ export class CadScene {
         dx /= len;
         dy /= len;
       }
-      return { label, ax, ay, x: ax + dx * label.reach, y: ay + dy * label.reach };
+      return { label, ax, ay, dx, dy };
     });
   }
 
@@ -1036,8 +1073,11 @@ export class CadScene {
     ctx.font = `600 ${size}px sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    const color = this.colors.pmi;
+    const bg = new THREE.Color(this.colors.background);
+    // styles.css の .cad-viewer-pmi-label と同じ、背景色の薄い塗り。
+    const fill = `rgba(${Math.round(bg.r * 255)}, ${Math.round(bg.g * 255)}, ${Math.round(bg.b * 255)}, 0.35)`;
     for (const l of this.pmiLayout(w, h)) {
-      const color = PMI_COLORS[l.label.kind];
       ctx.strokeStyle = color;
       ctx.lineWidth = Math.max(1, k);
       ctx.beginPath();
@@ -1045,7 +1085,7 @@ export class CadScene {
       ctx.lineTo(l.x * k, l.y * k);
       ctx.stroke();
       const tw = ctx.measureText(l.label.text).width + size * 0.8;
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.15)'; // styles.css の .cad-viewer-pmi-label と同じ薄い塗り
+      ctx.fillStyle = fill;
       ctx.fillRect(l.x * k - tw / 2, l.y * k - size * 0.75, tw, size * 1.5);
       ctx.strokeRect(l.x * k - tw / 2, l.y * k - size * 0.75, tw, size * 1.5);
       ctx.fillStyle = color;
@@ -1107,6 +1147,8 @@ export class CadScene {
     this.applyHighlightColors();
     this.applyBackground();
     this.refreshColors();
+    // PMI の図形の色をテーマに合わせて描き直す（ラベルの色は styles.css がテーマで切り替える）。
+    if (this.pmiInput.length) this.setPmiLabels(this.pmiInput);
   }
 
   /** サイドバーの部品にマウスを乗せたとき、その部品を浮かせて見せる（null で戻す）。 */
