@@ -415,8 +415,9 @@ async def show_cad_viewer(
             (e.g. "Select the face to put the hole in").
         file_path: The CAD file to show (see above). Leave empty when using code.
         code: CadQuery code that makes the shape (see above). Leave empty when using file_path.
-        select: Which kinds of elements the user may select: any of "face", "edge", "vertex",
-            "part", "hole", "outer". Default: all kinds the model has ("part" only for an assembly with 2 or more
+        select: Which kinds of elements you want the user to select: any of "face", "edge", "vertex",
+            "part", "hole", "outer". The viewer opens in the first of them that the model has; the user can
+            still switch to any kind the model has. Default: all kinds the model has ("part" only for an assembly with 2 or more
             parts, "vertex" not for STL, "hole" only for a model with holes in it (open surfaces and meshes, or
             hole mouths of solids and closed meshes), "outer" only for an open surface or mesh, or a solid / closed
             mesh whose flat faces have hole mouths).
@@ -517,9 +518,13 @@ async def _show_cad_viewer(
     data.pop("reference", None)
     data.pop("deviation", None)
 
-    kinds = _available_kinds(data, select)
+    # 選ぶ種類のボタンは、モデルが持つ種類をすべて出す（AI が select で絞っても、利用者は切り替えられる）。
+    # select は開いたときのモードと、AI が欲しい種類の目安に使う。
+    kinds = _available_kinds(data, None)
     if not kinds:
-        return f"Error: the model has none of the requested kinds {select} to select."
+        return "Error: the model has no faces, edges or vertices to select."
+    wanted = _available_kinds(data, select)
+    initial_kind = wanted[0] if wanted else kinds[0]
     data_token = _register_file(data_path, "3D viewer data (show_cad_viewer)")
     save_id = uuid.uuid4().hex
     thread_id = cl.user_session.get("thread_id") or "_no_session"
@@ -538,7 +543,7 @@ async def _show_cad_viewer(
     if align_state is not None:
         _ALIGN_STATES[save_id] = align_state
     try:
-        answer = await _ask_selection(question, data, kinds, save_id, data_id, align_state is not None)
+        answer = await _ask_selection(question, data, kinds, save_id, data_id, align_state is not None, initial_kind)
     finally:
         target = _SAVE_TARGETS.pop(save_id, None)
         _ALIGN_STATES.pop(save_id, None)
@@ -1925,7 +1930,13 @@ def _echo_text(
 
 
 async def _ask_selection(
-    question: str, data: dict, kinds: list[str], save_id: str = "", data_id: str = "", can_align: bool = False
+    question: str,
+    data: dict,
+    kinds: list[str],
+    save_id: str = "",
+    data_id: str = "",
+    can_align: bool = False,
+    initial_kind: str = "",
 ) -> tuple[dict[str, Any], list[tuple[str, int]], list[dict[str, Any]], str] | str:
     # 3D ビューア専用のタイムアウト（[cad_viewer] timeout_seconds）。ビューアを閉じずにブラウザを閉じると、
     # 会話の生成がこの秒数まで待ち続けるので、既定は有限にしてある。
@@ -1940,6 +1951,8 @@ async def _ask_selection(
             props={
                 "question": question,
                 "select": kinds,
+                # 開いたときに選んでおく種類（AI の select の先頭。ボタンは select のすべて）。
+                "initial_kind": initial_kind if initial_kind in kinds else kinds[0],
                 # ビューア用データの本体はブラウザが GET /locohane/cad/data/{data_id} で取りに来る（_VIEWER_PACKAGES）。
                 "data_id": data_id,
                 "save_id": save_id,

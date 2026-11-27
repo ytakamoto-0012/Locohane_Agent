@@ -263,10 +263,19 @@ async def test_cache_is_not_used_when_disabled(env, tmp_path, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_select_limits_the_kinds(env, tmp_path) -> None:
+async def test_select_sets_the_initial_kind_but_keeps_every_kind(env, tmp_path) -> None:
+    # AI が select で絞っても、ボタンはモデルが持つ種類をすべて出し、select の先頭で開く。
     _viewer.response = {"submitted": True, "selected": [{"kind": "edge", "id": 0}]}
+    out = json.loads(await _call(file_path=str(_cube_stl(tmp_path)), select=["edge"]))
+    assert _viewer.shown[0]["select"] == ["face", "edge"] and _viewer.shown[0]["initial_kind"] == "edge"
+    assert out["selected_count"] == 1 and out["selected_by_kind"] == {"edge": 1}
+
+
+@pytest.mark.asyncio
+async def test_no_selection_writes_no_file(env, tmp_path) -> None:
+    _viewer.response = {"submitted": True, "selected": []}
     out = json.loads(await _call(file_path=str(_cube_stl(tmp_path)), select=["face"]))
-    assert _viewer.shown[0]["select"] == ["face"]
+    assert _viewer.shown[0]["initial_kind"] == "face"
     assert out["selected_count"] == 0 and out["selected_by_kind"] == {}
     # 何も選ばなければ選択結果のファイルは作らない。
     assert "selection_file" not in out

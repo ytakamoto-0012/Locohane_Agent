@@ -242,6 +242,7 @@ export function CadViewerBar() {
       key={element.id}
       question={props.question ?? ''}
       kinds={props.select?.length ? props.select : ['face']}
+      initialKind={props.initial_kind}
       data={data}
       saveId={props.save_id ?? ''}
       screenshotLongSide={props.screenshot_long_side ?? 0}
@@ -342,6 +343,8 @@ function CadViewerLoader({
 interface PanelProps {
   question: string;
   kinds: CadKind[];
+  /** 開いたときに選んでおく種類（無ければ kinds の先頭）。 */
+  initialKind?: CadKind;
   data: CadData;
   saveId: string;
   screenshotLongSide: number;
@@ -494,6 +497,7 @@ type SaveState ={ kind: 'idle' } | { kind: 'saving' } | { kind: 'saved'; path: s
 function CadViewerPanel({
   question,
   kinds,
+  initialKind,
   data,
   saveId,
   screenshotLongSide,
@@ -519,7 +523,7 @@ function CadViewerPanel({
   const [message, setMessage] = useState('');
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<CadScene | null>(null);
-  const [mode, setMode] = useState<CadKind>(kinds[0]);
+  const [mode, setMode] = useState<CadKind>(initialKind && kinds.includes(initialKind) ? initialKind : kinds[0]);
   const [selection, setSelection] = useState<CadSelection[]>([]);
   const [hover, setHover] = useState<CadSelection | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');

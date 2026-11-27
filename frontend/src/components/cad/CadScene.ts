@@ -336,6 +336,8 @@ export class CadScene {
   private paneModels: number[] = [0];
   // ポインタを押した・乗せている画面（ArcballControls の回転・移動・拡大縮小の計算に使う）。
   private activePane = 0;
+  // 最後に計測でクリックした画面（計測の文字をその画面に重ねる。null なら ① を映す最初の画面）。
+  private measurePane: number | null = null;
   // 最後に当たった面の三角形（マウスの下の値を出すため）。
   private lastMeshHit: THREE.Intersection | null = null;
 
@@ -606,13 +608,19 @@ export class CadScene {
     // 折れ目の線（エッジ）は、エッジを表示しているとき（面を表示していても）と、ワイヤー表示のときに描く。
     const showLines = l.wire || l.edges;
     const lines = showLines ? this.comparisonEdges(l) : l.lines;
-    if (d && l.values) {
+    // ゼブラは ① と同じ照明・縞で比較モデルにも映す（曲率は比較モデルに値が無いので、ふつうの表示のまま）。
+    const zebra = this.surfaceDisplay.mode === 'zebra' ? this.surfaceDisplay : null;
+    if ((d && l.values) || (zebra && !l.wire)) {
       if (!l.scalar) {
         l.scalar = createSurfaceMaterial();
         (l.scalar.uniforms.uCenter.value as THREE.Vector3).copy(this.center);
         l.scalar.uniforms.uRadius.value = this.radius;
+        (l.scalar.uniforms.uHover.value as THREE.Color).set(this.colors.hover);
+        (l.scalar.uniforms.uSelected.value as THREE.Color).set(this.colors.selected);
       }
-      applySurfaceDisplay(l.scalar, { mode: 'scalar', scalar: { values: l.values, min: d.min, max: d.max, tolerance: d.tolerance, scheme: 'deviation' } });
+      if (d && l.values)
+        applySurfaceDisplay(l.scalar, { mode: 'scalar', scalar: { values: l.values, min: d.min, max: d.max, tolerance: d.tolerance, scheme: 'deviation' } });
+      else if (zebra) applySurfaceDisplay(l.scalar, zebra);
       l.mesh.material = l.scalar;
       l.mesh.visible = true;
       if (lines) {
@@ -695,6 +703,7 @@ export class CadScene {
       return typeof m === 'number' && m >= 0 && m <= this.comparisons.length ? m : 0;
     });
     this.activePane = 0;
+    this.measurePane = null;
     this.resize();
     this.render();
   }
@@ -755,6 +764,13 @@ export class CadScene {
     return i >= 0 ? rects[i] : null;
   }
 
+  /** 計測の文字を重ねる画面（最後に計測でクリックした画面。まだなら ① を映す最初の画面）。 */
+  private measureLabelPane(): PaneRect | null {
+    if (this.split === 'single') return this.paneRects()[0];
+    const rects = this.paneRects();
+    return this.measurePane !== null && rects[this.measurePane] ? rects[this.measurePane] : this.labelPane();
+  }
+
   private readonly trackPane = (e: PointerEvent | WheelEvent) => {
     this.activePane = this.paneIndexAt(e.clientX, e.clientY);
   };
@@ -803,6 +819,8 @@ export class CadScene {
    */
   setSurfaceDisplay(display: SurfaceDisplay): void {
     this.surfaceDisplay = display;
+    // 比較モデルにもゼブラを映す（applyComparisonLook）。
+    for (const l of this.comparisons) if (l) this.applyComparisonLook(l);
     if (!this.mesh) return;
     if (this.lightGuide) this.lightGuide.group.visible = display.mode === 'zebra' && display.zebra.showLights;
     if (display.mode === 'normal') {
@@ -1138,6 +1156,10 @@ export class CadScene {
     };
     this.measurePoints = points(7, MEASURE_COLOR);
     this.measureHoverMarker = points(10, this.colors.hover);
+    // 計測は比較モデル（② ③ ④）の上でもできるので、線・点の印はどの画面にも出す。
+    this.measureLines.layers.enableAll();
+    this.measurePoints.layers.enableAll();
+    this.measureHoverMarker.layers.enableAll();
     this.datumLines = new LineSegments2(
       new LineSegmentsGeometry(),
       new LineMaterial({ linewidth: MEASURE_LINE_WIDTH, color: DATUM_COLOR, depthTest: false, transparent: true })
@@ -1362,7 +1384,7 @@ export class CadScene {
 
   /** 計測の文字を、各点の今の画面上の位置へ動かす（描くたびに呼ぶ）。 */
   private placeMeasureLabels(): void {
-    const pane = this.labelPane();
+    const pane = this.measureLabelPane();
     this.labelLayer.style.display = pane ? '' : 'none';
     if (!pane || (!this.measureLabels.length && !this.datumLabels.length)) return;
     const { x: ox, y: oy, w, h } = pane;
@@ -1932,7 +1954,7 @@ export class CadScene {
 
   /** 計測の文字（HTML で重ねているので WebGL の画面には入らない）を、撮った画面にも描く。k は CSS ピクセルからの倍率。 */
   private drawMeasureLabels(ctx: CanvasRenderingContext2D, k: number): void {
-    const pane = this.labelPane();
+    const pane = this.measureLabelPane();
     if (!pane || (!this.measureLabels.length && !this.datumLabels.length)) return;
     const { x: ox, y: oy, w, h } = pane;
     const size = Math.max(9, Math.round(12 * Math.max(k, 0.75)));
@@ -2363,7 +2385,48 @@ export class CadScene {
   }
 
   /** クリックした位置の、見えている面の上の点（面に当たらなければ手前のエッジ・頂点の点）。何も無ければ null。 */
+  /**
+   * クリックした位置の点。① の点（basePointAt）と、比較モデル（② ③ ④）の表面の点のうち手前のもの（回転中心・
+   * ゼブラの基準点・計測の点。比較モデルは三角形しか無いので表面の点だけ）。
+   */
   private pointAt(clientX: number, clientY: number): THREE.Vector3 | null {
+    const base = this.basePointAt(clientX, clientY);
+    const comp = this.comparisonHitAt(clientX, clientY);
+    if (!comp) return base;
+    if (base && this.rayDepth(base) <= comp.distance) return base;
+    return comp.point.clone();
+  }
+
+  /** 点の、今の光線（raycaster.ray）の上での奥行き。 */
+  private rayDepth(p: THREE.Vector3): number {
+    const ray = this.raycaster.ray;
+    return new THREE.Vector3().subVectors(p, ray.origin).dot(ray.direction);
+  }
+
+  /**
+   * マウスの下の比較モデル（② ③ ④）の表面の当たり（ワールド = ① の座標）。分けた画面ではその画面のモデル、重ねているときは
+   * 見えているすべて。① だけを映す画面では null。光線は raycaster に残す。
+   */
+  private comparisonHitAt(clientX: number, clientY: number): THREE.Intersection | null {
+    const model = this.paneModel(this.paneIndexAt(clientX, clientY));
+    if (model === 0) return null;
+    const ndc = this.ndcAt(clientX, clientY, true);
+    if (!ndc) return null;
+    this.raycaster.setFromCamera(ndc, this.camera);
+    let best: THREE.Intersection | null = null;
+    this.comparisons.forEach((l, i) => {
+      if (!l) return;
+      if (model > 0 ? model !== i + 1 : !l.group.visible || !l.mesh.visible) return;
+      l.group.updateMatrixWorld(true);
+      this.raycaster.layers.set(l.layer);
+      const h = this.raycaster.intersectObject(l.mesh, false).find((x) => x.face);
+      if (h && (!best || h.distance < best.distance)) best = h;
+    });
+    this.raycaster.layers.set(0);
+    return best;
+  }
+
+  private basePointAt(clientX: number, clientY: number): THREE.Vector3 | null {
     const ndc = this.ndcAt(clientX, clientY);
     if (!ndc) return null;
     this.raycaster.setFromCamera(ndc, this.camera);
@@ -2465,7 +2528,14 @@ export class CadScene {
    */
   private measurePickAt(clientX: number, clientY: number): MeasurePick | null {
     const tool = this.measureTool;
-    if (this.measureWantsPoint()) return this.measurePointAt(clientX, clientY);
+    if (this.measureWantsPoint()) {
+      // 比較モデル（② ③ ④）の表面の点も拾う（三角形の上の点なので概算。要素は持たない）。手前の方を使う。
+      const base = this.measurePointAt(clientX, clientY);
+      const comp = this.comparisonHitAt(clientX, clientY);
+      if (!comp) return base;
+      if (base && this.rayDepth(new THREE.Vector3(...base.point)) <= comp.distance + this.radius * 0.004) return base;
+      return { point: [comp.point.x, comp.point.y, comp.point.z], item: null, exact: false };
+    }
     if (tool === 'pointEdge') {
       const edge = this.pickAt(clientX, clientY, 'edge');
       if (!edge) return null;
@@ -2769,7 +2839,10 @@ export class CadScene {
     }
     if (this.measureTool) {
       const pick = this.measurePickAt(e.clientX, e.clientY);
-      if (pick) this.callbacks.onMeasurePick?.(pick);
+      if (pick) {
+        this.measurePane = this.paneIndexAt(e.clientX, e.clientY);
+        this.callbacks.onMeasurePick?.(pick);
+      }
       return;
     }
     const item = this.pickAt(e.clientX, e.clientY);
@@ -2847,7 +2920,8 @@ export class CadScene {
       }
     }
     for (const l of this.comparisons) {
-      if (l?.scalar && l.mesh.material === l.scalar) updateSurfaceUniforms(l.scalar, this.camera, null);
+      if (l?.scalar && l.mesh.material === l.scalar)
+        updateSurfaceUniforms(l.scalar, this.camera, this.surfaceDisplay.mode === 'zebra' && !this.deviationDisplay ? this.surfaceDisplay.zebra : null);
     }
     if (this.split === 'single') {
       // 偏差の色で比較モデルを重ねているときは、① の面を描かない（① の内側に入った部分 = 負の偏差が隠れないように。

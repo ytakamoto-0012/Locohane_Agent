@@ -525,6 +525,8 @@ export interface CadSavedHistory {
 export interface CadViewerProps {
   question?: string;
   select?: CadKind[];
+  /** 開いたときに選んでおく種類（AI が select で頼んだ種類の先頭）。 */
+  initial_kind?: CadKind;
   /** ビューア用データの ID。本体は app.py の GET /locohane/cad/data/{data_id} で取りに行く（fetchCadPackage）。 */
   data_id?: string;
   /** 以前の形（props にビューア用データ全体を入れていた）。 */
