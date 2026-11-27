@@ -6,7 +6,7 @@ import { useI18n } from '../../i18n';
 import type { MessageKey } from '../../i18n/messages';
 import type { CadAlignmentInfo, CadDeviationStats } from './cadData';
 import { fmtNum } from './measure';
-import { CURVATURE_KINDS, legendGradient, type CurvatureKind, type ScalarScheme, type ZebraLight, type ZebraSettings } from './surfaceShading';
+import { CURVATURE_KINDS, MAX_ZEBRA_STRIPES, legendGradient, type CurvatureKind, type ScalarScheme, type ZebraLight, type ZebraSettings } from './surfaceShading';
 
 export type AnalysisMode = 'normal' | 'zebra' | 'curvature' | 'deviation';
 export type DatumName = 'A' | 'B' | 'C';
@@ -101,7 +101,14 @@ export function AnalysisSettingsRow(p: SettingsProps) {
           </button>
         ))}
         <span className="cad-viewer-sep" />
-        <NumberField label={t('cad.zebra.stripes')} value={z.stripes} step={1} min={1} max={200} onChange={(v) => p.onZebra({ ...z, stripes: Math.round(v) })} />
+        <NumberField
+          label={t('cad.zebra.stripes')}
+          value={z.stripes}
+          step={1}
+          min={1}
+          max={MAX_ZEBRA_STRIPES}
+          onChange={(v) => p.onZebra({ ...z, stripes: Math.round(v) })}
+        />
         <NumberField label={t('cad.zebra.width')} title={t('cad.zebra.widthTitle')} value={z.width} step={0.05} min={0.05} max={0.95} onChange={(v) => p.onZebra({ ...z, width: v })} />
         <NumberField label={t('cad.zebra.angle')} title={t('cad.zebra.angleTitle')} value={z.angleDeg} step={15} min={-180} max={180} onChange={(v) => p.onZebra({ ...z, angleDeg: v })} />
         <button
@@ -112,6 +119,24 @@ export function AnalysisSettingsRow(p: SettingsProps) {
           onClick={() => p.onZebra({ ...z, viewFixed: !z.viewFixed })}
         >
           {z.viewFixed ? t('cad.zebra.fixedView') : t('cad.zebra.fixedModel')}
+        </button>
+        <button
+          type="button"
+          className={`cad-viewer-chip${z.showLights ? ' active' : ''}`}
+          aria-pressed={z.showLights}
+          title={t('cad.zebra.showLightsTitle')}
+          onClick={() => p.onZebra({ ...z, showLights: !z.showLights })}
+        >
+          {t('cad.zebra.showLights')}
+        </button>
+        <button
+          type="button"
+          className={`cad-viewer-chip${z.gloss ? ' active' : ''}`}
+          aria-pressed={z.gloss}
+          title={t('cad.zebra.glossTitle')}
+          onClick={() => p.onZebra({ ...z, gloss: !z.gloss })}
+        >
+          {t('cad.zebra.gloss')}
         </button>
       </div>
     );

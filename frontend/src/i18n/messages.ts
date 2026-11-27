@@ -296,6 +296,12 @@ export const ja = {
   'cad.zebra.fixedView': '照明: 視点に固定',
   'cad.zebra.fixedModel': '照明: モデルに固定',
   'cad.zebra.fixedTitle': '照明を視点に固定する（回すと縞が流れる）か、モデルに固定する（部屋の照明の下で見回すのと同じ）かを切り替える',
+  'cad.zebra.showLights': '光源を表示',
+  'cad.zebra.showLightsTitle':
+    '照明の形（ドームは球、蛍光灯はモデルを囲む筒。半径はモデル半径の 3 倍）と明るい縞（蛍光灯）の並び、軸の向き（矢印）を 3D 空間に重ねて描く。全体は縮小すると見える。手前側の壁は薄く描く',
+  'cad.zebra.gloss': '艶',
+  'cad.zebra.glossTitle':
+    '塗装面のような艶を重ねる（左上手前のキーライトのハイライト、縁ほど強い映り込み、上が明るく下が暗い周りの映り込み）。縞の位置は変わらない。ハイライトと縞を見分けにくいときは切る',
   'cad.curvature.kind': '種類',
   'cad.curvature.kindTitle': '表示する曲率の種類',
   'cad.curvature.mean': '平均曲率',
@@ -763,6 +769,12 @@ const en: Record<MessageKey, string> = {
   'cad.zebra.fixedView': 'Lights: fixed to view',
   'cad.zebra.fixedModel': 'Lights: fixed to model',
   'cad.zebra.fixedTitle': 'Fix the lights to the view (stripes move as you rotate) or to the model (like walking around a part under room lights)',
+  'cad.zebra.showLights': 'Show lights',
+  'cad.zebra.showLightsTitle':
+    'Draw the lights in 3D: their shape (a sphere for the dome, a tube around the model for the tube lights; radius 3 × the model radius), the bright stripes (tubes) and the axis (arrow). Zoom out to see all of it. The near wall is drawn faint',
+  'cad.zebra.gloss': 'Gloss',
+  'cad.zebra.glossTitle':
+    'Add a painted-surface gloss (a highlight from a key light at the upper left, stronger reflection toward the edges, and a surrounding reflection that is bright above and dark below). The stripes stay where they are. Turn it off if the highlight is hard to tell from a stripe',
   'cad.curvature.kind': 'Type',
   'cad.curvature.kindTitle': 'Which curvature to show',
   'cad.curvature.mean': 'Mean curvature',

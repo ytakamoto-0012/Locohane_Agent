@@ -31,7 +31,7 @@ import {
   type CadVisibility
 } from './cadData';
 import { asVec3, onCircle, onSphere, unit, type MeasureDraw, type MeasurePick, type MeasureTool, type Vec3 } from './measure';
-import { applySurfaceDisplay, createSurfaceMaterial, updateSurfaceUniforms, type SurfaceDisplay } from './surfaceShading';
+import { ZebraLightGuide, applySurfaceDisplay, createSurfaceMaterial, updateSurfaceUniforms, type SurfaceDisplay } from './surfaceShading';
 
 /** 基準モデル（偏差の比較相手）を重ねて描くときの色。 */
 const REFERENCE_COLOR = '#4f7fe0';
@@ -243,6 +243,8 @@ export class CadScene {
   private standardMaterial: THREE.Material | null = null;
   private surfaceMaterial: THREE.ShaderMaterial | null = null;
   private surfaceDisplay: SurfaceDisplay = { mode: 'normal' };
+  // ゼブラの照明の形（showLights のときだけ見せる）。解析表示の材質と uniform を共有する。
+  private lightGuide: ZebraLightGuide | null = null;
   // 頂点ごとの強調（0 = なし、1 = ホバー、2 = 選択）とスカラー（曲率・偏差）。解析表示の材質が読む。
   private hlAttr: THREE.BufferAttribute | null = null;
   private scalarAttr: THREE.BufferAttribute | null = null;
@@ -463,6 +465,7 @@ export class CadScene {
   setSurfaceDisplay(display: SurfaceDisplay): void {
     this.surfaceDisplay = display;
     if (!this.mesh) return;
+    if (this.lightGuide) this.lightGuide.group.visible = display.mode === 'zebra' && display.zebra.showLights;
     if (display.mode === 'normal') {
       if (this.standardMaterial) this.mesh.material = this.standardMaterial;
       this.requestRender();
@@ -486,6 +489,11 @@ export class CadScene {
       }
     }
     applySurfaceDisplay(this.surfaceMaterial, display);
+    if (display.mode === 'zebra' && display.zebra.showLights && !this.lightGuide) {
+      this.lightGuide = new ZebraLightGuide(this.surfaceMaterial);
+      this.lightGuide.group.visible = true;
+      this.scene.add(this.lightGuide.group);
+    }
     this.mesh.material = this.surfaceMaterial;
     this.requestRender();
   }
@@ -2201,6 +2209,9 @@ export class CadScene {
     if (this.surfaceMaterial && this.mesh?.material === this.surfaceMaterial) {
       // 視点に固定した照明・陰影の向きは、カメラが動くたびに合わせる。
       updateSurfaceUniforms(this.surfaceMaterial, this.camera, this.surfaceDisplay.mode === 'zebra' ? this.surfaceDisplay.zebra : null);
+      if (this.lightGuide?.group.visible && this.surfaceDisplay.mode === 'zebra') {
+        this.lightGuide.update(this.surfaceDisplay.zebra, this.center, this.radius);
+      }
     }
     this.renderer.render(this.scene, this.camera);
     this.renderGizmo();
