@@ -21,8 +21,14 @@ const ZEBRA_ROT_AXES: [string, 'rotXDeg' | 'rotYDeg' | 'rotZDeg'][] = [
   ['Y', 'rotYDeg'],
   ['Z', 'rotZDeg']
 ];
-/** 平面の光源の位置の欄（ZebraSettings.planePos の順: 右・上・手前）。 */
-const ZEBRA_POS_FIELDS = ['x', 'y', 'z'] as const;
+/** 平面の光源の、基準点からの距離の欄（ZebraSettings.planeOffset の順）。 */
+const ZEBRA_OFFSET_AXES = ['X', 'Y', 'Z'] as const;
+
+/** 基準点からの距離の欄の刻み（今の距離の大きさのおよそ 1/10 の 1・10・100…）。 */
+function offsetStep(off: number[]): number {
+  const m = Math.max(...off.map(Math.abs));
+  return m > 0 ? 10 ** Math.floor(Math.log10(m / 10)) : 1;
+}
 
 /** 数の入力欄（空・数でない入力は無視する）。 */
 function NumberField({
@@ -72,6 +78,9 @@ interface SettingsProps {
   mode: AnalysisMode;
   zebra: ZebraSettings;
   onZebra: (z: ZebraSettings) => void;
+  /** 平面の光源の基準点をクリックで選んでいる最中か。 */
+  basePicking: boolean;
+  onBasePicking: (on: boolean) => void;
   curvatureKind: CurvatureKind;
   onCurvatureKind: (k: CurvatureKind) => void;
   range: RangeState;
@@ -149,23 +158,53 @@ export function AnalysisSettingsRow(p: SettingsProps) {
             onChange={(v) => p.onZebra({ ...z, [key]: v })}
           />
         ))}
-        {z.light === 'plane' &&
-          ZEBRA_POS_FIELDS.map((f, i) => (
-            <NumberField
-              key={f}
-              label={t(`cad.zebra.pos.${f}` as MessageKey)}
-              title={t('cad.zebra.posTitle')}
-              value={z.planePos[i]}
-              step={0.5}
-              min={-50}
-              max={50}
-              onChange={(v) => {
-                const pos: [number, number, number] = [...z.planePos];
-                pos[i] = v;
-                p.onZebra({ ...z, planePos: pos });
-              }}
-            />
-          ))}
+        {z.light === 'plane' && (
+          <>
+            <span className="cad-viewer-sep" />
+            <button
+              type="button"
+              className={`cad-viewer-chip${p.basePicking ? ' active' : ''}`}
+              aria-pressed={p.basePicking}
+              title={t('cad.zebra.baseTitle')}
+              onClick={() => p.onBasePicking(!p.basePicking)}
+            >
+              {t('cad.zebra.base')}: ({z.planeBase.map((v) => fmtNum(v)).join(', ')})
+            </button>
+            <button
+              type="button"
+              className="cad-viewer-chip"
+              disabled={z.planeBase.every((v) => v === 0)}
+              title={t('cad.zebra.baseOriginTitle')}
+              onClick={() => p.onZebra({ ...z, planeBase: [0, 0, 0] })}
+            >
+              {t('cad.zebra.baseOrigin')}
+            </button>
+            <button
+              type="button"
+              className={`cad-viewer-chip${z.planeAnchor === 'bottom' ? ' active' : ''}`}
+              aria-pressed={z.planeAnchor === 'bottom'}
+              title={t('cad.zebra.anchorTitle')}
+              onClick={() => p.onZebra({ ...z, planeAnchor: z.planeAnchor === 'bottom' ? 'center' : 'bottom' })}
+            >
+              {z.planeAnchor === 'bottom' ? t('cad.zebra.anchorBottom') : t('cad.zebra.anchorCenter')}
+            </button>
+            {ZEBRA_OFFSET_AXES.map((axis, i) => (
+              <NumberField
+                key={axis}
+                label={axis}
+                title={t('cad.zebra.offsetTitle', { axis })}
+                value={z.planeOffset[i]}
+                step={offsetStep(z.planeOffset)}
+                onChange={(v) => {
+                  const off: [number, number, number] = [...z.planeOffset];
+                  off[i] = v;
+                  p.onZebra({ ...z, planeOffset: off });
+                }}
+              />
+            ))}
+            {p.units !== 'unknown' && <span className="cad-viewer-unit">{p.units}</span>}
+          </>
+        )}
         <span className="cad-viewer-sep" />
         <button
           type="button"

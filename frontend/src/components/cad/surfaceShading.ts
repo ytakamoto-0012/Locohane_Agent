@@ -16,6 +16,8 @@ import * as THREE from 'three';
 export type ZebraLight = 'dome' | 'cylinder' | 'plane';
 /** 円筒・平面の蛍光灯の並べ方（回転前の照明の座標で、水平 = 右向きに伸びる、垂直 = 上向きに伸びる）。 */
 export type ZebraOrientation = 'horizontal' | 'vertical';
+/** 平面の光源の位置を合わせるパネルの点（パネルの中心か、いちばん下の蛍光灯の中央か）。 */
+export type ZebraPlaneAnchor = 'center' | 'bottom';
 
 export interface ZebraSettings {
   light: ZebraLight;
@@ -27,16 +29,23 @@ export interface ZebraSettings {
   width: number;
   /**
    * 照明を X・Y・Z 軸の周りに回す角度（度。X → Y → Z の順に回す）。軸は視点に固定なら画面の右・上・手前、
-   * モデルに固定ならワールドの X・Y・Z。ドーム・円筒はモデルの中心の周り、平面はパネルの中心の周りに回す。
+   * モデルに固定ならワールドの X・Y・Z。ドーム・円筒はモデルの中心の周り、平面は位置を合わせる点（planeAnchor）の周りに回す。
    */
   rotXDeg: number;
   rotYDeg: number;
   rotZDeg: number;
+  /** 平面の光源の位置の基準点（ワールド座標。既定は原点。ビューアでクリックして選ぶ）。 */
+  planeBase: [number, number, number];
   /**
-   * 平面の光源（パネルの中心）の位置。モデルの中心から、回転前の照明の右・上・手前へのずれ（モデル半径の倍数）。
-   * パネルは手前の向きを法線にしてモデルの方を向く。
+   * 平面の光源（パネルの中心）の、基準点からの X・Y・Z の距離（モデルの単位）。軸は回転と同じ（視点に固定なら画面の右・上・手前、
+   * モデルに固定ならワールドの X・Y・Z）。パネルは照明の手前の向きを法線にして向く。
    */
-  planePos: [number, number, number];
+  planeOffset: [number, number, number];
+  /**
+   * 基準点 + 距離の位置に合わせるパネルの点。center = パネルの中心、bottom = いちばん下の蛍光灯の中央（垂直に並べたときは
+   * 蛍光灯の下端 = パネルの下辺の中央）。床からの高さで置きたいときは bottom。回転もこの点の周りに回す。
+   */
+  planeAnchor: ZebraPlaneAnchor;
   /** true なら照明を視点に固定（回すと縞が流れる）、false ならモデル（ワールド）に固定。 */
   viewFixed: boolean;
   /** true なら照明（ドーム・トンネル・筒と、その中の明るい縞）の形と向きを 3D 空間に重ねて描く。 */
@@ -56,11 +65,20 @@ export const DEFAULT_ZEBRA: ZebraSettings = {
   rotXDeg: 0,
   rotYDeg: 0,
   rotZDeg: 0,
-  planePos: [0, 0, 3],
+  planeBase: [0, 0, 0],
+  planeOffset: [0, 0, 300],
+  planeAnchor: 'center',
   viewFixed: true,
   showLights: false,
   gloss: true
 };
+
+/** モデルの大きさに合わせた既定のゼブラの設定（平面の光源は、原点から手前（視点に固定の Z）へモデル半径の 3 倍）。 */
+export function defaultZebra(bbox: { min: number[]; max: number[] }): ZebraSettings {
+  const d = Math.hypot(...bbox.max.map((v, i) => v - (bbox.min[i] ?? 0)));
+  const r = Number.isFinite(d) && d > 0 ? d / 2 : 100;
+  return { ...DEFAULT_ZEBRA, planeOffset: [0, 0, Number((3 * r).toPrecision(2))] };
+}
 
 /** 照明の形の大きさ（モデル半径の倍数）。トンネル・筒の半径はシェーダーの tunnel と同じ 3、筒の長さは軸に沿って ±LIGHT_GUIDE_HALF_LENGTH。 */
 export const LIGHT_GUIDE_RADIUS = 3;
@@ -256,14 +274,15 @@ vec3 tubeRef(vec3 axis) {
 }
 
 // 平面のパネル（中心からの位置 q）の明るさ。一辺 2 × ${LIGHT_PLANE_HALF_SIZE.toFixed(1)}R の正方形の外は暗い。
-// 水平なら上下の位置、垂直なら左右の位置で縞を決め、パネルの中心に明るい蛍光灯が 1 本来るようにそろえる。
+// 水平なら上下の位置、垂直なら左右の位置で縞を決め、パネルを uStripes 等分した区画の真ん中に蛍光灯を 1 本ずつ置く
+// （i 本目の中心は −h + (i + 0.5) × 2h / uStripes。surfaceShading.ts の planeAnchorShift と同じ並び）。
 float panelAt(vec3 q) {
   float h = ${LIGHT_PLANE_HALF_SIZE.toFixed(1)} * uRadius;
   float a = dot(q, uRight);
   float b = dot(q, uUp);
   if (abs(a) > h || abs(b) > h) return 0.0;
   float c = uVertical == 1 ? a : b;
-  return stripe(c / (2.0 * h) * uStripes + 0.5 * uWidth);
+  return stripe((c + h) / (2.0 * h) * uStripes - 0.5 + 0.5 * uWidth);
 }
 
 // 点 p（中心からの位置）から向き r の光線が平面のパネルに当たるところの明るさ（パネルの裏側へ向かう光線も、前に当たれば明るい）。
@@ -395,14 +414,13 @@ export function createSurfaceMaterial(): THREE.ShaderMaterial {
 const _euler = new THREE.Euler();
 const _rot = new THREE.Quaternion();
 const _base = new THREE.Quaternion();
-const _v = new THREE.Vector3();
 const DEG = Math.PI / 180;
 
 /**
  * 材質の照明の向きを今のカメラに合わせる（描くたびに呼ぶ）。視点に固定する照明は、カメラの上・手前・右を照明の
  * 上・手前・右にする。モデルに固定する照明は、ワールドの +Z を上、−Y を手前（正面から +Y の向きに見る）、+X を右にする。
  * そのうえで X・Y・Z 軸（視点に固定なら画面の右・上・手前、モデルに固定ならワールドの X・Y・Z）の周りに X → Y → Z の順に回す。
- * 平面の光源の位置は、回す前の照明の右・上・手前で測る（パネルはその位置を中心に回る）。
+ * 平面の光源の位置は、基準点から回転と同じ X・Y・Z の軸に沿って測る（パネルはその位置を中心に回る）。
  */
 export function updateSurfaceUniforms(material: THREE.ShaderMaterial, camera: THREE.Camera, zebra: ZebraSettings | null): void {
   const u = material.uniforms;
@@ -423,9 +441,30 @@ export function updateSurfaceUniforms(material: THREE.ShaderMaterial, camera: TH
   (u.uUp.value as THREE.Vector3).set(0, upY, upZ).applyQuaternion(_rot);
   (u.uFront.value as THREE.Vector3).set(0, frontY, frontZ).applyQuaternion(_rot);
   (u.uRight.value as THREE.Vector3).set(1, 0, 0).applyQuaternion(_rot);
-  const [px, py, pz] = zebra.planePos ?? DEFAULT_ZEBRA.planePos;
-  _v.set(px || 0, (py || 0) * upY + (pz || 0) * frontY, (py || 0) * upZ + (pz || 0) * frontZ).applyQuaternion(_base);
-  (u.uPlanePos.value as THREE.Vector3).copy(_v).multiplyScalar(u.uRadius.value as number);
+  // 合わせる点（パネルの中心か、いちばん下の蛍光灯の中央）= 基準点 + X・Y・Z の距離（軸は回転と同じ）。パネルの中心は
+  // そこから回した後の上へ planeAnchorShift だけずらす（回転はその点の周りになる）。シェーダーにはモデルの中心からの位置で渡す。
+  (u.uPlanePos.value as THREE.Vector3)
+    .copy(planeAnchorPoint(zebra, _base))
+    .addScaledVector(u.uUp.value as THREE.Vector3, planeAnchorShift(zebra, u.uRadius.value as number))
+    .sub(u.uCenter.value as THREE.Vector3);
+}
+
+/** 平面の光源の、位置を合わせる点（ワールド）= 基準点 + X・Y・Z の距離。base は X・Y・Z の軸の向き（視点に固定ならカメラの姿勢）。 */
+function planeAnchorPoint(zebra: ZebraSettings, base: THREE.Quaternion): THREE.Vector3 {
+  const [ox, oy, oz] = zebra.planeOffset ?? DEFAULT_ZEBRA.planeOffset;
+  const [bx, by, bz] = zebra.planeBase ?? DEFAULT_ZEBRA.planeBase;
+  return new THREE.Vector3(ox || 0, oy || 0, oz || 0).applyQuaternion(base).add(new THREE.Vector3(bx || 0, by || 0, bz || 0));
+}
+
+/**
+ * 位置を合わせる点から、パネルの中心までの（回した後の）上向きの距離。中心なら 0。いちばん下の蛍光灯なら、水平は
+ * h − h / 本数（パネルを本数で等分した最下段の区画の真ん中。シェーダーの panelAt と同じ並び）、垂直は h（蛍光灯の下端）。
+ */
+export function planeAnchorShift(zebra: ZebraSettings, radius: number): number {
+  if (zebra.planeAnchor !== 'bottom') return 0;
+  const h = LIGHT_PLANE_HALF_SIZE * radius;
+  if (zebra.orientation === 'vertical') return h;
+  return h - h / Math.max(1, Math.min(MAX_ZEBRA_STRIPES, zebra.stripes));
 }
 
 /** 表示の設定を材質に入れる。 */
@@ -507,6 +546,9 @@ export class ZebraLightGuide {
   private readonly tube: THREE.Mesh;
   private readonly panel: THREE.Mesh;
   private readonly arrow: THREE.ArrowHelper;
+  /** 平面の光源の基準点の印と、基準点から位置を合わせた点（パネルの中心か、いちばん下の蛍光灯の中央）への線。 */
+  private readonly baseMarker: THREE.Points;
+  private readonly baseLine: THREE.Line;
 
   constructor(surface: THREE.ShaderMaterial) {
     const su = surface.uniforms;
@@ -536,11 +578,21 @@ export class ZebraLightGuide {
     this.tube = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 2, 256, 1, true), this.material);
     this.panel = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.material);
     this.arrow = new THREE.ArrowHelper(Y_AXIS, new THREE.Vector3(), 1, GUIDE_AXIS_COLOR);
-    for (const o of [this.dome, this.tube, this.panel]) {
+    const markerGeometry = new THREE.BufferGeometry();
+    markerGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3), 3));
+    this.baseMarker = new THREE.Points(
+      markerGeometry,
+      new THREE.PointsMaterial({ size: 9, sizeAttenuation: false, color: GUIDE_AXIS_COLOR, depthTest: false, transparent: true })
+    );
+    const lineGeometry = new THREE.BufferGeometry();
+    lineGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+    this.baseLine = new THREE.Line(lineGeometry, new THREE.LineBasicMaterial({ color: GUIDE_AXIS_COLOR, transparent: true, opacity: 0.6, depthTest: false }));
+    for (const o of [this.dome, this.tube, this.panel, this.baseMarker, this.baseLine]) {
       o.renderOrder = 2;
       o.frustumCulled = false;
     }
-    this.group.add(this.dome, this.tube, this.panel, this.arrow);
+    this.baseMarker.renderOrder = 4;
+    this.group.add(this.dome, this.tube, this.panel, this.arrow, this.baseMarker, this.baseLine);
     this.group.visible = false;
   }
 
@@ -555,6 +607,8 @@ export class ZebraLightGuide {
     this.dome.visible = zebra.light === 'dome';
     this.tube.visible = zebra.light === 'cylinder';
     this.panel.visible = zebra.light === 'plane';
+    this.baseMarker.visible = zebra.light === 'plane';
+    this.baseLine.visible = zebra.light === 'plane';
     if (zebra.light === 'plane') {
       // パネルの面の右・上を照明の右・上、法線を手前にする（右 × 上 = 手前なので右手系のまま）。
       const h = LIGHT_PLANE_HALF_SIZE * radius;
@@ -567,6 +621,16 @@ export class ZebraLightGuide {
       this.arrow.position.copy(this.panel.position);
       this.arrow.setDirection(dir);
       this.arrow.setLength(len, 0.12 * len, 0.05 * len);
+      const [bx, by, bz] = zebra.planeBase ?? [0, 0, 0];
+      const mp = this.baseMarker.geometry.getAttribute('position') as THREE.BufferAttribute;
+      mp.setXYZ(0, bx, by, bz);
+      mp.needsUpdate = true;
+      const lp = this.baseLine.geometry.getAttribute('position') as THREE.BufferAttribute;
+      // 線は基準点から、位置を合わせた点（パネルの中心か、いちばん下の蛍光灯の中央）まで。
+      const anchor = this.panel.position.clone().addScaledVector(up, -planeAnchorShift(zebra, radius));
+      lp.setXYZ(0, bx, by, bz);
+      lp.setXYZ(1, anchor.x, anchor.y, anchor.z);
+      lp.needsUpdate = true;
       return;
     }
     if (zebra.light === 'dome') {
@@ -588,6 +652,10 @@ export class ZebraLightGuide {
     this.dome.geometry.dispose();
     this.tube.geometry.dispose();
     this.panel.geometry.dispose();
+    this.baseMarker.geometry.dispose();
+    (this.baseMarker.material as THREE.Material).dispose();
+    this.baseLine.geometry.dispose();
+    (this.baseLine.material as THREE.Material).dispose();
     this.material.dispose();
     this.arrow.dispose();
   }

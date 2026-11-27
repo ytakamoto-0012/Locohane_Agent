@@ -58,6 +58,8 @@ export interface CadSceneCallbacks {
   onBoxPick: (items: CadSelection[], remove: boolean) => void;
   /** 「回転中心」でクリックした点を回転の中心にしたとき（ビューアは指定のモードを終える）。 */
   onPivotSet?: () => void;
+  /** ゼブラの平面の光源の「基準点」でクリックした点（ワールド座標。ビューアは指定のモードを終える）。 */
+  onZebraBasePick?: (p: [number, number, number]) => void;
   /** 曲率・偏差の表示中、マウスの下の面の上の値（面に当たらなければ null）。 */
   onScalarHover?: (value: number | null) => void;
   /** 計測のモード（setMeasureTool）でクリックした点・要素。選択はしない。 */
@@ -212,6 +214,7 @@ export class CadScene {
   private renderQueued = false;
   // true の間は、クリックした点を回転の中心にする（選択はしない）。
   private pivotPicking = false;
+  private zebraBasePicking = false;
   // 指定した回転の中心の印（形の中心に戻したら隠す）。
   private pivotMarker: THREE.Points | null = null;
   // 「回転中心」で指定した点。全体表示・視点の切り替えまで、移動や拡大縮小をしても回転の中心として残す。
@@ -1348,6 +1351,12 @@ export class CadScene {
     this.renderer.domElement.classList.toggle('cad-viewer-pivot-picking', on);
   }
 
+  /** true の間、クリックした点（面・エッジ・頂点の上）をゼブラの平面の光源の基準点として返す（onZebraBasePick）。 */
+  setZebraBasePicking(on: boolean): void {
+    this.zebraBasePicking = on;
+    this.renderer.domElement.classList.toggle('cad-viewer-point-picking', on);
+  }
+
   /** p を回転の中心にする。向きは変えずに平行移動して、p を画面の中央に寄せる（ArcballControls は常に中心を見るため）。 */
   private setPivot(p: THREE.Vector3): void {
     // 今の回転中心までの奥行きを保ったまま、p が画面の中央に来る位置へカメラを平行移動する
@@ -2215,6 +2224,11 @@ export class CadScene {
     if (!down || e.button !== 0) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_MOVE_PIXELS) {
       if (boxing && rect) this.callbacks.onBoxPick(this.boxPick(rect, this.boxMode === 'crossing'), e.ctrlKey || e.metaKey);
+      return;
+    }
+    if (this.zebraBasePicking) {
+      const p = this.pointAt(e.clientX, e.clientY);
+      if (p) this.callbacks.onZebraBasePick?.([p.x, p.y, p.z]);
       return;
     }
     if (this.pivotPicking) {

@@ -289,7 +289,7 @@ export const ja = {
     'モデルを囲む筒（半径はモデル半径の 3 倍）の内側に並んだ蛍光灯を映す。水平は横向きのトンネルの天井と壁（外観検査の蛍光灯の映り込み。真下は床で暗い）、垂直は縦の筒の周り',
   'cad.zebra.light.plane': '平面',
   'cad.zebra.light.planeTitle':
-    '平らなパネル（一辺はモデル半径の 8 倍）に平行に並んだ蛍光灯を映す。パネルはモデルの方を向き、位置（左右・上下・距離）で置き場所を決める。パネルに当たらない反射は暗い',
+    '平らなパネル（一辺はモデル半径の 8 倍）に平行に並んだ蛍光灯を映す。パネルの中心は、クリックで選ぶ基準点（既定は原点）からの X・Y・Z の距離で決める。パネルに当たらない反射は暗い',
   'cad.zebra.orient.horizontal': '水平',
   'cad.zebra.orient.horizontalTitle': '蛍光灯を水平（横向き）に並べる',
   'cad.zebra.orient.vertical': '垂直',
@@ -299,12 +299,18 @@ export const ja = {
   'cad.zebra.widthTitle': '明るい縞（蛍光灯）の幅の割合（0.05〜0.95）',
   'cad.zebra.rot': '{axis}回転',
   'cad.zebra.rotTitle':
-    '照明を {axis} 軸の周りに回す角度（度。X → Y → Z の順に回す）。軸は「視点に固定」では画面の右（X）・上（Y）・手前（Z）、「モデルに固定」ではワールドの X・Y・Z。ドーム・円筒はモデルの中心、平面はパネルの中心の周りに回る',
-  'cad.zebra.pos.x': '左右',
-  'cad.zebra.pos.y': '上下',
-  'cad.zebra.pos.z': '距離',
-  'cad.zebra.posTitle':
-    '平面の光源（パネルの中心）の位置。モデルの中心から右・上・手前へのずれで、単位はモデル半径。回転前の照明の向きで測る（「モデルに固定」では右 = +X、上 = +Z、手前 = −Y）',
+    '照明を {axis} 軸の周りに回す角度（度。X → Y → Z の順に回す）。軸は「視点に固定」では画面の右（X）・上（Y）・手前（Z）、「モデルに固定」ではワールドの X・Y・Z。ドーム・円筒はモデルの中心、平面は合わせる点（パネル中央か最下段の蛍光灯）の周りに回る',
+  'cad.zebra.base': '基準点',
+  'cad.zebra.baseTitle': '平面の光源の位置の基準点にする点をクリックで選ぶ（面・エッジ・頂点の上。既定は原点）。パネルの中心は基準点から X・Y・Z の距離だけ離れた位置',
+  'cad.zebra.baseOrigin': '原点',
+  'cad.zebra.baseOriginTitle': '基準点を原点 (0, 0, 0) に戻す',
+  'cad.zebra.offsetTitle':
+    '平面の光源（パネルの中心）の、基準点からの {axis} 方向の距離（モデルの単位）。軸は回転と同じで、「視点に固定」では画面の右（X）・上（Y）・手前（Z）、「モデルに固定」ではワールドの X・Y・Z',
+  'cad.zebra.anchorCenter': '合わせる点: パネル中央',
+  'cad.zebra.anchorBottom': '合わせる点: 最下段の蛍光灯',
+  'cad.zebra.anchorTitle':
+    '基準点 + X・Y・Z の位置に合わせるパネルの点を、パネルの中央か、いちばん下の蛍光灯の中央（垂直に並べたときは蛍光灯の下端）で切り替える。床からの高さで置くときは最下段にする。回転もこの点の周りに回る',
+  'cad.hintZebraBase': '平面の光源の基準点にする点をクリックしてください（もう一度「基準点」を押すとやめる）。',
   'cad.zebra.fixedView': '照明: 視点に固定',
   'cad.zebra.fixedModel': '照明: モデルに固定',
   'cad.zebra.fixedTitle': '照明を視点に固定する（回すと縞が流れる）か、モデルに固定する（部屋の照明の下で見回すのと同じ）かを切り替える',
@@ -774,7 +780,7 @@ const en: Record<MessageKey, string> = {
     'Reflect tube lights lined up inside a cylinder around the model (radius 3 × the model radius). Horizontal: the ceiling and walls of a sideways tunnel (like the light-tunnel check of car bodies; the floor below is dark). Vertical: around an upright cylinder',
   'cad.zebra.light.plane': 'Plane',
   'cad.zebra.light.planeTitle':
-    'Reflect parallel tube lights on a flat panel (side 8 × the model radius) facing the model. Set where it is with the position fields. Reflections that miss the panel are dark',
+    'Reflect parallel tube lights on a flat panel (side 8 × the model radius). Its center is set by the X / Y / Z distance from a base point you click (default: the origin). Reflections that miss the panel are dark',
   'cad.zebra.orient.horizontal': 'Horizontal',
   'cad.zebra.orient.horizontalTitle': 'Line the tube lights up horizontally',
   'cad.zebra.orient.vertical': 'Vertical',
@@ -784,12 +790,19 @@ const en: Record<MessageKey, string> = {
   'cad.zebra.widthTitle': 'Share of the light stripes (tubes), 0.05 to 0.95',
   'cad.zebra.rot': 'Rot {axis}',
   'cad.zebra.rotTitle':
-    'Angle to turn the lights about the {axis} axis, in degrees (applied X, then Y, then Z). The axes are screen right (X), up (Y) and toward you (Z) when fixed to the view, and world X, Y, Z when fixed to the model. The dome and cylinder turn about the model center, the plane about the panel center',
-  'cad.zebra.pos.x': 'Right',
-  'cad.zebra.pos.y': 'Up',
-  'cad.zebra.pos.z': 'Dist.',
-  'cad.zebra.posTitle':
-    'Position of the plane light (panel center): offset from the model center to the right, up and toward you, in model radii, measured in the lights’ directions before rotation (when fixed to the model: right = +X, up = +Z, toward you = −Y)',
+    'Angle to turn the lights about the {axis} axis, in degrees (applied X, then Y, then Z). The axes are screen right (X), up (Y) and toward you (Z) when fixed to the view, and world X, Y, Z when fixed to the model. The dome and cylinder turn about the model center, the plane about its anchor (panel center or bottom tube)',
+  'cad.zebra.base': 'Base point',
+  'cad.zebra.baseTitle':
+    'Click a point (on a face, edge or vertex) to use as the base point of the plane light (default: the origin). The panel center is the X / Y / Z distance away from it',
+  'cad.zebra.baseOrigin': 'Origin',
+  'cad.zebra.baseOriginTitle': 'Put the base point back at the origin (0, 0, 0)',
+  'cad.zebra.offsetTitle':
+    'Distance of the plane light (panel center) from the base point along {axis}, in model units. The axes are the same as for rotation: screen right (X), up (Y) and toward you (Z) when fixed to the view, world X, Y, Z when fixed to the model',
+  'cad.zebra.anchorCenter': 'Anchor: panel center',
+  'cad.zebra.anchorBottom': 'Anchor: bottom tube',
+  'cad.zebra.anchorTitle':
+    'Which point of the panel goes to the base point + X / Y / Z: the panel center, or the center of the bottom tube (the lower end of the tubes when they run vertically). Use the bottom tube to place the lights by height above the floor. Rotation turns about this point too',
+  'cad.hintZebraBase': 'Click the point to use as the base point of the plane light (press "Base point" again to stop).',
   'cad.zebra.fixedView': 'Lights: fixed to view',
   'cad.zebra.fixedModel': 'Lights: fixed to model',
   'cad.zebra.fixedTitle': 'Fix the lights to the view (stripes move as you rotate) or to the model (like walking around a part under room lights)',

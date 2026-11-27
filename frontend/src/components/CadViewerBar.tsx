@@ -64,7 +64,7 @@ import {
   type DatumName,
   type RangeState
 } from './cad/CadAnalysisPanel';
-import { DEFAULT_ZEBRA, autoRange, curvatureValues, type CurvatureKind, type SurfaceDisplay, type ZebraSettings } from './cad/surfaceShading';
+import { autoRange, defaultZebra, curvatureValues, type CurvatureKind, type SurfaceDisplay, type ZebraSettings } from './cad/surfaceShading';
 
 const KIND_LABEL: Record<CadKind, MessageKey> = {
   face: 'cad.kind.face',
@@ -540,7 +540,9 @@ function CadViewerPanel({
   const hasCurvature = !!data.analysis?.k1;
   const hasReference = !!data.reference && !!data.deviation?.values;
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('normal');
-  const [zebra, setZebra] = useState<ZebraSettings>(DEFAULT_ZEBRA);
+  const [zebra, setZebra] = useState<ZebraSettings>(() => defaultZebra(data.bbox));
+  // ゼブラの平面の光源の「基準点」: 次にクリックした点を基準点にする（その 1 回だけ）。
+  const [zebraBasePicking, setZebraBasePicking] = useState(false);
   const [curvatureKind, setCurvatureKind] = useState<CurvatureKind>('mean');
   const [curvRange, setCurvRange] = useState<RangeState | null>(null);
   const [devRange, setDevRange] = useState<RangeState | null>(null);
@@ -741,6 +743,10 @@ function CadViewerPanel({
             onPickGroup: pickGroup,
             onBoxPick: boxPick,
             onPivotSet: () => setPivotPicking(false),
+            onZebraBasePick: (p) => {
+              setZebra((z) => ({ ...z, planeBase: p }));
+              setZebraBasePicking(false);
+            },
             onMeasurePick: measurePick,
             onPmiClick: (id) => selectPmiRef.current(id),
             onScalarHover: setScalarHover
@@ -774,6 +780,11 @@ function CadViewerPanel({
   useEffect(() => {
     sceneRef.current?.setPivotPicking(pivotPicking);
   }, [pivotPicking, status]);
+  // 基準点を選べるのはゼブラの平面の光源を表示しているときだけ。
+  const basePickingOn = zebraBasePicking && analysisMode === 'zebra' && zebra.light === 'plane';
+  useEffect(() => {
+    sceneRef.current?.setZebraBasePicking(basePickingOn);
+  }, [basePickingOn, status]);
   useEffect(() => {
     sceneRef.current?.setOriginAxesVisible(originAxes);
   }, [originAxes, status]);
@@ -866,6 +877,7 @@ function CadViewerPanel({
     // 縫合で穴・外周の一覧が変わったら（topologyVersion）描き直す。
     void topologyVersion;
     if (pivotPicking) return t('cad.hintPivot');
+    if (basePickingOn) return t('cad.hintZebraBase');
     let item = hover ? describe(itemsOf(data, hover.kind)[hover.id], label(hover), effectiveColor(data, colors, hover), t, data, localAxis) : '';
     if (hover?.kind === 'hole') {
       const n = sceneRef.current?.holeGroupOf(hover.id).length ?? holeGroup(data, hover.id, holeAngle, holeSizeTol).length;
@@ -893,7 +905,7 @@ function CadViewerPanel({
       return item ? `${value}  ${item}` : value;
     }
     return item || t(boxMode === 'off' ? 'cad.hint' : 'cad.hintBox');
-  }, [hover, data, label, t, colors, boxMode, pivotPicking, measureTool, measureError, pending, localAxis, holeAngle, holeSizeTol, mode, topologyVersion, scalarHover, analysisMode, curvatureKind]);
+  }, [hover, data, label, t, colors, boxMode, pivotPicking, basePickingOn, measureTool, measureError, pending, localAxis, holeAngle, holeSizeTol, mode, topologyVersion, scalarHover, analysisMode, curvatureKind]);
 
   const selectAll = () => {
     const ids = sceneRef.current?.selectableIds(mode) ?? [];
@@ -1089,6 +1101,7 @@ function CadViewerPanel({
       setMeasureOpen(false);
       chooseMeasureTool(null);
     } else if (pivotPicking) setPivotPicking(false);
+    else if (basePickingOn) setZebraBasePicking(false);
     else if (boxMode !== 'off') setBoxMode('off');
     else if (selection.length) setSelection([]);
     else if (expanded) setExpanded(false);
@@ -1459,7 +1472,10 @@ function CadViewerPanel({
             className={`cad-viewer-chip${pivotPicking ? ' active' : ''}`}
             aria-pressed={pivotPicking}
             title={t('cad.pivotTitle')}
-            onClick={() => setPivotPicking((x) => !x)}
+            onClick={() => {
+              setPivotPicking((x) => !x);
+              setZebraBasePicking(false);
+            }}
           >
             {t('cad.pivot')}
           </button>
@@ -1579,6 +1595,15 @@ function CadViewerPanel({
         mode={analysisMode}
         zebra={zebra}
         onZebra={setZebra}
+        basePicking={basePickingOn}
+        onBasePicking={(on) => {
+          setZebraBasePicking(on);
+          if (on) {
+            setPivotPicking(false);
+            chooseMeasureTool(null);
+            setBoxMode('off');
+          }
+        }}
         curvatureKind={curvatureKind}
         onCurvatureKind={(k) => {
           setCurvatureKind(k);

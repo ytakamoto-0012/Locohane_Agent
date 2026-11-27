@@ -2118,14 +2118,18 @@ switch the face display (press again for the normal display). Drawing is done by
   vertical cylinder a ring of upright tubes. Every reflection from inside the cylinder hits it, so faces facing any direction get stripes; with the plane,
   reflections that miss the panel are dark. Where stripes are denser than a pixel they fade to the average brightness.
   Count (1 to 1000), width (share of the light part) and rotation about X / Y / Z (degrees, applied X then Y then Z; the dome and cylinder turn about the
-  model center, the plane about the panel center) can be changed, and the lights can be fixed to the view (stripes move as you rotate; the rotation axes
-  are screen right / up / toward you) or to the model (room lights with world +Z up and −Y in front; the rotation axes are world X / Y / Z). For the plane,
-  the position (right / up / distance: offset from the model center along the lights' right / up / front before rotation, in model radii; default 3
-  toward you) places the panel, which faces the model with its front direction as the normal.
+  model center, the plane about its anchor (panel center or bottom tube)) can be changed, and the lights can be fixed to the view (stripes move as you rotate; the rotation axes
+  are screen right / up / toward you) or to the model (room lights with world +Z up and −Y in front; the rotation axes are world X / Y / Z). The plane panel's
+  anchor is placed at the X / Y / Z distance (model units, same axes as rotation) from a base point. The base point is the origin by default; press "Base point"
+  and click on a face, edge or vertex to move it there (the same operation as setting the rotation center; "Origin" puts it back, Esc stops).
+  The anchor switches between "panel center" (default) and "bottom tube" (the center of the lowest tube; the lower end of the tubes, i.e. the middle of
+  the panel's bottom edge, when they run vertically), which makes it easy to place the lights by height above the floor. The tubes sit one in the
+  middle of each of the equal sections the panel is split into (none is cut at the edges).
+  The default distance is 3 × the model radius toward you (view Z). The panel faces along the lights' front direction.
   Broken stripes = a step (G0 break), kinked = a tangent break (G1), a sudden change of bend = a curvature break (G2).
   "Show lights" draws the lights in 3D (`ZebraLightGuide`): their shape (a sphere of radius 3R for the dome, a tube of radius 3R and ±4R along the axis
   for the cylinder, a panel with side 8R for the plane; R is the model radius; the shape itself is very faint), the center line of each tube (bright
-  stripe) on it and the axis (arrow; for the plane, from the panel toward the model). The lines use the same shader formula as the model (with
+  stripe) on it and the axis (arrow; for the plane, from the panel toward the model; the plane also gets a mark at the base point and a line from it to the panel center). The lines use the same shader formula as the model (with
   `ZEBRA_LINES` defined to draw center lines instead of bands; wide bands would hide the model), so count, width, rotation, position and the
   view / model fixing show up as they are. Zoom out to see all of it. Lines on the near side are drawn faint
   and the far wall strong so the stripes on the model stay visible.

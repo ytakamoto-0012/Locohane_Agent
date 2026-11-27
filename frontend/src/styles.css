@@ -1147,8 +1147,9 @@
   height: 100%;
 }
 
-/* 「回転中心」でクリックする点を待っている間。 */
-.cad-viewer-canvas.cad-viewer-pivot-picking {
+/* 「回転中心」・ゼブラの平面の光源の「基準点」でクリックする点を待っている間。 */
+.cad-viewer-canvas.cad-viewer-pivot-picking,
+.cad-viewer-canvas.cad-viewer-point-picking {
   cursor: crosshair;
 }
 
