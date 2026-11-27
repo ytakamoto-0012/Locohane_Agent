@@ -2177,9 +2177,10 @@ reference's outward normal = extra material) from every vertex of the shown mode
   (point-to-plane ICP of the whole model; tries the current position and 4 placements matching centroid and principal axes and refines the best),
   "Fit selected faces" (local best fit from the current position), "Align by datums" with datums A, B, C and the optional D (best fit roughly first),
   and "Position when opened" / "Original coordinates".
-  - Choose "Point" or "Datum hole", press A–D and click the model (Esc to stop; the datums are drawn with their names). A **point** puts the surface
+  - The datums are the points A–D (D optional) and, in a separate slot, the datum holes "Hole 1" and "Hole 2" (optional, up to 2). Press a button and click
+    the model (A–D pick points, Hole 1 / Hole 2 pick holes; Esc to stop; the datums are drawn with their names). A **point** puts the surface
     around the clicked point ("Pad R"; default `[cad_viewer] datum_pad_radius`, 0 = 1/50 of the reference diagonal), only the part connected to the point,
-    onto the reference surface (a checking-fixture pad). A **datum hole** (up to 2): click a hole rim (open shapes), a circular edge or a cylindrical face to
+    onto the reference surface (a checking-fixture pad). A **datum hole**: click a hole rim (open shapes), a circular edge or a cylindrical face to
     get the center, axis and measured diameter; a round pin (diameter in "pin ⌀", initially the hole diameter) stands on the axis of the same hole of the
     reference model (found by fitting a circle to its wall). Within the clearance (hole − pin) / 2 the hole can move; beyond it the hole rim is pushed onto
     the pin. A pin larger than the hole aligns the centers without clearance. The result shows the hole offset from the pin axis, the clearance and the
@@ -2188,8 +2189,9 @@ reference's outward normal = extra material) from every vertex of the shown mode
     rim. The pin starts as the thickest pin that fits (the short side, or across flats); within the hole shape shrunk by the pin radius the hole can
     move (the clearance differs by direction) and beyond it the rim is pushed onto the pin. The reference hole center comes from fitting the same shape
     to its wall. The mark draws the pin circle and the hole outline.
-  - "Priority" (default): A fixes 3, B 2 and C 1 degrees of freedom (3-2-1, a prioritized least squares where later datums do not move what earlier ones
-    fixed). D joins the last stage with a lower weight (`[cad_viewer] datum_d_weight`, default 0.3) and does not move what A and B fixed. "Average": all
+  - "Priority" (default): in this order, A (pad) fixes 3, Hole 1 (round pin) 2, Hole 2 (second pin) 1, B 2 and C 1 degrees of freedom (a prioritized least
+    squares where later datums do not move what earlier ones fixed). When A and two holes fix all 6, B and C have no effect; without holes it is the 3-2-1 of
+    A, B and C. D joins the last stage with a lower weight (`[cad_viewer] datum_d_weight`, default 0.3) and does not move what earlier stages fixed. "Average": all
     datums at the same weight in one least squares (6 DOF). Each datum's weight does not depend on its number of points.
   It runs in app.py's action_callback `cad_viewer_align` (`align_viewer_model`, numpy and scipy's cKDTree in a thread of the app). The deviation values
   are written to `_tmp_` as float32 and the browser fetches them with `GET /locohane/cad/data/{id}` (removed when the viewer closes).

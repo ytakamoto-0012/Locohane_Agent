@@ -40,7 +40,7 @@ import {
   type CadTopology,
   type CadViewerProps,
   DATUM_NAMES,
-  MAX_DATUM_HOLES,
+  isHoleDatum,
   type DatumMode,
   type DatumName,
   type Datums,
@@ -66,10 +66,10 @@ import { restoreHistory, serializeHistory, type EditSnapshot } from './cad/editH
 import {
   AlignRow,
   AnalysisSettingsRow,
+  datumLabel,
   ScalarLegend,
   type AlignState,
   type AnalysisMode,
-  type DatumKind,
   type RangeState
 } from './cad/CadAnalysisPanel';
 import { autoRange, defaultZebra, curvatureValues, type CurvatureKind, type SurfaceDisplay, type ZebraSettings } from './cad/surfaceShading';
@@ -599,10 +599,11 @@ function CadViewerPanel({
   const [alignInfo, setAlignInfo] = useState<CadAlignmentInfo | null>(data.deviation?.alignment ?? null);
   const [alignStats, setAlignStats] = useState<CadDeviationStats | null>(data.deviation?.stats ?? null);
   const [alignState, setAlignState] = useState<AlignState>({ kind: 'idle' });
-  // データム（点か基準穴。D は任意）と、次にクリックして拾うデータム・拾うもの・D の扱い・点の当て面の半径。
+  // データム（A〜D は点、H1・H2 は基準穴。D・穴は任意）と、次にクリックして拾うデータム・D の扱い・点の当て面の半径。
+  // 拾うもの（点・穴）は枠で決まる。
   const [datums, setDatums] = useState<Datums>({});
   const [datumPicking, setDatumPicking] = useState<DatumName | null>(null);
-  const [datumKind, setDatumKind] = useState<DatumKind>('point');
+  const datumKind = datumPicking && isHoleDatum(datumPicking) ? 'hole' : 'point';
   const [datumMode, setDatumMode] = useState<DatumMode>('priority');
   const [padRadius, setPadRadius] = useState(datumPadRadiusDefault);
   const curvature = useMemo(() => {
@@ -746,14 +747,11 @@ function CadViewerPanel({
   );
   // PMI（3D ラベル・パネルの一覧）のクリック: 指す要素を選び、そこへ寄せる（選べない種類の要素も、寄せる範囲には含める）。
   // データムを拾うモードでクリックした点・穴を、拾っているデータムにする（穴のピンの直径は初めは穴の径）。
+  // 点の枠（A〜D）には点、穴の枠（H1・H2）には穴だけを入れる（シーンは枠に合わせて拾うものを変えている）。
   const datumPickRef = useRef<(p: DatumScenePick) => void>(() => {});
   datumPickRef.current = (p: DatumScenePick) => {
     const name = datumPicking;
-    if (!name) return;
-    if (p.type === 'hole') {
-      const others = DATUM_NAMES.filter((n) => n !== name && datums[n]?.type === 'hole').length;
-      if (others >= MAX_DATUM_HOLES) return;
-    }
+    if (!name || (p.type === 'hole') !== isHoleDatum(name)) return;
     setDatums((cur) => ({ ...cur, [name]: p.type === 'hole' ? { ...p, pin: Number(p.diameter.toFixed(3)) } : p }));
     setDatumPicking(null);
   };
@@ -845,8 +843,8 @@ function CadViewerPanel({
     sceneRef.current?.setDatumPicking(datumPickingOn ? datumKind : null);
   }, [datumPickingOn, datumKind, status]);
   useEffect(() => {
-    sceneRef.current?.setDatumOverlay(alignOpen ? DATUM_NAMES.flatMap((n) => (datums[n] ? [{ name: n, datum: datums[n]! }] : [])) : []);
-  }, [alignOpen, datums, status]);
+    sceneRef.current?.setDatumOverlay(alignOpen ? DATUM_NAMES.flatMap((n) => (datums[n] ? [{ name: datumLabel(n, t), datum: datums[n]! }] : [])) : []);
+  }, [alignOpen, datums, status, t]);
   useEffect(() => {
     sceneRef.current?.setOriginAxesVisible(originAxes);
   }, [originAxes, status]);
@@ -941,7 +939,7 @@ function CadViewerPanel({
     void topologyVersion;
     if (pivotPicking) return t('cad.hintPivot');
     if (basePickingOn) return t('cad.hintZebraBase');
-    if (datumPickingOn && datumPicking) return t(datumKind === 'hole' ? 'cad.hintDatumHole' : 'cad.hintDatumPoint', { name: datumPicking });
+    if (datumPickingOn && datumPicking) return t(datumKind === 'hole' ? 'cad.hintDatumHole' : 'cad.hintDatumPoint', { name: datumLabel(datumPicking, t) });
     let item = hover ? describe(itemsOf(data, hover.kind)[hover.id], label(hover), effectiveColor(data, colors, hover), t, data, localAxis) : '';
     if (hover?.kind === 'hole') {
       const n = sceneRef.current?.holeGroupOf(hover.id).length ?? holeGroup(data, hover.id, holeAngle, holeSizeTol).length;
@@ -1868,8 +1866,6 @@ function CadViewerPanel({
                   onReferenceOpacity={setReferenceOpacity}
                   datumPicking={datumPickingOn ? datumPicking : null}
                   onPickDatum={pickDatum}
-                  datumKind={datumKind}
-                  onDatumKind={setDatumKind}
                   onPin={setPin}
                   datumMode={datumMode}
                   onDatumMode={setDatumMode}

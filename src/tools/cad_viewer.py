@@ -1080,7 +1080,7 @@ async def align_viewer_model(payload: dict[str, Any]) -> dict[str, Any]:
     """ビューアの「位置合わせ」（app.py の action_callback "cad_viewer_align"）。
 
     payload: {save_id, method: "bestfit" | "faces" | "datum" | "reset" | "initial", faces: [面の ID],
-    datums: {A: {type: "point", point: [x, y, z]} か {type: "hole", center, axis, diameter, pin}, B, C, D（任意）},
+    datums: {A〜D（D は任意）: {type: "point", point: [x, y, z]}, H1・H2（基準穴、任意）: {type: "hole", center, axis, diameter, pin}},
     datum_mode: "priority" | "average", pad_radius: 点のデータムの当て面の半径（0 以下で自動）, dof: {A, B, C}, tolerance}。
 
     Returns:
@@ -1099,7 +1099,9 @@ async def align_viewer_model(payload: dict[str, Any]) -> dict[str, Any]:
     faces = _face_ids(payload.get("faces"), n_faces)
     raw_datums = payload.get("datums") if isinstance(payload.get("datums"), dict) else {}
     # 中身（点・穴の数値）は src/cad/align.py の _parse_datum が確かめる。
-    datums = {k: raw_datums[k] for k in ("A", "B", "C", "D") if isinstance(raw_datums.get(k), dict)}
+    from ..cad.align import DATUM_NAMES
+
+    datums = {k: raw_datums[k] for k in DATUM_NAMES if isinstance(raw_datums.get(k), dict)}
     raw_dof = payload.get("dof") if isinstance(payload.get("dof"), dict) else {}
     dof = {k: int(v) for k, v in raw_dof.items() if k in ("A", "B", "C") and isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 6}
     datum_mode = "average" if payload.get("datum_mode") == "average" else "priority"

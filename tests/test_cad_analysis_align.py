@@ -237,14 +237,37 @@ def test_two_datum_holes_with_round_pins_recover_the_position() -> None:
     target = A.TargetMesh(_moved(T_true, pos), tris, [[0, len(tris)]])
     datums = {
         "A": _pt(T_true, [55, 80, 0]),
-        "B": _hole(T_true, (30, 40), 10.0, 10.0),  # 隙間なしのピン: 穴の中心をピンの軸に合わせる
-        "C": _hole(T_true, (80, 40), 10.0, 10.0),
+        # 基準穴は A〜D とは別の枠（H1・H2）。隙間なしのピン: 穴の中心をピンの軸に合わせる。
+        "H1": _hole(T_true, (30, 40), 10.0, 10.0),
+        "H2": _hole(T_true, (80, 40), 10.0, 10.0),
     }
     T, info = A.align(target, index, "datum", start=np.eye(4), datums=datums, pad_radius=15)
-    assert info["datums"]["B"]["type"] == "hole" and info["datums"]["B"]["offset"] < 1e-3
+    assert info["datums"]["H1"]["type"] == "hole" and info["datums"]["H1"]["offset"] < 1e-3
+    assert info["datums"]["H1"]["dof"] == 2 and info["datums"]["H2"]["dof"] == 1
     assert np.allclose(T, T_true, atol=1e-3)
-    with pytest.raises(A.AlignError):  # 基準穴は 2 本まで
+    # 点の枠（A〜D）に穴、穴の枠に点は入れられない（基準穴は H1・H2 の 2 本まで）。
+    with pytest.raises(A.AlignError, match="must be a point"):
         A.align(target, index, "datum", start=np.eye(4), datums={**datums, "D": _hole(T_true, (30, 40), 10.0, 10.0)})
+    with pytest.raises(A.AlignError, match="must be a datum hole"):
+        A.align(target, index, "datum", start=np.eye(4), datums={**datums, "H2": _pt(T_true, [55, 80, 0])})
+
+
+def test_priority_order_puts_the_datum_holes_before_b_and_c() -> None:
+    # 当て面 A と穴 2 本で 6 自由度が決まるので、後の段の B（板の縁からずれた点）は効かない。
+    pos, tris = _plate_with_holes([(30, 40), (80, 40)])
+    index = A.SurfaceIndex(pos, tris)
+    T_true = np.eye(4)
+    T_true[:3, 3] = [0.7, 0.4, 0]
+    target = A.TargetMesh(_moved(T_true, pos), tris, [[0, len(tris)]])
+    datums = {
+        "A": _pt(T_true, [55, 80, 0]),
+        "B": _pt(T_true, [20, 85, 0]),
+        "H1": _hole(T_true, (30, 40), 10.0, 10.0),
+        "H2": _hole(T_true, (80, 40), 10.0, 10.0),
+    }
+    T, info = A.align(target, index, "datum", start=np.eye(4), datums=datums, pad_radius=10)
+    assert list(info["datums"]) == ["A", "H1", "H2", "B"]
+    assert np.allclose(T, T_true, atol=1e-3)
 
 
 def test_datum_hole_pin_with_clearance_stops_at_the_pin() -> None:
@@ -253,16 +276,16 @@ def test_datum_hole_pin_with_clearance_stops_at_the_pin() -> None:
     T_true = np.eye(4)
     T_true[:3, 3] = [2.0, 0, 0]  # 穴が x に 2 ずれた位置から
     target = A.TargetMesh(_moved(T_true, pos), tris, [[0, len(tris)]])
-    datums = {"A": _pt(T_true, [60, 80, 0]), "B": _hole(T_true, (30, 40), 10.0, 9.0)}  # 直径 9 のピン: 隙間 0.5
+    datums = {"A": _pt(T_true, [60, 80, 0]), "H1": _hole(T_true, (30, 40), 10.0, 9.0)}  # 直径 9 のピン: 隙間 0.5
     T, info = A.align(target, index, "datum", start=np.eye(4), datums=datums, pad_radius=15)
-    hole = info["datums"]["B"]
+    hole = info["datums"]["H1"]
     assert hole["clearance"] == pytest.approx(0.5) and hole["offset"] == pytest.approx(0.5, abs=0.02)
     # 隙間の中なら動かさない。
     T_true[:3, 3] = [0.3, 0, 0]
     target = A.TargetMesh(_moved(T_true, pos), tris, [[0, len(tris)]])
-    datums = {"A": _pt(T_true, [60, 80, 0]), "B": _hole(T_true, (30, 40), 10.0, 9.0)}
+    datums = {"A": _pt(T_true, [60, 80, 0]), "H1": _hole(T_true, (30, 40), 10.0, 9.0)}
     T, info = A.align(target, index, "datum", start=np.eye(4), datums=datums, pad_radius=15)
-    assert info["datums"]["B"]["offset"] == pytest.approx(0.3, abs=0.02)
+    assert info["datums"]["H1"]["offset"] == pytest.approx(0.3, abs=0.02)
 
 
 def test_datum_d_by_priority_or_average() -> None:

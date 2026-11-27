@@ -2,11 +2,13 @@
  * 3D ビューアの表面の解析（ゼブラ・曲率・偏差）の設定の行と凡例、基準モデルとの位置合わせの行。
  * 状態は CadViewerBar.tsx の CadViewerPanel が持ち、ここは表示と入力だけ（three.js は使わない）。
  */
-import { useI18n } from '../../i18n';
+import { useI18n, type Translate } from '../../i18n';
 import type { MessageKey } from '../../i18n/messages';
 import {
   DATUM_NAMES,
-  MAX_DATUM_HOLES,
+  HOLE_DATUM_NAMES,
+  POINT_DATUM_NAMES,
+  isHoleDatum,
   featureSizeLabel,
   type CadAlignmentInfo,
   type CadDeviationStats,
@@ -19,9 +21,13 @@ import { NumberInput } from './NumberInput';
 import { CURVATURE_KINDS, MAX_ZEBRA_STRIPES, legendGradient, type CurvatureKind, type ScalarScheme, type ZebraLight, type ZebraOrientation, type ZebraSettings } from './surfaceShading';
 
 export type AnalysisMode = 'normal' | 'zebra' | 'curvature' | 'deviation';
-export type DatumKind = 'point' | 'hole';
-/** データムごとに決める自由度（src/cad/align.py の DATUM_DOF と同じ 3-2-1。D は優先なら最後の段に低い重みで加わる）。 */
-const DATUM_DOF: Record<Exclude<DatumName, 'D'>, number> = { A: 3, B: 2, C: 1 };
+/** データムごとに決める自由度（src/cad/align.py の DATUM_DOF と同じ。D は優先なら最後の段に低い重みで加わる）。 */
+const DATUM_DOF: Record<Exclude<DatumName, 'D'>, number> = { A: 3, H1: 2, H2: 1, B: 2, C: 1 };
+
+/** データムの表示名（H1・H2 は「穴1」「穴2」）。 */
+export function datumLabel(n: DatumName, t: Translate): string {
+  return isHoleDatum(n) ? t('cad.align.holeName', { n: n.slice(1) }) : n;
+}
 const DATUM_MODES: DatumMode[] = ['priority', 'average'];
 const ZEBRA_LIGHTS: ZebraLight[] = ['dome', 'cylinder', 'plane'];
 const ZEBRA_ORIENTATIONS: ZebraOrientation[] = ['horizontal', 'vertical'];
@@ -353,11 +359,9 @@ interface AlignProps {
   onReferenceVisible: (v: boolean) => void;
   referenceOpacity: number;
   onReferenceOpacity: (v: number) => void;
-  /** 次にクリックして拾うデータム（null なら拾っていない）と、拾うもの（点・基準穴）。 */
+  /** 次にクリックして拾うデータム（null なら拾っていない）。A〜D は点、H1・H2 は基準穴を拾う。 */
   datumPicking: DatumName | null;
   onPickDatum: (name: DatumName | null) => void;
-  datumKind: DatumKind;
-  onDatumKind: (k: DatumKind) => void;
   onPin: (name: DatumName, diameter: number) => void;
   datumMode: DatumMode;
   onDatumMode: (m: DatumMode) => void;
@@ -373,7 +377,6 @@ export function AlignRow(p: AlignProps) {
   const { t } = useI18n();
   const busy = p.state.kind === 'busy';
   const hasDatum = DATUM_NAMES.some((n) => p.datums[n]);
-  const holeCount = DATUM_NAMES.filter((n) => p.datums[n]?.type === 'hole').length;
   const reports = p.info?.method === 'datum' ? (p.info.datums ?? {}) : {};
   const pct = (v: number | undefined) => (typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : '—');
   const s = p.stats;
@@ -423,62 +426,62 @@ export function AlignRow(p: AlignProps) {
       {p.canAlign && (
         <div className="cad-viewer-measure-bar cad-viewer-analysis-bar" role="group" aria-label={t('cad.align.datums')}>
           <span className="cad-viewer-chip cad-viewer-ref-name">{t('cad.align.datums')}</span>
-          {(['point', 'hole'] as DatumKind[]).map((k) => (
-            <button
-              key={k}
-              type="button"
-              className={`cad-viewer-chip${p.datumKind === k ? ' active' : ''}`}
-              aria-pressed={p.datumKind === k}
-              disabled={busy}
-              title={t(`cad.align.kind.${k}Title` as MessageKey, { max: MAX_DATUM_HOLES })}
-              onClick={() => p.onDatumKind(k)}
-            >
-              {t(`cad.align.kind.${k}` as MessageKey)}
-            </button>
-          ))}
-          <span className="cad-viewer-sep" />
-          {DATUM_NAMES.map((n) => {
+          {POINT_DATUM_NAMES.map((n) => {
             const d = p.datums[n];
             const picking = p.datumPicking === n;
-            // 基準穴は 2 本まで（今の穴を拾い直すのはよい）。
-            const holeFull = p.datumKind === 'hole' && holeCount >= MAX_DATUM_HOLES && d?.type !== 'hole';
             return (
               <button
                 key={n}
                 type="button"
                 className={`cad-viewer-chip${d ? ' active' : ''}${picking ? ' picking' : ''}`}
                 aria-pressed={picking}
-                disabled={busy || (holeFull && !picking)}
-                title={
-                  n === 'D'
-                    ? t('cad.align.setDatumDTitle')
-                    : t('cad.align.setDatumTitle', { name: n, dof: DATUM_DOF[n] })
-                }
+                disabled={busy}
+                title={n === 'D' ? t('cad.align.setDatumDTitle') : t('cad.align.setDatumTitle', { name: n, dof: DATUM_DOF[n] })}
                 onClick={() => p.onPickDatum(picking ? null : n)}
               >
                 {n === 'D' ? t('cad.align.datumD') : n}
-                {d ? (d.type === 'hole' ? ` ${d.profile ? featureSizeLabel(d.profile) : `⌀${fmtNum(d.diameter)}`}` : ' ●') : ''}
+                {d ? ' ●' : ''}
               </button>
             );
           })}
-          {DATUM_NAMES.map((n) => {
+          <span className="cad-viewer-sep" />
+          <span className="cad-viewer-chip cad-viewer-ref-name" title={t('cad.align.holesTitle')}>
+            {t('cad.align.holes')}
+          </span>
+          {HOLE_DATUM_NAMES.map((n) => {
             const d = p.datums[n];
-            return d?.type === 'hole' ? (
-              <NumberField
-                key={`pin-${n}`}
-                label={t('cad.align.pin', { name: n })}
-                title={
-                  d.profile
-                    ? t('cad.align.pinProfileTitle', { name: n, shape: featureSizeLabel(d.profile), hole: fmtNum(d.diameter) })
-                    : t('cad.align.pinTitle', { name: n, hole: fmtNum(d.diameter) })
-                }
-                value={d.pin}
-                step={0.01}
-                min={0.001}
-                onChange={(v) => p.onPin(n, v)}
-              />
-            ) : null;
+            const picking = p.datumPicking === n;
+            return (
+              <span key={n} className="cad-viewer-datum-hole">
+                <button
+                  type="button"
+                  className={`cad-viewer-chip${d ? ' active' : ''}${picking ? ' picking' : ''}`}
+                  aria-pressed={picking}
+                  disabled={busy}
+                  title={t('cad.align.setHoleTitle', { name: datumLabel(n, t), dof: DATUM_DOF[n] })}
+                  onClick={() => p.onPickDatum(picking ? null : n)}
+                >
+                  {datumLabel(n, t)}
+                  {d?.type === 'hole' ? ` ${d.profile ? featureSizeLabel(d.profile) : `⌀${fmtNum(d.diameter)}`}` : ''}
+                </button>
+                {d?.type === 'hole' && (
+                  <NumberField
+                    label={t('cad.align.pin')}
+                    title={
+                      d.profile
+                        ? t('cad.align.pinProfileTitle', { name: datumLabel(n, t), shape: featureSizeLabel(d.profile), hole: fmtNum(d.diameter) })
+                        : t('cad.align.pinTitle', { name: datumLabel(n, t), hole: fmtNum(d.diameter) })
+                    }
+                    value={d.pin}
+                    step={0.01}
+                    min={0.001}
+                    onChange={(v) => p.onPin(n, v)}
+                  />
+                )}
+              </span>
+            );
           })}
+          <span className="cad-viewer-sep" />
           <NumberField label={t('cad.align.padRadius')} title={t('cad.align.padRadiusTitle')} value={p.padRadius} step={0.5} min={0.001} onChange={p.onPadRadius} />
           <span className="cad-viewer-sep" />
           {DATUM_MODES.map((m) => (
@@ -523,14 +526,15 @@ export function AlignRow(p: AlignProps) {
             {DATUM_NAMES.map((n) => {
               const r = reports[n];
               if (r?.type !== 'hole') return null;
+              const name = datumLabel(n, t);
               return (
                 <span key={`hole-${n}`} className={r.pin_larger_than_hole ? 'cad-viewer-align-error' : undefined}>
                   {r.pin_larger_than_hole
-                    ? t('cad.align.holePinLarger', { name: n, pin: fmtNum(r.pin ?? NaN), hole: fmtNum(r.diameter ?? NaN) })
+                    ? t('cad.align.holePinLarger', { name, pin: fmtNum(r.pin ?? NaN), hole: fmtNum(r.diameter ?? NaN) })
                     : r.shape
-                    ? t('cad.align.holeResultProfile', { name: n, offset: fmtNum(r.offset ?? NaN), clearance: fmtNum(r.clearance ?? NaN) })
+                    ? t('cad.align.holeResultProfile', { name, offset: fmtNum(r.offset ?? NaN), clearance: fmtNum(r.clearance ?? NaN) })
                     : t('cad.align.holeResult', {
-                        name: n,
+                        name,
                         offset: fmtNum(r.offset ?? NaN),
                         clearance: fmtNum(r.clearance ?? NaN),
                         nominal: fmtNum(r.nominal_diameter ?? NaN)

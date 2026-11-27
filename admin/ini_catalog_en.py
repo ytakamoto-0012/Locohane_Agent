@@ -1593,7 +1593,7 @@ DESCRIPTIONS: dict[str, str] = {
         'It can be changed in the viewer ("Pad R"; this is the value when it opens).'
     ),
     'cad_viewer.datum_d_weight': (
-        'The weight of datum D when datums are used by "Priority" (A, B and C count as 1). D joins the last stage (C) and does not move the directions fixed by A and B.\n'
+        'The weight of datum D when datums are used by "Priority" (the other datums count as 1). D joins the last stage and does not move the directions fixed by earlier stages (A, the datum holes, B).\n'
         'Not used by "Average" (all datums get the same weight).'
     ),
     'plan.allow_badge_unlock': (

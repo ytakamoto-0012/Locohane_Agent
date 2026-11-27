@@ -9,17 +9,17 @@ p について、T·p から基準モデルの表面までの符号付き距離�
 - ``bestfit``: 対象全体を基準へ最小二乗で合わせる（point-to-plane の ICP。初めの位置は今の位置と、重心と主軸を
   合わせた 4 通りを試して、合いの良いものから詰める）。
 - ``faces``: 選んだ面だけを使って合わせる（部分ベストフィット）。今の位置から詰める。
-- ``datum``: 基準（データム）A・B・C（と任意の D）で合わせる。データムはモデルの上の点か基準穴:
+- ``datum``: 点のデータム A・B・C（と任意の D）と、それとは別の枠の基準穴 H1・H2（任意）で合わせる:
 
-  - 点: クリックした点の周り（半径 ``pad_radius``、つながった表面だけ）を基準の表面に当てる（検査具の当て面）。
-  - 基準穴（1 本か 2 本）: 穴（対象の穴の中心・軸・実測の径）に、基準モデルの同じ穴の軸に立てた丸ピン（直径を指定）を
+  - 点（A〜D）: クリックした点の周り（半径 ``pad_radius``、つながった表面だけ）を基準の表面に当てる（検査具の当て面）。
+  - 基準穴（H1・H2。1 本か 2 本）: 穴（対象の穴の中心・軸・実測の径）に、基準モデルの同じ穴の軸に立てた丸ピン（直径を指定）を
     通す。穴とピンの隙間（(穴径 − ピン径) / 2）の中では動けて、はみ出す分だけ穴の縁をピンに当てて押し戻す。
     四角・角 R の四角・正多角形の穴（``profile``。src/cad/profile_holes.py）は、穴の形をピンの半径だけ内側へ縮めた形の中で
     ピンが動けるとし（隙間は向きごとに違う）、基準モデルの穴の中心はその形を壁の点に当てはめて求める。
 
-  ``datum_mode="priority"``（既定）は A・B・C の順に、各段で決める自由度の数を A=3・B=2・C=1（3-2-1 の位置決め）に
-  限って合わせ、先の段が決めた向きは後の段で動かさない（優先度付きの最小二乗）。D は最後の段に低い重み
-  （``d_weight``）で加わり、A・B・C を優先したまま残りの向きにだけ効く。``"average"`` は全データムを同じ重みで
+  ``datum_mode="priority"``（既定）は A → H1 → H2 → B → C の順に、各段で決める自由度の数を A=3・H1=2・H2=1・B=2・C=1
+  に限って合わせ（穴が無ければ 3-2-1 の位置決め）、先の段が決めた向きは後の段で動かさない（優先度付きの最小二乗）。
+  D は最後の段に低い重み（``d_weight``）で加わり、先の段を優先したまま残りの向きにだけ効く。``"average"`` は全データムを同じ重みで
   1 段（6 自由度）の最小二乗にする（平均化）。
 - ``none``: 合わせない（今の位置のまま偏差だけ求める）。
 
@@ -49,17 +49,23 @@ ICP_POINTS = 20_000
 COARSE_POINTS = 2_000
 COARSE_ITERATIONS = 15
 ICP_ITERATIONS = 60
-# データムの既定の自由度（3-2-1）。D は優先のときは最後の段に加わり、平均のときは全データムで 6。
-DATUM_NAMES = ("A", "B", "C", "D")
-DATUM_DOF = {"A": 3, "B": 2, "C": 1}
+# データムの名前。A〜D は点のデータム（D は任意）、H1・H2 は基準穴（A〜D とは別の枠。2 本まで）。
+POINT_DATUMS = ("A", "B", "C", "D")
+HOLE_DATUMS = ("H1", "H2")
+DATUM_NAMES = POINT_DATUMS + HOLE_DATUMS
+# 優先のときの段の順と、各段で決める自由度の既定。当て面 A（3）→ 丸ピン H1（2）→ 2 本目のピン H2（1）→ B（2）→ C（1）。
+# 先の段で 6 自由度が決まれば後の段は効かない（A と穴 2 本で決まれば B・C は使わない。穴が無ければ A・B・C の 3-2-1）。
+# D は最後の段に低い重みで加わり、平均のときは全データムで 6。
+PRIORITY_ORDER = ("A", "H1", "H2", "B", "C")
+DATUM_DOF = {"A": 3, "H1": 2, "H2": 1, "B": 2, "C": 1}
 DATUM_MODES = ("priority", "average")
 # 優先のときの D の重み（A・B・C を 1 として）。
 DATUM_D_WEIGHT = 0.3
 # 点のデータムの当て面の半径の既定（基準の対角線に対する割合。pad_radius が 0 以下のとき）。
 PAD_RADIUS_RATIO = 1 / 50
 PAD_POINTS = 4000
-# 基準穴は 2 本まで。
-MAX_HOLES = 2
+# 基準穴は 2 本まで（H1・H2）。
+MAX_HOLES = len(HOLE_DATUMS)
 METHODS = ("none", "bestfit", "faces", "datum")
 
 
@@ -785,7 +791,12 @@ def _parse_datum(name: str, raw: Any, target: TargetMesh, index: SurfaceIndex, p
     def num(v: Any) -> float | None:
         return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0 else None
 
-    if raw.get("type") == "hole":
+    is_hole = raw.get("type") == "hole"
+    if is_hole != (name in HOLE_DATUMS):
+        raise AlignError(
+            f"datum {name} must be a datum hole" if name in HOLE_DATUMS else f"datum {name} must be a point (datum holes go to H1 / H2)"
+        )
+    if is_hole:
         c, a, dia, pin = vec(raw.get("center")), vec(raw.get("axis")), num(raw.get("diameter")), num(raw.get("pin"))
         if c is None or a is None or dia is None or float(np.linalg.norm(a)) < 1e-12:
             raise AlignError(f"datum hole {name} needs the center, axis and diameter of the hole")
@@ -878,8 +889,8 @@ def align(
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """位置合わせの変換（対象 → 基準）と、その記録（方法・合いの指標・使った面・データム）。
 
-    datums は {"A": {"type": "point", "point": [x, y, z]} か {"type": "hole", "center", "axis", "diameter", "pin"}, ...}
-    （対象の座標。D は任意）。
+    datums は {"A": {"type": "point", "point": [x, y, z]}, ..., "H1": {"type": "hole", "center", "axis", "diameter", "pin"}, ...}
+    （対象の座標。A〜D は点、H1・H2 は基準穴。D・穴は任意）。
     """
     rng = np.random.default_rng(seed)
     T0 = np.eye(4) if start is None else start
@@ -916,9 +927,7 @@ def align(
         parsed = {n: _parse_datum(n, (datums or {}).get(n), target, index, pad_radius, rng) for n in DATUM_NAMES}
         given = {n: d for n, d in parsed.items() if d is not None}
         if not given:
-            raise AlignError("pick the datums (A, and B / C / D if needed) before aligning by datums")
-        if sum(isinstance(d, HoleDatum) for d in given.values()) > MAX_HOLES:
-            raise AlignError(f"use at most {MAX_HOLES} datum holes")
+            raise AlignError("pick the datums (A, and B / C / D or the datum holes H1 / H2 if needed) before aligning by datums")
         stages: list[tuple[list[tuple[PadDatum | HoleDatum, float]], int]] = []
         used: dict[str, Any] = {}
         if datum_mode == "average":
@@ -926,7 +935,7 @@ def align(
             for n in given:
                 used[n] = {"weight": 1.0}
         else:
-            for n in ("A", "B", "C"):
+            for n in PRIORITY_ORDER:
                 cap = int(max(0, min(6, dof.get(n, 0))))
                 if n in given and cap > 0:
                     stages.append(([(given[n], 1.0)], cap))
@@ -934,7 +943,7 @@ def align(
             if "D" in given:
                 w = float(max(d_weight, 0.0))
                 if stages:
-                    # D は最後の段に低い重みで加わる（A・B・C で決めた向きは動かさない）。
+                    # D は最後の段に低い重みで加わる（先の段で決めた向きは動かさない）。
                     members, cap = stages[-1]
                     stages[-1] = ([*members, (given["D"], w)], cap)
                 else:

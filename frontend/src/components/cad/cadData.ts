@@ -408,13 +408,19 @@ export interface CadDatumReport {
   shape?: CadHoleShape;
 }
 
-/** データムの名前（D は任意）。 */
-export type DatumName = 'A' | 'B' | 'C' | 'D';
-export const DATUM_NAMES: DatumName[] = ['A', 'B', 'C', 'D'];
-/** D の扱い: priority は A・B・C を優先し D を低い重みで、average は全データムを同じ重みで合わせる。 */
+/**
+ * データムの名前。A〜D（D は任意）は点のデータム、H1・H2 は基準穴（A〜D とは別の枠。2 本まで）。
+ * 優先の順は A → H1 → H2 → B → C（D は最後の段に低い重み。src/cad/align.py の PRIORITY_ORDER）。
+ */
+export type PointDatumName = 'A' | 'B' | 'C' | 'D';
+export type HoleDatumName = 'H1' | 'H2';
+export type DatumName = PointDatumName | HoleDatumName;
+export const POINT_DATUM_NAMES: PointDatumName[] = ['A', 'B', 'C', 'D'];
+export const HOLE_DATUM_NAMES: HoleDatumName[] = ['H1', 'H2'];
+export const DATUM_NAMES: DatumName[] = [...POINT_DATUM_NAMES, ...HOLE_DATUM_NAMES];
+export const isHoleDatum = (n: DatumName): n is HoleDatumName => n === 'H1' || n === 'H2';
+/** D の扱い: priority は A・B・C（と基準穴）を優先し D を低い重みで、average は全データムを同じ重みで合わせる。 */
 export type DatumMode = 'priority' | 'average';
-/** 基準穴は 2 本まで（src/cad/align.py の MAX_HOLES）。 */
-export const MAX_DATUM_HOLES = 2;
 
 /**
  * シーンで拾ったデータム（モデルの座標）。穴は中心・軸・実測の径。丸以外の穴（四角・角 R の四角・正多角形）は

@@ -291,12 +291,12 @@ def test_datum_holes_of_rect_and_hexagon_recover_the_position() -> None:
     datums = {
         "A": _point(T_true, [50, 85, 0]),
         # ピンが穴の一番狭い向き（10・対辺）と同じ太さ: 四角は長い向きにだけ動け、六角は中心に決まる。
-        "B": _profile_hole(T_true, (75, 40), [1, 0, 0], hp, 8 * math.sqrt(3)),
-        "C": _profile_hole(T_true, (30, 40), [1, 0, 0], rp, 10.0),
+        "H1": _profile_hole(T_true, (75, 40), [1, 0, 0], hp, 8 * math.sqrt(3)),
+        "H2": _profile_hole(T_true, (30, 40), [1, 0, 0], rp, 10.0),
     }
     T, info = A.align(target, index, "datum", start=np.eye(4), datums=datums, pad_radius=15)
-    assert info["datums"]["B"]["shape"] == "polygon" and info["datums"]["B"]["offset"] < 1e-2
-    assert info["datums"]["C"]["shape"] == "rectangle" and info["datums"]["C"]["diameter"] == pytest.approx(10)
+    assert info["datums"]["H1"]["shape"] == "polygon" and info["datums"]["H1"]["offset"] < 1e-2
+    assert info["datums"]["H2"]["shape"] == "rectangle" and info["datums"]["H2"]["diameter"] == pytest.approx(10)
     assert np.allclose(T, T_true, atol=5e-3)
 
 
@@ -308,7 +308,7 @@ def test_rect_datum_hole_leaves_the_long_direction_free() -> None:
     T_true[:3, 3] = [3.0, 2.0, 0]  # 長い向き（x）に 3、短い向き（y）に 2 ずれた位置から
     target = A.TargetMesh(A.apply(np.linalg.inv(T_true), pos), tris, [[0, len(tris)]])
     rp = {"shape": "rectangle", "width": 20, "height": 10}
-    datums = {"A": _point(T_true, [60, 80, 0]), "B": _profile_hole(T_true, (30, 40), [1, 0, 0], rp, 6.0)}
+    datums = {"A": _point(T_true, [60, 80, 0]), "H1": _profile_hole(T_true, (30, 40), [1, 0, 0], rp, 6.0)}
     T, info = A.align(target, index, "datum", start=np.eye(4), datums=datums, pad_radius=15)
     # ピン ⌀6 は四角 20×10 の中で x に ±7、y に ±2 動ける: 対象の穴（基準の座標で (27, 38)）は、y は縁（2）に当たる
     # ところまでで、x の 3 は隙間の中なので、どちらもそのまま。
@@ -318,10 +318,10 @@ def test_rect_datum_hole_leaves_the_long_direction_free() -> None:
     # 短い向きに 3 ずれていれば、縁がピンに当たる 2 まで押し戻す。
     T_true[:3, 3] = [3.0, 3.0, 0]
     target = A.TargetMesh(A.apply(np.linalg.inv(T_true), pos), tris, [[0, len(tris)]])
-    datums = {"A": _point(T_true, [60, 80, 0]), "B": _profile_hole(T_true, (30, 40), [1, 0, 0], rp, 6.0)}
+    datums = {"A": _point(T_true, [60, 80, 0]), "H1": _profile_hole(T_true, (30, 40), [1, 0, 0], rp, 6.0)}
     T, info = A.align(target, index, "datum", start=np.eye(4), datums=datums, pad_radius=15)
     moved = A.apply(T, A.apply(np.linalg.inv(T_true), np.array([[30.0, 40, 0]])))[0]
-    # A と B だけでは z まわりの回転が決まらないので、x は隙間（±7）の中にあることだけを見る。
+    # A と穴1 だけでは z まわりの回転が決まらないので、x は隙間（±7）の中にあることだけを見る。
     assert -7 < moved[0] - 30 < 0
     assert moved[1] - 40 == pytest.approx(-2.0, abs=0.05)
-    assert info["datums"]["B"]["clearance"] == pytest.approx(2.0)
+    assert info["datums"]["H1"]["clearance"] == pytest.approx(2.0)

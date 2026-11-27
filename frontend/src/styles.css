@@ -823,6 +823,13 @@
   outline-offset: 1px;
 }
 
+/* 基準穴の枠（穴のボタンとピンの直径の欄をひとまとまりにする）。 */
+.cad-viewer-datum-hole {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* 位置合わせのデータムの名前（CadScene.ts の DATUM_COLOR）。 */
 .cad-viewer-measure-label.cad-viewer-datum-label {
   color: #0b7285;
