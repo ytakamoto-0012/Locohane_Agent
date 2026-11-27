@@ -187,7 +187,10 @@ function describe(
     return parts.filter(Boolean).join('  ');
   }
   if (item.kind === 'hole') {
-    if (typeof item.diameter === 'number') parts.push(`${t('cad.info.diameter')}${fmt(item.diameter)}`);
+    // 閉じた形の穴の口は形と大きさ（□20×10 等）と、通し・止まり。
+    if (typeof item.shape === 'string') parts.push(featureSizeLabel(item as Parameters<typeof featureSizeLabel>[0]));
+    else if (typeof item.diameter === 'number') parts.push(`${t('cad.info.diameter')}${fmt(item.diameter)}`);
+    if (typeof item.through === 'boolean') parts.push(item.through ? t('cad.info.through') : t('cad.info.blind'));
     if (item.center) parts.push(xyz(toLocalPoint(axis, item.center)));
     if (item.normal) parts.push(`${t('cad.info.normal')} ${xyz(toLocalVector(axis, item.normal))}`);
     return parts.filter(Boolean).join('  ');

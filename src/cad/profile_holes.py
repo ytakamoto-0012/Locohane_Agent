@@ -95,6 +95,47 @@ def _recognize(
     return out
 
 
+def closed_shape_loops(
+    positions: np.ndarray, indices: np.ndarray, face_ranges: list[list[int]], faces: list[dict], hole_ids: set[str]
+) -> tuple[list[dict], list[dict]]:
+    """閉じた形（ソリッド・閉じたメッシュ）の、穴の口と外周のループ（src/cad/topology.py の穴・外周の一覧に足す）。
+
+    穴の口: 平らな面の内側の輪郭のうち、向こうの面が穴（hole_ids の feature を持つ面）の壁のもの（通し穴は両方の口）。
+    外周: 穴の口を持つ平らな面の外側の輪郭。どちらも {"points": (k,3) の順に並ぶ点, "face": 輪郭の面, "walls": 壁の面,
+    "feature": 穴の ID}（外周は walls・feature なし）。
+    """
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    idx = np.asarray(indices, dtype=np.int64).reshape(-1, 3)
+    if not len(idx) or not hole_ids or len(face_ranges) != len(faces):
+        return [], []
+    mesh = _Mesh(pos, idx, face_ranges)
+    holes: list[dict] = []
+    outers: list[dict] = []
+    for f in mesh.candidate_faces():
+        n = mesh.face_normal(f)
+        if not float(np.linalg.norm(n)) or not mesh.is_planar(f, n):
+            continue
+        loops = mesh.loops_of(f)
+        if len(loops) < 2:
+            continue
+        u, v = _plane_basis(n)
+        basis = np.stack([u, v], axis=1)
+        areas = [abs(_shoelace((mesh.points[vs] - mesh.points[loops[0][0][0]]) @ basis)) for vs, _ in loops]
+        outer = int(np.argmax(areas))
+        found = False
+        for i, (verts, others) in enumerate(loops):
+            if i == outer:
+                continue
+            walls = sorted({o for o in others if o >= 0 and o != f})
+            feats = {faces[w].get("feature") for w in walls} & hole_ids
+            if len(feats) == 1:
+                holes.append({"points": mesh.points[verts], "face": f, "walls": walls, "feature": feats.pop()})
+                found = True
+        if found:
+            outers.append({"points": mesh.points[loops[outer][0]], "face": f})
+    return holes, outers
+
+
 # ---------------------------------------------------------------------------
 # メッシュ（頂点をまとめ、面の縁・面のつながりを求める）
 # ---------------------------------------------------------------------------

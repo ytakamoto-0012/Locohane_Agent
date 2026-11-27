@@ -161,6 +161,48 @@ def test_closed_mesh_holes_of_every_shape_are_recognized(tmp_path) -> None:
     _check_plate_features(data["features"])
 
 
+def _check_closed_loops(data: dict) -> None:
+    from src.cad.topology import attach_topology
+
+    attach_topology(data, {})
+    holes, outers = data["holeList"], data["outerList"]
+    # 通し穴 4 本（丸・四角・角 R・六角）は表と裏の 2 つの口、止まり穴（四角 8×8）は 1 つ。
+    assert len(holes) == 9 and all(h["closedShape"] for h in holes)
+    by_feature: dict[str, list[dict]] = {}
+    for h in holes:
+        by_feature.setdefault(h["feature"], []).append(h)
+    feats = {f["id"]: f for f in data["features"]}
+    for fid, mouths in by_feature.items():
+        assert len(mouths) == (2 if feats[fid]["through"] else 1)
+    rect = next(h for h in holes if h.get("shape") == "rectangle" and h["width"] == pytest.approx(20))
+    assert rect["height"] == pytest.approx(10) and "diameter" not in rect and rect["through"] is True
+    assert abs(rect["normal"][2]) == pytest.approx(1)
+    assert next(h for h in holes if "shape" not in h)["diameter"] == pytest.approx(6, abs=1e-3)
+    # 外周は穴の口がある平らな面（板の表と裏）の外形 120×60。
+    assert len(outers) == 2 and all(o["perimeter"] == pytest.approx(360) for o in outers)
+
+
+def test_solid_hole_mouths_and_outer_borders_are_selectable_loops() -> None:
+    cq = pytest.importorskip("cadquery")
+    from src.cad.export_mesh import Options, shape_to_viewer_data
+
+    data = shape_to_viewer_data(_plate(cq).val(), Options(), {"kind": "code"})
+    _check_closed_loops(data)
+    # B-rep では口の縁のエッジが付く（四角の口は直線 4 本、外周は 4 本）。
+    rect = next(h for h in data["holeList"] if h.get("shape") == "rectangle" and h["width"] == pytest.approx(20))
+    assert len(rect["edges"]) == 4 and all(data["edgeList"][e]["geomType"] == "LINE" for e in rect["edges"])
+    assert all(len(o["edges"]) == 4 for o in data["outerList"])
+
+
+def test_closed_mesh_hole_mouths_and_outer_borders_are_selectable_loops(tmp_path) -> None:
+    cq = pytest.importorskip("cadquery")
+    from src.cad.mesh_data import stl_to_viewer_data
+
+    path = tmp_path / "plate.stl"
+    cq.exporters.export(_plate(cq), str(path), tolerance=0.01, angularTolerance=0.1)
+    _check_closed_loops(stl_to_viewer_data(path, max_triangles=1_000_000))
+
+
 def test_summary_groups_holes_by_shape_and_size() -> None:
     feats = [
         {"type": "hole", "diameter": 5.0, "depth": 10.0, "through": True},

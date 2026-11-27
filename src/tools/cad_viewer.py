@@ -33,6 +33,7 @@ from langchain_core.tools import tool
 from ..ask_relay import ask_turn
 from ..cad.formats import format_of, supported_extensions_text
 from ..cad.features import summarize_features
+from ..cad.profile_holes import profile_size_fields
 from ..cad.step_summary import summarize_step
 from ..cad.topology import TOPOLOGY_KEYS, to_local_point, to_local_vector
 from ..cad.mesh_data import FORMAT as VIEWER_FORMAT
@@ -389,8 +390,9 @@ async def show_cad_viewer(
         code: CadQuery code that makes the shape (see above). Leave empty when using file_path.
         select: Which kinds of elements the user may select: any of "face", "edge", "vertex",
             "part", "hole", "outer". Default: all kinds the model has ("part" only for an assembly with 2 or more
-            parts, "vertex" not for STL, "hole" only for an open surface or mesh with holes in it, "outer"
-            only for an open surface or mesh).
+            parts, "vertex" not for STL, "hole" only for a model with holes in it (open surfaces and meshes, or
+            hole mouths of solids and closed meshes), "outer" only for an open surface or mesh, or a solid / closed
+            mesh whose flat faces have hole mouths).
         compare_with: The previous version of the model to compare with (see above). Leave empty
             for no comparison.
         reference: The reference model for the deviation map and alignment (see above). Leave empty
@@ -1860,9 +1862,11 @@ def _holes_summary(data: dict) -> dict[str, Any]:
     geom = data.get("holes") or {}
     groups: dict[tuple, int] = {}
     for h in holes:
-        key = (round(float(h.get("diameter") or 0), 2), tuple(round(float(c), 2) + 0.0 for c in h.get("normal") or []))
+        # 閉じた形の穴の口（closedShape）は形と大きさ（profile_size_fields）でまとめる。
+        size = tuple(profile_size_fields(h).items()) if h.get("closedShape") else (("diameter", round(float(h.get("diameter") or 0), 2)),)
+        key = (size, tuple(round(float(c), 2) + 0.0 for c in h.get("normal") or []))
         groups[key] = groups.get(key, 0) + 1
-    rows = [{"diameter": d, "normal": list(n), "count": c} for (d, n), c in sorted(groups.items(), key=lambda kv: (-kv[1], kv[0][0]))[:12]]
+    rows = [{**dict(s), "normal": list(n), "count": c} for (s, n), c in sorted(groups.items(), key=lambda kv: (-kv[1], str(kv[0][0])))[:12]]
     out: dict[str, Any] = {
         "count": len(holes),
         "topology_tolerance": geom.get("tolerance"),
@@ -1873,7 +1877,11 @@ def _holes_summary(data: dict) -> dict[str, Any]:
             "(gaps up to topology_tolerance count as connected). Each hole (kind 'hole' in the selection) has center, normal "
             "(facing the same way as the surface; faces that are not sewn may disagree on which side is the front, so treat "
             "opposite normals as the same direction), diameter (mean), area, perimeter, the faces around it and, for B-rep, its border edges. "
-            "The outer boundaries (kind 'outer', one per connected group of faces) can be selected too and have the same fields."
+            "The outer boundaries (kind 'outer', one per connected group of faces) can be selected too and have the same fields. "
+            "For solids and closed meshes (closedShape: true) a hole is the rim of a hole mouth on a flat face (a through hole has "
+            "two, one per mouth) with its shape and size (round = diameter; rectangle / roundedRectangle = width x height "
+            "(cornerRadius); polygon = sides, acrossFlats), feature (the id under features) and through, and an outer boundary is "
+            "the outer border of a flat face that has hole mouths."
         ),
     }
     if geom.get("sewTolerance"):

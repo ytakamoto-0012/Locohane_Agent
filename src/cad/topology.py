@@ -177,13 +177,16 @@ def find_boundary_holes(data: dict[str, Any], tolerance: float, sew_tolerance: f
     out: dict[str, Any] = {"faceComponents": _renumber(comp).tolist()}
     normals = _vertex_normals(data, len(positions))
     out["faceAdjacency"] = tris.face_adjacency(tri_face, normals)
-    if not find_holes or not len(tris.a):
+    if not find_holes:
         return out
-    loops, open_chains = tris.loops()
     edges = data.get("edgeList") or []
     is_brep = (data.get("source") or {}).get("format") != "STL"
-
     tri_normals = _triangle_normals(positions, indices)
+    closed_holes, closed_outers = _closed_loops(data, positions, indices, tri_face, tri_normals, faces, edges)
+    if not len(tris.a) and not closed_holes and not closed_outers:
+        return out
+    loops, open_chains = tris.loops() if len(tris.a) else ([], 0)
+
     candidates: list[dict[str, Any]] = []
     gaps = 0
     for pts, loop_tris in loops:
@@ -195,7 +198,7 @@ def find_boundary_holes(data: dict[str, Any], tolerance: float, sew_tolerance: f
             gaps += 1
             continue
         candidates.append(info)
-    if not candidates and not open_chains and not gaps:
+    if not candidates and not open_chains and not gaps and not closed_holes and not closed_outers:
         return out
 
     face_boxes = _face_boxes(positions, indices, mesh.get("faceRanges") or [], len(faces))
@@ -205,6 +208,9 @@ def find_boundary_holes(data: dict[str, Any], tolerance: float, sew_tolerance: f
 
     if is_brep:
         _attach_brep_edges(holes + outers, faces, edges, data.get("edges") or {})
+    # 閉じた形の穴の口・外周（開いた形の穴・外周の後ろに並べる）。
+    holes += closed_holes
+    outers += closed_outers
 
     hole_items, hole_geometry = _loop_items(holes, "hole", faces)
     outer_items, outer_geometry = _loop_items(outers, "outer", faces)
@@ -757,6 +763,88 @@ def _face_components(n_faces: int, pairs: list[tuple[int, int]]) -> np.ndarray:
     for x, y in pairs:
         union(x, y)
     return np.array([find(i) for i in range(n_faces)], dtype=np.int64)
+
+
+def _closed_loops(
+    data: dict[str, Any],
+    positions: np.ndarray,
+    indices: np.ndarray,
+    tri_face: np.ndarray,
+    tri_normals: np.ndarray,
+    faces: list[dict],
+    edges: list[dict],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """閉じた形（ソリッド・閉じたメッシュ）の穴の口と外周のループ（src/cad/profile_holes.py の closed_shape_loops）を、
+    開いた形のループと同じ情報（_loop_info）にする。穴の口には穴の ID（feature）と形・大きさを足し、B-rep なら縁のエッジも付ける。"""
+    features = {f.get("id"): f for f in data.get("features") or [] if f.get("type") == "hole" and f.get("id")}
+    if not features:
+        return [], []
+    from .profile_holes import closed_shape_loops, profile_size_fields
+
+    face_ranges = (data.get("mesh") or {}).get("faceRanges") or []
+    raw_holes, raw_outers = closed_shape_loops(positions, indices, face_ranges, faces, set(features))
+    face_tris: dict[int, list[int]] = {}
+    for fid, (start, count) in enumerate(face_ranges):
+        face_tris[fid] = list(range(int(start), int(start) + int(count)))
+
+    def info_of(raw: dict) -> dict[str, Any] | None:
+        info = _loop_info(raw["points"], face_tris.get(raw["face"], []), tri_normals, tri_face)
+        if info is None:
+            return None
+        info["_faces"] = [raw["face"], *raw.get("walls", [])]
+        info["closedShape"] = True
+        return info
+
+    holes: list[dict[str, Any]] = []
+    for raw in raw_holes:
+        info = info_of(raw)
+        if info is None:
+            continue
+        feat = features[raw["feature"]]
+        info["feature"] = raw["feature"]
+        size = profile_size_fields(feat)
+        # 丸以外は縁の平均の径でなく、形の大きさを持つ（diameter は丸だけ）。
+        info.pop("diameter", None)
+        info.update(size)
+        if feat.get("inscribedDiameter") is not None:
+            info["inscribedDiameter"] = feat["inscribedDiameter"]
+        info["through"] = feat.get("through")
+        holes.append(info)
+    outers = [info for info in (info_of(raw) for raw in raw_outers) if info is not None]
+    if edges:
+        _attach_closed_edges(holes + outers, edges, data.get("edges") or {})
+    return holes, outers
+
+
+def _attach_closed_edges(loops: list[dict], edges: list[dict], edge_geom: dict[str, Any]) -> None:
+    """閉じた形のループに、その上を通るエッジ（ループの面に属し、エッジの真ん中の点がループの線の近くにあるもの）の ID を付ける。"""
+    seg = _decode(edge_geom.get("positions"), "f4", 3).astype(np.float64)
+    ranges = edge_geom.get("ranges") or []
+    by_face: dict[int, list[int]] = {}
+    for li, loop in enumerate(loops):
+        by_face.setdefault(loop["_faces"][0], []).append(li)
+    found: dict[int, list[int]] = {}
+    for eid, e in enumerate(edges):
+        if e.get("seam") or eid >= len(ranges):
+            continue
+        cand = [li for f in e.get("faces") or [] for li in by_face.get(int(f), [])]
+        start, count = ranges[eid]
+        if not cand or not count:
+            continue
+        pts = seg[int(start) * 2 : (int(start) + int(count)) * 2]
+        sample = (pts[len(pts) // 2 - 1] + pts[len(pts) // 2]) / 2 if len(pts) >= 2 else pts[0]
+        best: tuple[float, int] | None = None
+        for li in cand:
+            p = loops[li]["_points"]
+            d = np.roll(p, -1, axis=0) - p
+            t = np.clip(((sample - p) * d).sum(axis=1) / np.maximum((d * d).sum(axis=1), 1e-300), 0, 1)
+            dist = float(np.linalg.norm(p + d * t[:, None] - sample, axis=1).min())
+            if dist <= max(0.02 * loops[li]["_diag"], 1e-9) and (best is None or dist < best[0]):
+                best = (dist, li)
+        if best is not None:
+            found.setdefault(best[1], []).append(eid)
+    for li, ids in found.items():
+        loops[li]["_edges"] = sorted(ids)
 
 
 def _attach_brep_edges(holes: list[dict], faces: list[dict], edges: list[dict], edge_geom: dict[str, Any]) -> None:

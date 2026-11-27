@@ -2027,6 +2027,12 @@ and does not stop at the top or bottom; in exchange, the up direction is not kep
   direction). Faces whose gap is within the topology tolerance are surrounded by one outer boundary, so you can see whether they were judged connected.
   Selected ones are in the selection file as `kind: "outer"` with the same fields as holes (center, perimeter, faces around it, border edges for B-rep, etc.).
   In the viewer data they are `outerList` and `outers`.
+- **Holes and outer boundaries of solids and closed meshes**: closed shapes have no border edges, so the rims of the mouths of recognized holes (`features`,
+  see "Non-round holes and holes of closed meshes") are holes and the outer border of each flat face with hole mouths is an outer boundary, selectable in the
+  same "Hole" and "Outer boundary" modes (`closedShape: true`, listed after those of open shapes). A through hole has two mouths; where they overlap on
+  screen the nearer one is picked. Hole mouths carry shape and size (`diameter` for round, otherwise `shape`, `width`, `height`, ...), `feature` (the hole
+  ID) and `through`, and hovering shows e.g. "Hole □20×10 through". For B-rep, the edges on the mouth or border are attached (`edges`). Picking one as a
+  datum hole takes the hole with its shape.
 - **Sew**: in the "Hole" and "Outer boundary" modes, enter a sewing tolerance in "Sew ±" (default `[cad_viewer] sew_tolerance` = 0.5 mm) and press "Sew" to find
   holes, outer boundaries and face groups again with the matching above widened up to the sewing tolerance, only between borders of different faces (gaps between
   unsewn faces stop being holes or outer boundaries; holes and slits inside one face are kept even when smaller; loops left across several faces no wider than the

@@ -972,6 +972,10 @@ export class CadScene {
     const hole = this.data.holeList?.length ? this.pickAt(clientX, clientY, 'hole') : null;
     if (hole) {
       const info = this.data.holeList?.[hole.id];
+      // 閉じた形の穴の口（src/cad/topology.py の _closed_loops）は、その穴（features）の形で拾う。
+      const feat = typeof info?.feature === 'string' ? this.data.features?.find((f) => f.id === info.feature) : undefined;
+      const got = feat ? this.featureDatum(feat, asVec3(info?.center) ? new THREE.Vector3(...asVec3(info!.center)!) : null) : null;
+      if (got) return got;
       const c = asVec3(info?.center);
       const n = unit(asVec3(info?.normal) ?? [0, 0, 0]);
       const dia = typeof info?.diameter === 'number' ? info.diameter : null;
@@ -2030,13 +2034,15 @@ export class CadScene {
     const tol2 = PICK_PIXELS_LINE * PICK_PIXELS_LINE;
     let bestId = -1;
     let bestScore = Infinity;
+    let bestDepth = Infinity;
     ranges.forEach(([s, n], id) => {
       if (!n || !this.visible(kind, id)) return;
       // 手前の面に隠れている穴は当てない（穴の中を通る光線は奥の面に当たるので、穴の中心の方が手前になる）。
       const c = holes[id]?.center;
+      const depth = c ? new THREE.Vector3(c[0], c[1], c[2]).sub(this.camera.position).dot(forward) : Infinity;
       if (kind === 'hole' && c && meshDistance < Infinity) {
-        const depth = new THREE.Vector3(c[0], c[1], c[2]).sub(this.camera.position).dot(forward);
-        const size = typeof holes[id]?.diameter === 'number' ? (holes[id].diameter as number) : 0;
+        const h = holes[id];
+        const size = typeof h?.diameter === 'number' ? h.diameter : typeof h?.width === 'number' ? (h.width as number) : 0;
         if (depth > meshDistance + Math.max(this.radius * 0.004, size * 0.5)) return;
       }
       let inside = false;
@@ -2054,11 +2060,14 @@ export class CadScene {
       }
       if (kind === 'outer') inside = false;
       if (!inside && near > tol2) return;
-      // 中に入る穴は画面上で小さい順、線の近くだけの穴はその後（大きな値）。
+      // 中に入る穴は画面上で小さい順、線の近くだけの穴はその後（大きな値）。同じくらいの大きさなら手前のもの
+      // （閉じた形の通し穴は表と裏の口が重なって見える）。
       const score = inside ? Math.abs(area) / 2 : Number.MAX_VALUE;
-      if (bestId < 0 || score < bestScore) {
+      const same = Math.abs(score - bestScore) <= Math.abs(bestScore) * 0.01;
+      if (bestId < 0 || (score < bestScore && !same) || (same && depth < bestDepth)) {
         bestId = id;
         bestScore = score;
+        bestDepth = depth;
       }
     });
     return bestId >= 0 ? bestId : null;
