@@ -1375,7 +1375,8 @@ export class CadScene {
    */
   private datumPickAt(clientX: number, clientY: number): DatumScenePick | null {
     if (this.datumPicking === 'point') {
-      const p = this.pointAt(clientX, clientY);
+      // データムは ① の上の点（呼ぶ側が withPick(0) で ① を入れている）。pointAt は重ねた ②③④ の点も返すので使わない。
+      const p = this.basePointAt(clientX, clientY);
       return p ? { type: 'point', point: [p.x, p.y, p.z] } : null;
     }
     const hole = this.data.holeList?.length ? this.pickAt(clientX, clientY, 'hole') : null;
@@ -1398,7 +1399,7 @@ export class CadScene {
     for (const fid of [...(face0 ? [face0.id] : []), ...edgeFaces]) {
       const featId = this.data.faces[fid]?.feature;
       const feat = typeof featId === 'string' ? this.data.features?.find((f) => f.id === featId) : undefined;
-      const got = feat?.type === 'hole' ? this.featureDatum(feat, this.pointAt(clientX, clientY)) : null;
+      const got = feat?.type === 'hole' ? this.featureDatum(feat, this.basePointAt(clientX, clientY)) : null;
       if (got) return got;
     }
     if (edge) {
@@ -1412,7 +1413,7 @@ export class CadScene {
       const info = this.data.faces[face.id];
       const o = asVec3(info?.axisOrigin);
       const a = unit(asVec3(info?.axisDirection) ?? [0, 0, 0]);
-      const p = this.pointAt(clientX, clientY);
+      const p = this.basePointAt(clientX, clientY);
       if (info?.geomType === 'CYLINDER' && o && a && p && typeof info.radius === 'number') {
         const t = (p.x - o[0]) * a[0] + (p.y - o[1]) * a[1] + (p.z - o[2]) * a[2];
         return { type: 'hole', center: [o[0] + a[0] * t, o[1] + a[1] * t, o[2] + a[2] * t], axis: a, diameter: info.radius * 2 };

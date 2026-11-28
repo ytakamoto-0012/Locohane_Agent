@@ -185,6 +185,24 @@ def test_compare_reports_removed_volume_and_new_holes() -> None:
     assert any("no effect" in w for w in same["warnings"])
 
 
+def test_feature_changes_counts_groups_beyond_the_summary_cap() -> None:
+    """要約の groups の上限（SUMMARY_MAX_GROUPS）を超えるグループも、変わっていなければ増減に出さない。"""
+    pytest.importorskip("cadquery")
+    from src.cad.compare import _feature_changes
+    from src.cad.features import SUMMARY_MAX_GROUPS
+
+    # 直径の違う穴のグループを上限より多く作る。数の多い順で並ぶので、1 個ずつのグループは上限で切られる。
+    before = [{"type": "hole", "diameter": 1.0, "depth": 5.0, "through": True}] * 3
+    before += [{"type": "hole", "diameter": 2.0 + i, "depth": 5.0, "through": True} for i in range(SUMMARY_MAX_GROUPS + 3)]
+    after = before + [{"type": "hole", "diameter": 1.0, "depth": 5.0, "through": True}]
+    changes = _feature_changes(before, after)
+    assert changes["changed_groups"] == [{"type": "hole", "diameter": 1.0, "depth": 5.0, "through": True, "before": 3, "after": 4}]
+    # 上限の外のグループが 1 個増えたことも分かる。
+    tail = before[-1]
+    grown = _feature_changes(before, before + [tail])["changed_groups"]
+    assert grown == [{**tail, "before": 1, "after": 2}]
+
+
 # ---------------------------------------------------------------------------
 # STEP の PMI・属性（cadquery）
 # ---------------------------------------------------------------------------

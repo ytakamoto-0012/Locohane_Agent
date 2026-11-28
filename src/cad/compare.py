@@ -19,7 +19,7 @@ import numpy as np
 
 import cadquery as cq
 
-from .features import summarize_features
+from .features import feature_group_key
 from .formats import format_of
 from .mesh_data import FORMAT as VIEWER_FORMAT
 from .mesh_data import b64, rnd
@@ -164,8 +164,9 @@ def _diff_meshes(vol: dict[str, Any], max_triangles: int, diag: float, options: 
 
 def _feature_changes(before: list[dict], after: list[dict]) -> dict[str, Any]:
     """穴・ボスのグループごとの数の増減（変わったグループだけ）。"""
-    b = {_group_key(g): g["count"] for g in summarize_features(before)["groups"]}
-    a = {_group_key(g): g["count"] for g in summarize_features(after)["groups"]}
+    # 要約の groups は上限で切り詰めるので使わない（上限を超えた分が「0 個になった」と誤って数えられる）。
+    b = _group_counts(before)
+    a = _group_counts(after)
     changes = []
     for key in sorted(set(a) | set(b), key=str):
         if a.get(key, 0) != b.get(key, 0):
@@ -177,9 +178,13 @@ def _feature_changes(before: list[dict], after: list[dict]) -> dict[str, Any]:
     }
 
 
-def _group_key(g: dict) -> tuple:
-    """要約の 1 行（件数を除く項目）を、並びをそろえたキーにする。"""
-    return tuple((k, v) for k, v in g.items() if k != "count")
+def _group_counts(features: list[dict]) -> dict[tuple, int]:
+    """要約と同じまとめ方（feature_group_key）で、全グループの件数を数える。"""
+    counts: dict[tuple, int] = {}
+    for f in features:
+        key = feature_group_key(f)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def summary_of(diff: dict[str, Any]) -> dict[str, Any]:

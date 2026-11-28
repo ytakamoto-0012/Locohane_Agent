@@ -98,8 +98,9 @@ const BOX_MODES: { id: BoxMode; label: MessageKey; title: MessageKey }[] = [
 const MEASUREMENTS_MAX = 50;
 
 // 要素の情報のうち、点（位置）と向きの項目（比較モデルの要素を ① の座標にするとき変換する）。
-const INFO_POINT_KEYS = ['center', 'axisOrigin', 'circleCenter', 'start', 'end', 'point', 'location'];
-const INFO_VECTOR_KEYS = ['normal', 'axisDirection', 'direction'];
+// （円錐の apex・球の sphereCenter も計測の R に使うので変換する。動かさないと位置合わせ後の値が狂う。）
+const INFO_POINT_KEYS = ['center', 'axisOrigin', 'circleCenter', 'sphereCenter', 'apex', 'axisStart', 'axisEnd', 'start', 'end', 'point', 'location'];
+const INFO_VECTOR_KEYS = ['normal', 'axisDirection', 'direction', 'xDirection'];
 
 /** 要素の情報の点・向きを、4×4 の変換 T（行ごと）で動かした写し。 */
 function transformInfo(info: CadItemInfo, T: number[][]): CadItemInfo {
