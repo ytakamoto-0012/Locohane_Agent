@@ -145,12 +145,22 @@ export interface CadSceneCallbacks {
 }
 
 /** カラーマップの上でクリックした点（そのモデルの三角形の頂点と重心座標。値と位置は描くたびに今のものから求める）。 */
-interface ValueProbe {
+interface ProbePoint {
   model: number;
   a: number;
   b: number;
   c: number;
   w: THREE.Vector3;
+}
+
+/**
+ * 値の吹き出し。指すのは model の点。extra は同じ吹き出しに値を並べるほかのモデルの同じ場所の点（1 画面に重ねて
+ * いるときのリンク）。
+ */
+interface ValueProbe extends ProbePoint {
+  /** 一緒に足した吹き出しの番号（分けた画面でリンクして足すと、同じ場所のほかの画面の吹き出しと同じ番号）。 */
+  group: number;
+  extra: ProbePoint[];
   el: HTMLDivElement;
   line: SVGLineElement;
   dot: SVGCircleElement;
@@ -399,7 +409,9 @@ export class CadScene {
   // カラーマップ（曲率・偏差）の上をクリックした点の値の吹き出し（setValuePicking で拾う。値は描くたびに今の値から読み直す）。
   private valuePicking = false;
   private valueProbes: ValueProbe[] = [];
-  private valueFormat: (model: number, value: number) => string = (_m, v) => fmtLabel(v);
+  private valueLinked = false;
+  private valueGroupSeq = 0;
+  private valueFormat: (model: number, value: number, marked: boolean) => string = (_m, v) => fmtLabel(v);
   private readonly valueLayer: HTMLDivElement;
   private readonly valueSvg: SVGSVGElement;
 
@@ -1041,8 +1053,11 @@ export class CadScene {
     this.valuePicking = on;
   }
 
-  /** 吹き出しの文字の作り方（model は 0 = ①、1〜3 = ②③④）。変えるとすべての吹き出しを書き直す。 */
-  setValueFormat(format: (model: number, value: number) => string): void {
+  /**
+   * 吹き出しの文字の 1 行の作り方（model は 0 = ①、1〜3 = ②③④。marked はほかのモデルの値と並べるので ① にも番号を
+   * 付けてほしいとき）。変えるとすべての吹き出しを書き直す。
+   */
+  setValueFormat(format: (model: number, value: number, marked: boolean) => string): void {
     this.valueFormat = format;
     for (const p of this.valueProbes) p.text = '';
     this.requestRender();
@@ -1063,45 +1078,112 @@ export class CadScene {
     p.dot.remove();
   }
 
-  /** その位置の、値の付いた面の上の点を吹き出しにする（若い番号のモデルを優先）。足せたら true。 */
+  /**
+   * クリックしたモデルだけでなく、ほかのモデルの同じ場所の値も出すか。画面を分けているときはほかの画面にもそれぞれ
+   * 吹き出しを出し、1 画面に重ねているときは 1 つの吹き出しに見えているモデルの値を並べる。
+   * 同じ場所 = 同じ視線（どの画面もカメラは同じ）の上で、クリックした点（① の座標）にいちばん近い面の上の点。
+   */
+  setValueLinked(on: boolean): void {
+    this.valueLinked = on;
+  }
+
+  /** 今のモデル（withPick）の当たった三角形の上の点を、吹き出しの覚え方（頂点と重心座標）にする。値が無ければ null。 */
+  private probeHitOf(h: THREE.Intersection | null | undefined): { a: number; b: number; c: number; w: THREE.Vector3 } | null {
+    const values = this.surfaceDisplay.mode === 'scalar' ? this.scalarValues : null;
+    const p = this.meshPositions;
+    if (!h?.face || !values || !p || values.length * 3 !== p.length) return null;
+    const { a, b, c } = h.face;
+    const w = new THREE.Vector3();
+    const tri = new THREE.Triangle(
+      new THREE.Vector3().fromArray(p, a * 3),
+      new THREE.Vector3().fromArray(p, b * 3),
+      new THREE.Vector3().fromArray(p, c * 3)
+    );
+    if (!tri.getBarycoord(h.point, w)) w.set(1, 0, 0);
+    const v = w.x * values[a] + w.y * values[b] + w.z * values[c];
+    return Number.isFinite(v) ? { a, b, c, w } : null;
+  }
+
+  /** モデル m の、正規化座標 ndc の視線の上で、点 at（① の座標）にいちばん近い面の上の点（値が無ければ null）。 */
+  private probeHitNear(m: number, ndc: THREE.Vector2, at: THREE.Vector3): { a: number; b: number; c: number; w: THREE.Vector3 } | null {
+    const l = m > 0 ? this.comparisons[m - 1] : null;
+    if (m > 0 && !l) return null;
+    const local = l ? at.clone().applyMatrix4(new THREE.Matrix4().copy(l.transform).invert()) : at.clone();
+    return this.withPick(m, () => {
+      if (!this.mesh || !this.visibility.face) return null;
+      this.raycaster.setFromCamera(ndc, this.camera);
+      let best: THREE.Intersection | null = null;
+      let bestD = Infinity;
+      for (const h of this.raycaster.intersectObject(this.mesh, false)) {
+        if (h.faceIndex == null) continue;
+        const d = h.point.distanceTo(local);
+        if (d < bestD) {
+          bestD = d;
+          best = h;
+        }
+      }
+      return this.probeHitOf(best);
+    });
+  }
+
+  /** 吹き出しを 1 つ作って並べる（group は一緒に足した吹き出しの番号。クリックで同じ group をまとめて消す）。 */
+  private pushValueProbe(model: number, hit: { a: number; b: number; c: number; w: THREE.Vector3 }, group: number, extra: ProbePoint[] = []): void {
+    const el = document.createElement('div');
+    el.className = 'cad-viewer-value-label';
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('class', 'cad-viewer-value-leader');
+    const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    dot.setAttribute('class', 'cad-viewer-value-dot');
+    dot.setAttribute('r', '3');
+    const probe: ValueProbe = { model, ...hit, group, extra, el, line, dot, text: '' };
+    // 吹き出しのクリックでその吹き出し（リンクして足したものは同じ場所の吹き出しすべて）を消す（下の形の選択・回転にはしない）。
+    el.addEventListener('pointerdown', (e) => e.stopPropagation());
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const gone = this.valueProbes.filter((x) => x.group === probe.group);
+      for (const x of gone) this.removeProbeElements(x);
+      this.valueProbes = this.valueProbes.filter((x) => x.group !== probe.group);
+      this.callbacks.onValueLabelsChange?.(this.valueProbes.length);
+      this.requestRender();
+    });
+    this.valueSvg.append(line, dot);
+    this.valueLayer.appendChild(el);
+    this.valueProbes.push(probe);
+  }
+
+  /**
+   * その位置の、値の付いた面の上の点を吹き出しにする（若い番号のモデルを優先）。リンク（setValueLinked）していて画面を
+   * 分けているときは、ほかの画面のモデルにも同じ場所の吹き出しを足す。足せたら true。
+   */
   private addValueProbeAt(clientX: number, clientY: number): boolean {
     for (const k of this.pickModels(clientX, clientY)) {
-      const hit = this.withPick(k, () => {
+      const found = this.withPick(k, () => {
         this.pickAt(clientX, clientY, 'face');
-        const h = this.lastMeshHit;
-        if (!h?.face || this.scalarAtLastHit() === null || !this.meshPositions) return null;
-        const { a, b, c } = h.face;
-        const p = this.meshPositions;
-        const w = new THREE.Vector3();
-        const tri = new THREE.Triangle(
-          new THREE.Vector3().fromArray(p, a * 3),
-          new THREE.Vector3().fromArray(p, b * 3),
-          new THREE.Vector3().fromArray(p, c * 3)
-        );
-        if (!tri.getBarycoord(h.point, w)) w.set(1, 0, 0);
-        return { a, b, c, w };
+        const hit = this.probeHitOf(this.lastMeshHit);
+        return hit && this.lastMeshHit ? { hit, at: this.lastMeshHit.point.clone() } : null;
       });
-      if (!hit) continue;
-      const el = document.createElement('div');
-      el.className = 'cad-viewer-value-label';
-      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      line.setAttribute('class', 'cad-viewer-value-leader');
-      const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      dot.setAttribute('class', 'cad-viewer-value-dot');
-      dot.setAttribute('r', '3');
-      const probe: ValueProbe = { model: k, ...hit, el, line, dot, text: '' };
-      // 吹き出しのクリックでその吹き出しを消す（下の形の選択・回転にはしない）。
-      el.addEventListener('pointerdown', (e) => e.stopPropagation());
-      el.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this.removeProbeElements(probe);
-        this.valueProbes = this.valueProbes.filter((x) => x !== probe);
-        this.callbacks.onValueLabelsChange?.(this.valueProbes.length);
-        this.requestRender();
-      });
-      this.valueSvg.append(line, dot);
-      this.valueLayer.appendChild(el);
-      this.valueProbes.push(probe);
+      if (!found) continue;
+      const group = ++this.valueGroupSeq;
+      const at = this.toBase(k, found.at);
+      const ndc = this.valueLinked ? this.ndcAt(clientX, clientY, true) : null;
+      if (ndc && this.split === 'single') {
+        // 重ねているときは、見えているほかのモデルの同じ場所の値を同じ吹き出しに並べる。
+        const extra: ProbePoint[] = [];
+        for (const m of this.pickModels(clientX, clientY)) {
+          if (m === k) continue;
+          const hit = this.probeHitNear(m, ndc, at);
+          if (hit) extra.push({ model: m, ...hit });
+        }
+        this.pushValueProbe(k, found.hit, group, extra);
+      } else {
+        this.pushValueProbe(k, found.hit, group);
+        // 分けているときは、ほかの画面のモデルにもそれぞれ吹き出しを出す。
+        const others = ndc ? [...new Set(this.paneModels)].filter((m) => m !== k && m >= 0) : [];
+        for (const m of others) {
+          const hit = this.probeHitNear(m, ndc!, at);
+          if (hit) this.pushValueProbe(m, hit, group);
+        }
+      }
       this.callbacks.onValueLabelsChange?.(this.valueProbes.length);
       this.requestRender();
       return true;
@@ -1109,22 +1191,41 @@ export class CadScene {
     return false;
   }
 
-  /** 吹き出しの今の値と、指す点（① の座標）。値が無い（今その色を映していない）・モデルを隠しているときは null。 */
-  private probeState(p: ValueProbe): { value: number; at: THREE.Vector3 } | null {
-    // 分けた画面では、重ね表示を隠したモデルもその画面に映す（映す画面が無いことは probePane で見る）。
-    if (this.split === 'single' && !this.modelShown(p.model)) return null;
+  /** 点の今の値（値が無ければ null）。 */
+  private pointValue(p: ProbePoint): number | null {
     return this.withModel(p.model, () => {
       const values = this.surfaceDisplay.mode === 'scalar' ? this.scalarValues : null;
       const pos = this.meshPositions;
       if (!values || !pos || values.length * 3 !== pos.length) return null;
       const v = p.w.x * values[p.a] + p.w.y * values[p.b] + p.w.z * values[p.c];
-      if (!Number.isFinite(v)) return null;
-      const at = new THREE.Vector3()
+      return Number.isFinite(v) ? v : null;
+    });
+  }
+
+  /**
+   * 吹き出しの今の文字と、指す点（① の座標）。どの値も無い（今その色を映していない）・指すモデルを隠しているときは null。
+   * ほかのモデルの値（extra）は、そのモデルを隠していれば並べない。
+   */
+  private probeState(p: ValueProbe): { text: string; at: THREE.Vector3 } | null {
+    // 分けた画面では、重ね表示を隠したモデルもその画面に映す（映す画面が無いことは probePane で見る）。
+    if (this.split === 'single' && !this.modelShown(p.model)) return null;
+    const marked = p.extra.length > 0;
+    const lines: string[] = [];
+    for (const q of [p, ...p.extra].sort((x, y) => x.model - y.model)) {
+      if (q !== p && !this.modelShown(q.model)) continue;
+      const v = this.pointValue(q);
+      if (v !== null) lines.push(this.valueFormat(q.model, v, marked));
+    }
+    if (!lines.length) return null;
+    const at = this.withModel(p.model, () => {
+      const pos = this.meshPositions;
+      if (!pos) return null;
+      return new THREE.Vector3()
         .addScaledVector(new THREE.Vector3().fromArray(pos, p.a * 3), p.w.x)
         .addScaledVector(new THREE.Vector3().fromArray(pos, p.b * 3), p.w.y)
         .addScaledVector(new THREE.Vector3().fromArray(pos, p.c * 3), p.w.z);
-      return { value: v, at: this.toBase(p.model, at) };
     });
+    return at ? { text: lines.join('\n'), at: this.toBase(p.model, at) } : null;
   }
 
   /** 吹き出しを重ねる画面（分けていなければ全体、分けていればそのモデルを映す最初の画面。無ければ null）。 */
@@ -1152,7 +1253,7 @@ export class CadScene {
         p.dot.style.display = 'none';
         continue;
       }
-      const text = this.valueFormat(p.model, st.value);
+      const text = st.text;
       if (text !== p.text) {
         p.text = text;
         p.el.textContent = text;
@@ -1215,13 +1316,15 @@ export class CadScene {
       ctx.beginPath();
       ctx.arc(l.ax * k, l.ay * k, 3 * k, 0, Math.PI * 2);
       ctx.fill();
-      const tw = ctx.measureText(l.text).width + size * 0.8;
-      const th = size * 1.5;
+      const rows = l.text.split('\n');
+      const lh = size * 1.3;
+      const tw = Math.max(...rows.map((r) => ctx.measureText(r).width)) + size * 0.8;
+      const th = lh * rows.length + size * 0.2;
       ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
       ctx.fillRect(l.x * k, l.y * k - th, tw, th);
       ctx.strokeRect(l.x * k, l.y * k - th, tw, th);
       ctx.fillStyle = '#222';
-      ctx.fillText(l.text, l.x * k + size * 0.4, l.y * k - th / 2);
+      rows.forEach((r, i) => ctx.fillText(r, l.x * k + size * 0.4, l.y * k - th + size * 0.1 + lh * (i + 0.5)));
     }
     ctx.restore();
   }

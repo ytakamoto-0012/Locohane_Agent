@@ -628,6 +628,9 @@ function CadViewerPanel({
   // カラーマップ（曲率・偏差）の上のクリックで、その点の値の吹き出しを出すか（オフならふつうの選択）と、出している数。
   const [valuePins, setValuePins] = useState(true);
   const [valueLabelCount, setValueLabelCount] = useState(0);
+  // 比較モデルがあるとき、クリックした点と同じ場所のほかのモデルの値も出すか（分けた画面はそれぞれの画面に、重ねているときは
+  // 1 つの吹き出しにまとめて）。オフならクリックしたモデルの値だけ。
+  const [valueLinked, setValueLinked] = useState(false);
   // 比較モデルの ① への位置合わせ。偏差の値は位置を合わせ直すたびに backend から取り直す。
   const [alignOpen, setAlignOpen] = useState(false);
   // 比べるときはすべてを最初から見せる（① 緑・② 赤・③ 青・④ 黄。②③④ は半透明。色はサイドバーの「比較モデル」で変えられる）。
@@ -1024,16 +1027,20 @@ function CadViewerPanel({
     sceneRef.current?.setValuePicking(colormapOn && valuePins);
     if (!colormapOn) sceneRef.current?.clearValueLabels();
   }, [colormapOn, valuePins, status]);
+  const hasComparisonModel = usable.some(Boolean);
+  useEffect(() => {
+    sceneRef.current?.setValueLinked(hasComparisonModel && valueLinked);
+  }, [hasComparisonModel, valueLinked, status]);
   useEffect(() => {
     // 吹き出しの文字は、マウスを乗せたときの値の表示と同じ書き方にする（曲率は曲率半径も）。
-    sceneRef.current?.setValueFormat((model, v) => {
+    sceneRef.current?.setValueFormat((model, v, marked) => {
       const mark = MODEL_MARKS[model] ?? '';
       if (deviationOn) return t('cad.deviation.value', { mark, value: `${v > 0 ? '+' : ''}${fmtNum(v)}` }).trim();
       const text = t('cad.curvature.value', {
         value: fmtNum(v),
         radius: Math.abs(v) > 1e-9 && curvatureKind !== 'gauss' ? fmtNum(1 / Math.abs(v)) : '∞'
       });
-      return model > 0 ? `${mark} ${text}` : text;
+      return model > 0 || marked ? `${mark} ${text}` : text;
     });
   }, [deviationOn, curvatureKind, t, status]);
   useEffect(() => {
@@ -2082,6 +2089,9 @@ function CadViewerPanel({
                   valuePins={valuePins}
                   onValuePins={setValuePins}
                   valueLabelCount={valueLabelCount}
+                  valueLinkable={hasComparisonModel}
+                  valueLinked={valueLinked}
+                  onValueLinked={setValueLinked}
                   onClearValueLabels={() => sceneRef.current?.clearValueLabels()}
                 />
               </section>

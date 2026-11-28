@@ -1532,7 +1532,8 @@
   font-size: 12px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  /* 重ねているときのリンクは、モデルごとの値を 1 行ずつ並べる。 */
+  white-space: pre;
   cursor: pointer;
   pointer-events: auto;
 }

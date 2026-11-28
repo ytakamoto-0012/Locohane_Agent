@@ -101,6 +101,10 @@ interface SettingsProps {
   /** カラーマップの上のクリックで、その点の値の吹き出しを出すか。 */
   valuePins: boolean;
   onValuePins: (on: boolean) => void;
+  /** 比較モデルがあり、ほかのモデルの同じ場所の値も出す（リンク）を選べるか。 */
+  valueLinkable: boolean;
+  valueLinked: boolean;
+  onValueLinked: (on: boolean) => void;
   /** 出している値の吹き出しの数。 */
   valueLabelCount: number;
   onClearValueLabels: () => void;
@@ -325,6 +329,18 @@ export function AnalysisSettingsRow(p: SettingsProps) {
       >
         {t('cad.valueLabel.pin')}
       </button>
+      {p.valueLinkable && (
+        <button
+          type="button"
+          className={`cad-viewer-chip${p.valueLinked ? ' active' : ''}`}
+          aria-pressed={p.valueLinked}
+          disabled={!p.valuePins}
+          title={t('cad.valueLabel.linkTitle')}
+          onClick={() => p.onValueLinked(!p.valueLinked)}
+        >
+          {t('cad.valueLabel.link')}
+        </button>
+      )}
       <button type="button" className="cad-viewer-chip" disabled={!p.valueLabelCount} title={t('cad.valueLabel.clearTitle')} onClick={p.onClearValueLabels}>
         {t('cad.valueLabel.clear', { count: p.valueLabelCount })}
       </button>
