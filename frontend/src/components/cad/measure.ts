@@ -105,7 +105,7 @@ export function onSphere(p: Vec3, c: Vec3, r: number): Vec3 | null {
 }
 
 const vecOut = (v: Vec3): number[] => v.map((x) => Math.round(x * 1e6) / 1e6);
-const ref = (s: CadSelection | null) => (s ? { kind: s.kind, id: s.id } : null);
+const ref = (s: CadSelection | null) => (s ? { kind: s.kind, id: s.id, ...(s.model ? { model: s.model } : {}) } : null);
 
 /**
  * 面・エッジの R と ⌀。円筒面・球面・円錐面（クリックした点の高さの半径）・トーラス面（管の半径 = 丸めの R）・
@@ -404,7 +404,7 @@ export function measure(
   tool: MeasureTool,
   picks: MeasurePick[],
   info: (s: CadSelection | null) => CadItemInfo | undefined,
-  edgePoints: (id: number) => Vec3[] = () => []
+  edgePoints: (id: number, model: number) => Vec3[] = () => []
 ): MeasureOutcome {
   switch (tool) {
     case 'radius':
@@ -413,7 +413,7 @@ export function measure(
       return measureDistance(picks[0], picks[1]);
     case 'pointEdge': {
       const edge = picks[1].item;
-      return measurePointEdge(info(edge), picks[0], picks[1], edge?.kind === 'edge' ? edgePoints(edge.id) : []);
+      return measurePointEdge(info(edge), picks[0], picks[1], edge?.kind === 'edge' ? edgePoints(edge.id, edge.model ?? 0) : []);
     }
     case 'planes':
       return measurePlanes(info(picks[0].item), info(picks[1].item), picks[0], picks[1]);

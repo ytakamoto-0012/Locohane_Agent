@@ -97,6 +97,28 @@ const BOX_MODES: { id: BoxMode; label: MessageKey; title: MessageKey }[] = [
 // 覚えておく計測の数の上限（古いものから消す。src/tools/cad_viewer.py の _MEASUREMENTS_MAX と同じ）。
 const MEASUREMENTS_MAX = 50;
 
+// 要素の情報のうち、点（位置）と向きの項目（比較モデルの要素を ① の座標にするとき変換する）。
+const INFO_POINT_KEYS = ['center', 'axisOrigin', 'circleCenter', 'start', 'end', 'point', 'location'];
+const INFO_VECTOR_KEYS = ['normal', 'axisDirection', 'direction'];
+
+/** 要素の情報の点・向きを、4×4 の変換 T（行ごと）で動かした写し。 */
+function transformInfo(info: CadItemInfo, T: number[][]): CadItemInfo {
+  const out: Record<string, unknown> = { ...info };
+  const apply = (v: unknown, w: number): number[] | null => {
+    if (!Array.isArray(v) || v.length !== 3 || !v.every((x) => typeof x === 'number')) return null;
+    return [0, 1, 2].map((r) => T[r][0] * v[0] + T[r][1] * v[1] + T[r][2] * v[2] + T[r][3] * w);
+  };
+  for (const k of INFO_POINT_KEYS) {
+    const p = apply(out[k], 1);
+    if (p) out[k] = p;
+  }
+  for (const k of INFO_VECTOR_KEYS) {
+    const p = apply(out[k], 0);
+    if (p) out[k] = p;
+  }
+  return out as unknown as CadItemInfo;
+}
+
 /** 計測の一覧に出す説明（ツールチップ。距離は各軸の成分も。ローカル座標系のときはその軸の成分）。 */
 function measureTitle(m: CadMeasurement, t: (k: MessageKey) => string, axis: CadLocalAxis | null): string {
   const parts = [`${t(`cad.measure.tool.${m.tool}` as MessageKey)}  ${m.draw.label}`];
@@ -525,6 +547,8 @@ function CadViewerPanel({
   const sceneRef = useRef<CadScene | null>(null);
   const [mode, setMode] = useState<CadKind>(initialKind && kinds.includes(initialKind) ? initialKind : kinds[0]);
   const [selection, setSelection] = useState<CadSelection[]>([]);
+  // ① の要素だけの選択（サイドバーの色・部品ツリー等、① にしか無い機能で使う）。
+  const baseSelection = useMemo(() => selection.filter((s) => !s.model), [selection]);
   const [hover, setHover] = useState<CadSelection | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [expanded, setExpanded] = useState(false);
@@ -617,6 +641,8 @@ function CadViewerPanel({
   const [alignState, setAlignState] = useState<AlignState>({ kind: 'idle' });
   // 位置を合わせ直す比較モデル（data.comparisons の位置、-1 = すべて）。
   const [alignTarget, setAlignTarget] = useState(-1);
+  // 比較モデルごとの、そのモデル → ① の変換（位置を合わせ直すと変わる）。②③④ の要素の情報を ① の座標にして計測に使う。
+  const compareTransforms = useRef<(number[][] | null)[]>(comparisons.map((c) => (isMatrix4(c.deviation?.transform) ? c.deviation!.transform! : null)));
   // 画面分割と、画面ごとに映すモデル（0 = ①、1〜3 = ②③④）。初めは ①②③④ の順。
   const shownModels = useMemo(() => [0, ...usable.flatMap((u, i) => (u ? [i + 1] : []))], [usable]);
   const splitLayouts = useMemo(() => splitLayoutsFor(shownModels.length), [shownModels]);
@@ -739,13 +765,26 @@ function CadViewerPanel({
     return () => window.removeEventListener('keydown', onKey);
   }, [history]);
 
+  /** 要素が属するモデルのデータ（② ③ ④ の要素は model を持つ）。 */
+  const dataOf = useCallback(
+    (s: CadSelection): CadData => (s.model ? ((comparisons[s.model - 1] as unknown as CadData | undefined) ?? data) : data),
+    [comparisons, data]
+  );
   const label = useCallback(
     (s: CadSelection) => {
-      const base = `${t(KIND_LABEL[s.kind])} #${s.id}`;
-      const name = s.kind === 'part' ? data.parts?.[s.id]?.name : undefined;
+      const base = `${s.model ? `${MODEL_MARKS[s.model]} ` : ''}${t(KIND_LABEL[s.kind])} #${s.id}`;
+      const name = s.kind === 'part' ? dataOf(s).parts?.[s.id]?.name : undefined;
       return name ? `${base} ${name}` : base;
     },
-    [t, data]
+    [t, dataOf]
+  );
+  /** 要素の説明（ツールチップ・下の行）。②③④ の要素はそのモデルのデータで、色の変更・ローカル座標系は ① だけ。 */
+  const describeItem = useCallback(
+    (s: CadSelection) =>
+      s.model
+        ? describe(itemsOf(dataOf(s), s.kind)[s.id], label(s), null, t, dataOf(s), null)
+        : describe(itemsOf(data, s.kind)[s.id], label(s), effectiveColor(data, colors, s), t, data, localAxis),
+    [dataOf, label, t, data, colors, localAxis]
   );
   const toggle = useCallback((item: CadSelection) => {
     setSelection((cur) => (cur.some((s) => sameSelection(s, item)) ? cur.filter((s) => !sameSelection(s, item)) : [...cur, item]));
@@ -754,26 +793,26 @@ function CadViewerPanel({
   const pickGroup = useCallback((items: CadSelection[]) => {
     if (!items.length) return;
     setSelection((cur) => {
-      const have = new Set(cur.map((s) => selectionKey(s.kind, s.id)));
-      if (items.every((i) => have.has(selectionKey(i.kind, i.id)))) {
-        const drop = new Set(items.map((i) => selectionKey(i.kind, i.id)));
-        return cur.filter((s) => !drop.has(selectionKey(s.kind, s.id)));
+      const have = new Set(cur.map((s) => selectionKey(s.kind, s.id, s.model)));
+      if (items.every((i) => have.has(selectionKey(i.kind, i.id, i.model)))) {
+        const drop = new Set(items.map((i) => selectionKey(i.kind, i.id, i.model)));
+        return cur.filter((s) => !drop.has(selectionKey(s.kind, s.id, s.model)));
       }
-      return [...cur, ...items.filter((i) => !have.has(selectionKey(i.kind, i.id)))];
+      return [...cur, ...items.filter((i) => !have.has(selectionKey(i.kind, i.id, i.model)))];
     });
   }, []);
   const boxPick = useCallback((items: CadSelection[], remove: boolean) => {
     // 枠で囲んだ要素・今の選択はどちらも数万件になりうるので、集合で引く（配列どうしを探すと 2 乗の時間がかかる）。
     setSelection((cur) => {
       if (remove) {
-        const drop = new Set(items.map((i) => selectionKey(i.kind, i.id)));
-        const kept = cur.filter((s) => !drop.has(selectionKey(s.kind, s.id)));
+        const drop = new Set(items.map((i) => selectionKey(i.kind, i.id, i.model)));
+        const kept = cur.filter((s) => !drop.has(selectionKey(s.kind, s.id, s.model)));
         return kept.length === cur.length ? cur : kept;
       }
-      const have = new Set(cur.map((s) => selectionKey(s.kind, s.id)));
+      const have = new Set(cur.map((s) => selectionKey(s.kind, s.id, s.model)));
       const added: CadSelection[] = [];
       for (const i of items) {
-        const key = selectionKey(i.kind, i.id);
+        const key = selectionKey(i.kind, i.id, i.model);
         if (have.has(key)) continue;
         have.add(key);
         added.push(i);
@@ -782,7 +821,16 @@ function CadViewerPanel({
     });
   }, []);
 
-  const infoOf = useCallback((s: CadSelection | null) => (s ? itemsOf(data, s.kind)[s.id] : undefined), [data]);
+  // 計測に使う要素の情報。②③④ の要素は点・向きをそのモデル → ① の変換で ① の座標にする（計測は ① の座標で行う）。
+  const infoOf = useCallback(
+    (s: CadSelection | null) => {
+      if (!s) return undefined;
+      const info = itemsOf(dataOf(s), s.kind)[s.id];
+      const T = s.model ? compareTransforms.current[s.model - 1] : null;
+      return info && T ? transformInfo(info, T) : info;
+    },
+    [dataOf]
+  );
   // 計測のモードでクリックした点・要素。要る数だけ集まったら測る（平面どうしは平面以外をその場で断る）。
   const measurePick = useCallback(
     (pick: MeasurePick) => {
@@ -799,7 +847,7 @@ function CadViewerPanel({
         return;
       }
       setPending([]);
-      const out = measure(tool, picks, infoOf, (id) => sceneRef.current?.edgePoints(id) ?? []);
+      const out = measure(tool, picks, infoOf, (id, model) => sceneRef.current?.edgePointsOf(model, id) ?? []);
       if ('error' in out) setMeasureError(out.error);
       else setMeasurements((list) => [...list, out.ok].slice(-MEASUREMENTS_MAX));
     },
@@ -958,15 +1006,9 @@ function CadViewerPanel({
   useEffect(() => {
     // 「面」のチェックを外したら ②③④ もワイヤー表示（それぞれの色の線）にし、「エッジ」の表示に合わせて折れ目の線も描く。
     comparisons.forEach((_, i) =>
-      sceneRef.current?.setComparisonOverlay(i, {
-        visible: compareVisible[i],
-        opacity: compareOpacity,
-        color: compareColors[i],
-        wire: !kindVisible.face,
-        edges: kindVisible.edge
-      })
+      sceneRef.current?.setComparisonOverlay(i, { visible: compareVisible[i], opacity: compareOpacity, color: compareColors[i] })
     );
-  }, [comparisons, compareVisible, compareOpacity, compareColors, kindVisible.face, kindVisible.edge, status]);
+  }, [comparisons, compareVisible, compareOpacity, compareColors, status]);
   useEffect(() => {
     sceneRef.current?.setDeviationDisplay(deviationOn ? { min: effDevRange.min, max: effDevRange.max, tolerance } : null);
     if (!deviationOn) setCompareHover(null);
@@ -1019,9 +1061,11 @@ function CadViewerPanel({
     if (pivotPicking) return t('cad.hintPivot');
     if (basePickingOn) return t('cad.hintZebraBase');
     if (datumPickingOn && datumPicking) return t(datumKind === 'hole' ? 'cad.hintDatumHole' : 'cad.hintDatumPoint', { name: datumLabel(datumPicking, t) });
-    let item = hover ? describe(itemsOf(data, hover.kind)[hover.id], label(hover), effectiveColor(data, colors, hover), t, data, localAxis) : '';
+    let item = hover ? describeItem(hover) : '';
     if (hover?.kind === 'hole') {
-      const n = sceneRef.current?.holeGroupOf(hover.id).length ?? holeGroup(data, hover.id, holeAngle, holeSizeTol).length;
+      const n = hover.model
+        ? holeGroup(dataOf(hover), hover.id, holeAngle, holeSizeTol).length
+        : (sceneRef.current?.holeGroupOf(hover.id).length ?? holeGroup(data, hover.id, holeAngle, holeSizeTol).length);
       item +=
         holeSizeTol === null
           ? `  ${t('cad.holeGroup', { count: n, deg: fmt(holeAngle) })}`
@@ -1056,7 +1100,7 @@ function CadViewerPanel({
       return item ? `${value}  ${item}` : value;
     }
     return item || t(boxMode === 'off' ? 'cad.hint' : 'cad.hintBox');
-  }, [hover, data, label, t, colors, boxMode, pivotPicking, basePickingOn, datumPickingOn, datumPicking, datumKind, measureTool, measureError, pending, localAxis, holeAngle, holeSizeTol, mode, topologyVersion, scalarHover, analysisMode, curvatureKind, compareHover, deviationOn]);
+  }, [hover, data, dataOf, describeItem, t, boxMode, pivotPicking, basePickingOn, datumPickingOn, datumPicking, datumKind, measureTool, measureError, pending, holeAngle, holeSizeTol, mode, topologyVersion, scalarHover, analysisMode, curvatureKind, compareHover, deviationOn]);
 
   const selectAll = () => {
     const ids = sceneRef.current?.selectableIds(mode) ?? [];
@@ -1071,6 +1115,8 @@ function CadViewerPanel({
     const colorSet = new Set<string>();
     const partSet = new Set<number>();
     for (const s of selection) {
+      // 同じ色・同じ部品は ① の要素で選ぶ。
+      if (s.model) continue;
       const c = attributeColor(data, colors, s);
       if (c) colorSet.add(c);
       const p = partOf(data, s);
@@ -1103,6 +1149,7 @@ function CadViewerPanel({
     void topologyVersion;
     const out = new Set<number>();
     for (const s of selection) {
+      if (s.model) continue;
       if (s.kind === 'face') out.add(s.id);
       else if (s.kind === 'hole' || s.kind === 'outer') {
         const fs = itemsOf(data, s.kind)[s.id]?.faces;
@@ -1180,6 +1227,8 @@ function CadViewerPanel({
     const parts = new Set(hiddenParts);
     const items = new Set(hiddenItems);
     for (const s of selection) {
+      // 隠せるのは ① の要素だけ（②③④ はサイドバーの「比較モデル」でモデルごとに隠す）。
+      if (s.model) continue;
       if (s.kind === 'part') parts.add(s.id);
       else items.add(selectionKey(s.kind, s.id));
     }
@@ -1199,8 +1248,8 @@ function CadViewerPanel({
   const leaveHiddenSpace = (shown: CadSelection[] = []) => {
     const keep = stashedSelection.current;
     stashedSelection.current = [];
-    const have = new Set(keep.map((s) => selectionKey(s.kind, s.id)));
-    setSelection([...keep, ...shown.filter((s) => !have.has(selectionKey(s.kind, s.id)))]);
+    const have = new Set(keep.map((s) => selectionKey(s.kind, s.id, s.model)));
+    setSelection([...keep, ...shown.filter((s) => !have.has(selectionKey(s.kind, s.id, s.model)))]);
     setHiddenSpace(false);
   };
   /**
@@ -1215,7 +1264,7 @@ function CadViewerPanel({
         parts.delete(s.id);
         return;
       }
-      items.delete(selectionKey(s.kind, s.id));
+      items.delete(selectionKey(s.kind, s.id, s.model));
       const p = partOf(data, s);
       if (p !== null) parts.delete(p);
       const info = itemsOf(data, s.kind)[s.id];
@@ -1345,7 +1394,7 @@ function CadViewerPanel({
     }
   };
   // 比較モデルの ① への位置合わせをやり直す（app.py の cad_viewer_align）。偏差の値は返ってきた ID で取りに行く。
-  const selectedFaceIds = useMemo(() => selection.filter((s) => s.kind === 'face').map((s) => s.id), [selection]);
+  const selectedFaceIds = useMemo(() => selection.filter((s) => s.kind === 'face' && !s.model).map((s) => s.id), [selection]);
   const alignModels = useMemo(
     () => comparisons.flatMap((c, i) => (usable[i] && c.deviation?.values ? [i] : [])),
     [comparisons, usable]
@@ -1383,7 +1432,10 @@ function CadViewerPanel({
         statsNext[x.model] = x.stats ?? null;
         sceneRef.current?.setComparisonValues(x.model, fetched[k]);
         const matrix = x.transform?.matrix;
-        if (isMatrix4(matrix)) sceneRef.current?.setComparisonOverlay(x.model, { matrix });
+        if (isMatrix4(matrix)) {
+          sceneRef.current?.setComparisonOverlay(x.model, { matrix });
+          compareTransforms.current[x.model] = matrix;
+        }
       });
       setDeviationValues(valuesNext);
       setAlignInfos(infosNext);
@@ -1441,9 +1493,9 @@ function CadViewerPanel({
           </button>
           {selection.map((s) => (
             <span
-              key={`${s.kind}-${s.id}`}
+              key={`${s.model ?? 0}-${s.kind}-${s.id}`}
               className="cad-viewer-tag"
-              title={describe(itemsOf(data, s.kind)[s.id], label(s), effectiveColor(data, colors, s), t, data, localAxis)}
+              title={describeItem(s)}
             >
               {label(s)}
               <button type="button" aria-label={t('cad.remove')} onClick={() => toggle(s)}>
@@ -1803,7 +1855,7 @@ function CadViewerPanel({
           <CadSidebar
             data={data}
             kinds={kinds}
-            selection={selection}
+            selection={baseSelection}
             selectionPanel={selectionPanel}
             kindVisible={kindVisible}
             onKindVisible={(k, v) => setKindVisible((cur) => ({ ...cur, [k]: v }))}

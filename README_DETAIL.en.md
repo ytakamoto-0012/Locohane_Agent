@@ -2178,10 +2178,15 @@ each other. Unlike `compare_with` (B-rep booleans with the previous version), it
   hidden; the edges are drawn), and the deviation under the mouse is shown like "② deviation +0.12".
 - **Split view**: "Split view" in the toolbar splits the view left / right into 2–4 panes, top / bottom into 2–4 panes, or into 2 × 2 panes (only layouts
   with no more panes than models are offered). The field at the top left of each pane chooses the model shown in it (① ② ③ ④; ①②③④ in order at first).
-  The view (rotation, pan, zoom, view buttons) is shared by all panes: dragging in any pane moves them all. In the panes showing ①, selection, box
-  selection and datum picking work. Measurement points (point distance, 3-point arc, the point of point-to-edge), the rotation center and the zebra base
-  point can also be picked on the surfaces of ② ③ ④ (when overlaid, on the nearest model; they are points on triangles, so the values are approximate "≈",
-  in ①'s coordinates; measurement texts go over the pane last clicked for measuring). Zebra and curvature are shown on ② ③ ④ with the same lights, range and colors as ① (curvature from each model's principal curvatures; "Auto" uses the values of all models). Compared models are drawn opaque in split panes. Drawing
+  The view (rotation, pan, zoom, view buttons) is shared by all panes: dragging in any pane moves them all. Like ①, faces, edges,
+  vertices, holes and outer boundaries (and parts) of ② ③ ④ can be selected by clicking and box selection, and measurements (R, distance, plane distance,
+  3-point arc; values in ①'s coordinates), the rotation center and the zebra base point can be picked on them. In a split pane the pane's model is used;
+  when overlaid, the lower-numbered model wins (① → ② → ③ → ④; if it has nothing there, the next model; box selection takes the first model with elements
+  in the box; hidden models are skipped). Tags and descriptions of selected elements carry the mark ②③④. Datum picking, hiding elements, color changes,
+  same color / part, connected faces and select all are for ① only. Measurement texts go over the pane last clicked for measuring.
+  How: ② ③ ④ use the same drawing, picking and highlighting code as ①, with the per-model state (`MODEL_FIELDS` in `CadScene`) swapped in by
+  `withModel`; picking runs in that model's coordinates (`withPick`: the group transform is removed and the camera is placed in that model's frame).
+  Selected elements carry `model` (1–3). Zebra and curvature are shown on ② ③ ④ with the same lights, range and colors as ① (curvature from each model's principal curvatures; "Auto" uses the values of all models). Compared models are drawn opaque in split panes. Drawing
   splits one canvas per pane (scissor) and separates the models by three.js layers (① = 0, ② ③ ④ = 1–3; `CadScene.setSplit`). ArcballControls gets
   the position within the pane where the pointer went down (`getCursorNDC` is replaced). Measurement texts and PMI labels are put over the first pane showing ①.
 - **Alignment**: `align` is `none` (default, keep the coordinates) or `bestfit` (best fit each of ② ③ ④ to ① when opening). In the viewer's "Align" (right
@@ -2229,6 +2234,10 @@ each other. Unlike `compare_with` (B-rep booleans with the previous version), it
   0.0002 × the diagonal; the chord error becomes deviation error) and kept as `baseSurface` in the viewer data (not sent to the browser). The deviation of a compared
   model is measured at the vertices of its display triangles (they lie on the shape; `base_chord_tolerance` in the result). With 1 million triangles: index 2.5 s, best fit
   2 s, deviation of all vertices about 3 s.
+- **Elements selected on ②③④**: `selected_count` in the result counts all models and `selected_by_kind` counts ①; when anything is selected on
+  ②③④, `selected_by_model` (`{"①": {...}, "②": {"face": 2}}`) is added. `selected` in the selection file lists the elements of ②③④ too, with `model`
+  (②③④); their data (center, normal etc.) is in that model's own coordinates and `to_base_transform` is the 4×4 matrix to ①'s coordinates. `items` of
+  measurements also carry `model` for elements of ②③④.
 - **Returned to the AI**: `comparison` in the result has the file of ① (`base`), the tolerance and `models` per compared model (`model` = ②③④, file,
   alignment [method, RMS, inlier ratio, translation, rotation angle, 4×4 transform = that model → ①], deviation statistics [area-weighted min, max,
   mean, σ, RMS, 95th percentile of |deviation|, area ratios within / outside / inside the tolerance; the tolerance is the viewer field's value], and the

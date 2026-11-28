@@ -11,6 +11,8 @@ export type CadLoopKind = 'hole' | 'outer';
 export interface CadSelection {
   kind: CadKind;
   id: number;
+  /** 比較モデルの要素なら 1〜3（② ③ ④）。① の要素は省く（0 と同じ）。 */
+  model?: number;
 }
 
 /** 面・エッジ・頂点・部品の情報（LLM へ返す内容と同じ。ビューアはホバー時の表示に一部を使う）。 */
@@ -74,8 +76,9 @@ export interface CadColorOverrides {
 }
 
 /** 選択を集合で引くときのキー（"種類:ID"）。 */
-export function selectionKey(kind: CadKind, id: number): string {
-  return `${kind}:${id}`;
+export function selectionKey(kind: CadKind, id: number, model?: number): string {
+  // 比較モデル（②③④）の要素は、モデルの番号を前に付けて ① の要素と区別する。
+  return model ? `${model}/${kind}:${id}` : `${kind}:${id}`;
 }
 
 /** 上書きの値。上書きが無ければ undefined（null は「色なし」の上書き）。 */
@@ -887,5 +890,5 @@ export function pmiTargets(item: CadPmiItem): CadSelection[] {
 }
 
 export function sameSelection(a: CadSelection, b: CadSelection): boolean {
-  return a.kind === b.kind && a.id === b.id;
+  return a.kind === b.kind && a.id === b.id && (a.model ?? 0) === (b.model ?? 0);
 }

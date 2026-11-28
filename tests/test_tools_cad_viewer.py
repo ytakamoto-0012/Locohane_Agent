@@ -1451,3 +1451,26 @@ async def test_compare_models_swap_with_the_second_model_is_not_a_close(env, tmp
     assert len(_viewer.shown) == 2 and "swapped ① and ②" in text
     assert _viewer.shown[1]["data"]["bbox"]["size"][0] == pytest.approx(40.4)
     assert len(_viewer.echoed) == 1
+
+
+@pytest.mark.asyncio
+async def test_compare_models_selection_on_the_compared_model(env, tmp_path) -> None:
+    # ② の上で選んだ要素は model 付きで受け取り、選択結果ファイルにそのモデルの情報と ① への変換を入れる。
+    pos, tris = _box_mesh(40, 20, 10)
+    nominal = _write_stl(tmp_path / "nominal.stl", pos[tris])
+    scan = _write_stl(tmp_path / "scan.stl", (pos * [1.01, 1, 1])[tris])
+    _viewer.response = {
+        "submitted": True,
+        "selected": [{"kind": "face", "id": 0}, {"kind": "face", "id": 1, "model": 1}, {"kind": "face", "id": 999, "model": 1}, {"kind": "face", "id": 0, "model": 3}],
+        "measurements": [{"type": "distance", "distance": 1.0, "points": [[0, 0, 0], [1, 0, 0]], "items": [{"kind": "face", "id": 1, "model": 1}, None]}],
+    }
+    out = json.loads(await _call(file_path=nominal, compare_models=[scan]))
+    assert out["selected_count"] == 2 and out["selected_by_kind"] == {"face": 1}
+    assert out["selected_by_model"] == {"①": {"face": 1}, "②": {"face": 1}}
+    assert out["measurements"][0]["items"][0] == {"model": "②", "kind": "face", "id": 1}
+    sel = json.loads(open(out["selection_file"], encoding="utf-8").read())
+    second = [s for s in sel["selected"] if s.get("model") == "②"]
+    assert len(second) == 1 and second[0]["id"] == 1 and len(second[0]["to_base_transform"]) == 4
+    assert "compare_note" in sel
+    # ② の要素だけでもボタンの種類は ① と ② の持つものすべて。
+    assert set(_viewer.shown[0]["select"]) >= {"face", "edge"}

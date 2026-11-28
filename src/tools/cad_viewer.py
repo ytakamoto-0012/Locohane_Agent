@@ -531,7 +531,12 @@ async def _show_cad_viewer(
 
     # 選ぶ種類のボタンは、モデルが持つ種類をすべて出す（AI が select で絞っても、利用者は切り替えられる）。
     # select は開いたときのモードと、AI が欲しい種類の目安に使う。
-    kinds = _available_kinds(data, None)
+    # 比較モデル（②③④）でも選べるので、それらが持つ種類も含める。
+    have = set(_available_kinds(data, None))
+    for entry in _comparison_entries(data):
+        if not entry.get("error"):
+            have |= set(_available_kinds(entry, None))
+    kinds = [k for k in _ALL_KINDS if k in have]
     if not kinds:
         return "Error: the model has no faces, edges or vertices to select."
     wanted = _available_kinds(data, select)
@@ -692,6 +697,7 @@ def _finish_answer_body(
         measurements,
         local_axis,
         comparison,
+        res.get("_compare_picked") or [],
     )
 
 
@@ -1638,13 +1644,34 @@ def _valid_selection(data: dict, kinds: list[str], selected: Any) -> list[tuple[
     seen: set[tuple[str, int]] = set()
     counts = {k: len(data.get(_LIST_KEYS[k]) or []) for k in kinds if k in _LIST_KEYS}
     for s in selected if isinstance(selected, list) else []:
-        if not isinstance(s, dict):
+        if not isinstance(s, dict) or s.get("model") not in (None, 0):
             continue
         kind, eid = s.get("kind"), s.get("id")
         if kind not in counts or not isinstance(eid, int) or isinstance(eid, bool):
             continue
         key = (kind, eid)
         if 0 <= eid < counts[kind] and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _valid_compare_selection(data: dict, kinds: list[str], selected: Any) -> list[tuple[int, str, int]]:
+    """ブラウザから来た選択のうち、比較モデル（model 1〜3 = ②③④）の要素の正しいものだけを (モデル, 種類, ID) で返す。"""
+    entries = _comparison_entries(data)
+    out: list[tuple[int, str, int]] = []
+    seen: set[tuple[int, str, int]] = set()
+    for s in selected if isinstance(selected, list) else []:
+        if not isinstance(s, dict):
+            continue
+        model, kind, eid = s.get("model"), s.get("kind"), s.get("id")
+        if not isinstance(model, int) or isinstance(model, bool) or not 1 <= model <= len(entries):
+            continue
+        entry = entries[model - 1]
+        if kind not in kinds or kind not in _LIST_KEYS or entry.get("error") or not isinstance(eid, int) or isinstance(eid, bool):
+            continue
+        key = (model, kind, eid)
+        if 0 <= eid < len(entry.get(_LIST_KEYS[kind]) or []) and key not in seen:
             seen.add(key)
             out.append(key)
     return out
@@ -1828,9 +1855,15 @@ def _measure_item(data: dict, v: Any) -> dict[str, Any] | None:
     """計測に使った要素の参照 {kind, id}（モデルに無い要素なら None）。"""
     if not isinstance(v, dict):
         return None
-    kind, eid = v.get("kind"), v.get("id")
+    kind, eid, model = v.get("kind"), v.get("id"), v.get("model")
     if kind not in _LIST_KEYS or isinstance(eid, bool) or not isinstance(eid, int):
         return None
+    if isinstance(model, int) and not isinstance(model, bool) and model > 0:
+        # 比較モデル（②③④）の要素。
+        entries = _comparison_entries(data)
+        entry = entries[model - 1] if model <= len(entries) else {}
+        ok = not entry.get("error") and 0 <= eid < len(entry.get(_LIST_KEYS[kind]) or [])
+        return {"model": _MARKS[model - 1], "kind": kind, "id": eid} if ok else None
     return {"kind": kind, "id": eid} if 0 <= eid < len(data.get(_LIST_KEYS[kind]) or []) else None
 
 
@@ -2009,7 +2042,8 @@ async def _ask_selection(
                 try:
                     answer = _echo_text(
                         data,
-                        _valid_selection(data, kinds, res.get("selected")),
+                        _valid_selection(data, kinds, res.get("selected"))
+                        + [(k, i) for _m, k, i in _valid_compare_selection(data, kinds, res.get("selected"))],
                         _valid_colors(data, res.get("colors")),
                         _valid_message(res.get("message")),
                         len(_attribute_changes(data, _valid_attributes(data, res.get("attributes")))),
@@ -2031,6 +2065,9 @@ async def _ask_selection(
         return "Error: the viewer returned an answer in an unexpected form. The selection was lost."
     # 閉じた（submitted: false）ときも返す（色・表示の変更を自動で保存するため。選択は使わない）。
     try:
+        if res.get("submitted", True):
+            # 比較モデル（②③④）の要素の選択は、① の選択と分けて res に入れて渡す（_format_result が使う）。
+            res = {**res, "_compare_picked": _valid_compare_selection(data, kinds, res.get("selected"))}
         return (
             res,
             _valid_selection(data, kinds, res.get("selected")) if res.get("submitted", True) else [],
@@ -2160,8 +2197,12 @@ def _write_selection(
     colors: list[dict[str, Any]],
     attr_changes: list[dict[str, Any]] | None = None,
     local_axis: dict[str, Any] | None = None,
+    compare_picked: list[tuple[int, str, int]] | None = None,
 ) -> Path:
-    """選んだ要素の詳しい情報（ジオメトリ全部）と色の変更を、そのセッションの `_tmp_` フォルダの JSON に書く。"""
+    """選んだ要素の詳しい情報（ジオメトリ全部）と色の変更を、そのセッションの `_tmp_` フォルダの JSON に書く。
+
+    比較モデル（②③④）の上で選んだ要素は "model" を付けて同じ "selected" に並べる（座標はそのモデル自身の座標）。
+    """
     path = _new_data_path(_resolve_exec_workdir(), prefix="cad_selection")
     body = {
         "model": _model_summary(data),
@@ -2170,6 +2211,19 @@ def _write_selection(
         "selected": [_with_local({"kind": kind, "id": eid, **data[_LIST_KEYS[kind]][eid]}, local_axis) for kind, eid in picked],
         "color_changes": colors,
     }
+    if compare_picked:
+        entries = _comparison_entries(data)
+        for m, kind, eid in compare_picked:
+            entry = entries[m - 1]
+            transform = (entry.get("deviation") or {}).get("transform")
+            body["selected"].append(
+                {"model": _MARKS[m - 1], "kind": kind, "id": eid, **entry[_LIST_KEYS[kind]][eid], "to_base_transform": transform}
+            )
+        body["compare_note"] = (
+            "Entries with 'model' (②③④) are elements of a compared model, with ids, points and directions in that model's own "
+            "coordinates (its own viewer data and file: comparison.models[].path). to_base_transform is the 4x4 matrix that maps "
+            "them to the coordinates of ① (the base model). Entries without 'model' are elements of ①."
+        )
     if local_axis is not None:
         body["local_axis"] = _local_axis_summary(local_axis)
     if attr_changes:
@@ -2200,6 +2254,7 @@ def _format_result(
     measurements: list[dict[str, Any]] | None = None,
     local_axis: dict[str, Any] | None = None,
     comparison: dict[str, Any] | None = None,
+    compare_picked: list[tuple[int, str, int]] | None = None,
 ) -> str:
     """LLM へ返す概要（JSON 文字列）。
 
@@ -2209,6 +2264,7 @@ def _format_result(
     """
     colors = colors or []
     attr_changes = attr_changes or []
+    compare_picked = compare_picked or []
     result: dict[str, Any] = {"status": "confirmed"}
     if message:
         # 利用者がビューアの指示欄に書いた指示。選択（や色の変更）はこの指示の対象。
@@ -2234,9 +2290,17 @@ def _format_result(
             "and wait for the user's next request."
         )
     result |= {
-        "selected_count": len(picked),
+        "selected_count": len(picked) + len(compare_picked),
         "selected_by_kind": {k: n for k in _ALL_KINDS if (n := sum(1 for kind, _ in picked if kind == k))},
     }
+    if compare_picked:
+        # 比較モデル（②③④）の上で選んだ要素。selected_by_kind は ① の分。
+        result["selected_by_model"] = {
+            _MARKS[m - 1]: {k: n for k in _ALL_KINDS if (n := sum(1 for mm, kind, _ in compare_picked if mm == m and kind == k))}
+            for m in sorted({m for m, _k, _i in compare_picked})
+        }
+        if picked:
+            result["selected_by_model"] = {"①": result["selected_by_kind"], **result["selected_by_model"]}
     if measurements:
         # 利用者がビューアで測った結果（最大 _MEASUREMENTS_MAX 件、1 件は小さいので戻り値に入れる）。
         result["measurements"] = [_with_local(m, local_axis) for m in measurements]
@@ -2247,7 +2311,8 @@ def _format_result(
             "distance = between 2 points (delta = x, y, z components); point_edge_distance = perpendicular (normal) distance "
             "from a clicked point to an edge (foot = the foot of the perpendicular on the edge; on_extension: true means the foot "
             "is on the extension of a line or on the full circle of an arc, outside the edge itself); plane_distance / plane_angle = between 2 planar faces; "
-            "arc3 = circle through 3 clicked points. items are the elements the points were on (null = none). "
+            "arc3 = circle through 3 clicked points. items are the elements the points were on (null = none; with 'model' "
+            "= an element of a compared model ②③④). All points and values are in the coordinates of ①. "
             "approximate: true means a point was on the display triangles of a curved surface, so the value can be off "
             "by the tessellation tolerance (this includes a cone radius taken at a clicked point). The other radii and "
             "plane distances come from the exact model geometry."
@@ -2260,10 +2325,11 @@ def _format_result(
             "The user edited STEP attributes in the viewer (details under 'attribute_changes' in selection_file). "
             "The original file is not changed; the viewer's Save button writes them to the exported STEP."
         )
-    if picked or colors or attr_changes:
+    if picked or compare_picked or colors or attr_changes:
         try:
             sel_token = _register_file(
-                _write_selection(data, picked, data_token, colors, attr_changes, local_axis), "3D viewer selection (show_cad_viewer)"
+                _write_selection(data, picked, data_token, colors, attr_changes, local_axis, compare_picked),
+                "3D viewer selection (show_cad_viewer)",
             )
         except OSError as e:
             logger.warning("show_cad_viewer: could not write the selection file", exc_info=True)
@@ -2272,7 +2338,9 @@ def _format_result(
             result["selection_file"] = sel_token
             result["how_to_read"] = (
                 f"Only when the task needs the details: {sel_token} has one entry per selected element under 'selected' (kind, id, geomType, area/length, center, normal, "
-                f"radius, bbox, neighbouring faces/edges, selectors)"
+                f"radius, bbox, neighbouring faces/edges, selectors"
+                + ("; entries of the compared models ②③④ also have 'model' and are in that model's own coordinates" if compare_picked else "")
+                + ")"
                 + (", and the color changes under 'color_changes' ({kind, id, from, to} as #rrggbb; from null = no color in the model, to null = color removed)" if colors else "")
                 + ". It can be very large, so never read it whole: query only the fields you need with json_query, "
                 f"e.g. file_path={sel_token}, query=\"selected[].id\" or \"selected[?kind=='face'].{{id: id, normal: normal, selectors: selectors}}\"."
