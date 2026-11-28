@@ -98,6 +98,12 @@ interface SettingsProps {
   tolerance: number;
   onTolerance: (v: number) => void;
   units: string;
+  /** カラーマップの上のクリックで、その点の値の吹き出しを出すか。 */
+  valuePins: boolean;
+  onValuePins: (on: boolean) => void;
+  /** 出している値の吹き出しの数。 */
+  valueLabelCount: number;
+  onClearValueLabels: () => void;
 }
 
 /** 選んだ解析表示の設定の行（ゼブラの照明・縞、曲率の種類と範囲、偏差の公差と範囲）。 */
@@ -309,6 +315,19 @@ export function AnalysisSettingsRow(p: SettingsProps) {
         {t('cad.range.auto')}
       </button>
       {p.units !== 'unknown' && <span className="cad-viewer-unit">{p.mode === 'curvature' ? `1/${p.units}` : p.units}</span>}
+      <span className="cad-viewer-sep" />
+      <button
+        type="button"
+        className={`cad-viewer-chip${p.valuePins ? ' active' : ''}`}
+        aria-pressed={p.valuePins}
+        title={t('cad.valueLabel.pinTitle')}
+        onClick={() => p.onValuePins(!p.valuePins)}
+      >
+        {t('cad.valueLabel.pin')}
+      </button>
+      <button type="button" className="cad-viewer-chip" disabled={!p.valueLabelCount} title={t('cad.valueLabel.clearTitle')} onClick={p.onClearValueLabels}>
+        {t('cad.valueLabel.clear', { count: p.valueLabelCount })}
+      </button>
     </div>
   );
 }

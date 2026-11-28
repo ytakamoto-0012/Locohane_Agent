@@ -1487,6 +1487,60 @@
   box-shadow: 0 0 0 2px rgba(31, 182, 212, 0.6);
 }
 
+/* カラーマップ（曲率・偏差）の上でクリックした点の値の吹き出し（CadScene.addValueProbeAt）。クリックで消す。 */
+.cad-viewer-value-labels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  --cad-value-color: #222;
+  --cad-value-fill: rgba(255, 255, 255, 0.92);
+}
+
+:root[data-theme='dark'] .cad-viewer-value-labels {
+  --cad-value-color: #eee;
+  --cad-value-fill: rgba(23, 23, 26, 0.9);
+}
+
+.cad-viewer-value-leaders {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+}
+
+.cad-viewer-value-leader {
+  stroke-width: 1;
+  stroke: var(--cad-value-color);
+}
+
+.cad-viewer-value-dot {
+  fill: var(--cad-value-color);
+  stroke: var(--cad-value-fill);
+  stroke-width: 1;
+}
+
+.cad-viewer-value-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--cad-value-color);
+  border-radius: 4px;
+  background: var(--cad-value-fill);
+  color: var(--cad-value-color);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.cad-viewer-value-label:hover {
+  box-shadow: 0 0 0 2px rgba(31, 182, 212, 0.6);
+}
+
 /* 3D ビューア専用のタイムアウトの残り時間（残りが 5 分を切ったら出す）。 */
 .cad-viewer-timeout {
   padding: 2px 8px;

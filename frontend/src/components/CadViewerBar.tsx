@@ -625,6 +625,9 @@ function CadViewerPanel({
   const [scalarHover, setScalarHover] = useState<number | null>(null);
   // 偏差の表示中、マウスの下の比較モデル（1〜3 = ②③④）とその点の偏差。
   const [compareHover, setCompareHover] = useState<{ model: number; value: number } | null>(null);
+  // カラーマップ（曲率・偏差）の上のクリックで、その点の値の吹き出しを出すか（オフならふつうの選択）と、出している数。
+  const [valuePins, setValuePins] = useState(true);
+  const [valueLabelCount, setValueLabelCount] = useState(0);
   // 比較モデルの ① への位置合わせ。偏差の値は位置を合わせ直すたびに backend から取り直す。
   const [alignOpen, setAlignOpen] = useState(false);
   // 比べるときはすべてを最初から見せる（① 緑・② 赤・③ 青・④ 黄。②③④ は半透明。色はサイドバーの「比較モデル」で変えられる）。
@@ -911,7 +914,8 @@ function CadViewerPanel({
             onPmiClick: (id) => selectPmiRef.current(id),
             onDatumPick: (p) => datumPickRef.current(p),
             onScalarHover: setScalarHover,
-            onComparisonHover: setCompareHover
+            onComparisonHover: setCompareHover,
+            onValueLabelsChange: setValueLabelCount
           },
           sceneColors()
         );
@@ -1014,6 +1018,24 @@ function CadViewerPanel({
     sceneRef.current?.setDeviationDisplay(deviationOn ? { min: effDevRange.min, max: effDevRange.max, tolerance } : null);
     if (!deviationOn) setCompareHover(null);
   }, [deviationOn, effDevRange, tolerance, status]);
+  // カラーマップを出している間だけ、クリックで値の吹き出しを足す。カラーマップを消したら吹き出しも消す。
+  const colormapOn = deviationOn || surfaceDisplay.mode === 'scalar';
+  useEffect(() => {
+    sceneRef.current?.setValuePicking(colormapOn && valuePins);
+    if (!colormapOn) sceneRef.current?.clearValueLabels();
+  }, [colormapOn, valuePins, status]);
+  useEffect(() => {
+    // 吹き出しの文字は、マウスを乗せたときの値の表示と同じ書き方にする（曲率は曲率半径も）。
+    sceneRef.current?.setValueFormat((model, v) => {
+      const mark = MODEL_MARKS[model] ?? '';
+      if (deviationOn) return t('cad.deviation.value', { mark, value: `${v > 0 ? '+' : ''}${fmtNum(v)}` }).trim();
+      const text = t('cad.curvature.value', {
+        value: fmtNum(v),
+        radius: Math.abs(v) > 1e-9 && curvatureKind !== 'gauss' ? fmtNum(1 / Math.abs(v)) : '∞'
+      });
+      return model > 0 ? `${mark} ${text}` : text;
+    });
+  }, [deviationOn, curvatureKind, t, status]);
   useEffect(() => {
     sceneRef.current?.setSplit(split, paneModels);
   }, [split, paneModels, status]);
@@ -2057,6 +2079,10 @@ function CadViewerPanel({
                   tolerance={tolerance}
                   onTolerance={setTolerance}
                   units={data.units}
+                  valuePins={valuePins}
+                  onValuePins={setValuePins}
+                  valueLabelCount={valueLabelCount}
+                  onClearValueLabels={() => sceneRef.current?.clearValueLabels()}
                 />
               </section>
             )}

@@ -140,7 +140,26 @@ export interface CadSceneCallbacks {
   onDatumPick?: (pick: DatumScenePick) => void;
   /** 偏差の表示中、マウスの下の比較モデル（1〜3 = ② ③ ④）とその点の偏差（当たらなければ null）。 */
   onComparisonHover?: (hit: { model: number; value: number } | null) => void;
+  /** 値の吹き出し（setValuePicking）の数が変わった（クリックで足した・吹き出しのクリックで消した・clearValueLabels）。 */
+  onValueLabelsChange?: (count: number) => void;
 }
+
+/** カラーマップの上でクリックした点（そのモデルの三角形の頂点と重心座標。値と位置は描くたびに今のものから求める）。 */
+interface ValueProbe {
+  model: number;
+  a: number;
+  b: number;
+  c: number;
+  w: THREE.Vector3;
+  el: HTMLDivElement;
+  line: SVGLineElement;
+  dot: SVGCircleElement;
+  text: string;
+}
+
+// 値の吹き出しの、指す点から文字の左下までのずれ（ピクセル）と、重なるときに上へずらす回数。
+const VALUE_LEADER_PIXELS = 18;
+const VALUE_LAYOUT_TRIES = 8;
 
 /** 位置合わせのデータムの印（setDatumOverlay）。穴はピンの円も描く。 */
 export interface DatumMark {
@@ -377,6 +396,12 @@ export class CadScene {
   private measurePane: number | null = null;
   // 最後に当たった面の三角形（マウスの下の値を出すため）。
   private lastMeshHit: THREE.Intersection | null = null;
+  // カラーマップ（曲率・偏差）の上をクリックした点の値の吹き出し（setValuePicking で拾う。値は描くたびに今の値から読み直す）。
+  private valuePicking = false;
+  private valueProbes: ValueProbe[] = [];
+  private valueFormat: (model: number, value: number) => string = (_m, v) => fmtLabel(v);
+  private readonly valueLayer: HTMLDivElement;
+  private readonly valueSvg: SVGSVGElement;
 
   constructor(container: HTMLElement, data: CadData, callbacks: CadSceneCallbacks, colors: CadSceneColors) {
     this.container = container;
@@ -401,6 +426,12 @@ export class CadScene {
     this.labelLayer = document.createElement('div');
     this.labelLayer.className = 'cad-viewer-measure-labels';
     container.appendChild(this.labelLayer);
+    this.valueLayer = document.createElement('div');
+    this.valueLayer.className = 'cad-viewer-value-labels';
+    this.valueSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    this.valueSvg.setAttribute('class', 'cad-viewer-value-leaders');
+    this.valueLayer.appendChild(this.valueSvg);
+    container.appendChild(this.valueLayer);
 
     const min = new THREE.Vector3(...data.bbox.min);
     const max = new THREE.Vector3(...data.bbox.max);
@@ -1000,6 +1031,199 @@ export class CadScene {
     if (!tri.getBarycoord(h.point, w)) return values[a];
     const v = w.x * values[a] + w.y * values[b] + w.z * values[c];
     return Number.isFinite(v) ? v : null;
+  }
+
+  /**
+   * クリックでカラーマップ（曲率・偏差）の値の吹き出しを足すか。オンの間、色の付いた面の上のクリックは選択でなく
+   * 吹き出しになる（色の付いていない所のクリックはふつうの選択）。
+   */
+  setValuePicking(on: boolean): void {
+    this.valuePicking = on;
+  }
+
+  /** 吹き出しの文字の作り方（model は 0 = ①、1〜3 = ②③④）。変えるとすべての吹き出しを書き直す。 */
+  setValueFormat(format: (model: number, value: number) => string): void {
+    this.valueFormat = format;
+    for (const p of this.valueProbes) p.text = '';
+    this.requestRender();
+  }
+
+  /** 値の吹き出しをすべて消す。 */
+  clearValueLabels(): void {
+    if (!this.valueProbes.length) return;
+    for (const p of this.valueProbes) this.removeProbeElements(p);
+    this.valueProbes = [];
+    this.callbacks.onValueLabelsChange?.(0);
+    this.requestRender();
+  }
+
+  private removeProbeElements(p: ValueProbe): void {
+    p.el.remove();
+    p.line.remove();
+    p.dot.remove();
+  }
+
+  /** その位置の、値の付いた面の上の点を吹き出しにする（若い番号のモデルを優先）。足せたら true。 */
+  private addValueProbeAt(clientX: number, clientY: number): boolean {
+    for (const k of this.pickModels(clientX, clientY)) {
+      const hit = this.withPick(k, () => {
+        this.pickAt(clientX, clientY, 'face');
+        const h = this.lastMeshHit;
+        if (!h?.face || this.scalarAtLastHit() === null || !this.meshPositions) return null;
+        const { a, b, c } = h.face;
+        const p = this.meshPositions;
+        const w = new THREE.Vector3();
+        const tri = new THREE.Triangle(
+          new THREE.Vector3().fromArray(p, a * 3),
+          new THREE.Vector3().fromArray(p, b * 3),
+          new THREE.Vector3().fromArray(p, c * 3)
+        );
+        if (!tri.getBarycoord(h.point, w)) w.set(1, 0, 0);
+        return { a, b, c, w };
+      });
+      if (!hit) continue;
+      const el = document.createElement('div');
+      el.className = 'cad-viewer-value-label';
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('class', 'cad-viewer-value-leader');
+      const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      dot.setAttribute('class', 'cad-viewer-value-dot');
+      dot.setAttribute('r', '3');
+      const probe: ValueProbe = { model: k, ...hit, el, line, dot, text: '' };
+      // 吹き出しのクリックでその吹き出しを消す（下の形の選択・回転にはしない）。
+      el.addEventListener('pointerdown', (e) => e.stopPropagation());
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.removeProbeElements(probe);
+        this.valueProbes = this.valueProbes.filter((x) => x !== probe);
+        this.callbacks.onValueLabelsChange?.(this.valueProbes.length);
+        this.requestRender();
+      });
+      this.valueSvg.append(line, dot);
+      this.valueLayer.appendChild(el);
+      this.valueProbes.push(probe);
+      this.callbacks.onValueLabelsChange?.(this.valueProbes.length);
+      this.requestRender();
+      return true;
+    }
+    return false;
+  }
+
+  /** 吹き出しの今の値と、指す点（① の座標）。値が無い（今その色を映していない）・モデルを隠しているときは null。 */
+  private probeState(p: ValueProbe): { value: number; at: THREE.Vector3 } | null {
+    // 分けた画面では、重ね表示を隠したモデルもその画面に映す（映す画面が無いことは probePane で見る）。
+    if (this.split === 'single' && !this.modelShown(p.model)) return null;
+    return this.withModel(p.model, () => {
+      const values = this.surfaceDisplay.mode === 'scalar' ? this.scalarValues : null;
+      const pos = this.meshPositions;
+      if (!values || !pos || values.length * 3 !== pos.length) return null;
+      const v = p.w.x * values[p.a] + p.w.y * values[p.b] + p.w.z * values[p.c];
+      if (!Number.isFinite(v)) return null;
+      const at = new THREE.Vector3()
+        .addScaledVector(new THREE.Vector3().fromArray(pos, p.a * 3), p.w.x)
+        .addScaledVector(new THREE.Vector3().fromArray(pos, p.b * 3), p.w.y)
+        .addScaledVector(new THREE.Vector3().fromArray(pos, p.c * 3), p.w.z);
+      return { value: v, at: this.toBase(p.model, at) };
+    });
+  }
+
+  /** 吹き出しを重ねる画面（分けていなければ全体、分けていればそのモデルを映す最初の画面。無ければ null）。 */
+  private probePane(model: number): PaneRect | null {
+    const rects = this.paneRects();
+    if (this.split === 'single') return rects[0];
+    const i = this.paneModels.indexOf(model);
+    return i >= 0 ? rects[i] : null;
+  }
+
+  /**
+   * 吹き出しの画面上の位置（CSS ピクセル、3D 表示の左上から）。ax, ay は指す点、x, y は文字の左下。
+   * 先に置いた吹き出しに重なるときは上へずらす。
+   */
+  private valueLayout(): { probe: ValueProbe; text: string; ax: number; ay: number; x: number; y: number }[] {
+    const placed: Rect[] = [];
+    const out: { probe: ValueProbe; text: string; ax: number; ay: number; x: number; y: number }[] = [];
+    const v = new THREE.Vector3();
+    for (const p of this.valueProbes) {
+      const st = this.probeState(p);
+      const pane = st ? this.probePane(p.model) : null;
+      if (!st || !pane) {
+        p.el.style.display = 'none';
+        p.line.style.display = 'none';
+        p.dot.style.display = 'none';
+        continue;
+      }
+      const text = this.valueFormat(p.model, st.value);
+      if (text !== p.text) {
+        p.text = text;
+        p.el.textContent = text;
+        p.el.title = text;
+      }
+      p.el.style.display = '';
+      p.line.style.display = '';
+      p.dot.style.display = '';
+      v.copy(st.at).project(this.camera);
+      const ax = pane.x + ((v.x + 1) / 2) * pane.w;
+      const ay = pane.y + ((1 - v.y) / 2) * pane.h;
+      const w = p.el.offsetWidth;
+      const h = p.el.offsetHeight;
+      let x = ax + VALUE_LEADER_PIXELS;
+      let y = ay - VALUE_LEADER_PIXELS;
+      for (let t = 0; t < VALUE_LAYOUT_TRIES; t++) {
+        const r = { x0: x, y0: y - h, x1: x + w, y1: y };
+        if (!placed.some((q) => r.x0 < q.x1 && r.x1 > q.x0 && r.y0 < q.y1 && r.y1 > q.y0)) break;
+        y -= h + 2;
+      }
+      placed.push({ x0: x, y0: y - h, x1: x + w, y1: y });
+      out.push({ probe: p, text, ax, ay, x, y });
+    }
+    return out;
+  }
+
+  /** 値の吹き出しを、今の画面上の位置へ動かし、今の値に書き直す（描くたびに呼ぶ）。 */
+  private placeValueLabels(): void {
+    this.valueLayer.style.display = this.valueProbes.length ? '' : 'none';
+    if (!this.valueProbes.length) return;
+    this.valueSvg.setAttribute('width', String(this.container.clientWidth));
+    this.valueSvg.setAttribute('height', String(this.container.clientHeight));
+    for (const l of this.valueLayout()) {
+      l.probe.el.style.transform = `translate(${l.x}px, ${l.y}px) translate(0, -100%)`;
+      l.probe.line.setAttribute('x1', String(l.ax));
+      l.probe.line.setAttribute('y1', String(l.ay));
+      l.probe.line.setAttribute('x2', String(l.x));
+      l.probe.line.setAttribute('y2', String(l.y));
+      l.probe.dot.setAttribute('cx', String(l.ax));
+      l.probe.dot.setAttribute('cy', String(l.ay));
+    }
+  }
+
+  /** 値の吹き出しを撮った画面にも描く。k は CSS ピクセルからの倍率。 */
+  private drawValueLabels(ctx: CanvasRenderingContext2D, k: number): void {
+    if (!this.valueProbes.length) return;
+    const size = Math.max(9, Math.round(12 * Math.max(k, 0.75)));
+    ctx.save();
+    ctx.font = `600 ${size}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    for (const l of this.valueLayout()) {
+      ctx.strokeStyle = '#222';
+      ctx.fillStyle = '#222';
+      ctx.lineWidth = Math.max(1, k);
+      ctx.beginPath();
+      ctx.moveTo(l.ax * k, l.ay * k);
+      ctx.lineTo(l.x * k, l.y * k);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(l.ax * k, l.ay * k, 3 * k, 0, Math.PI * 2);
+      ctx.fill();
+      const tw = ctx.measureText(l.text).width + size * 0.8;
+      const th = size * 1.5;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
+      ctx.fillRect(l.x * k, l.y * k - th, tw, th);
+      ctx.strokeRect(l.x * k, l.y * k - th, tw, th);
+      ctx.fillStyle = '#222';
+      ctx.fillText(l.text, l.x * k + size * 0.4, l.y * k - th / 2);
+    }
+    ctx.restore();
   }
 
   private buildLines(): void {
@@ -2113,6 +2337,7 @@ export class CadScene {
       ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
       this.drawPmiLabels(ctx, canvas.width / Math.max(this.container.clientWidth, 1));
       this.drawMeasureLabels(ctx, canvas.width / Math.max(this.container.clientWidth, 1));
+      this.drawValueLabels(ctx, canvas.width / Math.max(this.container.clientWidth, 1));
       return canvas.toDataURL('image/png');
     } catch (err) {
       console.warn('Could not capture the 3D viewer', err);
@@ -2195,6 +2420,7 @@ export class CadScene {
     this.boxEl.remove();
     this.labelLayer.remove();
     this.pmiLayer.remove();
+    this.valueLayer.remove();
     const disposeObject = (obj: THREE.Object3D) => {
       const o = obj as THREE.Mesh;
       o.geometry?.dispose();
@@ -3010,6 +3236,8 @@ export class CadScene {
       }
       return;
     }
+    // カラーマップの上のクリックは、その点の値の吹き出しにする（色の無い所はふつうに選ぶ）。
+    if (this.valuePicking && this.addValueProbeAt(e.clientX, e.clientY)) return;
     const item = this.pickAny(e.clientX, e.clientY);
     if (item?.kind === 'hole' && this.callbacks.onPickGroup) {
       const k = item.model ?? 0;
@@ -3143,6 +3371,7 @@ export class CadScene {
     this.renderGizmo();
     this.placeMeasureLabels();
     this.placePmiLabels();
+    this.placeValueLabels();
   }
 }
 
